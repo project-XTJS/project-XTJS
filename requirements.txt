@@ -1,0 +1,17 @@
+fastapi==0.104.1
+uvicorn==0.24.0.post1
+python-multipart==0.0.6
+pdfplumber==0.10.2
+pymupdf==1.23.8
+python-docx==0.8.11
+sentence-transformers
+faiss-cpu
+numpy
+language-tool-python
+openpyxl
+paddlepaddle
+paddleocr
+opencv-python
+python-dotenv
+celery
+redis
