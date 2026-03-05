@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 # 挂载静态文件
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+# app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # 注册路由
 app.include_router(document_router, prefix="/api/documents", tags=["documents"])

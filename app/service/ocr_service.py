@@ -1,5 +1,7 @@
 import os
 from typing import List, Dict, Any
+from pydantic import BaseModel
+
 
 class OCRService:
     def __init__(self):
