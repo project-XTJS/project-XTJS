@@ -10,6 +10,7 @@ from app.router.ocr import router as ocr_router
 from app.router.business_format import router as business_format_router
 from app.router.business_duplication import router as business_duplication_router
 from app.router.technical_duplication import router as technical_duplication_router
+from app.router.tendering import router as tendering_router
 
 app = FastAPI(
     title="Document Analyzer API",
@@ -35,6 +36,7 @@ app.include_router(ocr_router, prefix="/api/ocr", tags=["ocr"])
 app.include_router(business_format_router, prefix="/api/business/format", tags=["business-format"])
 app.include_router(business_duplication_router, prefix="/api/business/duplication", tags=["business-duplication"])
 app.include_router(technical_duplication_router, prefix="/api/technical/duplication", tags=["technical-duplication"])
+app.include_router(tendering_router, prefix="/api/tendering", tags=["招投标文件管理"])
 
 # 根路径
 @app.get("/")
