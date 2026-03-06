@@ -45,6 +45,18 @@ services:
       - app_network
     restart: always
 
+  # Flyway 服务
+  flyway:
+    image: flyway/flyway:latest
+    container_name: flyway
+    volumes:
+      - ./db/migration:/flyway/sql
+    command: -url=jdbc:postgresql://postgres:5432/xtjs_db -user=admin -password=password migrate
+    depends_on:
+      - postgres
+    networks:
+      - app_network
+
 networks:
   app_network:
     driver: bridge
