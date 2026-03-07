@@ -3,11 +3,14 @@ LABEL authors="Stan1ey"
 
 WORKDIR /app
 
-# 复制依赖文件
-COPY requirements.txt .
+# 安装uv
+RUN pip install --no-cache-dir uv
 
-# 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# 复制依赖文件
+COPY requirements.txt pyproject.toml uv.lock .
+
+# 使用uv安装依赖
+RUN uv pip install -r requirements.txt
 
 # 复制应用代码
 COPY . .
