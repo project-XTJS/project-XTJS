@@ -9,10 +9,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv
 
 # 复制依赖文件
-COPY requirements.txt pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock ./
 
 # 使用uv安装依赖
-RUN uv pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN uv sync
 
 # 复制应用代码
 COPY . .
