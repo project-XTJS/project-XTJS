@@ -9,6 +9,7 @@ dependencies = [
     "faiss-cpu>=1.13.2",
     "fastapi==0.104.1",
     "language-tool-python>=3.2.2",
+    "minio>=7.2.20",
     "numpy>=2.4.2",
     "opencv-python>=4.13.0.92",
     "openpyxl>=3.1.5",
