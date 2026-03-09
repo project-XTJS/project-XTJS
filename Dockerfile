@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 8080
 
 # 启动应用
-CMD ["uv", "run", "app.main.py"]
+CMD ["uv", "run","-m","app.main.py"]
