@@ -2,10 +2,6 @@ FROM python:3.12-slim
 LABEL authors="Stan1ey"
 
 # 安装必要的系统依赖
-RUN apt-get update && apt-get install -y \
-    curl \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
