@@ -44,6 +44,11 @@ services:
     networks:
       - app_network
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d xtjs_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # Flyway 服务
   flyway:
@@ -53,7 +58,8 @@ services:
       - ./db/migration:/flyway/sql
     command: -url=jdbc:postgresql://postgres:5432/xtjs_db -user=admin -password=password migrate
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - app_network
 
