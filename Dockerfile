@@ -21,4 +21,4 @@ COPY . .
 EXPOSE 8080
 
 # 启动应用
-CMD ["uv", "run","-m","app.main.py"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
