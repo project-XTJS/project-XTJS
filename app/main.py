@@ -39,6 +39,7 @@ app.include_router(technical_duplication_router, prefix="/api/technical/duplicat
 app.include_router(tendering_router, prefix="/api/tendering", tags=["招投标文件管理"])
 
 # 根路径
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Document Analyzer API"}
@@ -47,3 +48,6 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8080)
