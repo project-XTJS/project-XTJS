@@ -50,6 +50,23 @@ services:
       timeout: 5s
       retries: 5
 
+  # MinIO 服务
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      - app_network
+    restart: always
+
   # Flyway 服务
   flyway:
     image: flyway/flyway:latest
