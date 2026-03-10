@@ -1,4 +1,5 @@
-from app.router.document import router as document_router
-from app.router.ocr import router as ocr_router
+from app.router.analysis import router as analysis_router
+from app.router.file import router as file_router
+from app.router.postgresql import router as postgresql_router
 
-router = document_router
+__all__ = ["analysis_router", "file_router", "postgresql_router"]
