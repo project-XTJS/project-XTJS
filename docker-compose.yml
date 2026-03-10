@@ -10,6 +10,14 @@ services:
     depends_on:
       - milvus
       - postgres
+      - minio
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://admin:password@postgres:5432/xtjs_db}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-tendering-files}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
     networks:
       - app_network
     restart: always
@@ -87,3 +95,4 @@ networks:
 volumes:
   milvus_data:
   postgres_data:
+  minio_data:
