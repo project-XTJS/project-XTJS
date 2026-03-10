@@ -1,25 +1,17 @@
-import os
-
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
-# 导入路由
-from app.router.document import router as document_router
-from app.router.ocr import router as ocr_router
-from app.router.business_format import router as business_format_router
-from app.router.business_duplication import router as business_duplication_router
-from app.router.technical_duplication import router as technical_duplication_router
-from app.router.tendering import router as tendering_router
+from app.router.analysis import router as analysis_router
+from app.router.file import router as file_router
+from app.router.postgresql import router as postgresql_router
 
 app = FastAPI(
-    title="Document Analyzer API",
-    description="API for analyzing PDF and Word documents with OCR support",
-    version="1.0.0"
+    title="XTJS API",
+    description="Unified API for project, file and text analysis workflows",
+    version="1.0.0",
 )
 
-# 配置CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,27 +20,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载静态文件
-# app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
+app.include_router(file_router, prefix="/api/files", tags=["files"])
+app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresql"])
 
-# 注册路由
-app.include_router(document_router, prefix="/api/documents", tags=["documents"])
-app.include_router(ocr_router, prefix="/api/ocr", tags=["ocr"])
-app.include_router(business_format_router, prefix="/api/business/format", tags=["business-format"])
-app.include_router(business_duplication_router, prefix="/api/business/duplication", tags=["business-duplication"])
-app.include_router(technical_duplication_router, prefix="/api/technical/duplication", tags=["technical-duplication"])
-app.include_router(tendering_router, prefix="/api/tendering", tags=["招投标文件管理"])
-
-# 根路径
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to Document Analyzer API"}
+    return {"message": "Welcome to XTJS API"}
 
-# 健康检查
+
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
