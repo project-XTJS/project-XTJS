@@ -19,7 +19,7 @@ async def create_project(payload: ProjectCreateRequest):
     """创建项目主记录。"""
     try:
         project = postgres_service.create_project(payload.identifier_id)
-        return {"code": 0, "msg": "project created", "data": project}
+        return {"code": 200, "msg": "project created", "data": project}
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
@@ -31,7 +31,7 @@ async def get_project_detail(identifier_id: str):
         detail = postgres_service.get_project_detail(identifier_id)
         if not detail:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"code": 0, "msg": "ok", "data": detail}
+        return {"code": 200, "msg": "ok", "data": detail}
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -47,7 +47,7 @@ async def bind_project_documents(identifier_id: str, payload: ProjectBindDocumen
             payload.tender_document_identifier,
             payload.bid_document_identifier,
         )
-        return {"code": 0, "msg": "documents bound", "data": relation}
+        return {"code": 200, "msg": "documents bound", "data": relation}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
@@ -61,7 +61,7 @@ async def create_document(payload: DocumentCreateRequest):
         document = postgres_service.create_document(
             payload.file_name, payload.file_url, payload.identifier_id
         )
-        return {"code": 0, "msg": "document created", "data": document}
+        return {"code": 200, "msg": "document created", "data": document}
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
@@ -73,7 +73,7 @@ async def get_document(identifier_id: str):
         document = postgres_service.get_document_by_identifier(identifier_id)
         if not document:
             raise HTTPException(status_code=404, detail="document not found")
-        return {"code": 0, "msg": "ok", "data": document}
+        return {"code": 200, "msg": "ok", "data": document}
     except HTTPException:
         raise
     except PsycopgError as exc:

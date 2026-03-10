@@ -33,7 +33,7 @@ async def upload_file(
             identifier_id=document_identifier,
         )
         return {
-            "code": 0,
+            "code": 200,
             "msg": "upload success",
             "data": {
                 "document": document,
@@ -68,7 +68,7 @@ async def delete_file(document_identifier: str):
         object_name = minio_service.object_name_from_presigned_url(document["file_url"])
         minio_service.delete_file(object_name)
         postgres_service.soft_delete_document(document_identifier)
-        return {"code": 0, "msg": "delete success"}
+        return {"code": 200, "msg": "delete success"}
     except HTTPException:
         raise
     except ValueError as exc:
