@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from fastapi import UploadFile
@@ -60,6 +60,31 @@ class MinioService:
         unique_suffix = uuid4().hex[:8]
         return f"{name}_{timestamp}_{unique_suffix}{ext}"
 
+    @staticmethod
+    def build_storage_uri(object_name: str) -> str:
+        """构建可持久化存储地址（不含签名参数）。"""
+        if not object_name or not object_name.strip():
+            raise ValueError("对象名不能为空。")
+        normalized_object_name = object_name.lstrip("/")
+        return f"minio://{MinioConfig.BUCKET_NAME}/{normalized_object_name}"
+
+    @staticmethod
+    def is_presigned_url(file_url: str) -> bool:
+        """判断地址是否为预签名 URL。"""
+        if not file_url:
+            return False
+        parsed = urlparse(file_url)
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        query = parse_qs(parsed.query)
+        signature_fields = {
+            "X-Amz-Signature",
+            "X-Amz-Algorithm",
+            "X-Amz-Credential",
+            "X-Amz-Expires",
+        }
+        return any(field in query for field in signature_fields)
+
     def _object_exists(self, object_name: str) -> bool:
         """检查对象是否已存在于桶中。"""
         try:
@@ -96,7 +121,7 @@ class MinioService:
             raise RuntimeError(f"MinIO 存储桶操作异常：{exc}") from exc
 
     def upload_file(self, file: UploadFile, object_name: str | None = None) -> dict:
-        """上传文件并返回对象名、预签名 URL、文件大小。"""
+        """上传文件并返回对象名、持久地址、预签名 URL、文件大小。"""
         self.validate_upload_file(file)
         size = self._get_file_size(file)
         if size <= 0:
@@ -112,12 +137,15 @@ class MinioService:
                 length=size,
                 content_type=file.content_type,
             )
-            file_url = self.client.presigned_get_object(
-                MinioConfig.BUCKET_NAME,
-                object_name,
-                expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
-            )
-            return {"object_name": object_name, "file_url": file_url, "size": size}
+            presigned_url = self.get_presigned_url(object_name)
+            storage_uri = self.build_storage_uri(object_name)
+            return {
+                "object_name": object_name,
+                "file_url": storage_uri,
+                "storage_uri": storage_uri,
+                "presigned_url": presigned_url,
+                "size": size,
+            }
         except ValueError:
             raise
         except RuntimeError:
@@ -126,6 +154,22 @@ class MinioService:
             raise RuntimeError(f"MinIO 上传失败：{exc}") from exc
         except Exception as exc:
             raise RuntimeError(f"MinIO 上传过程中发生异常：{exc}") from exc
+
+    def get_presigned_url(self, object_name: str) -> str:
+        """按对象名生成预签名访问 URL。"""
+        if not object_name or not object_name.strip():
+            raise ValueError("对象名不能为空。")
+
+        try:
+            return self.client.presigned_get_object(
+                MinioConfig.BUCKET_NAME,
+                object_name,
+                expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
+            )
+        except S3Error as exc:
+            raise RuntimeError(f"生成 MinIO 预签名 URL 失败：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"生成 MinIO 预签名 URL 时发生异常：{exc}") from exc
 
     def delete_file(self, object_name: str) -> None:
         """按对象名删除文件。"""
@@ -150,3 +194,17 @@ class MinioService:
         if len(parts) != 2:
             raise ValueError("无效的 MinIO 文件 URL。")
         return parts[1]
+
+    @staticmethod
+    def object_name_from_storage_uri(storage_uri: str) -> str:
+        """从存储地址（minio://bucket/object）反解对象名。"""
+        parsed = urlparse(storage_uri)
+        if parsed.scheme != "minio":
+            raise ValueError("无效的 MinIO 存储地址。")
+        if parsed.netloc != MinioConfig.BUCKET_NAME:
+            raise ValueError("存储地址中的桶名与当前配置不一致。")
+
+        object_name = parsed.path.lstrip("/")
+        if not object_name:
+            raise ValueError("存储地址中缺少对象名。")
+        return object_name

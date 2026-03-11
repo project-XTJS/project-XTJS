@@ -24,7 +24,7 @@ async def upload_file(
         upload_result = minio_service.upload_file(file, object_name)
         return {
             "code": 200,
-            "msg": "upload success",
+            "msg": "上传成功",
             "data": upload_result,
         }
     except ValueError as exc:
@@ -36,12 +36,31 @@ async def upload_file(
         raise HTTPException(status_code=500, detail="文件上传服务异常，请稍后重试。") from exc
 
 
+@router.get("/objects/{object_name:path}/presigned-url", summary="生成 MinIO 临时访问链接")
+async def get_presigned_url(object_name: str):
+    """按对象名生成预签名访问 URL。"""
+    try:
+        presigned_url = minio_service.get_presigned_url(object_name)
+        return {
+            "code": 200,
+            "msg": "获取成功",
+            "data": {"object_name": object_name, "presigned_url": presigned_url},
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("MinIO 预签名链接接口发生未预期异常")
+        raise HTTPException(status_code=500, detail="获取临时访问链接失败，请稍后重试。") from exc
+
+
 @router.delete("/objects/{object_name:path}", summary="删除 MinIO 文件")
 async def delete_file(object_name: str):
     """按对象名删除 MinIO 文件。"""
     try:
         minio_service.delete_file(object_name)
-        return {"code": 200, "msg": "delete success"}
+        return {"code": 200, "msg": "删除成功"}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:

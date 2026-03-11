@@ -8,6 +8,7 @@ from app.model.postgresql_model import (
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
 )
+from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
@@ -58,10 +59,19 @@ async def bind_project_documents(identifier_id: str, payload: ProjectBindDocumen
 async def create_document(payload: DocumentCreateRequest):
     """创建文档元数据记录。"""
     try:
+        normalized_file_url = payload.file_url.strip()
+        if not normalized_file_url:
+            raise ValueError("file_url 不能为空。")
+        if MinioService.is_presigned_url(normalized_file_url):
+            object_name = MinioService.object_name_from_presigned_url(normalized_file_url)
+            normalized_file_url = MinioService.build_storage_uri(object_name)
+
         document = postgres_service.create_document(
-            payload.file_name, payload.file_url, payload.identifier_id
+            payload.file_name, normalized_file_url, payload.identifier_id
         )
         return {"code": 200, "msg": "document created", "data": document}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 

@@ -37,7 +37,10 @@ class DocumentCreateRequest(BaseModel):
         default=None, description="业务文档标识。为空时自动生成。"
     )
     file_name: str
-    file_url: str
+    file_url: str = Field(
+        ...,
+        description="建议传持久化存储地址（如 minio://bucket/object），不要传预签名 URL。",
+    )
 
 
 class ProjectBindDocumentsRequest(BaseModel):
