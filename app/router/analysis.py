@@ -15,12 +15,12 @@ analysis_service = AnalysisService()
 @router.post("/analyze-file", summary="文档解析（抽取文本+统计）")
 async def analyze_file(file: UploadFile = File(...)):
     """上传单个文档并返回抽取后的正文与统计信息。"""
-    allowed_extensions = {"pdf", "docx"}
+    allowed_extensions = {"pdf", "docx", "doc"}
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type: {file_extension}. Only pdf/docx are accepted.",
+            detail=f"Unsupported file type: {file_extension}. Only pdf/docx/doc are accepted.",
         )
 
     content = await file.read()
