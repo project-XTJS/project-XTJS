@@ -69,6 +69,8 @@ class MinioService:
             if exc.code in {"NoSuchKey", "NoSuchObject"}:
                 return False
             raise RuntimeError(f"检查 MinIO 对象是否存在失败：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"检查 MinIO 对象是否存在时发生异常：{exc}") from exc
 
     def _resolve_upload_object_name(self, filename: str, object_name: str | None) -> str:
         """解析上传对象名并避免与已有对象冲突。"""
@@ -85,8 +87,13 @@ class MinioService:
 
     def ensure_bucket(self) -> None:
         """确保业务桶存在，不存在时自动创建。"""
-        if not self.client.bucket_exists(MinioConfig.BUCKET_NAME):
-            self.client.make_bucket(MinioConfig.BUCKET_NAME)
+        try:
+            if not self.client.bucket_exists(MinioConfig.BUCKET_NAME):
+                self.client.make_bucket(MinioConfig.BUCKET_NAME)
+        except S3Error as exc:
+            raise RuntimeError(f"检查或创建 MinIO 存储桶失败：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"MinIO 存储桶操作异常：{exc}") from exc
 
     def upload_file(self, file: UploadFile, object_name: str | None = None) -> dict:
         """上传文件并返回对象名、预签名 URL、文件大小。"""
@@ -111,15 +118,28 @@ class MinioService:
                 expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
             )
             return {"object_name": object_name, "file_url": file_url, "size": size}
+        except ValueError:
+            raise
+        except RuntimeError:
+            raise
         except S3Error as exc:
             raise RuntimeError(f"MinIO 上传失败：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"MinIO 上传过程中发生异常：{exc}") from exc
 
     def delete_file(self, object_name: str) -> None:
         """按对象名删除文件。"""
+        if not object_name or not object_name.strip():
+            raise ValueError("对象名不能为空。")
+
         try:
             self.client.remove_object(MinioConfig.BUCKET_NAME, object_name)
         except S3Error as exc:
+            if exc.code in {"NoSuchKey", "NoSuchObject"}:
+                raise ValueError(f"对象不存在：{object_name}") from exc
             raise RuntimeError(f"MinIO 删除失败：{exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"MinIO 删除过程中发生异常：{exc}") from exc
 
     @staticmethod
     def object_name_from_presigned_url(file_url: str) -> str:
