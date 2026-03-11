@@ -61,8 +61,8 @@ class MinioService:
         return f"{name}_{timestamp}_{unique_suffix}{ext}"
 
     @staticmethod
-    def build_storage_uri(object_name: str) -> str:
-        """构建可持久化存储地址（不含签名参数）。"""
+    def build_file_url(object_name: str) -> str:
+        """构建可持久化 file_url（不含签名参数）。"""
         if not object_name or not object_name.strip():
             raise ValueError("对象名不能为空。")
         normalized_object_name = object_name.lstrip("/")
@@ -121,7 +121,7 @@ class MinioService:
             raise RuntimeError(f"MinIO 存储桶操作异常：{exc}") from exc
 
     def upload_file(self, file: UploadFile, object_name: str | None = None) -> dict:
-        """上传文件并返回对象名、持久地址、预签名 URL、文件大小。"""
+        """上传文件并返回对象名、file_url、预签名 URL、文件大小。"""
         self.validate_upload_file(file)
         size = self._get_file_size(file)
         if size <= 0:
@@ -138,11 +138,10 @@ class MinioService:
                 content_type=file.content_type,
             )
             presigned_url = self.get_presigned_url(object_name)
-            storage_uri = self.build_storage_uri(object_name)
+            file_url = self.build_file_url(object_name)
             return {
                 "object_name": object_name,
-                "file_url": storage_uri,
-                "storage_uri": storage_uri,
+                "file_url": file_url,
                 "presigned_url": presigned_url,
                 "size": size,
             }
@@ -196,9 +195,9 @@ class MinioService:
         return parts[1]
 
     @staticmethod
-    def object_name_from_storage_uri(storage_uri: str) -> str:
-        """从存储地址（minio://bucket/object）反解对象名。"""
-        parsed = urlparse(storage_uri)
+    def object_name_from_file_url(file_url: str) -> str:
+        """从 file_url（minio://bucket/object）反解对象名。"""
+        parsed = urlparse(file_url)
         if parsed.scheme != "minio":
             raise ValueError("无效的 MinIO 存储地址。")
         if parsed.netloc != MinioConfig.BUCKET_NAME:

@@ -64,7 +64,7 @@ async def create_document(payload: DocumentCreateRequest):
             raise ValueError("file_url 不能为空。")
         if MinioService.is_presigned_url(normalized_file_url):
             object_name = MinioService.object_name_from_presigned_url(normalized_file_url)
-            normalized_file_url = MinioService.build_storage_uri(object_name)
+            normalized_file_url = MinioService.build_file_url(object_name)
 
         document = postgres_service.create_document(
             payload.file_name, normalized_file_url, payload.identifier_id
