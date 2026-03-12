@@ -1,10 +1,12 @@
 """项目与文档元数据路由：对外暴露 PG 业务操作接口。"""
 
-from fastapi import APIRouter, HTTPException, Query
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from psycopg2 import Error as PsycopgError
 
 from app.model.postgresql_model import (
-    DocumentCreateRequest,
     DocumentUpdateRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
@@ -16,6 +18,8 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 postgres_service = PostgreSQLService()
+minio_service = MinioService()
+logger = logging.getLogger(__name__)
 
 
 def _normalize_file_url(file_url: str) -> str:
@@ -27,6 +31,20 @@ def _normalize_file_url(file_url: str) -> str:
         object_name = MinioService.object_name_from_presigned_url(normalized_file_url)
         normalized_file_url = MinioService.build_file_url(object_name)
     return normalized_file_url
+
+
+def _rollback_uploaded_object(upload_result: Optional[dict]) -> Optional[str]:
+    if not upload_result:
+        return None
+    object_name = upload_result.get("object_name")
+    if not object_name:
+        return None
+    try:
+        minio_service.delete_file(object_name)
+        return None
+    except Exception as cleanup_exc:  # pragma: no cover - defensive rollback
+        logger.exception("MinIO upload rollback failed: object_name=%s", object_name)
+        return str(cleanup_exc)
 
 
 @router.post("/projects", summary="新建项目")
@@ -165,21 +183,61 @@ async def delete_relation(relation_id: int):
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
-@router.post("/documents", summary="新建文档记录")
-async def create_document(payload: DocumentCreateRequest):
-    """创建文档元数据记录。"""
+@router.post("/documents", summary="上传并创建文档记录")
+async def create_document(
+    file: UploadFile = File(...),
+    identifier_id: Optional[str] = Form(default=None),
+    document_name: Optional[str] = Form(default=None),
+    object_name: Optional[str] = Form(default=None),
+):
+    """上传文件到 MinIO 并创建文档元数据记录。"""
+    upload_result: Optional[dict] = None
     try:
-        normalized_file_url = _normalize_file_url(payload.file_url)
-        document = postgres_service.create_document(
-            payload.file_name,
-            normalized_file_url,
-            payload.identifier_id,
+        upload_result = minio_service.upload_file(file, object_name)
+        resolved_file_name = (
+            (document_name or "").strip()
+            or (file.filename or "").strip()
+            or upload_result.get("object_name", "")
         )
-        return {"code": 200, "msg": "document created", "data": document}
+        if not resolved_file_name:
+            raise ValueError("document_name cannot be empty")
+
+        document = postgres_service.create_document(
+            file_name=resolved_file_name,
+            file_url=upload_result["file_url"],
+            identifier_id=identifier_id,
+        )
+        return {
+            "code": 200,
+            "msg": "document created",
+            "data": {
+                "document": document,
+                "upload": upload_result,
+            },
+        }
     except ValueError as exc:
+        rollback_error = _rollback_uploaded_object(upload_result)
+        if rollback_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{exc}; rollback uploaded object failed: {rollback_error}",
+            ) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+        rollback_error = _rollback_uploaded_object(upload_result)
+        detail = f"database error: {exc}"
+        if rollback_error:
+            detail = f"{detail}; rollback uploaded object failed: {rollback_error}"
+        raise HTTPException(status_code=500, detail=detail) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        rollback_error = _rollback_uploaded_object(upload_result)
+        logger.exception("upload-and-create document failed")
+        detail = "upload and create document failed, please retry later"
+        if rollback_error:
+            detail = f"{detail}; rollback failed: {rollback_error}"
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @router.get("/documents", summary="查询文档列表")
