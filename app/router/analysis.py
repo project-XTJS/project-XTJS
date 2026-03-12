@@ -5,11 +5,11 @@ import os
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.model.analysis import TextAnalysisRequest
-from app.service.analysis_service import AnalysisService
+from app.service.analysis_service import get_analysis_service
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
 router = APIRouter()
-analysis_service = AnalysisService()
+analysis_service = get_analysis_service()
 
 
 @router.post("/analyze-file", summary="文档解析（抽取文本+统计）")

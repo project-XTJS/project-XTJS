@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Any, Dict, List
 
 from app.service.ocr_service import OCRService
@@ -159,3 +160,9 @@ class AnalysisService:
     def extract_parameters(self, text: str) -> List[str]:
         """提取技术参数字段。"""
         return extract_technical_parameters(text)
+
+
+@lru_cache(maxsize=1)
+def get_analysis_service() -> AnalysisService:
+    """返回单例分析服务，避免 OCR 模型重复初始化。"""
+    return AnalysisService()
