@@ -1,4 +1,5 @@
 import os
+import inspect
 import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -13,6 +14,7 @@ class OCRService:
         self.ocr = None
         self.structure = None
         self.available = False
+        self.active_device = OCRConfig.DEVICE
         self.init_errors: List[str] = []
         self._prepare_runtime_storage()
         self._sanitize_import_path()
@@ -26,36 +28,59 @@ class OCRService:
             self._record_error("ImportError", exc)
             return
 
-        try:
-            self.ocr = PaddleOCR(
-                lang=OCRConfig.LANG,
-                ocr_version=OCRConfig.OCR_VERSION,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-                device=OCRConfig.DEVICE,
-                enable_hpi=OCRConfig.ENABLE_HPI,
-            )
-            print("PaddleOCR 3.x initialized successfully")
-        except Exception as exc:
-            self._record_error("Error initializing PaddleOCR", exc)
+        for device in self._build_device_candidates():
+            self.active_device = device
+            self._apply_runtime_flags(device)
 
-        try:
-            self.structure = PPStructureV3(
-                lang=OCRConfig.LANG,
-                ocr_version=OCRConfig.OCR_VERSION,
-                use_doc_orientation_classify=OCRConfig.USE_DOC_ORIENTATION,
-                use_doc_unwarping=OCRConfig.USE_DOC_UNWARPING,
-                use_textline_orientation=OCRConfig.USE_TEXTLINE_ORIENTATION,
-                use_table_recognition=OCRConfig.STRUCTURE_USE_TABLE,
-                use_formula_recognition=OCRConfig.STRUCTURE_USE_FORMULA,
-                format_block_content=False,
-                device=OCRConfig.DEVICE,
-                enable_hpi=OCRConfig.ENABLE_HPI,
-            )
-            print("PP-StructureV3 initialized successfully")
-        except Exception as exc:
-            self._record_error("Error initializing PP-StructureV3", exc)
+            candidate_ocr = None
+            candidate_structure = None
+
+            try:
+                candidate_ocr = PaddleOCR(
+                    lang=OCRConfig.LANG,
+                    ocr_version=OCRConfig.OCR_VERSION,
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    device=device,
+                    enable_hpi=OCRConfig.ENABLE_HPI,
+                )
+                print(f"PaddleOCR 3.x initialized successfully on {device}")
+            except Exception as exc:
+                self._record_error(f"Error initializing PaddleOCR on {device}", exc)
+
+            if OCRConfig.ENABLE_STRUCTURE:
+                try:
+                    structure_kwargs = {
+                        "lang": OCRConfig.LANG,
+                        "ocr_version": OCRConfig.OCR_VERSION,
+                        "use_doc_orientation_classify": OCRConfig.USE_DOC_ORIENTATION,
+                        "use_doc_unwarping": OCRConfig.USE_DOC_UNWARPING,
+                        "use_textline_orientation": OCRConfig.USE_TEXTLINE_ORIENTATION,
+                        "use_table_recognition": OCRConfig.STRUCTURE_USE_TABLE,
+                        "use_formula_recognition": OCRConfig.STRUCTURE_USE_FORMULA,
+                        "device": device,
+                        "enable_hpi": OCRConfig.ENABLE_HPI,
+                    }
+                    if self._supports_kwarg(PPStructureV3.__init__, "format_block_content"):
+                        structure_kwargs["format_block_content"] = False
+
+                    candidate_structure = PPStructureV3(
+                        **structure_kwargs
+                    )
+                    print(f"PP-StructureV3 initialized successfully on {device}")
+                except Exception as exc:
+                    self._record_error(f"Error initializing PP-StructureV3 on {device}", exc)
+
+            if candidate_ocr is not None or candidate_structure is not None:
+                self.ocr = candidate_ocr
+                self.structure = candidate_structure
+                self.available = True
+                if device != OCRConfig.DEVICE:
+                    print(
+                        f"OCR device fallback applied: requested={OCRConfig.DEVICE}, active={device}"
+                    )
+                break
 
         self.available = self.ocr is not None or self.structure is not None
 
@@ -94,6 +119,47 @@ class OCRService:
 
         sys.path[:] = sanitized
 
+    def _build_device_candidates(self) -> List[str]:
+        primary = OCRConfig.DEVICE.strip() if OCRConfig.DEVICE else "cpu"
+        candidates = [primary]
+
+        if self._is_gpu_device(primary):
+            try:
+                import paddle
+
+                if not paddle.is_compiled_with_cuda():
+                    message = (
+                        f"GPU device requested ({primary}) but PaddlePaddle has no CUDA support; fallback to CPU."
+                    )
+                    self.init_errors.append(message)
+                    print(message)
+                    return ["cpu"]
+            except Exception as exc:
+                self._record_error("Failed to check CUDA support; fallback to CPU", exc)
+                return ["cpu"]
+
+            if OCRConfig.FALLBACK_TO_CPU:
+                candidates.append("cpu")
+
+        return candidates
+
+    @staticmethod
+    def _is_gpu_device(device: str) -> bool:
+        return device.strip().lower().startswith("gpu")
+
+    @staticmethod
+    def _supports_kwarg(callable_obj: Any, kwarg_name: str) -> bool:
+        try:
+            signature = inspect.signature(callable_obj)
+        except Exception:
+            return False
+        return kwarg_name in signature.parameters
+
+    def _apply_runtime_flags(self, device: str) -> None:
+        if device.strip().lower().startswith("cpu") and OCRConfig.DISABLE_MKLDNN_ON_CPU:
+            # Workaround for oneDNN/PIR runtime incompatibility on some CPU environments.
+            os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
     def _prepare_runtime_storage(self) -> None:
         OCRConfig.STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
         OCRConfig.PDX_CACHE_HOME.mkdir(parents=True, exist_ok=True)
@@ -120,9 +186,14 @@ class OCRService:
 
         try:
             if self.structure is not None:
-                structured_text = self._recognize_pdf_with_structure(pdf_path)
-                if structured_text.strip():
-                    return structured_text
+                try:
+                    structured_text = self._recognize_pdf_with_structure(pdf_path)
+                    if structured_text.strip():
+                        return structured_text
+                except Exception as exc:
+                    self._record_error(
+                        "Error during structured PDF recognition, fallback to OCR", exc
+                    )
 
             if self.ocr is not None:
                 return self._recognize_pdf_with_ocr(pdf_path)
@@ -173,12 +244,14 @@ class OCRService:
         if self.structure is None:
             return ""
 
-        result = self.structure.predict(
-            pdf_path,
-            use_table_recognition=OCRConfig.STRUCTURE_USE_TABLE,
-            use_formula_recognition=OCRConfig.STRUCTURE_USE_FORMULA,
-            format_block_content=False,
-        )
+        predict_kwargs = {
+            "use_table_recognition": OCRConfig.STRUCTURE_USE_TABLE,
+            "use_formula_recognition": OCRConfig.STRUCTURE_USE_FORMULA,
+        }
+        if self._supports_kwarg(self.structure.predict, "format_block_content"):
+            predict_kwargs["format_block_content"] = False
+
+        result = self.structure.predict(pdf_path, **predict_kwargs)
         return self._collect_text(result)
 
     def _recognize_pdf_with_ocr(self, pdf_path: str) -> str:

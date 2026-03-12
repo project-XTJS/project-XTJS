@@ -9,12 +9,13 @@ faiss-cpu
 numpy
 language-tool-python
 openpyxl
-paddlepaddle>=3.3.0
-paddlex[ocr]>=3.4.2
-paddleocr>=3.4.0
+paddlepaddle==3.2.0
+paddlex[ocr]>=3.3.13,<3.4.0
+paddleocr==3.3.3
 opencv-python
 python-dotenv
 celery
+chardet<6
 redis
 minio>=7.2.20
 psycopg2-binary==2.9.10
