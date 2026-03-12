@@ -1,6 +1,7 @@
 """项目与文档元数据路由：对外暴露 PG 业务操作接口。"""
 
 import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
@@ -13,12 +14,15 @@ from app.model.postgresql_model import (
     ProjectRelationUpdateRequest,
     ProjectUpdateRequest,
 )
+from app.service.analysis_service import get_analysis_service
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.utils.text_utils import cleanup_temp_file, save_temp_file
 
 router = APIRouter()
 postgres_service = PostgreSQLService()
 minio_service = MinioService()
+analysis_service = get_analysis_service()
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +49,26 @@ def _rollback_uploaded_object(upload_result: Optional[dict]) -> Optional[str]:
     except Exception as cleanup_exc:  # pragma: no cover - defensive rollback
         logger.exception("MinIO upload rollback failed: object_name=%s", object_name)
         return str(cleanup_exc)
+
+
+def _extract_recognition_content(file_bytes: bytes, file_name: str) -> dict:
+    file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
+    allowed_extensions = {"pdf", "docx", "doc"}
+    if file_extension not in allowed_extensions:
+        raise ValueError(
+            f"Unsupported file type: {file_extension}. Only pdf/docx/doc are accepted."
+        )
+
+    temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
+    try:
+        recognized_text = analysis_service.extract_text_with_ocr(temp_file_path, file_extension)
+        return {
+            "file_type": file_extension,
+            "content": recognized_text,
+            "text_length": len(recognized_text),
+        }
+    finally:
+        cleanup_temp_file(temp_file_path)
 
 
 @router.post("/projects", summary="新建项目")
@@ -190,7 +214,7 @@ async def create_document(
     document_name: Optional[str] = Form(default=None),
     object_name: Optional[str] = Form(default=None),
 ):
-    """上传文件到 MinIO 并创建文档元数据记录。"""
+    """上传文件到 MinIO，写入文档元数据并保存识别内容。"""
     upload_result: Optional[dict] = None
     try:
         upload_result = minio_service.upload_file(file, object_name)
@@ -202,16 +226,27 @@ async def create_document(
         if not resolved_file_name:
             raise ValueError("document_name cannot be empty")
 
-        document = postgres_service.create_document(
+        await file.seek(0)
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise ValueError("uploaded file content is empty")
+
+        recognition_content = _extract_recognition_content(
+            file_bytes=file_bytes,
+            file_name=(file.filename or resolved_file_name),
+        )
+        creation_result = postgres_service.create_document_with_content(
             file_name=resolved_file_name,
             file_url=upload_result["file_url"],
+            recognition_content=recognition_content,
             identifier_id=identifier_id,
         )
         return {
             "code": 200,
             "msg": "document created",
             "data": {
-                "document": document,
+                "document": creation_result["document"],
+                "file_content": creation_result["file_content"],
                 "upload": upload_result,
             },
         }
@@ -230,7 +265,11 @@ async def create_document(
             detail = f"{detail}; rollback uploaded object failed: {rollback_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        rollback_error = _rollback_uploaded_object(upload_result)
+        detail = str(exc)
+        if rollback_error:
+            detail = f"{detail}; rollback uploaded object failed: {rollback_error}"
+        raise HTTPException(status_code=500, detail=detail) from exc
     except Exception as exc:
         rollback_error = _rollback_uploaded_object(upload_result)
         logger.exception("upload-and-create document failed")
