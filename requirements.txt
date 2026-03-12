@@ -9,8 +9,9 @@ faiss-cpu
 numpy
 language-tool-python
 openpyxl
-paddlepaddle
-paddleocr
+paddlepaddle>=3.3.0
+paddlex[ocr]>=3.4.2
+paddleocr>=3.4.0
 opencv-python
 python-dotenv
 celery

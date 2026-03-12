@@ -1,6 +1,9 @@
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from app.router.analysis import router as analysis_router
 from app.router.file import router as file_router

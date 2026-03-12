@@ -43,5 +43,8 @@ pytest_cache/
 # Temporary files
 temp/
 tmp/
+.runtime_tmp/
+.ocr_runtime/
+.test-ocr-root/
 *.tmp
 *.temp
