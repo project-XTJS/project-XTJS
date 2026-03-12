@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import Json, RealDictCursor
 
 from app.config.postgresql import PostgresConfig
 
@@ -170,6 +170,49 @@ class PostgreSQLService:
                     (identifier, normalized_file_name, normalized_file_url),
                 )
                 return dict(cursor.fetchone())
+
+    def create_document_with_content(
+        self,
+        file_name: str,
+        file_url: str,
+        recognition_content: Dict[str, Any],
+        identifier_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """创建文档记录并写入识别内容（同事务）。"""
+        identifier = self._normalize_identifier(identifier_id)
+        normalized_file_name = self._normalize_file_value(file_name, "file_name")
+        normalized_file_url = self._normalize_file_value(file_url, "file_url")
+
+        if not isinstance(recognition_content, dict):
+            raise ValueError("recognition_content must be a JSON object")
+
+        with self._connect() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                existing = self._get_document_record(cursor, identifier)
+                if existing:
+                    raise ValueError(f"Document identifier already exists: {identifier}")
+
+                cursor.execute(
+                    """
+                    INSERT INTO xtjs_documents (identifier_id, file_name, file_url)
+                    VALUES (%s, %s, %s)
+                    RETURNING id, identifier_id, file_name, file_url, deleted, create_time, update_time
+                    """,
+                    (identifier, normalized_file_name, normalized_file_url),
+                )
+                document = dict(cursor.fetchone())
+
+                cursor.execute(
+                    """
+                    INSERT INTO file_content (document_id, content)
+                    VALUES (%s, %s)
+                    RETURNING id, document_id, create_time
+                    """,
+                    (document["id"], Json(recognition_content)),
+                )
+                file_content = dict(cursor.fetchone())
+
+                return {"document": document, "file_content": file_content}
 
     def list_documents(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
         """分页查询文档列表（仅未删除）。"""
