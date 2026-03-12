@@ -48,3 +48,26 @@ class ProjectBindDocumentsRequest(BaseModel):
 
     tender_document_identifier: str
     bid_document_identifier: str
+
+
+class ProjectUpdateRequest(BaseModel):
+    """项目更新请求。"""
+
+    new_identifier_id: str
+
+
+class DocumentUpdateRequest(BaseModel):
+    """文档更新请求。"""
+
+    file_name: Optional[str] = None
+    file_url: Optional[str] = Field(
+        default=None,
+        description="文档存储地址（minio://bucket/object）。",
+    )
+
+
+class ProjectRelationUpdateRequest(BaseModel):
+    """项目文档关联更新请求。"""
+
+    tender_document_identifier: str
+    bid_document_identifier: str
