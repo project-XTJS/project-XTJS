@@ -4,11 +4,13 @@ services:
   app:
     # Requires Docker with NVIDIA Container Toolkit.
     gpus: ${OCR_GPU_DEVICES:-all}
+    shm_size: "8gb"
     environment:
       - PADDLE_OCR_DEVICE=${OCR_GPU_DEVICE:-gpu:0}
       - PADDLE_OCR_FALLBACK_TO_CPU=${PADDLE_OCR_FALLBACK_TO_CPU:-true}
       - PADDLE_OCR_DISABLE_MKLDNN=${PADDLE_OCR_DISABLE_MKLDNN:-false}
       - PADDLE_OCR_ENABLE_STRUCTURE=${PADDLE_OCR_ENABLE_STRUCTURE:-true}
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=${PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:-true}
       - OCR_STORAGE_ROOT=/app/.ocr_runtime
       - PADDLE_PDX_CACHE_HOME=/app/.ocr_runtime/paddlex-cache
       - OCR_RUNTIME_TEMP_DIR=/app/.ocr_runtime/runtime-tmp
