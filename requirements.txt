@@ -10,8 +10,8 @@ numpy>=1.26.4,<3
 language-tool-python
 openpyxl
 # Install the Paddle runtime to match your environment:
-# CPU: paddlepaddle==3.2.0
-# GPU (CUDA 12.6): use the official Paddle image or install paddlepaddle-gpu==3.2.0 from the cu126 index
+# CPU: paddlepaddle==3.3.0
+# GPU: prefer the official Paddle GPU image instead of downloading wheels during docker build
 paddlex[ocr]>=3.3.13,<3.4.0
 paddleocr==3.3.3
 opencv-python>=4.10.0.84
