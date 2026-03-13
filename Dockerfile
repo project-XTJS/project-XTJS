@@ -14,6 +14,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
+ENV PADDLE_PDX_MODEL_SOURCE=BOS
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -28,7 +29,8 @@ RUN apt-get update \
 
 RUN python3 -m venv "${VIRTUAL_ENV}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel uv
-RUN python -m pip install --no-cache-dir paddlepaddle-gpu==${PADDLE_VERSION} -i ${PADDLE_INDEX_URL}
+RUN python -m pip install --no-cache-dir "paddlepaddle-gpu==${PADDLE_VERSION}" -i "${PADDLE_INDEX_URL}"
+RUN python -m pip install --no-cache-dir "paddleocr[all]"
 
 COPY pyproject.toml uv.lock ./
 RUN uv sync --active --frozen --inexact --no-install-project
