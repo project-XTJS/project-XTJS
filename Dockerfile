@@ -2,6 +2,8 @@ ARG PADDLE_BASE_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
 ARG PADDLE_VERSION=3.3.0
 ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu130/
 FROM ${PADDLE_BASE_IMAGE}
+ARG PADDLE_VERSION
+ARG PADDLE_INDEX_URL
 LABEL authors="Stan1ey"
 
 WORKDIR /app
