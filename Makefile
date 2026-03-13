@@ -3,7 +3,9 @@ commit_id?=$(shell git rev-parse --short HEAD)
 project?=$(CURDIR)
 project_name?=project-xtjs
 image?=project-xtjs:${version}-${commit_id}
-paddle_base_image?=ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda13.0-cudnn9.13
+paddle_base_image?=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
+paddle_version?=3.3.0
+paddle_index_url?=https://www.paddlepaddle.org.cn/packages/stable/cu130/
 compose_files?=-f docker-compose.yml -f docker-compose.gpu.yml
 compose?=docker compose ${compose_files}
 python_cmd?=python3
@@ -15,7 +17,11 @@ start:
 
 package:
 	docker pull ${paddle_base_image}
-	docker build --build-arg PADDLE_BASE_IMAGE=${paddle_base_image} -t ${image} .
+	docker build \
+		--build-arg PADDLE_BASE_IMAGE=${paddle_base_image} \
+		--build-arg PADDLE_VERSION=${paddle_version} \
+		--build-arg PADDLE_INDEX_URL=${paddle_index_url} \
+		-t ${image} .
 
 prepare:
 	${compose} down
