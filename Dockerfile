@@ -1,25 +1,23 @@
-FROM python:3.12-slim
+FROM ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.0.0-gpu-cuda12.6-cudnn9.5-trt10.5
 LABEL authors="Stan1ey"
-
-# 安装必要的系统依赖
 
 WORKDIR /app
 
-# 复制依赖文件
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV UV_LINK_MODE=copy
+
+RUN python -m venv --system-site-packages "${VIRTUAL_ENV}"
+RUN python -m pip install --no-cache-dir uv
+
 COPY pyproject.toml uv.lock ./
+RUN uv sync --active --frozen --inexact --no-install-project
 
-# 安装uv
-RUN pip install --no-cache-dir uv
-RUN python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
-
-# 使用uv安装依赖
-RUN uv sync
-
-# 复制应用代码
 COPY . .
+RUN uv sync --active --frozen --inexact
 
-# 暴露端口
 EXPOSE 8080
 
-# 启动应用
 CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
