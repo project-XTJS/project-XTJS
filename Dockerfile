@@ -4,7 +4,8 @@ LABEL authors="Stan1ey"
 # 安装必要的系统依赖
 
 WORKDIR /app
-
+# 先安装paddle
+RUN pip install paddlepaddle-gpu -i https://mirror.baidu.com/pypi/simple
 # 安装uv
 RUN pip install --no-cache-dir uv
 
