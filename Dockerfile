@@ -10,7 +10,7 @@ COPY pyproject.toml uv.lock ./
 
 # 安装uv
 RUN pip install --no-cache-dir uv
-
+RUN python -m pip install paddlepaddle-gpu==3.2.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 
 # 使用uv安装依赖
 RUN uv sync
