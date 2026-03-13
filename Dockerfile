@@ -8,11 +8,6 @@ WORKDIR /app
 # 复制依赖文件
 COPY pyproject.toml uv.lock ./
 
-RUN rm -f uv.lock && \
-    uv sync --index-url https://mirror.baidu.com/pypi/simple \
-
-# 先安装paddle
-RUN pip install paddlepaddle-gpu -i https://mirror.baidu.com/pypi/simple
 # 安装uv
 RUN pip install --no-cache-dir uv
 
