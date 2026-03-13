@@ -1,4 +1,5 @@
-FROM ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.0.0-gpu-cuda12.6-cudnn9.5-trt10.5
+ARG PADDLE_BASE_IMAGE=ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.3.0-gpu-cuda13.0-cudnn9.13
+FROM ${PADDLE_BASE_IMAGE}
 LABEL authors="Stan1ey"
 
 WORKDIR /app
