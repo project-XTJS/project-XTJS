@@ -21,6 +21,7 @@ class MinioService:
             secret_key=MinioConfig.SECRET_KEY,
             secure=MinioConfig.SECURE,
         )
+        self.bucket_name = MinioConfig.BUCKET_NAME
 
     @staticmethod
     def _get_file_size(file: UploadFile) -> int:
@@ -61,12 +62,15 @@ class MinioService:
         return f"{name}_{timestamp}_{unique_suffix}{ext}"
 
     @staticmethod
-    def build_file_url(object_name: str) -> str:
+    def build_file_url(object_name: str, bucket_name: str | None = None) -> str:
         """构建可持久化 file_url（不含签名参数）。"""
         if not object_name or not object_name.strip():
             raise ValueError("对象名不能为空。")
+        resolved_bucket_name = (bucket_name or MinioConfig.BUCKET_NAME).strip()
+        if not resolved_bucket_name:
+            raise ValueError("bucket_name cannot be empty")
         normalized_object_name = object_name.lstrip("/")
-        return f"minio://{MinioConfig.BUCKET_NAME}/{normalized_object_name}"
+        return f"minio://{resolved_bucket_name}/{normalized_object_name}"
 
     @staticmethod
     def is_presigned_url(file_url: str) -> bool:
@@ -88,7 +92,7 @@ class MinioService:
     def _object_exists(self, object_name: str) -> bool:
         """检查对象是否已存在于桶中。"""
         try:
-            self.client.stat_object(MinioConfig.BUCKET_NAME, object_name)
+            self.client.stat_object(self.bucket_name, object_name)
             return True
         except S3Error as exc:
             if exc.code in {"NoSuchKey", "NoSuchObject"}:
@@ -113,8 +117,15 @@ class MinioService:
     def ensure_bucket(self) -> None:
         """确保业务桶存在，不存在时自动创建。"""
         try:
-            if not self.client.bucket_exists(MinioConfig.BUCKET_NAME):
-                self.client.make_bucket(MinioConfig.BUCKET_NAME)
+            available_buckets = [bucket.name for bucket in self.client.list_buckets()]
+            if available_buckets:
+                if MinioConfig.BUCKET_NAME in available_buckets:
+                    self.bucket_name = MinioConfig.BUCKET_NAME
+                else:
+                    self.bucket_name = available_buckets[0]
+                return
+            self.client.make_bucket(MinioConfig.BUCKET_NAME)
+            self.bucket_name = MinioConfig.BUCKET_NAME
         except S3Error as exc:
             raise RuntimeError(f"检查或创建 MinIO 存储桶失败：{exc}") from exc
         except Exception as exc:
@@ -131,16 +142,17 @@ class MinioService:
             self.ensure_bucket()
             object_name = self._resolve_upload_object_name(file.filename, object_name)
             self.client.put_object(
-                bucket_name=MinioConfig.BUCKET_NAME,
+                bucket_name=self.bucket_name,
                 object_name=object_name,
                 data=file.file,
                 length=size,
                 content_type=file.content_type,
             )
             presigned_url = self.get_presigned_url(object_name)
-            file_url = self.build_file_url(object_name)
+            file_url = self.build_file_url(object_name, self.bucket_name)
             return {
                 "object_name": object_name,
+                "bucket_name": self.bucket_name,
                 "file_url": file_url,
                 "presigned_url": presigned_url,
                 "size": size,
@@ -160,8 +172,9 @@ class MinioService:
             raise ValueError("对象名不能为空。")
 
         try:
+            self.ensure_bucket()
             return self.client.presigned_get_object(
-                MinioConfig.BUCKET_NAME,
+                self.bucket_name,
                 object_name,
                 expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
             )
@@ -176,7 +189,8 @@ class MinioService:
             raise ValueError("对象名不能为空。")
 
         try:
-            self.client.remove_object(MinioConfig.BUCKET_NAME, object_name)
+            self.ensure_bucket()
+            self.client.remove_object(self.bucket_name, object_name)
         except S3Error as exc:
             if exc.code in {"NoSuchKey", "NoSuchObject"}:
                 raise ValueError(f"对象不存在：{object_name}") from exc
