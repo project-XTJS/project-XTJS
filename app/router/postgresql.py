@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from psycopg2 import Error as PsycopgError
@@ -211,7 +211,7 @@ async def delete_relation(relation_id: int):
 @router.post("/documents", summary="上传并创建文档记录")
 async def create_document(
     file: UploadFile = File(...),
-    document_type: str = Form(...),
+    document_type: Literal["tender", "bid"] = Form(...),
     identifier_id: Optional[str] = Form(default=None),
     document_name: Optional[str] = Form(default=None),
     object_name: Optional[str] = Form(default=None),
