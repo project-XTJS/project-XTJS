@@ -246,7 +246,6 @@ async def create_document(
             "msg": "document created",
             "data": {
                 "document": creation_result["document"],
-                "file_content": creation_result["file_content"],
                 "upload": upload_result,
             },
         }

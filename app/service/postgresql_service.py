@@ -165,7 +165,16 @@ class PostgreSQLService:
                     """
                     INSERT INTO xtjs_documents (identifier_id, file_name, file_url)
                     VALUES (%s, %s, %s)
-                    RETURNING id, identifier_id, file_name, file_url, deleted, create_time, update_time
+                    RETURNING
+                        id,
+                        identifier_id,
+                        file_name,
+                        file_url,
+                        extracted,
+                        content,
+                        deleted,
+                        create_time,
+                        update_time
                     """,
                     (identifier, normalized_file_name, normalized_file_url),
                 )
@@ -196,7 +205,7 @@ class PostgreSQLService:
                     """
                     INSERT INTO xtjs_documents (identifier_id, file_name, file_url)
                     VALUES (%s, %s, %s)
-                    RETURNING id, identifier_id, file_name, file_url, deleted, create_time, update_time
+                    RETURNING id, identifier_id
                     """,
                     (identifier, normalized_file_name, normalized_file_url),
                 )
@@ -204,15 +213,25 @@ class PostgreSQLService:
 
                 cursor.execute(
                     """
-                    INSERT INTO file_content (document_id, content)
-                    VALUES (%s, %s)
-                    RETURNING id, document_id, create_time
+                    UPDATE xtjs_documents
+                    SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    RETURNING
+                        id,
+                        identifier_id,
+                        file_name,
+                        file_url,
+                        extracted,
+                        content,
+                        deleted,
+                        create_time,
+                        update_time
                     """,
-                    (document["id"], Json(recognition_content)),
+                    (Json(recognition_content), document["id"]),
                 )
-                file_content = dict(cursor.fetchone())
+                updated_document = dict(cursor.fetchone())
 
-                return {"document": document, "file_content": file_content}
+                return {"document": updated_document}
 
     def list_documents(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
         """分页查询文档列表（仅未删除）。"""
@@ -230,7 +249,16 @@ class PostgreSQLService:
                 total = int(cursor.fetchone()["total"])
                 cursor.execute(
                     """
-                    SELECT id, identifier_id, file_name, file_url, deleted, create_time, update_time
+                    SELECT
+                        id,
+                        identifier_id,
+                        file_name,
+                        file_url,
+                        extracted,
+                        content,
+                        deleted,
+                        create_time,
+                        update_time
                     FROM xtjs_documents
                     WHERE deleted = FALSE
                     ORDER BY create_time DESC, id DESC
@@ -249,7 +277,16 @@ class PostgreSQLService:
     def get_document_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """按业务标识查询未删除文档。"""
         query = """
-            SELECT id, identifier_id, file_name, file_url, deleted, create_time, update_time
+            SELECT
+                id,
+                identifier_id,
+                file_name,
+                file_url,
+                extracted,
+                content,
+                deleted,
+                create_time,
+                update_time
             FROM xtjs_documents
             WHERE identifier_id = %s AND deleted = FALSE
             ORDER BY id ASC
@@ -286,7 +323,16 @@ class PostgreSQLService:
             UPDATE xtjs_documents
             SET {", ".join(updates)}
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING id, identifier_id, file_name, file_url, deleted, create_time, update_time
+            RETURNING
+                id,
+                identifier_id,
+                file_name,
+                file_url,
+                extracted,
+                content,
+                deleted,
+                create_time,
+                update_time
         """
 
         with self._connect() as conn:
