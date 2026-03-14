@@ -8,6 +8,7 @@ from app.config.postgresql import PostgresConfig
 
 
 class PostgreSQLService:
+    DOCUMENT_TYPES = {"tender", "bid"}
     """PostgreSQL 业务服务：封装项目/文档 CRUD 与关联操作。"""
 
     def _connect(self):
@@ -33,6 +34,13 @@ class PostgreSQLService:
             raise ValueError(f"{field_name} cannot be empty")
         return normalized
 
+    @classmethod
+    def _normalize_document_type(cls, document_type: str) -> str:
+        normalized = (document_type or "").strip().lower()
+        if normalized not in cls.DOCUMENT_TYPES:
+            raise ValueError("document_type must be either 'tender' or 'bid'")
+        return normalized
+
     def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             """
@@ -48,7 +56,7 @@ class PostgreSQLService:
     def _get_document_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             """
-            SELECT id, identifier_id
+            SELECT id, identifier_id, document_type
             FROM xtjs_documents
             WHERE identifier_id = %s AND deleted = FALSE
             ORDER BY id ASC
@@ -149,12 +157,17 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def create_document(
-        self, file_name: str, file_url: str, identifier_id: Optional[str] = None
+        self,
+        file_name: str,
+        file_url: str,
+        document_type: str,
+        identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """创建文档记录。"""
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
+        normalized_document_type = self._normalize_document_type(document_type)
 
         with self._connect() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -163,11 +176,12 @@ class PostgreSQLService:
                     raise ValueError(f"Document identifier already exists: {identifier}")
                 cursor.execute(
                     """
-                    INSERT INTO xtjs_documents (identifier_id, file_name, file_url)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
+                    VALUES (%s, %s, %s, %s)
                     RETURNING
                         id,
                         identifier_id,
+                        document_type,
                         file_name,
                         file_url,
                         extracted,
@@ -176,7 +190,12 @@ class PostgreSQLService:
                         create_time,
                         update_time
                     """,
-                    (identifier, normalized_file_name, normalized_file_url),
+                    (
+                        identifier,
+                        normalized_document_type,
+                        normalized_file_name,
+                        normalized_file_url,
+                    ),
                 )
                 return dict(cursor.fetchone())
 
@@ -184,6 +203,7 @@ class PostgreSQLService:
         self,
         file_name: str,
         file_url: str,
+        document_type: str,
         recognition_content: Dict[str, Any],
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -191,6 +211,7 @@ class PostgreSQLService:
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
+        normalized_document_type = self._normalize_document_type(document_type)
 
         if not isinstance(recognition_content, dict):
             raise ValueError("recognition_content must be a JSON object")
@@ -203,11 +224,16 @@ class PostgreSQLService:
 
                 cursor.execute(
                     """
-                    INSERT INTO xtjs_documents (identifier_id, file_name, file_url)
-                    VALUES (%s, %s, %s)
-                    RETURNING id, identifier_id
+                    INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id, identifier_id, document_type
                     """,
-                    (identifier, normalized_file_name, normalized_file_url),
+                    (
+                        identifier,
+                        normalized_document_type,
+                        normalized_file_name,
+                        normalized_file_url,
+                    ),
                 )
                 document = dict(cursor.fetchone())
 
@@ -219,6 +245,7 @@ class PostgreSQLService:
                     RETURNING
                         id,
                         identifier_id,
+                        document_type,
                         file_name,
                         file_url,
                         extracted,
@@ -252,6 +279,7 @@ class PostgreSQLService:
                     SELECT
                         id,
                         identifier_id,
+                        document_type,
                         file_name,
                         file_url,
                         extracted,
@@ -280,6 +308,7 @@ class PostgreSQLService:
             SELECT
                 id,
                 identifier_id,
+                document_type,
                 file_name,
                 file_url,
                 extracted,
@@ -326,6 +355,7 @@ class PostgreSQLService:
             RETURNING
                 id,
                 identifier_id,
+                document_type,
                 file_name,
                 file_url,
                 extracted,
@@ -371,10 +401,18 @@ class PostgreSQLService:
                     raise ValueError(
                         f"Tender document not found: {tender_document_identifier}"
                     )
+                if tender["document_type"] != "tender":
+                    raise ValueError(
+                        f"Document is not a tender document: {tender_document_identifier}"
+                    )
 
                 bid = self._get_document_record(cursor, bid_document_identifier)
                 if not bid:
                     raise ValueError(f"Bid document not found: {bid_document_identifier}")
+                if bid["document_type"] != "bid":
+                    raise ValueError(
+                        f"Document is not a bid document: {bid_document_identifier}"
+                    )
 
                 cursor.execute(
                     """
@@ -416,9 +454,11 @@ class PostgreSQLService:
                 pd.id AS relation_id,
                 p.identifier_id AS project_identifier,
                 td.identifier_id AS tender_identifier_id,
+                td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 bd.identifier_id AS bid_identifier_id,
+                bd.document_type AS bid_document_type,
                 bd.file_name AS bid_file_name,
                 bd.file_url AS bid_file_url,
                 pd.create_time
@@ -460,10 +500,18 @@ class PostgreSQLService:
                     raise ValueError(
                         f"Tender document not found: {tender_document_identifier}"
                     )
+                if tender["document_type"] != "tender":
+                    raise ValueError(
+                        f"Document is not a tender document: {tender_document_identifier}"
+                    )
 
                 bid = self._get_document_record(cursor, bid_document_identifier)
                 if not bid:
                     raise ValueError(f"Bid document not found: {bid_document_identifier}")
+                if bid["document_type"] != "bid":
+                    raise ValueError(
+                        f"Document is not a bid document: {bid_document_identifier}"
+                    )
 
                 cursor.execute(
                     """
@@ -534,9 +582,11 @@ class PostgreSQLService:
             SELECT
                 pd.id AS relation_id,
                 td.identifier_id AS tender_identifier_id,
+                td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 bd.identifier_id AS bid_identifier_id,
+                bd.document_type AS bid_document_type,
                 bd.file_name AS bid_file_name,
                 bd.file_url AS bid_file_url,
                 pd.create_time

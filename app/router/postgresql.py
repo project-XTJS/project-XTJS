@@ -210,6 +210,7 @@ async def delete_relation(relation_id: int):
 @router.post("/documents", summary="上传并创建文档记录")
 async def create_document(
     file: UploadFile = File(...),
+    document_type: str = Form(...),
     identifier_id: Optional[str] = Form(default=None),
     document_name: Optional[str] = Form(default=None),
     object_name: Optional[str] = Form(default=None),
@@ -238,6 +239,7 @@ async def create_document(
         creation_result = postgres_service.create_document_with_content(
             file_name=resolved_file_name,
             file_url=upload_result["file_url"],
+            document_type=document_type,
             recognition_content=recognition_content,
             identifier_id=identifier_id,
         )
