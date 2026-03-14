@@ -7,10 +7,10 @@ from pydantic import BaseModel, Field
 class ResponseModel(BaseModel):
     """通用响应模型（可用于后续统一响应结构）。"""
 
-    code: Optional[int] = 200
-    message: Optional[str] = "success"
+    code: int = 200
+    message: str = "success"
     # 每次响应生成一个请求追踪 ID，便于日志关联。
-    rid: Optional[str] = Field(default_factory=lambda: str(uuid4()))
+    rid: str = Field(default_factory=lambda: str(uuid4()))
     data: Any = None
 
 

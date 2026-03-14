@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from app.config.response import configure_response_handlers
 from app.router.analysis import router as analysis_router
 from app.router.file import router as file_router
 from app.router.postgresql import router as postgresql_router
@@ -22,6 +23,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+configure_response_handlers(app)
 
 app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(file_router, prefix="/api/files", tags=["files"])
