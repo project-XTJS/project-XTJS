@@ -32,8 +32,9 @@ def _normalize_file_url(file_url: str) -> str:
         raise ValueError("file_url cannot be empty")
 
     if MinioService.is_presigned_url(normalized_file_url):
+        bucket_name = MinioService.bucket_name_from_presigned_url(normalized_file_url)
         object_name = MinioService.object_name_from_presigned_url(normalized_file_url)
-        normalized_file_url = MinioService.build_file_url(object_name)
+        normalized_file_url = MinioService.build_file_url(object_name, bucket_name)
     return normalized_file_url
 
 
