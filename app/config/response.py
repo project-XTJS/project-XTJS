@@ -37,7 +37,7 @@ def _normalize_json_payload(payload: Any, status_code: int, rid: str) -> dict:
         return normalized
 
     if isinstance(payload, dict) and any(
-        key in payload for key in ("code", "msg", "message", "data")
+        key in payload for key in ("code", "message", "data")
     ):
         code = payload.get("code", status_code)
         try:
@@ -45,7 +45,7 @@ def _normalize_json_payload(payload: Any, status_code: int, rid: str) -> dict:
         except (TypeError, ValueError):
             code = status_code
 
-        message = payload.get("message") or payload.get("msg")
+        message = payload.get("message")
         if not message:
             message = "success" if status_code < 400 else "request failed"
 

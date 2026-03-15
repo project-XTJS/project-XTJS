@@ -32,12 +32,12 @@ app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresq
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to XTJS API"}
+    return {"code": 200, "message": "Welcome to XTJS API", "data": None}
 
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy"}
+    return {"code": 200, "message": "healthy", "data": {"status": "healthy"}}
 
 
 if __name__ == "__main__":

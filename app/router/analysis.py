@@ -30,7 +30,7 @@ async def analyze_file(file: UploadFile = File(...)):
         text = analysis_service.extract_text_with_ocr(temp_file_path, file_extension)
         return {
             "code": 200,
-            "msg": "analyze success",
+            "message": "analyze success",
             "data": {
                 "filename": file.filename,
                 "file_type": file_extension,
@@ -74,4 +74,4 @@ async def run_text_analysis(payload: TextAnalysisRequest):
     else:
         result = {"status": "success", "parameters": analysis_service.extract_parameters(text)}
 
-    return {"code": 200, "msg": "ok", "data": result}
+    return {"code": 200, "message": "ok", "data": result}

@@ -18,7 +18,7 @@ async def get_presigned_url(object_name: str):
         presigned_url = minio_service.get_presigned_url(object_name)
         return {
             "code": 200,
-            "msg": "获取成功",
+            "message": "获取成功",
             "data": {"object_name": object_name, "presigned_url": presigned_url},
         }
     except ValueError as exc:
@@ -35,7 +35,7 @@ async def delete_file(object_name: str):
     """按对象名删除 MinIO 文件。"""
     try:
         minio_service.delete_file(object_name)
-        return {"code": 200, "msg": "删除成功"}
+        return {"code": 200, "message": "删除成功"}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
