@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Any, Dict, List
 
+from app.config.ocr import OCRConfig
 from app.service.ocr_service import OCRService
 from app.utils.similarity_utils import (
     calculate_similarity_list,
@@ -13,6 +14,10 @@ from app.utils.text_utils import extract_text, preprocess_text
 
 class AnalysisService:
     """统一分析服务：聚合格式检查、查重、参数提取等能力。"""
+
+    OCR_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}
+    DIRECT_TEXT_EXTENSIONS = {"pdf", "docx", "doc"}
+    SUPPORTED_EXTENSIONS = OCR_IMAGE_EXTENSIONS | DIRECT_TEXT_EXTENSIONS
 
     # 商务标关键章节白名单。
     BUSINESS_REQUIRED_SECTIONS = [
@@ -34,17 +39,96 @@ class AnalysisService:
         # OCR 仅在需要识别扫描 PDF 时启用。
         self.ocr_service = OCRService()
 
+    @classmethod
+    def get_supported_extensions(cls) -> List[str]:
+        return sorted(cls.SUPPORTED_EXTENSIONS)
+
+    def extract_text_result(self, file_path: str, file_type: str) -> Dict[str, Any]:
+        """统一抽取文本并返回 OCR 元信息。"""
+        normalized_file_type = (file_type or "").strip().lower()
+        if normalized_file_type not in self.SUPPORTED_EXTENSIONS:
+            supported = ",".join(self.get_supported_extensions())
+            raise ValueError(
+                f"Unsupported file type: {normalized_file_type}. Supported types: {supported}."
+            )
+
+        if normalized_file_type in self.OCR_IMAGE_EXTENSIONS:
+            return self._extract_image_result(file_path, normalized_file_type)
+
+        if normalized_file_type == "pdf":
+            return self._extract_pdf_result(file_path)
+
+        text = preprocess_text(extract_text(file_path, normalized_file_type))
+        return self._build_result(
+            content=text,
+            file_type=normalized_file_type,
+            parser_engine=normalized_file_type,
+            source_mode="native_parser",
+            ocr_engine="",
+            ocr_used=False,
+        )
+
     def extract_text_with_ocr(self, file_path: str, file_type: str) -> str:
-        """先做常规抽取，必要时回退 OCR。"""
-        text = extract_text(file_path, file_type)
-        if file_type == "pdf" and not text.strip():
-            ocr_text = self.ocr_service.recognize_pdf(file_path)
-            if ocr_text.startswith("PaddleOCR is not available") or ocr_text.startswith(
-                "Error during"
-            ):
-                raise RuntimeError(ocr_text)
-            text = ocr_text
-        return preprocess_text(text)
+        """兼容旧调用：返回纯文本内容。"""
+        return self.extract_text_result(file_path, file_type)["content"]
+
+    def _extract_pdf_result(self, file_path: str) -> Dict[str, Any]:
+        if not OCRConfig.FORCE_PDF_OCR:
+            text = extract_text(file_path, "pdf")
+            if text.strip():
+                return self._build_result(
+                    content=preprocess_text(text),
+                    file_type="pdf",
+                    parser_engine="pdfplumber",
+                    source_mode="text_layer",
+                    ocr_engine="",
+                    ocr_used=False,
+                )
+
+        ocr_result = self.ocr_service.recognize_pdf_result(file_path)
+        return self._normalize_ocr_result(ocr_result, file_type="pdf")
+
+    def _extract_image_result(self, file_path: str, file_type: str) -> Dict[str, Any]:
+        ocr_result = self.ocr_service.recognize_image_result(file_path)
+        return self._normalize_ocr_result(ocr_result, file_type=file_type)
+
+    def _normalize_ocr_result(self, ocr_result: Dict[str, Any], *, file_type: str) -> Dict[str, Any]:
+        content = ocr_result["content"]
+        if not ocr_result["success"]:
+            raise RuntimeError(content)
+
+        return self._build_result(
+            content=preprocess_text(content),
+            file_type=file_type,
+            parser_engine=ocr_result["ocr_engine"] or "PaddleOCR 3.x",
+            source_mode="ocr",
+            ocr_engine=ocr_result["ocr_engine"],
+            ocr_used=True,
+            active_device=ocr_result["active_device"],
+        )
+
+    def _build_result(
+        self,
+        *,
+        content: str,
+        file_type: str,
+        parser_engine: str,
+        source_mode: str,
+        ocr_engine: str,
+        ocr_used: bool,
+        active_device: str | None = None,
+    ) -> Dict[str, Any]:
+        return {
+            "file_type": file_type,
+            "content": content,
+            "text_length": len(content),
+            "parser_engine": parser_engine,
+            "source_mode": source_mode,
+            "ocr_engine": ocr_engine,
+            "ocr_used": ocr_used,
+            "active_device": active_device or self.ocr_service.active_device,
+            "ocr_available": self.ocr_service.is_available(),
+        }
 
     def summarize_text(self, text: str) -> Dict[str, Any]:
         """返回文本长度、词数与预览内容。"""

@@ -22,8 +22,11 @@ from app.utils.text_utils import cleanup_temp_file, save_temp_file
 router = APIRouter()
 postgres_service = PostgreSQLService()
 minio_service = MinioService()
-analysis_service = get_analysis_service()
 logger = logging.getLogger(__name__)
+
+
+def _get_analysis_service():
+    return get_analysis_service()
 
 
 def _normalize_file_url(file_url: str) -> str:
@@ -53,21 +56,20 @@ def _rollback_uploaded_object(upload_result: Optional[dict]) -> Optional[str]:
 
 
 def _extract_recognition_content(file_bytes: bytes, file_name: str) -> dict:
+    analysis_service = _get_analysis_service()
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
-    allowed_extensions = {"pdf", "docx", "doc"}
+    allowed_extensions = set(analysis_service.get_supported_extensions())
     if file_extension not in allowed_extensions:
         raise ValueError(
-            f"Unsupported file type: {file_extension}. Only pdf/docx/doc are accepted."
+            f"Unsupported file type: {file_extension}. "
+            f"Supported types: {', '.join(sorted(allowed_extensions))}."
         )
 
     temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
     try:
-        recognized_text = analysis_service.extract_text_with_ocr(temp_file_path, file_extension)
-        return {
-            "file_type": file_extension,
-            "content": recognized_text,
-            "text_length": len(recognized_text),
-        }
+        recognition_result = analysis_service.extract_text_result(temp_file_path, file_extension)
+        recognition_result["filename"] = file_name
+        return recognition_result
     finally:
         cleanup_temp_file(temp_file_path)
 

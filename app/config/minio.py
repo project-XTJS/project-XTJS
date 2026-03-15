@@ -15,6 +15,9 @@ class MinioConfig:
     MAX_FILE_SIZE = int(os.getenv("MINIO_MAX_FILE_SIZE", str(500 * 1024 * 1024)))
     ALLOWED_EXTENSIONS = {
         ext.strip().lower()
-        for ext in os.getenv("MINIO_ALLOWED_EXTENSIONS", "pdf,docx,doc").split(",")
+        for ext in os.getenv(
+            "MINIO_ALLOWED_EXTENSIONS",
+            "pdf,docx,doc,png,jpg,jpeg,bmp,tif,tiff",
+        ).split(",")
         if ext.strip()
     }

@@ -6,13 +6,12 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "celery>=5.6.2",
-    "chardet<6",
-    "faiss-cpu>=1.13.2",
+    "chardet<8",
     "fastapi==0.104.1",
     "language-tool-python>=3.2.2",
     "minio>=7.2.20",
     "numpy>=1.26.4,<3",
-    "opencv-python>=4.10.0.84",
+    "opencv-contrib-python==4.10.0.84",
     "openpyxl>=3.1.5",
     "pdfplumber==0.10.2",
     "psycopg2-binary==2.9.10",
@@ -21,6 +20,5 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "python-multipart==0.0.6",
     "redis>=7.2.1",
-    "sentence-transformers>=5.2.3",
     "uvicorn==0.24.0.post1",
 ]

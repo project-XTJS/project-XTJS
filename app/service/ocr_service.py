@@ -1,6 +1,7 @@
 import os
 import inspect
 import sys
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, List, Optional
@@ -39,9 +40,9 @@ class OCRService:
                 candidate_ocr = PaddleOCR(
                     lang=OCRConfig.LANG,
                     ocr_version=OCRConfig.OCR_VERSION,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
+                    use_doc_orientation_classify=OCRConfig.USE_DOC_ORIENTATION,
+                    use_doc_unwarping=OCRConfig.USE_DOC_UNWARPING,
+                    use_textline_orientation=OCRConfig.USE_TEXTLINE_ORIENTATION,
                     device=device,
                     enable_hpi=OCRConfig.ENABLE_HPI,
                 )
@@ -156,7 +157,11 @@ class OCRService:
         return kwarg_name in signature.parameters
 
     def _apply_runtime_flags(self, device: str) -> None:
-        if device.strip().lower().startswith("cpu") and OCRConfig.DISABLE_MKLDNN_ON_CPU:
+        if self._is_gpu_device(device):
+            os.environ.pop("FLAGS_use_mkldnn", None)
+            return
+
+        if OCRConfig.DISABLE_MKLDNN_ON_CPU:
             # Workaround for oneDNN/PIR runtime incompatibility on some CPU environments.
             os.environ.setdefault("FLAGS_use_mkldnn", "0")
 
@@ -167,6 +172,7 @@ class OCRService:
         os.environ["PADDLE_PDX_CACHE_HOME"] = str(OCRConfig.PDX_CACHE_HOME)
         os.environ["TMP"] = str(OCRConfig.RUNTIME_TEMP_DIR)
         os.environ["TEMP"] = str(OCRConfig.RUNTIME_TEMP_DIR)
+        os.environ["TMPDIR"] = str(OCRConfig.RUNTIME_TEMP_DIR)
 
     def recognize_text(self, image_path: str) -> str:
         """Recognize text from a single image."""
@@ -179,32 +185,77 @@ class OCRService:
         except Exception as exc:
             return f"Error during text recognition: {exc}"
 
+    def recognize_image(self, image_path: str) -> str:
+        """Recognize text from a document image, preferring PP-StructureV3."""
+        result = self.recognize_image_result(image_path)
+        return result["content"]
+
     def recognize_pdf(self, pdf_path: str) -> str:
         """Recognize text from a PDF, preferring PP-StructureV3 when available."""
+        result = self.recognize_pdf_result(pdf_path)
+        return result["content"]
+
+    def recognize_image_result(self, image_path: str) -> dict[str, Any]:
+        """Recognize an image and return text plus runtime metadata."""
         if not self.available:
-            return self._not_available_message()
+            return self._build_failure_result(self._not_available_message())
+
+        if self.structure is not None:
+            try:
+                structured_text = self._collect_text(self.structure.predict(image_path))
+                if structured_text.strip():
+                    return self._build_success_result(
+                        content=structured_text,
+                        ocr_engine="PP-StructureV3",
+                    )
+            except Exception as exc:
+                self._record_error(
+                    "Error during structured image recognition, fallback to OCR", exc
+                )
+
+        if self.ocr is not None:
+            try:
+                return self._build_success_result(
+                    content=self._collect_text(self.ocr.predict(image_path)),
+                    ocr_engine="PaddleOCR 3.x",
+                )
+            except Exception as exc:
+                self._record_error("Error during image OCR recognition", exc)
+
+        return self._build_failure_result(self._not_available_message())
+
+    def recognize_pdf_result(self, pdf_path: str) -> dict[str, Any]:
+        """Recognize a PDF and return text plus runtime metadata."""
+        if not self.available:
+            return self._build_failure_result(self._not_available_message())
 
         try:
             if self.structure is not None:
                 try:
                     structured_text = self._recognize_pdf_with_structure(pdf_path)
                     if structured_text.strip():
-                        return structured_text
+                        return self._build_success_result(
+                            content=structured_text,
+                            ocr_engine="PP-StructureV3",
+                        )
                 except Exception as exc:
                     self._record_error(
                         "Error during structured PDF recognition, fallback to OCR", exc
                     )
 
             if self.ocr is not None:
-                return self._recognize_pdf_with_ocr(pdf_path)
+                return self._build_success_result(
+                    content=self._recognize_pdf_with_ocr(pdf_path),
+                    ocr_engine="PaddleOCR 3.x",
+                )
 
-            return self._not_available_message()
+            return self._build_failure_result(self._not_available_message())
         except Exception as exc:
-            return f"Error during PDF recognition: {exc}"
+            return self._build_failure_result(f"Error during PDF recognition: {exc}")
 
     def recognize_bytes(self, image_bytes: bytes) -> str:
         """Recognize text from image bytes."""
-        if self.ocr is None:
+        if not self.available:
             return self._not_available_message()
 
         temp_image_path: Optional[str] = None
@@ -220,7 +271,7 @@ class OCRService:
             with NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
                 temp_image_path = temp_file.name
             cv2.imwrite(temp_image_path, image)
-            return self.recognize_text(temp_image_path)
+            return self.recognize_image(temp_image_path)
         except Exception as exc:
             return f"Error during byte stream recognition: {exc}"
         finally:
@@ -239,6 +290,22 @@ class OCRService:
             return f"{base} Please check if PaddleOCR is installed correctly."
         reason = " | ".join(self.init_errors)
         return f"{base} {reason}"
+
+    def _build_success_result(self, *, content: str, ocr_engine: str) -> dict[str, Any]:
+        return {
+            "success": True,
+            "content": content.strip(),
+            "ocr_engine": ocr_engine,
+            "active_device": self.active_device,
+        }
+
+    def _build_failure_result(self, message: str) -> dict[str, Any]:
+        return {
+            "success": False,
+            "content": message,
+            "ocr_engine": "",
+            "active_device": self.active_device,
+        }
 
     def _recognize_pdf_with_structure(self, pdf_path: str) -> str:
         if self.structure is None:
@@ -285,6 +352,18 @@ class OCRService:
 
     def _collect_lines(self, node: Any, lines: List[str]) -> None:
         if node is None:
+            return
+
+        if isinstance(node, str):
+            text = node.strip()
+            if text:
+                lines.append(text)
+            return
+
+        if isinstance(node, bytes):
+            text = node.decode("utf-8", errors="ignore").strip()
+            if text:
+                lines.append(text)
             return
 
         legacy_text = self._extract_legacy_line_text(node)
@@ -341,14 +420,15 @@ class OCRService:
             lines.append(text)
             return
 
-        if isinstance(node, (list, tuple)):
-            for item in node:
+        if isinstance(node, Mapping):
+            for item in node.values():
                 self._collect_lines(item, lines)
             return
 
-        if isinstance(node, dict):
-            for item in node.values():
+        if isinstance(node, Iterable):
+            for item in node:
                 self._collect_lines(item, lines)
+            return
 
     @staticmethod
     def _extract_legacy_line_text(node: Any) -> str:
@@ -373,7 +453,7 @@ class OCRService:
 
     @staticmethod
     def _get_field(node: Any, field_name: str) -> Any:
-        if isinstance(node, dict):
+        if isinstance(node, Mapping):
             return node.get(field_name)
 
         try:

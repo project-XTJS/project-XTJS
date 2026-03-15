@@ -4,17 +4,15 @@ python-multipart==0.0.6
 pdfplumber==0.10.2
 pymupdf==1.23.8
 python-docx==0.8.11
-sentence-transformers
-faiss-cpu
 numpy>=1.26.4,<3
 language-tool-python
 openpyxl
 # Install the Paddle runtime to match your environment:
-# GPU: install paddlepaddle-gpu==3.3.0 from the official cu130 index, then install "paddleocr[all]"
-opencv-python>=4.10.0.84
+# GPU: install paddlepaddle-gpu==3.3.0 from the official cu130 index, then install "paddleocr[doc-parser]==3.3.0"
+opencv-contrib-python==4.10.0.84
 python-dotenv
 celery
-chardet<6
+chardet<8
 redis
 minio>=7.2.20
 psycopg2-binary==2.9.10

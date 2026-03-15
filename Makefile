@@ -6,6 +6,10 @@ image?=project-xtjs:${version}-${commit_id}
 paddle_base_image?=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
 paddle_version?=3.3.0
 paddle_index_url?=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+paddle_trusted_host?=www.paddlepaddle.org.cn
+paddle_ocr_package_version?=3.3.0
+paddle_ocr_dependency_group?=doc-parser
+install_hpi_deps?=false
 compose_files?=-f docker-compose.yml -f docker-compose.gpu.yml
 compose?=docker compose ${compose_files}
 python_cmd?=python3
@@ -21,6 +25,10 @@ package:
 		--build-arg PADDLE_BASE_IMAGE=${paddle_base_image} \
 		--build-arg PADDLE_VERSION=${paddle_version} \
 		--build-arg PADDLE_INDEX_URL=${paddle_index_url} \
+		--build-arg PADDLE_TRUSTED_HOST=${paddle_trusted_host} \
+		--build-arg PADDLE_OCR_PACKAGE_VERSION=${paddle_ocr_package_version} \
+		--build-arg PADDLE_OCR_DEPENDENCY_GROUP=${paddle_ocr_dependency_group} \
+		--build-arg INSTALL_HPI_DEPS=${install_hpi_deps} \
 		-t ${image} .
 
 prepare:

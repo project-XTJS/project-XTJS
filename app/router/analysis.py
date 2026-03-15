@@ -9,25 +9,33 @@ from app.service.analysis_service import get_analysis_service
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
 router = APIRouter()
-analysis_service = get_analysis_service()
+
+
+def _get_analysis_service():
+    return get_analysis_service()
 
 
 @router.post("/analyze-file", summary="文档解析（抽取文本+统计）")
 async def analyze_file(file: UploadFile = File(...)):
     """上传单个文档并返回抽取后的正文与统计信息。"""
-    allowed_extensions = {"pdf", "docx", "doc"}
+    analysis_service = _get_analysis_service()
+    allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type: {file_extension}. Only pdf/docx/doc are accepted.",
+            detail=(
+                f"Unsupported file type: {file_extension}. "
+                f"Supported types: {', '.join(sorted(allowed_extensions))}."
+            ),
         )
 
     content = await file.read()
     # 统一落本地临时文件，便于 PDF/Word/OCR 流程复用。
     temp_file_path = save_temp_file(content, f".{file_extension}")
     try:
-        text = analysis_service.extract_text_with_ocr(temp_file_path, file_extension)
+        extraction_result = analysis_service.extract_text_result(temp_file_path, file_extension)
+        text = extraction_result["content"]
         return {
             "code": 200,
             "message": "analyze success",
@@ -36,6 +44,11 @@ async def analyze_file(file: UploadFile = File(...)):
                 "file_type": file_extension,
                 "file_size": len(content),
                 "content": text,
+                "parser_engine": extraction_result["parser_engine"],
+                "source_mode": extraction_result["source_mode"],
+                "ocr_engine": extraction_result["ocr_engine"],
+                "ocr_used": extraction_result["ocr_used"],
+                "active_device": extraction_result["active_device"],
                 "analysis": analysis_service.summarize_text(text),
             },
         }
@@ -51,6 +64,7 @@ async def analyze_file(file: UploadFile = File(...)):
 @router.post("/run", summary="统一文本分析接口")
 async def run_text_analysis(payload: TextAnalysisRequest):
     """按 task_type 分发到统一分析服务。"""
+    analysis_service = _get_analysis_service()
     text = preprocess_text(payload.text)
 
     # 任务路由集中在此，减少前端对多个 API 的耦合。

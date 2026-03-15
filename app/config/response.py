@@ -81,11 +81,25 @@ def _normalize_json_payload(payload: Any, status_code: int, rid: str) -> dict:
 
 
 def configure_response_handlers(app: FastAPI) -> None:
+    passthrough_paths = {
+        path
+        for path in (
+            app.openapi_url,
+            app.docs_url,
+            app.redoc_url,
+            "/docs/oauth2-redirect",
+        )
+        if path
+    }
+
     @app.middleware("http")
     async def unify_json_response(request: Request, call_next):
         rid = str(uuid4())
         request.state.rid = rid
         response = await call_next(request)
+
+        if request.url.path in passthrough_paths:
+            return response
 
         content_type = response.headers.get("content-type", "").lower()
         if "application/json" not in content_type:
