@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
@@ -8,6 +9,8 @@ from minio import Minio
 from minio.error import S3Error
 
 from app.config.minio import MinioConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MinioService:
@@ -21,6 +24,23 @@ class MinioService:
             secure=MinioConfig.SECURE,
         )
         self.bucket_name = MinioConfig.BUCKET_NAME
+
+    def _audit(
+        self,
+        action: str,
+        status: str,
+        object_name: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        logger.info(
+            "minio_audit action=%s status=%s bucket=%s object_name=%s endpoint=%s detail=%s",
+            action,
+            status,
+            self.bucket_name,
+            object_name or "",
+            MinioConfig.ENDPOINT,
+            detail or "",
+        )
 
     @staticmethod
     def _get_file_size(file: UploadFile) -> int:
@@ -110,20 +130,30 @@ class MinioService:
         raise RuntimeError("Failed to generate a unique object name")
 
     def ensure_bucket(self) -> None:
+        if not self.bucket_name or not self.bucket_name.strip():
+            raise RuntimeError("Fixed MinIO bucket name is empty")
+
         try:
-            available_buckets = [bucket.name for bucket in self.client.list_buckets()]
-            if available_buckets:
-                if MinioConfig.BUCKET_NAME in available_buckets:
-                    self.bucket_name = MinioConfig.BUCKET_NAME
-                else:
-                    self.bucket_name = available_buckets[0]
+            exists = self.client.bucket_exists(self.bucket_name)
+            if exists:
+                self._audit(action="ensure_bucket", status="exists")
                 return
 
-            self.client.make_bucket(MinioConfig.BUCKET_NAME)
-            self.bucket_name = MinioConfig.BUCKET_NAME
+            self.client.make_bucket(self.bucket_name)
+            self._audit(action="ensure_bucket", status="created")
         except S3Error as exc:
+            self._audit(
+                action="ensure_bucket",
+                status="failed",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"Failed to check/create MinIO bucket: {exc}") from exc
         except Exception as exc:
+            self._audit(
+                action="ensure_bucket",
+                status="failed",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"MinIO bucket operation error: {exc}") from exc
 
     def upload_file(self, file: UploadFile, object_name: str | None = None) -> dict:
@@ -144,6 +174,7 @@ class MinioService:
             )
             presigned_url = self.get_presigned_url(object_name)
             file_url = self.build_file_url(object_name, self.bucket_name)
+            self._audit(action="upload_file", status="success", object_name=object_name)
             return {
                 "object_name": object_name,
                 "bucket_name": self.bucket_name,
@@ -156,8 +187,20 @@ class MinioService:
         except RuntimeError:
             raise
         except S3Error as exc:
+            self._audit(
+                action="upload_file",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"MinIO upload failed: {exc}") from exc
         except Exception as exc:
+            self._audit(
+                action="upload_file",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"MinIO upload error: {exc}") from exc
 
     def get_presigned_url(self, object_name: str) -> str:
@@ -166,14 +209,28 @@ class MinioService:
 
         try:
             self.ensure_bucket()
-            return self.client.presigned_get_object(
+            presigned_url = self.client.presigned_get_object(
                 self.bucket_name,
                 object_name,
                 expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
             )
+            self._audit(action="get_presigned_url", status="success", object_name=object_name)
+            return presigned_url
         except S3Error as exc:
+            self._audit(
+                action="get_presigned_url",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"Failed to generate presigned URL: {exc}") from exc
         except Exception as exc:
+            self._audit(
+                action="get_presigned_url",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"Error while generating presigned URL: {exc}") from exc
 
     def delete_file(self, object_name: str) -> None:
@@ -183,11 +240,30 @@ class MinioService:
         try:
             self.ensure_bucket()
             self.client.remove_object(self.bucket_name, object_name)
+            self._audit(action="delete_file", status="success", object_name=object_name)
         except S3Error as exc:
             if exc.code in {"NoSuchKey", "NoSuchObject"}:
+                self._audit(
+                    action="delete_file",
+                    status="not_found",
+                    object_name=object_name,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
                 raise ValueError(f"Object not found: {object_name}") from exc
+            self._audit(
+                action="delete_file",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"MinIO delete failed: {exc}") from exc
         except Exception as exc:
+            self._audit(
+                action="delete_file",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
             raise RuntimeError(f"MinIO delete error: {exc}") from exc
 
     @staticmethod
