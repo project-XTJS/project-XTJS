@@ -15,9 +15,9 @@ def _get_analysis_service():
     return get_analysis_service()
 
 
-@router.post("/analyze-file", summary="文档解析（抽取文本+统计）")
+@router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(file: UploadFile = File(...)):
-    """上传单个文档并返回抽取后的正文与统计信息。"""
+    """上传单个文档并返回抽取后的正文内容。"""
     analysis_service = _get_analysis_service()
     allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
@@ -54,7 +54,6 @@ async def analyze_file(file: UploadFile = File(...)):
                 "seal_detected": extraction_result["seal_detected"],
                 "seal_count": extraction_result["seal_count"],
                 "seal_texts": extraction_result["seal_texts"],
-                "analysis": analysis_service.summarize_text(text),
             },
         }
     except ValueError as exc:
@@ -79,18 +78,9 @@ async def run_text_analysis(payload: TextAnalysisRequest):
         result = analysis_service.validate_business_sections(text)
     elif payload.task_type == "technical_content":
         result = analysis_service.check_technical_content(text)
-    elif payload.task_type == "duplication":
-        result = analysis_service.check_duplication(
-            text=text,
-            historical_texts=payload.historical_texts,
-            mode=payload.mode,
-        )
-    elif payload.task_type == "quote_duplication":
-        result = analysis_service.check_quote_duplication(
-            text=text,
-            historical_quotes=payload.historical_texts,
-        )
-    else:
+    elif payload.task_type == "extract_parameters":
         result = {"status": "success", "parameters": analysis_service.extract_parameters(text)}
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")
 
     return {"code": 200, "message": "ok", "data": result}

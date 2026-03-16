@@ -1,19 +1,14 @@
+import re
 from functools import lru_cache
 from typing import Any, Dict, List
 
 from app.config.ocr import OCRConfig
 from app.service.ocr_service import OCRService
-from app.utils.similarity_utils import (
-    calculate_similarity_list,
-    extract_quotes,
-    extract_technical_parameters,
-    jaccard_similarity,
-)
 from app.utils.text_utils import extract_text, preprocess_text
 
 
 class AnalysisService:
-    """统一分析服务：聚合格式检查、查重、参数提取等能力。"""
+    """统一分析服务：聚合文本抽取、格式检查与参数提取能力。"""
 
     OCR_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}
     DIRECT_TEXT_EXTENSIONS = {"pdf", "docx", "doc"}
@@ -33,6 +28,11 @@ class AnalysisService:
         "质量保证",
         "安全措施",
         "进度计划",
+    ]
+    TECHNICAL_PARAMETER_PATTERNS = [
+        r"[A-Za-z0-9]+[参数技术指标].*?[0-9]+[.]?[0-9]*",
+        r"[参数技术指标][:：].*?[0-9]+[.]?[0-9]*",
+        r"[0-9]+[.]?[0-9]*[A-Za-z%]+",
     ]
 
     def __init__(self) -> None:
@@ -145,14 +145,6 @@ class AnalysisService:
             "seal_texts": seal_texts or [],
         }
 
-    def summarize_text(self, text: str) -> Dict[str, Any]:
-        """返回文本长度、词数与预览内容。"""
-        return {
-            "text_length": len(text),
-            "word_count": len(text.split()),
-            "sample_content": f"{text[:500]}..." if len(text) > 500 else text,
-        }
-
     def check_business_format(self, text: str) -> Dict[str, Any]:
         """商务标格式检查：章节齐全性 + 关键字段存在性。"""
         found_sections = [s for s in self.BUSINESS_REQUIRED_SECTIONS if s in text]
@@ -218,47 +210,12 @@ class AnalysisService:
         )
         return {"status": "success", "section_details": section_details, "overall_score": overall_score}
 
-    def check_duplication(
-        self, text: str, historical_texts: List[str], mode: str = "business"
-    ) -> Dict[str, Any]:
-        """统一查重入口：根据模式切换相似度阈值。"""
-        threshold = 0.8 if mode == "business" else 0.7
-        result = calculate_similarity_list(text, historical_texts, threshold)
-        result["status"] = "success"
-        result["threshold"] = threshold
-        return result
-
-    def check_quote_duplication(self, text: str, historical_quotes: List[str]) -> Dict[str, Any]:
-        """报价查重：从文本中提取报价片段后逐条比对。"""
-        quotes = extract_quotes(text)
-        quote_similarities: List[Dict[str, Any]] = []
-
-        for index, historical_quote in enumerate(historical_quotes):
-            historical_quote_items = extract_quotes(historical_quote)
-            for quote in quotes:
-                for historical_item in historical_quote_items:
-                    similarity = jaccard_similarity(quote, historical_item)
-                    if similarity >= 0.7:
-                        quote_similarities.append(
-                            {
-                                "document_id": index + 1,
-                                "quote": quote,
-                                "historical_quote": historical_item,
-                                "similarity": similarity,
-                            }
-                        )
-
-        quote_similarities.sort(key=lambda item: item["similarity"], reverse=True)
-        return {
-            "status": "success",
-            "quotes": quotes,
-            "quote_duplication_checks": quote_similarities,
-            "has_quote_duplication": len(quote_similarities) > 0,
-        }
-
     def extract_parameters(self, text: str) -> List[str]:
         """提取技术参数字段。"""
-        return extract_technical_parameters(text)
+        parameters: List[str] = []
+        for pattern in self.TECHNICAL_PARAMETER_PATTERNS:
+            parameters.extend(re.findall(pattern, text, re.DOTALL))
+        return parameters
 
 
 @lru_cache(maxsize=1)
