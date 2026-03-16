@@ -18,6 +18,7 @@ run: update_docker_compose package prepare start
 
 start:
 	${compose} up -d
+	${compose} logs -f app
 
 package:
 	docker pull ${paddle_base_image}
