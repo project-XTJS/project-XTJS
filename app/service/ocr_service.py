@@ -14,6 +14,7 @@ class OCRService:
         # Compatible with PaddleOCR 3.x: initialize OCR and PP-StructureV3 separately.
         self.ocr = None
         self.structure = None
+        self.structure_seal_enabled = False
         self.available = False
         self.active_device = OCRConfig.DEVICE
         self.init_errors: List[str] = []
@@ -35,6 +36,7 @@ class OCRService:
 
             candidate_ocr = None
             candidate_structure = None
+            candidate_structure_seal_enabled = False
 
             try:
                 candidate_ocr = PaddleOCR(
@@ -58,6 +60,7 @@ class OCRService:
                         "use_doc_orientation_classify": OCRConfig.USE_DOC_ORIENTATION,
                         "use_doc_unwarping": OCRConfig.USE_DOC_UNWARPING,
                         "use_textline_orientation": OCRConfig.USE_TEXTLINE_ORIENTATION,
+                        "use_seal_recognition": False,
                         "use_table_recognition": OCRConfig.STRUCTURE_USE_TABLE,
                         "use_formula_recognition": OCRConfig.STRUCTURE_USE_FORMULA,
                         "device": device,
@@ -66,16 +69,33 @@ class OCRService:
                     if self._supports_kwarg(PPStructureV3.__init__, "format_block_content"):
                         structure_kwargs["format_block_content"] = False
 
-                    candidate_structure = PPStructureV3(
-                        **structure_kwargs
-                    )
-                    print(f"PP-StructureV3 initialized successfully on {device}")
+                    if OCRConfig.ENABLE_SEAL_RECOGNITION:
+                        try:
+                            candidate_structure = PPStructureV3(
+                                **{**structure_kwargs, "use_seal_recognition": True}
+                            )
+                            candidate_structure_seal_enabled = True
+                            print(
+                                f"PP-StructureV3 initialized successfully on {device} with seal recognition"
+                            )
+                        except Exception as exc:
+                            self._record_error(
+                                f"Error initializing PP-StructureV3 with seal recognition on {device}",
+                                exc,
+                            )
+
+                    if candidate_structure is None:
+                        candidate_structure = PPStructureV3(**structure_kwargs)
+                        print(f"PP-StructureV3 initialized successfully on {device}")
                 except Exception as exc:
-                    self._record_error(f"Error initializing PP-StructureV3 on {device}", exc)
+                    self._record_error(
+                        f"Error initializing PP-StructureV3 on {device}", exc
+                    )
 
             if candidate_ocr is not None or candidate_structure is not None:
                 self.ocr = candidate_ocr
                 self.structure = candidate_structure
+                self.structure_seal_enabled = candidate_structure_seal_enabled
                 self.available = True
                 if device != OCRConfig.DEVICE:
                     print(
@@ -202,11 +222,15 @@ class OCRService:
 
         if self.structure is not None:
             try:
-                structured_text = self._collect_text(self.structure.predict(image_path))
-                if structured_text.strip():
+                structured_result = self._predict_with_structure(image_path)
+                structured_text, seal_texts = self._collect_structure_text_and_seals(
+                    structured_result
+                )
+                if structured_text.strip() or seal_texts:
                     return self._build_success_result(
                         content=structured_text,
                         ocr_engine="PP-StructureV3",
+                        seal_texts=seal_texts,
                     )
             except Exception as exc:
                 self._record_error(
@@ -232,11 +256,15 @@ class OCRService:
         try:
             if self.structure is not None:
                 try:
-                    structured_text = self._recognize_pdf_with_structure(pdf_path)
-                    if structured_text.strip():
+                    structured_result = self._predict_with_structure(pdf_path)
+                    structured_text, seal_texts = self._collect_structure_text_and_seals(
+                        structured_result
+                    )
+                    if structured_text.strip() or seal_texts:
                         return self._build_success_result(
                             content=structured_text,
                             ocr_engine="PP-StructureV3",
+                            seal_texts=seal_texts,
                         )
                 except Exception as exc:
                     self._record_error(
@@ -291,12 +319,24 @@ class OCRService:
         reason = " | ".join(self.init_errors)
         return f"{base} {reason}"
 
-    def _build_success_result(self, *, content: str, ocr_engine: str) -> dict[str, Any]:
+    def _build_success_result(
+        self,
+        *,
+        content: str,
+        ocr_engine: str,
+        seal_texts: Optional[List[str]] = None,
+    ) -> dict[str, Any]:
+        normalized_seal_texts = self._dedupe_texts(seal_texts or [])
         return {
             "success": True,
             "content": content.strip(),
             "ocr_engine": ocr_engine,
             "active_device": self.active_device,
+            "seal_enabled": self.structure_seal_enabled,
+            "seal_removed": OCRConfig.EXCLUDE_SEAL_TEXT and bool(normalized_seal_texts),
+            "seal_detected": bool(normalized_seal_texts),
+            "seal_count": len(normalized_seal_texts),
+            "seal_texts": normalized_seal_texts,
         }
 
     def _build_failure_result(self, message: str) -> dict[str, Any]:
@@ -305,21 +345,20 @@ class OCRService:
             "content": message,
             "ocr_engine": "",
             "active_device": self.active_device,
+            "seal_enabled": self.structure_seal_enabled,
+            "seal_removed": False,
+            "seal_detected": False,
+            "seal_count": 0,
+            "seal_texts": [],
         }
 
     def _recognize_pdf_with_structure(self, pdf_path: str) -> str:
         if self.structure is None:
             return ""
 
-        predict_kwargs = {
-            "use_table_recognition": OCRConfig.STRUCTURE_USE_TABLE,
-            "use_formula_recognition": OCRConfig.STRUCTURE_USE_FORMULA,
-        }
-        if self._supports_kwarg(self.structure.predict, "format_block_content"):
-            predict_kwargs["format_block_content"] = False
-
-        result = self.structure.predict(pdf_path, **predict_kwargs)
-        return self._collect_text(result)
+        result = self._predict_with_structure(pdf_path)
+        structured_text, _ = self._collect_structure_text_and_seals(result)
+        return structured_text
 
     def _recognize_pdf_with_ocr(self, pdf_path: str) -> str:
         import fitz
@@ -344,6 +383,170 @@ class OCRService:
                         os.unlink(temp_image_path)
 
         return "\n".join(page_texts).strip()
+
+    def _predict_with_structure(self, input_path: str) -> Any:
+        if self.structure is None:
+            return []
+
+        predict_kwargs = {
+            "use_seal_recognition": self.structure_seal_enabled,
+            "use_table_recognition": OCRConfig.STRUCTURE_USE_TABLE,
+            "use_formula_recognition": OCRConfig.STRUCTURE_USE_FORMULA,
+        }
+        if self._supports_kwarg(self.structure.predict, "format_block_content"):
+            predict_kwargs["format_block_content"] = False
+        return self.structure.predict(input_path, **predict_kwargs)
+
+    def _collect_structure_text_and_seals(
+        self, results: Any
+    ) -> tuple[str, list[str]]:
+        lines: List[str] = []
+        seal_texts: List[str] = []
+        self._collect_structure_lines(results, lines, seal_texts)
+        return (
+            "\n".join(line for line in lines if line).strip(),
+            self._dedupe_texts(seal_texts),
+        )
+
+    def _collect_structure_lines(
+        self, node: Any, lines: List[str], seal_texts: List[str]
+    ) -> None:
+        if node is None:
+            return
+
+        if isinstance(node, str):
+            text = node.strip()
+            if text:
+                lines.append(text)
+            return
+
+        if isinstance(node, bytes):
+            text = node.decode("utf-8", errors="ignore").strip()
+            if text:
+                lines.append(text)
+            return
+
+        block_label = self._stringify_text(
+            self._get_field(node, "block_label") or self._get_field(node, "label")
+        ).lower()
+        if block_label == "seal":
+            self._collect_seal_texts(node, seal_texts)
+            return
+
+        parsing_res_list = self._get_field(node, "parsing_res_list")
+        if isinstance(parsing_res_list, list):
+            for block in parsing_res_list:
+                self._collect_structure_lines(block, lines, seal_texts)
+            return
+
+        seal_res_list = self._get_field(node, "seal_res_list")
+        if isinstance(seal_res_list, list):
+            for seal_res in seal_res_list:
+                self._collect_seal_texts(seal_res, seal_texts)
+
+        block_content = self._extract_block_content(node)
+        if block_content:
+            lines.append(block_content)
+            return
+
+        rec_texts = self._get_field(node, "rec_texts")
+        if isinstance(rec_texts, list):
+            found_rec_text = False
+            for item in rec_texts:
+                text = self._stringify_text(item)
+                if text:
+                    lines.append(text)
+                    found_rec_text = True
+            if found_rec_text:
+                return
+
+        overall_ocr_res = self._get_field(node, "overall_ocr_res")
+        if overall_ocr_res is not None:
+            before_len = len(lines)
+            self._collect_structure_lines(overall_ocr_res, lines, seal_texts)
+            if len(lines) > before_len:
+                return
+
+        markdown_texts = self._get_field(node, "markdown_texts")
+        if isinstance(markdown_texts, str) and markdown_texts.strip():
+            lines.append(markdown_texts.strip())
+            return
+
+        rec_text = self._stringify_text(self._get_field(node, "rec_text"))
+        if rec_text:
+            lines.append(rec_text)
+            return
+
+        plain_text = self._stringify_text(self._get_field(node, "text"))
+        if plain_text:
+            lines.append(plain_text)
+            return
+
+        if isinstance(node, Mapping):
+            for item in node.values():
+                self._collect_structure_lines(item, lines, seal_texts)
+            return
+
+        if isinstance(node, Iterable):
+            for item in node:
+                self._collect_structure_lines(item, lines, seal_texts)
+
+    def _collect_seal_texts(self, node: Any, seal_texts: List[str]) -> None:
+        if node is None:
+            return
+
+        block_content = self._extract_block_content(node)
+        if block_content:
+            seal_texts.append(block_content)
+
+        rec_texts = self._get_field(node, "rec_texts")
+        if isinstance(rec_texts, list):
+            for item in rec_texts:
+                text = self._stringify_text(item)
+                if text:
+                    seal_texts.append(text)
+
+        rec_text = self._stringify_text(self._get_field(node, "rec_text"))
+        if rec_text:
+            seal_texts.append(rec_text)
+
+        overall_ocr_res = self._get_field(node, "overall_ocr_res")
+        if overall_ocr_res is not None:
+            self._collect_seal_texts(overall_ocr_res, seal_texts)
+
+        if isinstance(node, Mapping):
+            for item in node.values():
+                self._collect_seal_texts(item, seal_texts)
+            return
+
+        if isinstance(node, Iterable) and not isinstance(node, (str, bytes)):
+            for item in node:
+                self._collect_seal_texts(item, seal_texts)
+
+    @staticmethod
+    def _extract_block_content(node: Any) -> str:
+        if node is None:
+            return ""
+        for field_name in ("block_content", "content", "markdown_texts"):
+            value = OCRService._get_field(node, field_name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            text = OCRService._stringify_text(value)
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _dedupe_texts(texts: List[str]) -> List[str]:
+        seen = set()
+        ordered: List[str] = []
+        for item in texts:
+            normalized = item.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            ordered.append(normalized)
+        return ordered
 
     def _collect_text(self, results: Any) -> str:
         lines: List[str] = []

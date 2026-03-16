@@ -49,6 +49,11 @@ async def analyze_file(file: UploadFile = File(...)):
                 "ocr_engine": extraction_result["ocr_engine"],
                 "ocr_used": extraction_result["ocr_used"],
                 "active_device": extraction_result["active_device"],
+                "seal_enabled": extraction_result["seal_enabled"],
+                "seal_removed": extraction_result["seal_removed"],
+                "seal_detected": extraction_result["seal_detected"],
+                "seal_count": extraction_result["seal_count"],
+                "seal_texts": extraction_result["seal_texts"],
                 "analysis": analysis_service.summarize_text(text),
             },
         }

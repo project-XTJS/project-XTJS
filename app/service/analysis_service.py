@@ -105,6 +105,11 @@ class AnalysisService:
             ocr_engine=ocr_result["ocr_engine"],
             ocr_used=True,
             active_device=ocr_result["active_device"],
+            seal_enabled=ocr_result.get("seal_enabled", False),
+            seal_removed=ocr_result.get("seal_removed", False),
+            seal_detected=ocr_result.get("seal_detected", False),
+            seal_count=ocr_result.get("seal_count", 0),
+            seal_texts=ocr_result.get("seal_texts", []),
         )
 
     def _build_result(
@@ -117,6 +122,11 @@ class AnalysisService:
         ocr_engine: str,
         ocr_used: bool,
         active_device: str | None = None,
+        seal_enabled: bool = False,
+        seal_removed: bool = False,
+        seal_detected: bool = False,
+        seal_count: int = 0,
+        seal_texts: List[str] | None = None,
     ) -> Dict[str, Any]:
         return {
             "file_type": file_type,
@@ -128,6 +138,11 @@ class AnalysisService:
             "ocr_used": ocr_used,
             "active_device": active_device or self.ocr_service.active_device,
             "ocr_available": self.ocr_service.is_available(),
+            "seal_enabled": seal_enabled,
+            "seal_removed": seal_removed,
+            "seal_detected": seal_detected,
+            "seal_count": seal_count,
+            "seal_texts": seal_texts or [],
         }
 
     def summarize_text(self, text: str) -> Dict[str, Any]:

@@ -34,6 +34,12 @@ class OCRConfig:
     OCR_VERSION = os.getenv("PADDLE_OCR_VERSION", "PP-OCRv5")
     ENABLE_HPI = _to_bool(os.getenv("PADDLE_OCR_ENABLE_HPI"), False)
     ENABLE_STRUCTURE = _to_bool(os.getenv("PADDLE_OCR_ENABLE_STRUCTURE"), True)
+    ENABLE_SEAL_RECOGNITION = _to_bool(
+        os.getenv("PADDLE_OCR_ENABLE_SEAL_RECOGNITION"), True
+    )
+    EXCLUDE_SEAL_TEXT = _to_bool(
+        os.getenv("PADDLE_OCR_EXCLUDE_SEAL_TEXT"), True
+    )
     FORCE_PDF_OCR = _to_bool(os.getenv("PADDLE_OCR_FORCE_PDF_OCR"), False)
 
     USE_DOC_ORIENTATION = _to_bool(os.getenv("PADDLE_OCR_USE_DOC_ORIENTATION"), True)
