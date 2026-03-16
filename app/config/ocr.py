@@ -27,7 +27,7 @@ class OCRConfig:
     DISABLE_MODEL_SOURCE_CHECK = _to_bool(
         os.getenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"), True
     )
-    DEVICE = os.getenv("PADDLE_OCR_DEVICE", "cpu")
+    DEVICE = os.getenv("PADDLE_OCR_DEVICE", "gpu:0")
     FALLBACK_TO_CPU = _to_bool(os.getenv("PADDLE_OCR_FALLBACK_TO_CPU"), True)
     DISABLE_MKLDNN_ON_CPU = _to_bool(os.getenv("PADDLE_OCR_DISABLE_MKLDNN"), True)
     LANG = os.getenv("PADDLE_OCR_LANG", "ch")
