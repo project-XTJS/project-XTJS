@@ -1,18 +1,25 @@
 fastapi==0.104.1
 uvicorn==0.24.0.post1
 python-multipart==0.0.6
+pydantic-settings>=2.0.0      # 用于配置管理
+
 pdfplumber==0.10.2
-pymupdf==1.23.8
+pymupdf
 python-docx==0.8.11
 numpy>=1.26.4,<3
 language-tool-python
 openpyxl
+
 # Install the Paddle runtime to match your environment:
 # GPU: install paddlepaddle-gpu==3.3.0 from the official cu130 index, then install "paddleocr[doc-parser]==3.3.0"
 opencv-contrib-python==4.10.0.84
+
 python-dotenv
 celery
 chardet<8
 redis
 minio>=7.2.20
 psycopg2-binary==2.9.10
+
+# [可选] Windows 环境下用于 .doc 文件解析的 COM 依赖
+# pywin32>=306

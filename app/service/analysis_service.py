@@ -2,7 +2,7 @@ import re
 from functools import lru_cache
 from typing import Any, Dict, List
 
-from app.config.ocr import OCRConfig
+from app.config.settings import settings
 from app.service.ocr_service import OCRService
 from app.utils.text_utils import extract_text, extract_text_pages_from_pdf, preprocess_text
 
@@ -35,9 +35,9 @@ class AnalysisService:
         r"[0-9]+[.]?[0-9]*[A-Za-z%]+",
     ]
 
-    def __init__(self) -> None:
-        # OCR 仅在需要识别扫描 PDF 时启用。
-        self.ocr_service = OCRService()
+    # 将 OCRService 作为依赖注入
+    def __init__(self, ocr_service: OCRService) -> None:
+        self.ocr_service = ocr_service
 
     @classmethod
     def get_supported_extensions(cls) -> List[str]:
@@ -73,7 +73,7 @@ class AnalysisService:
         return self.extract_text_result(file_path, file_type)["content"]
 
     def _extract_pdf_result(self, file_path: str) -> Dict[str, Any]:
-        if not OCRConfig.FORCE_PDF_OCR:
+        if not settings.PADDLE_OCR_FORCE_PDF_OCR:
             page_texts = extract_text_pages_from_pdf(file_path)
             if any(page_text.strip() for page_text in page_texts):
                 return self._build_result(
@@ -219,7 +219,6 @@ class AnalysisService:
                 if candidate != -1 and candidate < next_index:
                     next_index = candidate
 
-            # 取当前章节到下一个章节之间的内容长度作为近似指标。
             content = text[start_index:next_index]
             section_details[section] = {
                 "found": True,
@@ -243,6 +242,11 @@ class AnalysisService:
 
 
 @lru_cache(maxsize=1)
+def _get_cached_ocr_service() -> OCRService:
+    """初始化并缓存 OCR 服务实例"""
+    return OCRService()
+
+@lru_cache(maxsize=1)
 def get_analysis_service() -> AnalysisService:
-    """返回单例分析服务，避免 OCR 模型重复初始化。"""
-    return AnalysisService()
+    """返回单例分析服务，并将 OCR 服务注入其中。"""
+    return AnalysisService(ocr_service=_get_cached_ocr_service())

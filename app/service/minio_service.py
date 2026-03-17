@@ -8,7 +8,7 @@ from fastapi import UploadFile
 from minio import Minio
 from minio.error import S3Error
 
-from app.config.minio import MinioConfig
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +18,12 @@ class MinioService:
 
     def __init__(self) -> None:
         self.client = Minio(
-            endpoint=MinioConfig.ENDPOINT,
-            access_key=MinioConfig.ACCESS_KEY,
-            secret_key=MinioConfig.SECRET_KEY,
-            secure=MinioConfig.SECURE,
+            endpoint=settings.MINIO_ENDPOINT,
+            access_key=settings.MINIO_ACCESS_KEY,
+            secret_key=settings.MINIO_SECRET_KEY,
+            secure=settings.MINIO_SECURE,
         )
-        self.bucket_name = MinioConfig.BUCKET_NAME
+        self.bucket_name = settings.MINIO_BUCKET_NAME
 
     def _audit(
         self,
@@ -38,7 +38,7 @@ class MinioService:
             status,
             self.bucket_name,
             object_name or "",
-            MinioConfig.ENDPOINT,
+            settings.MINIO_ENDPOINT,
             detail or "",
         )
 
@@ -55,15 +55,15 @@ class MinioService:
 
     def validate_upload_file(self, file: UploadFile) -> None:
         size = self._get_file_size(file)
-        if size <= 0 or size > MinioConfig.MAX_FILE_SIZE:
-            max_mb = MinioConfig.MAX_FILE_SIZE // 1024 // 1024
+        if size <= 0 or size > settings.MINIO_MAX_FILE_SIZE:
+            max_mb = settings.MINIO_MAX_FILE_SIZE // 1024 // 1024
             raise ValueError(f"File size must be between 1B and {max_mb}MB")
 
         if not file.filename:
             raise ValueError("File name cannot be empty")
 
         extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
-        if extension not in MinioConfig.ALLOWED_EXTENSIONS:
+        if extension not in settings.minio_allowed_extensions:
             raise ValueError(f"Unsupported file type: {extension}")
 
     @staticmethod
@@ -81,7 +81,7 @@ class MinioService:
         if not object_name or not object_name.strip():
             raise ValueError("Object name cannot be empty")
 
-        resolved_bucket_name = (bucket_name or MinioConfig.BUCKET_NAME).strip()
+        resolved_bucket_name = (bucket_name or settings.MINIO_BUCKET_NAME).strip()
         if not resolved_bucket_name:
             raise ValueError("Bucket name cannot be empty")
 
@@ -212,7 +212,7 @@ class MinioService:
             presigned_url = self.client.presigned_get_object(
                 self.bucket_name,
                 object_name,
-                expires=timedelta(days=MinioConfig.URL_EXPIRE_DAYS),
+                expires=timedelta(days=settings.MINIO_PRESIGNED_EXPIRES_DAYS),
             )
             self._audit(action="get_presigned_url", status="success", object_name=object_name)
             return presigned_url

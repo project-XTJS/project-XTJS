@@ -1,19 +1,50 @@
+import logging
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import Json, RealDictCursor
 
-from app.config.postgresql import PostgresConfig
+from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+# 数据库连接池单例
+_db_pool = None
+
+def get_db_pool():
+    global _db_pool
+    if _db_pool is None:
+        try:
+            _db_pool = ThreadedConnectionPool(
+                minconn=1,
+                maxconn=20, # 最大并发连接数
+                dsn=settings.DATABASE_URL
+            )
+            logger.info("PostgreSQL connection pool initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize PostgreSQL pool: {e}")
+            raise
+    return _db_pool
 
 
 class PostgreSQLService:
     DOCUMENT_TYPES = {"tender", "bid"}
     """PostgreSQL 业务服务：封装项目/文档 CRUD 与关联操作。"""
 
-    def _connect(self):
-        """创建数据库连接。"""
-        return psycopg2.connect(PostgresConfig.DATABASE_URL)
+    @contextmanager
+    def _get_connection(self):
+        """从连接池获取连接，并在完成后自动归还。自带事务（Transaction）管理。"""
+        pool = get_db_pool()
+        conn = pool.getconn()
+        try:
+            # psycopg2 的 connection 上下文管理器会自动在结束时 commit，报错时 rollback
+            with conn: 
+                yield conn
+        finally:
+            pool.putconn(conn)
 
     @staticmethod
     def _normalize_identifier(identifier_id: Optional[str]) -> str:
@@ -75,7 +106,7 @@ class PostgreSQLService:
             VALUES (%s)
             RETURNING id, identifier_id, deleted, create_time, update_time
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (identifier,))
                 return dict(cursor.fetchone())
@@ -84,7 +115,7 @@ class PostgreSQLService:
         """分页查询项目列表（仅未删除）。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
                     """
@@ -119,7 +150,7 @@ class PostgreSQLService:
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (identifier_id,))
                 result = cursor.fetchone()
@@ -138,7 +169,7 @@ class PostgreSQLService:
             WHERE identifier_id = %s AND deleted = FALSE
             RETURNING id, identifier_id, deleted, create_time, update_time
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (normalized_new_identifier, identifier_id))
                 updated = cursor.fetchone()
@@ -151,7 +182,7 @@ class PostgreSQLService:
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query, (identifier_id,))
                 return cursor.rowcount > 0
@@ -169,7 +200,7 @@ class PostgreSQLService:
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
         normalized_document_type = self._normalize_document_type(document_type)
 
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 existing = self._get_document_record(cursor, identifier)
                 if existing:
@@ -216,7 +247,7 @@ class PostgreSQLService:
         if not isinstance(recognition_content, dict):
             raise ValueError("recognition_content must be a JSON object")
 
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 existing = self._get_document_record(cursor, identifier)
                 if existing:
@@ -264,7 +295,7 @@ class PostgreSQLService:
         """分页查询文档列表（仅未删除）。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
                     """
@@ -321,7 +352,7 @@ class PostgreSQLService:
             ORDER BY id ASC
             LIMIT 1
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (identifier_id,))
                 result = cursor.fetchone()
@@ -365,7 +396,7 @@ class PostgreSQLService:
                 update_time
         """
 
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, tuple(values))
                 updated = cursor.fetchone()
@@ -378,7 +409,7 @@ class PostgreSQLService:
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(query, (identifier_id,))
                 return cursor.rowcount > 0
@@ -390,7 +421,7 @@ class PostgreSQLService:
         bid_document_identifier: str,
     ) -> Dict[str, Any]:
         """创建项目与招标/投标文档之间的关联记录。"""
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 project = self._get_project_record(cursor, project_identifier)
                 if not project:
@@ -468,7 +499,7 @@ class PostgreSQLService:
             JOIN xtjs_documents bd ON pd.bid_document_id = bd.id AND bd.deleted = FALSE
             WHERE pd.id = %s
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (relation_id,))
                 relation = cursor.fetchone()
@@ -481,7 +512,7 @@ class PostgreSQLService:
         bid_document_identifier: str,
     ) -> Optional[Dict[str, Any]]:
         """更新项目文档关联（替换招标/投标文档）。"""
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
                     """
@@ -561,7 +592,7 @@ class PostgreSQLService:
 
     def delete_relation(self, relation_id: int) -> bool:
         """删除项目文档关联。"""
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
@@ -596,7 +627,7 @@ class PostgreSQLService:
             WHERE pd.project_id = %s
             ORDER BY pd.create_time DESC
         """
-        with self._connect() as conn:
+        with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (project["id"],))
                 relations: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]

@@ -1,11 +1,8 @@
 from typing import Literal
-
 from pydantic import BaseModel, Field
-
 
 class TextAnalysisRequest(BaseModel):
     """统一文本分析请求模型。"""
-
     # task_type 决定后端执行的分析分支。
     task_type: Literal[
         "business_format",

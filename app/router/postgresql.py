@@ -4,30 +4,25 @@ import logging
 import os
 from typing import Literal, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, Depends
 from psycopg2 import Error as PsycopgError
 
-from app.model.postgresql_model import (
+from app.schemas.postgresql import (
     DocumentUpdateRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
     ProjectRelationUpdateRequest,
     ProjectUpdateRequest,
 )
-from app.service.analysis_service import get_analysis_service
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 from app.utils.text_utils import cleanup_temp_file, save_temp_file
+from app.router.dependencies import get_db_service, get_oss_service, get_text_analysis_service
 
 router = APIRouter()
-postgres_service = PostgreSQLService()
-minio_service = MinioService()
 logger = logging.getLogger(__name__)
 
-
-def _get_analysis_service():
-    return get_analysis_service()
-
+# --- 辅助函数 ---
 
 def _normalize_file_url(file_url: str) -> str:
     normalized_file_url = file_url.strip()
@@ -40,23 +35,20 @@ def _normalize_file_url(file_url: str) -> str:
         normalized_file_url = MinioService.build_file_url(object_name, bucket_name)
     return normalized_file_url
 
-
-def _rollback_uploaded_object(upload_result: Optional[dict]) -> Optional[str]:
+def _rollback_uploaded_object(upload_result: Optional[dict], oss_service: MinioService) -> Optional[str]:
     if not upload_result:
         return None
     object_name = upload_result.get("object_name")
     if not object_name:
         return None
     try:
-        minio_service.delete_file(object_name)
+        oss_service.delete_file(object_name)
         return None
-    except Exception as cleanup_exc:  # pragma: no cover - defensive rollback
+    except Exception as cleanup_exc:  # pragma: no cover
         logger.exception("MinIO upload rollback failed: object_name=%s", object_name)
         return str(cleanup_exc)
 
-
-def _extract_recognition_content(file_bytes: bytes, file_name: str) -> dict:
-    analysis_service = _get_analysis_service()
+def _extract_recognition_content(file_bytes: bytes, file_name: str, analysis_service) -> dict:
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
     allowed_extensions = set(analysis_service.get_supported_extensions())
     if file_extension not in allowed_extensions:
@@ -74,56 +66,60 @@ def _extract_recognition_content(file_bytes: bytes, file_name: str) -> dict:
         cleanup_temp_file(temp_file_path)
 
 
+# --- 路由接口 ---
+
 @router.post("/projects", summary="新建项目")
-async def create_project(payload: ProjectCreateRequest):
-    """创建项目主记录。"""
+async def create_project(
+    payload: ProjectCreateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        project = postgres_service.create_project(payload.identifier_id)
-        return {"code": 200, "message": "project created", "data": project}
+        return db_service.create_project(payload.identifier_id)
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
             raise HTTPException(status_code=409, detail="project identifier already exists") from exc
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
-
 
 @router.get("/projects", summary="查询项目列表")
 async def list_projects(
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    db_service: PostgreSQLService = Depends(get_db_service)
 ):
-    """分页查询项目列表。"""
     try:
-        result = postgres_service.list_projects(limit=limit, offset=offset)
-        return {"code": 200, "message": "ok", "data": result}
+        return db_service.list_projects(limit=limit, offset=offset)
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.get("/projects/{identifier_id}", summary="查询项目详情")
-async def get_project_detail(identifier_id: str):
-    """按业务标识查询项目详情及绑定文档信息。"""
+async def get_project_detail(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        detail = postgres_service.get_project_detail(identifier_id)
+        detail = db_service.get_project_detail(identifier_id)
         if not detail:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"code": 200, "message": "ok", "data": detail}
+        return detail
     except HTTPException:
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.put("/projects/{identifier_id}", summary="更新项目标识")
-async def update_project(identifier_id: str, payload: ProjectUpdateRequest):
-    """更新项目业务标识。"""
+async def update_project(
+    identifier_id: str, 
+    payload: ProjectUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        updated = postgres_service.update_project_identifier(
+        updated = db_service.update_project_identifier(
             identifier_id=identifier_id,
             new_identifier_id=payload.new_identifier_id,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"code": 200, "message": "project updated", "data": updated}
+        return updated
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -131,63 +127,68 @@ async def update_project(identifier_id: str, payload: ProjectUpdateRequest):
             raise HTTPException(status_code=409, detail="project identifier already exists") from exc
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.delete("/projects/{identifier_id}", summary="删除项目")
-async def delete_project(identifier_id: str):
-    """逻辑删除项目。"""
+async def delete_project(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        deleted = postgres_service.soft_delete_project(identifier_id)
+        deleted = db_service.soft_delete_project(identifier_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="project not found")
-        return {"code": 200, "message": "project deleted"}
+        return {"status": "deleted"}
     except HTTPException:
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.post("/projects/{identifier_id}/bind-documents", summary="绑定招标/投标文档")
-async def bind_project_documents(identifier_id: str, payload: ProjectBindDocumentsRequest):
-    """为项目绑定招标文档与投标文档。"""
+async def bind_project_documents(
+    identifier_id: str, 
+    payload: ProjectBindDocumentsRequest,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        relation = postgres_service.bind_project_documents(
+        return db_service.bind_project_documents(
             identifier_id,
             payload.tender_document_identifier,
             payload.bid_document_identifier,
         )
-        return {"code": 200, "message": "documents bound", "data": relation}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.get("/relations/{relation_id}", summary="查询项目文档关联详情")
-async def get_relation_detail(relation_id: int):
-    """按关联 ID 查询绑定详情。"""
+async def get_relation_detail(
+    relation_id: int,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        relation = postgres_service.get_relation_by_id(relation_id)
+        relation = db_service.get_relation_by_id(relation_id)
         if not relation:
             raise HTTPException(status_code=404, detail="relation not found")
-        return {"code": 200, "message": "ok", "data": relation}
+        return relation
     except HTTPException:
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.put("/relations/{relation_id}", summary="更新项目文档关联")
-async def update_relation(relation_id: int, payload: ProjectRelationUpdateRequest):
-    """更新关联中的招标/投标文档。"""
+async def update_relation(
+    relation_id: int, 
+    payload: ProjectRelationUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        updated = postgres_service.update_relation(
+        updated = db_service.update_relation(
             relation_id=relation_id,
             tender_document_identifier=payload.tender_document_identifier,
             bid_document_identifier=payload.bid_document_identifier,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="relation not found")
-        return {"code": 200, "message": "relation updated", "data": updated}
+        return updated
     except HTTPException:
         raise
     except ValueError as exc:
@@ -195,20 +196,20 @@ async def update_relation(relation_id: int, payload: ProjectRelationUpdateReques
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.delete("/relations/{relation_id}", summary="删除项目文档关联")
-async def delete_relation(relation_id: int):
-    """删除项目文档关联。"""
+async def delete_relation(
+    relation_id: int,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        deleted = postgres_service.delete_relation(relation_id)
+        deleted = db_service.delete_relation(relation_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="relation not found")
-        return {"code": 200, "message": "relation deleted"}
+        return {"status": "deleted"}
     except HTTPException:
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
-
 
 @router.post("/documents", summary="上传并创建文档记录")
 async def create_document(
@@ -217,11 +218,13 @@ async def create_document(
     identifier_id: Optional[str] = Form(default=None),
     document_name: Optional[str] = Form(default=None),
     object_name: Optional[str] = Form(default=None),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+    analysis_service = Depends(get_text_analysis_service)
 ):
-    """上传文件到 MinIO，写入文档元数据并保存识别内容。"""
     upload_result: Optional[dict] = None
     try:
-        upload_result = minio_service.upload_file(file, object_name)
+        upload_result = oss_service.upload_file(file, object_name)
         resolved_file_name = (
             (document_name or "").strip()
             or (file.filename or "").strip()
@@ -238,24 +241,24 @@ async def create_document(
         recognition_content = _extract_recognition_content(
             file_bytes=file_bytes,
             file_name=(file.filename or resolved_file_name),
+            analysis_service=analysis_service
         )
-        creation_result = postgres_service.create_document_with_content(
+        
+        creation_result = db_service.create_document_with_content(
             file_name=resolved_file_name,
             file_url=upload_result["file_url"],
             document_type=document_type,
             recognition_content=recognition_content,
             identifier_id=identifier_id,
         )
+        
         return {
-            "code": 200,
-            "message": "document created",
-            "data": {
-                "document": creation_result["document"],
-                "upload": upload_result,
-            },
+            "document": creation_result["document"],
+            "upload": upload_result,
         }
+        
     except ValueError as exc:
-        rollback_error = _rollback_uploaded_object(upload_result)
+        rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         if rollback_error:
             raise HTTPException(
                 status_code=400,
@@ -263,68 +266,69 @@ async def create_document(
             ) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
-        rollback_error = _rollback_uploaded_object(upload_result)
+        rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         detail = f"database error: {exc}"
         if rollback_error:
             detail = f"{detail}; rollback uploaded object failed: {rollback_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
     except RuntimeError as exc:
-        rollback_error = _rollback_uploaded_object(upload_result)
+        rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         detail = str(exc)
         if rollback_error:
             detail = f"{detail}; rollback uploaded object failed: {rollback_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
     except Exception as exc:
-        rollback_error = _rollback_uploaded_object(upload_result)
+        rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         logger.exception("upload-and-create document failed")
         detail = "upload and create document failed, please retry later"
         if rollback_error:
             detail = f"{detail}; rollback failed: {rollback_error}"
         raise HTTPException(status_code=500, detail=detail) from exc
 
-
 @router.get("/documents", summary="查询文档列表")
 async def list_documents(
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    db_service: PostgreSQLService = Depends(get_db_service)
 ):
-    """分页查询文档列表。"""
     try:
-        result = postgres_service.list_documents(limit=limit, offset=offset)
-        return {"code": 200, "message": "ok", "data": result}
+        return db_service.list_documents(limit=limit, offset=offset)
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.get("/documents/{identifier_id}", summary="查询文档记录")
-async def get_document(identifier_id: str):
-    """按业务标识查询文档记录。"""
+async def get_document(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        document = postgres_service.get_document_by_identifier(identifier_id)
+        document = db_service.get_document_by_identifier(identifier_id)
         if not document:
             raise HTTPException(status_code=404, detail="document not found")
-        return {"code": 200, "message": "ok", "data": document}
+        return document
     except HTTPException:
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.put("/documents/{identifier_id}", summary="更新文档记录")
-async def update_document(identifier_id: str, payload: DocumentUpdateRequest):
-    """更新文档元数据。"""
+async def update_document(
+    identifier_id: str, 
+    payload: DocumentUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
         normalized_file_url = (
             _normalize_file_url(payload.file_url) if payload.file_url is not None else None
         )
-        updated = postgres_service.update_document(
+        updated = db_service.update_document(
             identifier_id=identifier_id,
             file_name=payload.file_name,
             file_url=normalized_file_url,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="document not found")
-        return {"code": 200, "message": "document updated", "data": updated}
+        return updated
     except HTTPException:
         raise
     except ValueError as exc:
@@ -332,15 +336,16 @@ async def update_document(identifier_id: str, payload: DocumentUpdateRequest):
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
-
 @router.delete("/documents/{identifier_id}", summary="删除文档记录")
-async def delete_document(identifier_id: str):
-    """逻辑删除文档记录。"""
+async def delete_document(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service)
+):
     try:
-        deleted = postgres_service.soft_delete_document(identifier_id)
+        deleted = db_service.soft_delete_document(identifier_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="document not found")
-        return {"code": 200, "message": "document deleted"}
+        return {"status": "deleted"}
     except HTTPException:
         raise
     except PsycopgError as exc:
