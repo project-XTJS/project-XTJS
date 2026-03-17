@@ -4,6 +4,7 @@ import os
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
+from app.config.recognition_schema import build_analyze_file_metadata
 from app.model.analysis import TextAnalysisRequest
 from app.service.analysis_service import get_analysis_service
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
@@ -36,6 +37,25 @@ async def analyze_file(file: UploadFile = File(...)):
     try:
         extraction_result = analysis_service.extract_text_result(temp_file_path, file_extension)
         text = extraction_result["content"]
+        metadata = build_analyze_file_metadata(
+            filename=file.filename,
+            file_type=file_extension,
+            file_size=len(content),
+            page_count=extraction_result["page_count"],
+            mime_type=file.content_type or "",
+            text_length=extraction_result["text_length"],
+            parser_engine=extraction_result["parser_engine"],
+            source_mode=extraction_result["source_mode"],
+            ocr_engine=extraction_result["ocr_engine"],
+            ocr_used=extraction_result["ocr_used"],
+            ocr_available=extraction_result["ocr_available"],
+            active_device=extraction_result["active_device"],
+            seal_enabled=extraction_result["seal_enabled"],
+            seal_removed=extraction_result["seal_removed"],
+            seal_detected=extraction_result["seal_detected"],
+            seal_count=extraction_result["seal_count"],
+            seal_texts=extraction_result["seal_texts"],
+        )
         return {
             "code": 200,
             "message": "analyze success",
@@ -44,6 +64,8 @@ async def analyze_file(file: UploadFile = File(...)):
                 "file_type": file_extension,
                 "file_size": len(content),
                 "content": text,
+                "pages": extraction_result["pages"],
+                "page_count": extraction_result["page_count"],
                 "parser_engine": extraction_result["parser_engine"],
                 "source_mode": extraction_result["source_mode"],
                 "ocr_engine": extraction_result["ocr_engine"],
@@ -54,6 +76,7 @@ async def analyze_file(file: UploadFile = File(...)):
                 "seal_detected": extraction_result["seal_detected"],
                 "seal_count": extraction_result["seal_count"],
                 "seal_texts": extraction_result["seal_texts"],
+                "metadata": metadata,
             },
         }
     except ValueError as exc:

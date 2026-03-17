@@ -67,6 +67,63 @@ class PdfRound1SchemaConfig:
     }
 
 
+class AnalyzeFileSchemaConfig:
+    """/api/analysis/analyze-file 返回结构配置。"""
+
+    SCHEMA_VERSION = "analyze_file_v1"
+
+
+def build_analyze_file_metadata(
+    *,
+    filename: str,
+    file_type: str,
+    file_size: int,
+    page_count: int = 0,
+    mime_type: str = "",
+    text_length: int = 0,
+    parser_engine: str = "",
+    source_mode: str = "",
+    ocr_engine: str = "",
+    ocr_used: bool = False,
+    ocr_available: bool = False,
+    active_device: str = "",
+    seal_enabled: bool = False,
+    seal_removed: bool = False,
+    seal_detected: bool = False,
+    seal_count: int = 0,
+    seal_texts: list[str] | None = None,
+) -> Dict[str, Any]:
+    """构建 analyze-file 的结构化元数据。"""
+    return {
+        "schema_version": AnalyzeFileSchemaConfig.SCHEMA_VERSION,
+        "document": {
+            "filename": filename,
+            "file_type": file_type,
+            "file_size": file_size,
+            "page_count": page_count,
+            "mime_type": mime_type,
+            "text_length": text_length,
+        },
+        "processing": {
+            "parser_engine": parser_engine,
+            "source_mode": source_mode,
+        },
+        "ocr": {
+            "available": ocr_available,
+            "used": ocr_used,
+            "engine": ocr_engine,
+            "active_device": active_device,
+        },
+        "seal": {
+            "enabled": seal_enabled,
+            "removed": seal_removed,
+            "detected": seal_detected,
+            "count": seal_count,
+            "texts": seal_texts or [],
+        },
+    }
+
+
 def build_pdf_round1_template(
     *,
     document_id: str = "",

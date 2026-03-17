@@ -230,6 +230,7 @@ class OCRService:
                     return self._build_success_result(
                         content=structured_text,
                         ocr_engine="PP-StructureV3",
+                        pages=self._build_pages_from_texts([structured_text]),
                         seal_texts=seal_texts,
                     )
             except Exception as exc:
@@ -239,9 +240,11 @@ class OCRService:
 
         if self.ocr is not None:
             try:
+                recognized_text = self._collect_text(self.ocr.predict(image_path))
                 return self._build_success_result(
-                    content=self._collect_text(self.ocr.predict(image_path)),
+                    content=recognized_text,
                     ocr_engine="PaddleOCR 3.x",
+                    pages=self._build_pages_from_texts([recognized_text]),
                 )
             except Exception as exc:
                 self._record_error("Error during image OCR recognition", exc)
@@ -257,13 +260,15 @@ class OCRService:
             if self.structure is not None:
                 try:
                     structured_result = self._predict_with_structure(pdf_path)
-                    structured_text, seal_texts = self._collect_structure_text_and_seals(
+                    pages, seal_texts = self._collect_structure_pages_and_seals(
                         structured_result
                     )
+                    structured_text = self._join_page_texts(pages)
                     if structured_text.strip() or seal_texts:
                         return self._build_success_result(
                             content=structured_text,
                             ocr_engine="PP-StructureV3",
+                            pages=pages,
                             seal_texts=seal_texts,
                         )
                 except Exception as exc:
@@ -272,9 +277,11 @@ class OCRService:
                     )
 
             if self.ocr is not None:
+                pages = self._recognize_pdf_pages_with_ocr(pdf_path)
                 return self._build_success_result(
-                    content=self._recognize_pdf_with_ocr(pdf_path),
+                    content=self._join_page_texts(pages),
                     ocr_engine="PaddleOCR 3.x",
+                    pages=pages,
                 )
 
             return self._build_failure_result(self._not_available_message())
@@ -324,12 +331,16 @@ class OCRService:
         *,
         content: str,
         ocr_engine: str,
+        pages: Optional[List[dict[str, Any]]] = None,
         seal_texts: Optional[List[str]] = None,
     ) -> dict[str, Any]:
         normalized_seal_texts = self._dedupe_texts(seal_texts or [])
+        normalized_pages = pages or self._build_pages_from_texts([content])
         return {
             "success": True,
             "content": content.strip(),
+            "pages": normalized_pages,
+            "page_count": len(normalized_pages),
             "ocr_engine": ocr_engine,
             "active_device": self.active_device,
             "seal_enabled": self.structure_seal_enabled,
@@ -343,6 +354,8 @@ class OCRService:
         return {
             "success": False,
             "content": message,
+            "pages": [],
+            "page_count": 0,
             "ocr_engine": "",
             "active_device": self.active_device,
             "seal_enabled": self.structure_seal_enabled,
@@ -357,10 +370,13 @@ class OCRService:
             return ""
 
         result = self._predict_with_structure(pdf_path)
-        structured_text, _ = self._collect_structure_text_and_seals(result)
-        return structured_text
+        pages, _ = self._collect_structure_pages_and_seals(result)
+        return self._join_page_texts(pages)
 
     def _recognize_pdf_with_ocr(self, pdf_path: str) -> str:
+        return self._join_page_texts(self._recognize_pdf_pages_with_ocr(pdf_path))
+
+    def _recognize_pdf_pages_with_ocr(self, pdf_path: str) -> List[dict[str, Any]]:
         import fitz
 
         page_texts: List[str] = []
@@ -376,13 +392,12 @@ class OCRService:
                         temp_image_path = temp_file.name
                     pix.save(temp_image_path)
                     page_text = self.recognize_text(temp_image_path).strip()
-                    if page_text:
-                        page_texts.append(page_text)
+                    page_texts.append(page_text)
                 finally:
                     if temp_image_path and os.path.exists(temp_image_path):
                         os.unlink(temp_image_path)
 
-        return "\n".join(page_texts).strip()
+        return self._build_pages_from_texts(page_texts)
 
     def _predict_with_structure(self, input_path: str) -> Any:
         if self.structure is None:
@@ -407,6 +422,47 @@ class OCRService:
             "\n".join(line for line in lines if line).strip(),
             self._dedupe_texts(seal_texts),
         )
+
+    def _collect_structure_pages_and_seals(
+        self, results: Any
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        if isinstance(results, Iterable) and not isinstance(results, (str, bytes, Mapping)):
+            result_items = list(results)
+        else:
+            result_items = [results]
+
+        pages: List[dict[str, Any]] = []
+        seal_texts: List[str] = []
+        for index, item in enumerate(result_items, start=1):
+            page_text, page_seals = self._collect_structure_text_and_seals(item)
+            pages.append(
+                {
+                    "page_no": index,
+                    "text": page_text,
+                    "text_length": len(page_text),
+                }
+            )
+            seal_texts.extend(page_seals)
+
+        return pages or self._build_pages_from_texts([""]), self._dedupe_texts(seal_texts)
+
+    @staticmethod
+    def _build_pages_from_texts(page_texts: List[str]) -> List[dict[str, Any]]:
+        pages: List[dict[str, Any]] = []
+        for index, text in enumerate(page_texts, start=1):
+            normalized_text = text.strip()
+            pages.append(
+                {
+                    "page_no": index,
+                    "text": normalized_text,
+                    "text_length": len(normalized_text),
+                }
+            )
+        return pages or [{"page_no": 1, "text": "", "text_length": 0}]
+
+    @staticmethod
+    def _join_page_texts(pages: List[dict[str, Any]]) -> str:
+        return "\n".join(page.get("text", "").strip() for page in pages if page.get("text", "").strip()).strip()
 
     def _collect_structure_lines(
         self, node: Any, lines: List[str], seal_texts: List[str]

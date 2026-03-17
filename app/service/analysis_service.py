@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from app.config.ocr import OCRConfig
 from app.service.ocr_service import OCRService
-from app.utils.text_utils import extract_text, preprocess_text
+from app.utils.text_utils import extract_text, extract_text_pages_from_pdf, preprocess_text
 
 
 class AnalysisService:
@@ -74,15 +74,16 @@ class AnalysisService:
 
     def _extract_pdf_result(self, file_path: str) -> Dict[str, Any]:
         if not OCRConfig.FORCE_PDF_OCR:
-            text = extract_text(file_path, "pdf")
-            if text.strip():
+            page_texts = extract_text_pages_from_pdf(file_path)
+            if any(page_text.strip() for page_text in page_texts):
                 return self._build_result(
-                    content=preprocess_text(text),
+                    content=preprocess_text("\n".join(page_texts)),
                     file_type="pdf",
                     parser_engine="pdfplumber",
                     source_mode="text_layer",
                     ocr_engine="",
                     ocr_used=False,
+                    pages=self._build_pages(page_texts),
                 )
 
         ocr_result = self.ocr_service.recognize_pdf_result(file_path)
@@ -97,6 +98,10 @@ class AnalysisService:
         if not ocr_result["success"]:
             raise RuntimeError(content)
 
+        normalized_pages = self._build_pages(
+            [page.get("text", "") for page in ocr_result.get("pages", [])]
+            or [content]
+        )
         return self._build_result(
             content=preprocess_text(content),
             file_type=file_type,
@@ -110,6 +115,7 @@ class AnalysisService:
             seal_detected=ocr_result.get("seal_detected", False),
             seal_count=ocr_result.get("seal_count", 0),
             seal_texts=ocr_result.get("seal_texts", []),
+            pages=normalized_pages,
         )
 
     def _build_result(
@@ -127,11 +133,15 @@ class AnalysisService:
         seal_detected: bool = False,
         seal_count: int = 0,
         seal_texts: List[str] | None = None,
+        pages: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
+        normalized_pages = pages or self._build_pages([content])
         return {
             "file_type": file_type,
             "content": content,
             "text_length": len(content),
+            "pages": normalized_pages,
+            "page_count": len(normalized_pages),
             "parser_engine": parser_engine,
             "source_mode": source_mode,
             "ocr_engine": ocr_engine,
@@ -144,6 +154,20 @@ class AnalysisService:
             "seal_count": seal_count,
             "seal_texts": seal_texts or [],
         }
+
+    @staticmethod
+    def _build_pages(page_texts: List[str]) -> List[Dict[str, Any]]:
+        normalized_pages: List[Dict[str, Any]] = []
+        for index, page_text in enumerate(page_texts, start=1):
+            normalized_text = preprocess_text(page_text)
+            normalized_pages.append(
+                {
+                    "page_no": index,
+                    "text": normalized_text,
+                    "text_length": len(normalized_text),
+                }
+            )
+        return normalized_pages or [{"page_no": 1, "text": "", "text_length": 0}]
 
     def check_business_format(self, text: str) -> Dict[str, Any]:
         """商务标格式检查：章节齐全性 + 关键字段存在性。"""

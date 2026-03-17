@@ -16,11 +16,16 @@ def preprocess_text(text: str) -> str:
 
 def extract_text_from_pdf(file_path: str) -> str:
     """从 PDF 中抽取可直接识别的文本层内容。"""
-    text = ""
+    return "\n".join(extract_text_pages_from_pdf(file_path)).strip()
+
+
+def extract_text_pages_from_pdf(file_path: str) -> List[str]:
+    """从 PDF 中按页抽取可直接识别的文本层内容。"""
+    page_texts: List[str] = []
     with open_pdf(file_path) as pdf:
         for page in pdf.pages:
-            text += page.extract_text() or ""
-    return text
+            page_texts.append(page.extract_text() or "")
+    return page_texts
 
 
 def extract_text_from_docx(file_path: str) -> str:
