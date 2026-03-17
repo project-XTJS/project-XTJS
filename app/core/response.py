@@ -32,7 +32,7 @@ class UnifiedResponse(JSONResponse):
             "data": content
         }
         
-        # 交给父类进行极速的 JSON 序列化
+        # 交给父类进行 JSON 序列化
         return super().render(wrapped_content)
 
 # 2. 全局异常拦截器

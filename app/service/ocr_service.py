@@ -1,714 +1,141 @@
 import os
-import inspect
-import sys
-from collections.abc import Iterable, Mapping
-from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import Any, List, Optional
-
-from app.config.settings import settings
-
+import cv2
+import fitz  # PyMuPDF
+import numpy as np
+from tqdm import tqdm
+import time
 
 class OCRService:
     def __init__(self):
-        # Compatible with PaddleOCR 3.x: initialize OCR and PP-StructureV3 separately.
-        self.ocr = None
-        self.structure = None
-        self.structure_seal_enabled = False
         self.available = False
-        self.active_device = settings.PADDLE_OCR_DEVICE
-        self.init_errors: List[str] = []
-        self._prepare_runtime_storage()
-        self._sanitize_import_path()
-        if settings.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:
-            os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
-        os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(settings.PADDLE_PDX_CACHE_HOME))
-
+        self.ocr = None
+        # 定义印章保存路径
+        self.seal_dir = "output_seals"
+        if not os.path.exists(self.seal_dir):
+            os.makedirs(self.seal_dir)
+        
         try:
-            from paddleocr import PaddleOCR, PPStructureV3
+            from rapidocr_onnxruntime import RapidOCR
+            self.ocr = RapidOCR(text_score=0.5, print_verbose=False) 
+            self.available = True
+            print(f"OCRService: RapidOCR 加载成功，印章保存至: {self.seal_dir}")
         except ImportError as exc:
-            self._record_error("ImportError", exc)
-            return
+            print(f"OCRService: 缺少依赖: {exc}")
 
-        for device in self._build_device_candidates():
-            self.active_device = device
-            self._apply_runtime_flags(device)
-
-            candidate_ocr = None
-            candidate_structure = None
-            candidate_structure_seal_enabled = False
-
-            try:
-                candidate_ocr = PaddleOCR(
-                    lang=settings.PADDLE_OCR_LANG,
-                    ocr_version=settings.PADDLE_OCR_VERSION,
-                    use_doc_orientation_classify=settings.PADDLE_OCR_USE_DOC_ORIENTATION,
-                    use_doc_unwarping=settings.PADDLE_OCR_USE_DOC_UNWARPING,
-                    use_textline_orientation=settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
-                    device=device,
-                    enable_hpi=settings.PADDLE_OCR_ENABLE_HPI,
-                )
-                print(f"PaddleOCR 3.x initialized successfully on {device}")
-            except Exception as exc:
-                self._record_error(f"Error initializing PaddleOCR on {device}", exc)
-
-            if settings.PADDLE_OCR_ENABLE_STRUCTURE:
-                try:
-                    structure_kwargs = {
-                        "lang": settings.PADDLE_OCR_LANG,
-                        "ocr_version": settings.PADDLE_OCR_VERSION,
-                        "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
-                        "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
-                        "use_textline_orientation": settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
-                        "use_seal_recognition": False,
-                        "use_table_recognition": settings.PADDLE_STRUCTURE_USE_TABLE,
-                        "use_formula_recognition": settings.PADDLE_STRUCTURE_USE_FORMULA,
-                        "device": device,
-                        "enable_hpi": settings.PADDLE_OCR_ENABLE_HPI,
-                    }
-                    if self._supports_kwarg(PPStructureV3.__init__, "format_block_content"):
-                        structure_kwargs["format_block_content"] = False
-
-                    if settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION:
-                        try:
-                            candidate_structure = PPStructureV3(
-                                **{**structure_kwargs, "use_seal_recognition": True}
-                            )
-                            candidate_structure_seal_enabled = True
-                            print(
-                                f"PP-StructureV3 initialized successfully on {device} with seal recognition"
-                            )
-                        except Exception as exc:
-                            self._record_error(
-                                f"Error initializing PP-StructureV3 with seal recognition on {device}",
-                                exc,
-                            )
-
-                    if candidate_structure is None:
-                        candidate_structure = PPStructureV3(**structure_kwargs)
-                        print(f"PP-StructureV3 initialized successfully on {device}")
-                except Exception as exc:
-                    self._record_error(
-                        f"Error initializing PP-StructureV3 on {device}", exc
-                    )
-
-            if candidate_ocr is not None or candidate_structure is not None:
-                self.ocr = candidate_ocr
-                self.structure = candidate_structure
-                self.structure_seal_enabled = candidate_structure_seal_enabled
-                self.available = True
-                if device != settings.PADDLE_OCR_DEVICE:
-                    print(
-                        f"OCR device fallback applied: requested={settings.PADDLE_OCR_DEVICE}, active={device}"
-                    )
-                break
-
-        self.available = self.ocr is not None or self.structure is not None
-
-    def _record_error(self, prefix: str, exc: Exception) -> None:
-        message = f"{prefix}: {exc}"
-        self.init_errors.append(message)
-        print(message)
-
-    def _sanitize_import_path(self) -> None:
-        runtime_prefix = Path(sys.prefix).resolve()
-        sanitized: List[str] = []
-
-        for raw_path in sys.path:
-            if not raw_path:
-                sanitized.append(raw_path)
-                continue
-
-            try:
-                resolved = Path(raw_path).resolve()
-            except Exception:
-                sanitized.append(raw_path)
-                continue
-
-            path_text = str(resolved).lower()
-            is_site_packages = "site-packages" in path_text
-            belongs_to_runtime = (
-                resolved == runtime_prefix or runtime_prefix in resolved.parents
-            )
-            if is_site_packages:
-                if not belongs_to_runtime:
-                    continue
-
-            sanitized.append(raw_path)
-
-        sys.path[:] = sanitized
-
-    def _build_device_candidates(self) -> List[str]:
-        primary = settings.PADDLE_OCR_DEVICE.strip() if settings.PADDLE_OCR_DEVICE else "cpu"
-        candidates = [primary]
-
-        if self._is_gpu_device(primary):
-            try:
-                import paddle
-
-                if not paddle.is_compiled_with_cuda():
-                    message = (
-                        f"GPU device requested ({primary}) but PaddlePaddle has no CUDA support; fallback to CPU."
-                    )
-                    self.init_errors.append(message)
-                    print(message)
-                    return ["cpu"]
-            except Exception as exc:
-                self._record_error("Failed to check CUDA support; fallback to CPU", exc)
-                return ["cpu"]
-
-            if settings.PADDLE_OCR_FALLBACK_TO_CPU:
-                candidates.append("cpu")
-
-        return candidates
-
-    @staticmethod
-    def _is_gpu_device(device: str) -> bool:
-        return device.strip().lower().startswith("gpu")
-
-    @staticmethod
-    def _supports_kwarg(callable_obj: Any, kwarg_name: str) -> bool:
-        try:
-            signature = inspect.signature(callable_obj)
-        except Exception:
-            return False
-        return kwarg_name in signature.parameters
-
-    def _apply_runtime_flags(self, device: str) -> None:
-        if self._is_gpu_device(device):
-            os.environ.pop("FLAGS_use_mkldnn", None)
-            return
-
-        if settings.PADDLE_OCR_DISABLE_MKLDNN:
-            os.environ.setdefault("FLAGS_use_mkldnn", "0")
-
-    def _prepare_runtime_storage(self) -> None:
-        settings.OCR_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-        settings.PADDLE_PDX_CACHE_HOME.mkdir(parents=True, exist_ok=True)
-        settings.OCR_RUNTIME_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        os.environ["PADDLE_PDX_CACHE_HOME"] = str(settings.PADDLE_PDX_CACHE_HOME)
-        os.environ["TMP"] = str(settings.OCR_RUNTIME_TEMP_DIR)
-        os.environ["TEMP"] = str(settings.OCR_RUNTIME_TEMP_DIR)
-        os.environ["TMPDIR"] = str(settings.OCR_RUNTIME_TEMP_DIR)
-
-    def recognize_text(self, image_path: str) -> str:
-        if self.ocr is None:
-            return self._not_available_message()
-
-        try:
-            result = self.ocr.predict(image_path)
-            return self._collect_text(result)
-        except Exception as exc:
-            return f"Error during text recognition: {exc}"
-
-    def recognize_image(self, image_path: str) -> str:
-        result = self.recognize_image_result(image_path)
-        return result["content"]
-
-    def recognize_pdf(self, pdf_path: str) -> str:
-        result = self.recognize_pdf_result(pdf_path)
-        return result["content"]
-
-    def recognize_image_result(self, image_path: str) -> dict[str, Any]:
+    def extract_all(self, file_path: str, file_type: str = "pdf") -> dict:
         if not self.available:
-            return self._build_failure_result(self._not_available_message())
+            return {"text": "", "pages": [], "seals": {"count": 0, "texts": [], "locations": []}}
 
-        if self.structure is not None:
-            try:
-                structured_result = self._predict_with_structure(image_path)
-                structured_text, seal_texts = self._collect_structure_text_and_seals(
-                    structured_result
-                )
-                if structured_text.strip() or seal_texts:
-                    return self._build_success_result(
-                        content=structured_text,
-                        ocr_engine="PP-StructureV3",
-                        pages=self._build_pages_from_texts([structured_text]),
-                        seal_texts=seal_texts,
-                    )
-            except Exception as exc:
-                self._record_error(
-                    "Error during structured image recognition, fallback to OCR", exc
-                )
-
-        if self.ocr is not None:
-            try:
-                recognized_text = self._collect_text(self.ocr.predict(image_path))
-                return self._build_success_result(
-                    content=recognized_text,
-                    ocr_engine="PaddleOCR 3.x",
-                    pages=self._build_pages_from_texts([recognized_text]),
-                )
-            except Exception as exc:
-                self._record_error("Error during image OCR recognition", exc)
-
-        return self._build_failure_result(self._not_available_message())
-
-    def recognize_pdf_result(self, pdf_path: str) -> dict[str, Any]:
-        if not self.available:
-            return self._build_failure_result(self._not_available_message())
-
-        try:
-            if self.structure is not None:
-                try:
-                    structured_result = self._predict_with_structure(pdf_path)
-                    pages, seal_texts = self._collect_structure_pages_and_seals(
-                        structured_result
-                    )
-                    structured_text = self._join_page_texts(pages)
-                    if structured_text.strip() or seal_texts:
-                        return self._build_success_result(
-                            content=structured_text,
-                            ocr_engine="PP-StructureV3",
-                            pages=pages,
-                            seal_texts=seal_texts,
-                        )
-                except Exception as exc:
-                    self._record_error(
-                        "Error during structured PDF recognition, fallback to OCR", exc
-                    )
-
-            if self.ocr is not None:
-                pages = self._recognize_pdf_pages_with_ocr(pdf_path)
-                return self._build_success_result(
-                    content=self._join_page_texts(pages),
-                    ocr_engine="PaddleOCR 3.x",
-                    pages=pages,
-                )
-
-            return self._build_failure_result(self._not_available_message())
-        except Exception as exc:
-            return self._build_failure_result(f"Error during PDF recognition: {exc}")
-
-    def recognize_bytes(self, image_bytes: bytes) -> str:
-        if not self.available:
-            return self._not_available_message()
-
-        temp_image_path: Optional[str] = None
-        try:
-            import cv2
-            import numpy as np
-
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if image is None:
-                return "Error during byte stream recognition: invalid image bytes."
-
-            with NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
-                temp_image_path = temp_file.name
-            cv2.imwrite(temp_image_path, image)
-            return self.recognize_image(temp_image_path)
-        except Exception as exc:
-            return f"Error during byte stream recognition: {exc}"
-        finally:
-            if temp_image_path and os.path.exists(temp_image_path):
-                os.unlink(temp_image_path)
-
-    def is_available(self) -> bool:
-        return self.available
-
-    def _not_available_message(self) -> str:
-        if self.available:
-            return "PaddleOCR is available."
-        base = "PaddleOCR is not available."
-        if not self.init_errors:
-            return f"{base} Please check if PaddleOCR is installed correctly."
-        reason = " | ".join(self.init_errors)
-        return f"{base} {reason}"
-
-    def _build_success_result(
-        self,
-        *,
-        content: str,
-        ocr_engine: str,
-        pages: Optional[List[dict[str, Any]]] = None,
-        seal_texts: Optional[List[str]] = None,
-    ) -> dict[str, Any]:
-        normalized_seal_texts = self._dedupe_texts(seal_texts or [])
-        normalized_pages = pages or self._build_pages_from_texts([content])
-        return {
-            "success": True,
-            "content": content.strip(),
-            "pages": normalized_pages,
-            "page_count": len(normalized_pages),
-            "ocr_engine": ocr_engine,
-            "active_device": self.active_device,
-            "seal_enabled": self.structure_seal_enabled,
-            "seal_removed": settings.PADDLE_OCR_EXCLUDE_SEAL_TEXT and bool(normalized_seal_texts),
-            "seal_detected": bool(normalized_seal_texts),
-            "seal_count": len(normalized_seal_texts),
-            "seal_texts": normalized_seal_texts,
-        }
-
-    def _build_failure_result(self, message: str) -> dict[str, Any]:
-        return {
-            "success": False,
-            "content": message,
-            "pages": [],
-            "page_count": 0,
-            "ocr_engine": "",
-            "active_device": self.active_device,
-            "seal_enabled": self.structure_seal_enabled,
-            "seal_removed": False,
-            "seal_detected": False,
-            "seal_count": 0,
-            "seal_texts": [],
-        }
-
-    def _recognize_pdf_with_structure(self, pdf_path: str) -> str:
-        if self.structure is None:
-            return ""
-
-        result = self._predict_with_structure(pdf_path)
-        pages, _ = self._collect_structure_pages_and_seals(result)
-        return self._join_page_texts(pages)
-
-    def _recognize_pdf_with_ocr(self, pdf_path: str) -> str:
-        return self._join_page_texts(self._recognize_pdf_pages_with_ocr(pdf_path))
-
-    def _recognize_pdf_pages_with_ocr(self, pdf_path: str) -> List[dict[str, Any]]:
-        import fitz
-
-        page_texts: List[str] = []
-
-        with fitz.open(pdf_path) as doc:
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                pix = page.get_pixmap()
-
-                temp_image_path: Optional[str] = None
-                try:
-                    with NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
-                        temp_image_path = temp_file.name
-                    pix.save(temp_image_path)
-                    page_text = self.recognize_text(temp_image_path).strip()
-                    page_texts.append(page_text)
-                finally:
-                    if temp_image_path and os.path.exists(temp_image_path):
-                        os.unlink(temp_image_path)
-
-        return self._build_pages_from_texts(page_texts)
-
-    def _predict_with_structure(self, input_path: str) -> Any:
-        if self.structure is None:
-            return []
-
-        predict_kwargs = {
-            "use_seal_recognition": self.structure_seal_enabled,
-            "use_table_recognition": settings.PADDLE_STRUCTURE_USE_TABLE,
-            "use_formula_recognition": settings.PADDLE_STRUCTURE_USE_FORMULA,
-        }
-        if self._supports_kwarg(self.structure.predict, "format_block_content"):
-            predict_kwargs["format_block_content"] = False
-        return self.structure.predict(input_path, **predict_kwargs)
-
-    def _collect_structure_text_and_seals(
-        self, results: Any
-    ) -> tuple[str, list[str]]:
-        lines: List[str] = []
-        seal_texts: List[str] = []
-        self._collect_structure_lines(results, lines, seal_texts)
-        return (
-            "\n".join(line for line in lines if line).strip(),
-            self._dedupe_texts(seal_texts),
-        )
-
-    def _collect_structure_pages_and_seals(
-        self, results: Any
-    ) -> tuple[list[dict[str, Any]], list[str]]:
-        if isinstance(results, Iterable) and not isinstance(results, (str, bytes, Mapping)):
-            result_items = list(results)
+        ext = file_type.lower().lstrip('.')
+        if ext == "pdf":
+            return self._recognize_pdf(file_path)
         else:
-            result_items = [results]
+            return self._recognize_image(file_path)
 
-        pages: List[dict[str, Any]] = []
-        seal_texts: List[str] = []
-        for index, item in enumerate(result_items, start=1):
-            page_text, page_seals = self._collect_structure_text_and_seals(item)
-            pages.append(
-                {
-                    "page_no": index,
-                    "text": page_text,
-                    "text_length": len(page_text),
-                }
-            )
-            seal_texts.extend(page_seals)
+    def _detect_seals(self, img_bgr, page_no: int = 1) -> dict:
+        """
+        核心逻辑：检测印章、记录位置并保存截图
+        """
+        seal_info = {"count": 0, "texts": [], "locations": []}
+        if img_bgr is None:
+            return seal_info
 
-        return pages or self._build_pages_from_texts([""]), self._dedupe_texts(seal_texts)
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        lower_red1, upper_red1 = np.array([0, 43, 46]), np.array([10, 255, 255])
+        lower_red2, upper_red2 = np.array([156, 43, 46]), np.array([180, 255, 255])
+        mask = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), 
+                        cv2.inRange(hsv, lower_red2, upper_red2))
 
-    @staticmethod
-    def _build_pages_from_texts(page_texts: List[str]) -> List[dict[str, Any]]:
-        pages: List[dict[str, Any]] = []
-        for index, text in enumerate(page_texts, start=1):
-            normalized_text = text.strip()
-            pages.append(
-                {
-                    "page_no": index,
-                    "text": normalized_text,
-                    "text_length": len(normalized_text),
-                }
-            )
-        return pages or [{"page_no": 1, "text": "", "text_length": 0}]
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.dilate(mask, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    @staticmethod
-    def _join_page_texts(pages: List[dict[str, Any]]) -> str:
-        return "\n".join(page.get("text", "").strip() for page in pages if page.get("text", "").strip()).strip()
+        seal_idx = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 1000:
+                x, y, w, h = cv2.boundingRect(cnt)
+                aspect_ratio = float(w) / h
+                if 0.5 < aspect_ratio < 2.0:
+                    seal_idx += 1
+                    box = [int(x), int(y), int(w), int(h)]
+                    
+                    # 裁剪印章区域
+                    seal_crop = img_bgr[y:y+h, x:x+w]
+                    
+                    # 保存截图：文件名格式为 seal_P页码_N序号.png
+                    save_path = os.path.join(self.seal_dir, f"seal_P{page_no}_{seal_idx}.png")
+                    cv2.imwrite(save_path, seal_crop)
+                    
+                    # 更新信息
+                    seal_info["count"] += 1
+                    seal_info["locations"].append(box)
+                    
+                    # 局部 OCR
+                    resized_crop = cv2.resize(seal_crop, None, fx=1.5, fy=1.5)
+                    crop_res, _ = self.ocr(resized_crop)
+                    if crop_res:
+                        txt = "".join([item[1] for item in crop_res])
+                        if len(txt) > 2: 
+                            seal_info["texts"].append(txt)
 
-    def _collect_structure_lines(
-        self, node: Any, lines: List[str], seal_texts: List[str]
-    ) -> None:
-        if node is None:
-            return
+        return seal_info
 
-        if isinstance(node, str):
-            text = node.strip()
-            if text:
-                lines.append(text)
-            return
+    def _recognize_pdf(self, pdf_path: str) -> dict:
+        pages_data, full_text = [], []
+        all_seals = {"count": 0, "texts": [], "locations": []}
+        
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+        pbar = tqdm(range(total_pages), desc="OCR解析中", unit="页")
+        
+        for i in pbar:
+            page_no = i + 1
+            page = doc[i]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+            
+            if pix.n == 4: img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+            elif pix.n == 3: img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            else: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            
+            ocr_res, _ = self.ocr(img)
+            p_txt = "\n".join([item[1] for item in ocr_res]) if ocr_res else ""
+            
+            # 传入页码以便保存文件名区分
+            s_res = self._detect_seals(img, page_no=page_no)
+            
+            if s_res["count"] > 0:
+                all_seals["count"] += s_res["count"]
+                all_seals["texts"].extend(s_res["texts"])
+                for box in s_res["locations"]:
+                    all_seals["locations"].append({"page": page_no, "box": box})
+            
+            pages_data.append({"page": page_no, "text": p_txt})
+            full_text.append(p_txt)
 
-        if isinstance(node, bytes):
-            text = node.decode("utf-8", errors="ignore").strip()
-            if text:
-                lines.append(text)
-            return
+        all_seals["texts"] = list(set(all_seals["texts"]))
+        return {"text": "\n".join(full_text), "pages": pages_data, "seals": all_seals}
 
-        block_label = self._stringify_text(
-            self._get_field(node, "block_label") or self._get_field(node, "label")
-        ).lower()
-        if block_label == "seal":
-            self._collect_seal_texts(node, seal_texts)
-            return
+    def _recognize_image(self, img_path: str) -> dict:
+        img = cv2.imread(img_path)
+        if img is None:
+            return {"text": "", "pages": [], "seals": {"count": 0, "texts": [], "locations": []}}
+            
+        ocr_res, _ = self.ocr(img)
+        text = "\n".join([item[1] for item in ocr_res]) if ocr_res else ""
+        
+        # 单张图片默认页码为 1
+        seal_res = self._detect_seals(img, page_no=1)
 
-        parsing_res_list = self._get_field(node, "parsing_res_list")
-        if isinstance(parsing_res_list, list):
-            for block in parsing_res_list:
-                self._collect_structure_lines(block, lines, seal_texts)
-            return
-
-        seal_res_list = self._get_field(node, "seal_res_list")
-        if isinstance(seal_res_list, list):
-            for seal_res in seal_res_list:
-                self._collect_seal_texts(seal_res, seal_texts)
-
-        block_content = self._extract_block_content(node)
-        if block_content:
-            lines.append(block_content)
-            return
-
-        rec_texts = self._get_field(node, "rec_texts")
-        if isinstance(rec_texts, list):
-            found_rec_text = False
-            for item in rec_texts:
-                text = self._stringify_text(item)
-                if text:
-                    lines.append(text)
-                    found_rec_text = True
-            if found_rec_text:
-                return
-
-        overall_ocr_res = self._get_field(node, "overall_ocr_res")
-        if overall_ocr_res is not None:
-            before_len = len(lines)
-            self._collect_structure_lines(overall_ocr_res, lines, seal_texts)
-            if len(lines) > before_len:
-                return
-
-        markdown_texts = self._get_field(node, "markdown_texts")
-        if isinstance(markdown_texts, str) and markdown_texts.strip():
-            lines.append(markdown_texts.strip())
-            return
-
-        rec_text = self._stringify_text(self._get_field(node, "rec_text"))
-        if rec_text:
-            lines.append(rec_text)
-            return
-
-        plain_text = self._stringify_text(self._get_field(node, "text"))
-        if plain_text:
-            lines.append(plain_text)
-            return
-
-        if isinstance(node, Mapping):
-            for item in node.values():
-                self._collect_structure_lines(item, lines, seal_texts)
-            return
-
-        if isinstance(node, Iterable):
-            for item in node:
-                self._collect_structure_lines(item, lines, seal_texts)
-
-    def _collect_seal_texts(self, node: Any, seal_texts: List[str]) -> None:
-        if node is None:
-            return
-
-        block_content = self._extract_block_content(node)
-        if block_content:
-            seal_texts.append(block_content)
-
-        rec_texts = self._get_field(node, "rec_texts")
-        if isinstance(rec_texts, list):
-            for item in rec_texts:
-                text = self._stringify_text(item)
-                if text:
-                    seal_texts.append(text)
-
-        rec_text = self._stringify_text(self._get_field(node, "rec_text"))
-        if rec_text:
-            seal_texts.append(rec_text)
-
-        overall_ocr_res = self._get_field(node, "overall_ocr_res")
-        if overall_ocr_res is not None:
-            self._collect_seal_texts(overall_ocr_res, seal_texts)
-
-        if isinstance(node, Mapping):
-            for item in node.values():
-                self._collect_seal_texts(item, seal_texts)
-            return
-
-        if isinstance(node, Iterable) and not isinstance(node, (str, bytes)):
-            for item in node:
-                self._collect_seal_texts(item, seal_texts)
-
-    @staticmethod
-    def _extract_block_content(node: Any) -> str:
-        if node is None:
-            return ""
-        for field_name in ("block_content", "content", "markdown_texts"):
-            value = OCRService._get_field(node, field_name)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            text = OCRService._stringify_text(value)
-            if text:
-                return text
-        return ""
-
-    @staticmethod
-    def _dedupe_texts(texts: List[str]) -> List[str]:
-        seen = set()
-        ordered: List[str] = []
-        for item in texts:
-            normalized = item.strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            ordered.append(normalized)
-        return ordered
-
-    def _collect_text(self, results: Any) -> str:
-        lines: List[str] = []
-        self._collect_lines(results, lines)
-        return "\n".join(line for line in lines if line).strip()
-
-    def _collect_lines(self, node: Any, lines: List[str]) -> None:
-        if node is None:
-            return
-
-        if isinstance(node, str):
-            text = node.strip()
-            if text:
-                lines.append(text)
-            return
-
-        if isinstance(node, bytes):
-            text = node.decode("utf-8", errors="ignore").strip()
-            if text:
-                lines.append(text)
-            return
-
-        legacy_text = self._extract_legacy_line_text(node)
-        if legacy_text:
-            lines.append(legacy_text)
-            return
-
-        rec_texts = self._get_field(node, "rec_texts")
-        if isinstance(rec_texts, list):
-            found_rec_text = False
-            for item in rec_texts:
-                text = self._stringify_text(item)
-                if text:
-                    lines.append(text)
-                    found_rec_text = True
-            if found_rec_text:
-                return
-
-        parsing_res_list = self._get_field(node, "parsing_res_list")
-        if isinstance(parsing_res_list, list):
-            found_parsing_text = False
-            for block in parsing_res_list:
-                block_text = self._get_field(block, "block_content")
-                if not block_text:
-                    block_text = self._get_field(block, "content")
-                text = self._stringify_text(block_text)
-                if text:
-                    lines.append(text)
-                    found_parsing_text = True
-            if found_parsing_text:
-                return
-
-        overall_ocr_res = self._get_field(node, "overall_ocr_res")
-        if overall_ocr_res is not None:
-            before_len = len(lines)
-            self._collect_lines(overall_ocr_res, lines)
-            if len(lines) > before_len:
-                return
-
-        markdown_texts = self._get_field(node, "markdown_texts")
-        if isinstance(markdown_texts, str) and markdown_texts.strip():
-            lines.append(markdown_texts.strip())
-            return
-
-        rec_text = self._get_field(node, "rec_text")
-        text = self._stringify_text(rec_text)
-        if text:
-            lines.append(text)
-            return
-
-        plain_text = self._get_field(node, "text")
-        text = self._stringify_text(plain_text)
-        if text:
-            lines.append(text)
-            return
-
-        if isinstance(node, Mapping):
-            for item in node.values():
-                self._collect_lines(item, lines)
-            return
-
-        if isinstance(node, Iterable):
-            for item in node:
-                self._collect_lines(item, lines)
-            return
-
-    @staticmethod
-    def _extract_legacy_line_text(node: Any) -> str:
-        if not isinstance(node, (list, tuple)) or len(node) != 2:
-            return ""
-
-        candidate = node[1]
-        if not isinstance(candidate, (list, tuple)) or not candidate:
-            return ""
-
-        text = candidate[0]
-        return text.strip() if isinstance(text, str) else ""
-
-    @staticmethod
-    def _stringify_text(value: Any) -> str:
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, (list, tuple)) and value:
-            first_item = value[0]
-            return first_item.strip() if isinstance(first_item, str) else ""
-        return ""
-
-    @staticmethod
-    def _get_field(node: Any, field_name: str) -> Any:
-        if isinstance(node, Mapping):
-            return node.get(field_name)
-
-        try:
-            if field_name in node:
-                return node[field_name]
-        except Exception:
-            pass
-
-        return getattr(node, field_name, None)
+        formatted_locations = [{"page": 1, "box": box} for box in seal_res["locations"]]
+        
+        return {
+            "text": text,
+            "pages": [{"page": 1, "text": text}],
+            "seals": {
+                "count": seal_res["count"],
+                "texts": seal_res["texts"],
+                "locations": formatted_locations
+            }
+        }

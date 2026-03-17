@@ -1,7 +1,7 @@
 # PROJECT-XTJS 项目开发手册
 
 ## 1. 项目简介
-本项目是一个基于 **FastAPI** 框架构建的基于 **PaddleOCR** 的文字识别到投标文件的合规性自动化分析。系统集成了 **PostgreSQL** 数据库、**MinIO** 对象存储以及 **Celery** 异步任务处理。
+本项目基于 **FastAPI** 框架构建和 **PaddleOCR** 的文字识别到投标文件的合规性自动化分析。系统集成了 **PostgreSQL** 数据库、**MinIO** 对象存储以及 **Celery** 异步任务处理。
 ---
 
 ## 2. 业务开发分工

@@ -21,7 +21,7 @@ def run_business_tests(file_path: str):
     业务模块自测函数
     """
     if not os.path.exists(file_path):
-        print(f"❌ 错误：找不到文件 '{file_path}'，请确认文件已放置在正确路径。")
+        print(f"错误：找不到文件 '{file_path}'，请确认文件已放置在正确路径。")
         return
     
     file_extension = os.path.splitext(file_path)[1].lower().replace('.', '')
@@ -68,6 +68,6 @@ def run_business_tests(file_path: str):
     print(f"结果: {VerificationChecker(ocr_service=None).check_seal_and_date(mock_meta)}")
 
 if __name__ == "__main__":
-    # 修改路径，测试不同的 PDF 或 Word 文档
+    # 修改路径为实际测试文件位置，确保文件存在
     SAMPLE_FILE = "test.pdf" 
     run_business_tests(SAMPLE_FILE)

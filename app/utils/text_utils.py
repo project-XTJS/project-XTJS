@@ -241,3 +241,59 @@ def cleanup_temp_file(file_path: str) -> None:
     except Exception as e:
         # 日志记录清理失败，但不抛出异常中断主流程
         print(f"Warning: Failed to cleanup temp file {file_path}: {e}")
+
+def extract_file_data(file_path: str, file_type: str) -> dict:
+    """
+    结构化抽取文件数据，返回包含分页信息、页数和解析引擎的字典。
+    复用项目中已有的高质量抽取逻辑 (pdfplumber, docx, doc)。
+    """
+    normalized_type = file_type.lower().lstrip(".")
+    
+    result = {
+        "content": "",
+        "pages": [],
+        "page_count": 0,
+        "parser_engine": "unknown"
+    }
+    
+    try:
+        if normalized_type == "pdf":
+            # 复用 pdfplumber 分页抽取逻辑
+            page_texts = extract_text_pages_from_pdf(file_path)
+            result["page_count"] = len(page_texts)
+            result["parser_engine"] = "pdfplumber"
+            result["content"] = "\n".join(page_texts).strip()
+            
+            # 组装结构化分页数据
+            for i, text in enumerate(page_texts):
+                result["pages"].append({"page": i + 1, "text": text})
+                
+        elif normalized_type == "docx":
+            # 复用 docx 抽取逻辑
+            content = extract_text_from_docx(file_path)
+            result["content"] = content
+            result["page_count"] = 1  # docx 较难精确计算物理页，视为单页
+            result["pages"] = [{"page": 1, "text": content}]
+            result["parser_engine"] = "python-docx"
+            
+        elif normalized_type == "doc":
+            # 复用复杂 doc 回退抽取逻辑
+            content = extract_text_from_doc(file_path)
+            result["content"] = content
+            result["page_count"] = 1
+            result["pages"] = [{"page": 1, "text": content}]
+            result["parser_engine"] = "doc_fallback_engine"
+            
+        elif normalized_type in ["jpg", "jpeg", "png"]:
+            result["parser_engine"] = "image_input"
+            result["page_count"] = 1
+            result["pages"] = [{"page": 1, "text": ""}] # 留空，等待 analysis_service 里的 OCR 填充
+            
+        else:
+            raise ValueError(f"Unsupported file type for structural extraction: {file_type}")
+            
+    except Exception as e:
+        print(f"提取结构化文件数据异常 ({file_path}): {e}")
+        # 异常时不抛出，返回空结构，防止整个流程阻断
+        
+    return result

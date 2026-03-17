@@ -2,16 +2,15 @@ fastapi==0.104.1
 uvicorn==0.24.0.post1
 python-multipart==0.0.6
 pydantic-settings>=2.0.0      # 用于配置管理
-
+rapidocr_onnxruntime
+onnxruntime-gpu
 pdfplumber==0.10.2
 pymupdf
 python-docx==0.8.11
 numpy>=1.26.4,<3
 language-tool-python
 openpyxl
-
-# Install the Paddle runtime to match your environment:
-# GPU: install paddlepaddle-gpu==3.3.0 from the official cu130 index, then install "paddleocr[doc-parser]==3.3.0"
+tqdm
 opencv-contrib-python==4.10.0.84
 
 python-dotenv
