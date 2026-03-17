@@ -33,19 +33,21 @@ class AnalysisService:
         ocr_used = False
         seal_data = {"count": 0, "texts": []}
         
-        # 如果是图片，或者提取的文字小于 50 个字符（大概率是纯图片 PDF）
         if file_extension in ["jpg", "jpeg", "png"] or len(raw_text.strip()) < 50:
             try:
-                # TODO: 依赖高海斌的 ocr_service.extract_all() 完成图片内容提取
-                # 假设高海斌的接口返回: {"text": "识别结果", "seals": {"count": 1, "texts": ["公章"]}}
                 if hasattr(self.ocr_service, "extract_all"):
-                    ocr_result = self.ocr_service.extract_all(file_path)
+                    # 传入 file_extension，确保 OCR 服务知道是图片还是 PDF
+                    ocr_result = self.ocr_service.extract_all(file_path, file_extension)
+                    
                     raw_text = ocr_result.get("text", raw_text)
                     seal_data = ocr_result.get("seals", seal_data)
                     ocr_used = True
                     
-                    # 更新图片识别的页级数据
-                    file_data["pages"] = [{"page": 1, "text": raw_text}]
+                    # 使用 PaddleOCR 逐页解析出的完美数据
+                    if "pages" in ocr_result and ocr_result["pages"]:
+                        file_data["pages"] = ocr_result["pages"]
+                    else:
+                        file_data["pages"] = [{"page": 1, "text": raw_text}]
             except Exception as e:
                 print(f"调用 OCR 服务异常: {e}")
         
@@ -53,21 +55,21 @@ class AnalysisService:
         return {
             "content": raw_text,                         
             "text_length": len(raw_text),
-            "pages": file_data["pages"],               # 真实的每一页内容
-            "page_count": file_data["page_count"],     # 真实的物理页数
+            "pages": file_data.get("pages", []),               
+            "page_count": file_data.get("page_count", 1),     
             
             # --- 引擎与模式相关 ---
-            "parser_engine": file_data["parser_engine"], # 动态引擎 (PyMuPDF/docx 等)
+            "parser_engine": file_data.get("parser_engine", "unknown"), 
             "source_mode": "local",
-            "active_device": "cuda" if getattr(self.ocr_service, 'use_gpu', False) else "cpu",
+            "active_device": "gpu" if self.ocr_service and getattr(self.ocr_service, 'available', False) else "cpu",
             
             # --- OCR 相关 ---
-            "ocr_engine": "RapidOCR" if ocr_used else "none",
+            "ocr_engine": "PaddleOCR" if ocr_used else "none",
             "ocr_used": ocr_used,
-            "ocr_available": self.ocr_service is not None,
+            "ocr_available": getattr(self.ocr_service, 'available', False),
             
             # --- 印章相关 ---
-            "seal_enabled": True, # 假设全局开启
+            "seal_enabled": True, 
             "seal_removed": False,
             "seal_detected": seal_data.get("count", 0) > 0,
             "seal_count": seal_data.get("count", 0),

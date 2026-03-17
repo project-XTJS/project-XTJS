@@ -21,48 +21,32 @@
 
 ## 3. 目录结构说明
 PROJECT-XTJS/
-├── .ocr_runtime/       # OCR 运行时缓存与模型文件
 ├── app/
-│   ├── config/         # 全局配置参数目录
-│   │   └── settings.py # 核心配置类
-│   ├── core/           # 框架核心：统一响应、异常拦截
-│   │   └── response.py
-│   ├── router/         # 接口定义：API 路由分发
-│   │   ├── analysis.py # 核心分析接口
-│   │   ├── dependencies.py # 依赖注入
-│   │   ├── file.py     # 文件上传接口
-│   │   └── postgresql.py # 数据库测试接口
-│   ├── schemas/        # 数据契约：入参/出参 Pydantic 模型
-│   │   ├── analysis.py
-│   │   ├── postgresql.py
-│   │   └── recognition.py
-│   ├── service/        # 业务逻辑层
-│   │   ├── analysis/   # 多人协作区：各业务子模块
-│   │   │   ├── __init__.py               # 包初始化文件
-│   │   │   ├── deviation.py              # 偏离项检查 (高海斌)
-│   │   │   ├── integrity.py              # 完整性/格式检查 (虞光勇、陶明宇)
-│   │   │   ├── itemized_pricing.py       # 分项报价表 (江宇)
-│   │   │   ├── pricing_reasonableness.py # 报价合理性 (曾俊、滑鹏鹏)
-│   │   │   └── verification.py           # 盖章/日期检查 (镇昊天、张化飞)
-│   │   ├── analysis_service.py   # 统一调度中心：负责导入并调用上述子模块
+│   ├── config/           # 全局配置参数目录 (settings.py)
+│   ├── core/             # 框架核心：统一响应格式、全局异常拦截
+│   ├── router/           # API 路由分发中心
+│   │   ├── analysis.py   # 核心分析接口 (前端对接主力)
+│   │   ├── dependencies.py # 依赖注入机制
+│   │   ├── file.py       # 文件上传与 MinIO 交互
+│   │   └── postgresql.py # DB 测试接口
+│   ├── schemas/          # 数据契约：Pydantic 请求/响应模型验证
+│   ├── service/          # 业务逻辑层
+│   │   ├── analysis/     # 各业务子模块独立文件
+│   │   ├── analysis_service.py   # 统一调度中心：负责串联各子模块
 │   │   ├── minio_service.py      # OSS 对象存储服务
-│   │   ├── ocr_service.py        # OCR 基础识别服务
+│   │   ├── ocr_service.py        # 底层 OCR 识别与印章定位服务
 │   │   └── postgresql_service.py # 数据库交互服务
-│   ├── tasks/          # 异步任务：Celery 任务定义
-│   │   └── __init__.py
-│   ├── utils/          # 工具链：通用提取与处理工具
-│   │   └── text_utils.py # PDF/Word 文本提取工具
-│   └── main.py         # 应用入口
-├── db/                 # 数据库 SQL 迁移脚本目录
-├── venv/               # Python 虚拟环境
-├── .dockerignore       # Docker 镜像构建忽略配置
-├── requirements.txt    # 依赖包列表
-└── run.py              # 本地快捷启动脚本
+│   ├── tasks/            # Celery 异步任务定义
+│   └── utils/            # 通用工具链 (text_utils.py)
+├── db/                   # 数据库 SQL 迁移脚本
+├── requirements.txt      # 依赖包列表
+└── run.py                # 本地一键启动脚本
 
 ## 4. 开发指引
 安装依赖：
 请在虚拟环境下执行依赖安装：
 pip install -r requirements.txt
+在初始化环境后，还需要手动安装对应cuda的paddle库才支持gpu版本，查看requirements.txt
 本地启动：
 执行启动脚本，系统将自动配置环境并启动服务：
 python run.py
