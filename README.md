@@ -4,35 +4,60 @@
 本项目是一个基于 **FastAPI** 框架构建的基于 **PaddleOCR** 的文字识别到投标文件的合规性自动化分析。系统集成了 **PostgreSQL** 数据库、**MinIO** 对象存储以及 **Celery** 异步任务处理。
 ---
 
-## 2. 后端业务任务分工表
-所有分析校验逻辑统一在 `app/service/analysis_service.py` 中实现。
+## 2. 业务开发分工
+为便于多人协作，将分析逻辑解耦至 `app/service/analysis/` 目录下的独立文件中。
 
-| 业务模块 | 核心负责人 | 对应代码位置 | 重点开发内容 |
+| 业务模块 | 核心负责人 | 对应代码文件 | 任务说明 |
 | :--- | :--- | :--- | :--- |
-| **OCR 识别调优** | 高海斌 | `ocr_service.py` | 优化模型加载、GPU/CPU 切换逻辑、提高识别精度。 |
-| **偏离条款合规性检查** | 高海斌 | `analysis_service.py` | 实现招标文件与投标文件之间的偏离项自动比对算法。 |
-| **投标文件完整性审查** | 虞光勇、陶明宇 | `analysis_service.py` | 校验必备章节（如报价函、授权书等）是否缺失。 |
-| **格式模板一致性检查** | 虞光勇、陶明宇 | `text_utils.py` | 校验文档字体、段落间距等排版是否符合模板规范。 |
-| **开标一览表报价合理性** | 曾俊、滑鹏鹏 | `analysis_service.py` | 提取报价并校验逻辑（如大小写匹配、报价范围预警）。 |
-| **分项报价表检查** | 江宇 | `analysis_service.py` | 解析表格，校验分项合计数与总价的逻辑关系。 |
-| **签字盖章合规性检查** | 镇昊天、张化飞 | `ocr_service.py` | 调用印章检测模型（Seal Detection）验证盖章状态。 |
-| **日期合规性检查** | 镇昊天、张化飞 | `analysis_service.py` | 自动提取签署日期并校验其是否在有效标期内。 |
+| **OCR 识别调优** | 高海斌 | `app/service/ocr_service.py` | 优化模型加载、GPU/CPU 切换逻辑、提高识别精度。 |
+| **偏离条款检查** | 高海斌 | `app/service/analysis/deviation.py` | 实现招标与投标文件之间的条款差异化比对算法。 |
+| **完整性审查** | 虞光勇、陶明宇 | `app/service/analysis/integrity.py` | 校验必备章节是否缺失，评估文档完整度。 |
+| **格式一致性检查** | 虞光勇、陶明宇 | `app/utils/text_utils.py` | 校验文档字体、段落间距等排版是否符合规范。 |
+| **报价合理性检查** | 曾俊、滑鹏鹏 | `app/service/analysis/pricing_reasonableness.py` | 提取总报价，校验大小写匹配及数值合理性。 |
+| **分项报价表检查** | 江宇 | `app/service/analysis/itemized_pricing.py` | 解析分项报价表格，校验合计数与总价逻辑。 |
+| **签字/盖章/日期** | 镇昊天、张化飞 | `app/service/analysis/verification.py` | 验证印章状态及自动提取校验签署日期。 |
+
 ---
 
 ## 3. 目录结构说明
-```text
 PROJECT-XTJS/
+├── .ocr_runtime/       # OCR 运行时缓存与模型文件
 ├── app/
-│   ├── core/           # 框架核心：统一响应 (Response)、异常拦截
-│   ├── schemas/        # 数据契约：入参/出参校验模型 (Pydantic Schemas)
-│   ├── router/         # 接口定义：API 路由分发 (analysis, file, postgresql)
-│   ├── service/        # 业务逻辑：核心业务 Service 层实现
-│   ├── tasks/          # 异步任务：Celery 任务定义与分发
-│   ├── utils/          # 工具链：通用文本处理、PDF/Word 解析工具
-│   └── main.py         # 应用入口：FastAPI 实例初始化与中间件配置
-├── db/migration/       # 数据库：SQL 迁移脚本版本控制
-├── run.py              # 快捷启动：本地一键运行脚本（带 Swagger 自动跳转）
-└── requirements.txt    # 依赖管理：项目所需 Python 第三方库清单
+│   ├── config/         # 全局配置参数目录
+│   │   └── settings.py # 核心配置类
+│   ├── core/           # 框架核心：统一响应、异常拦截
+│   │   └── response.py
+│   ├── router/         # 接口定义：API 路由分发
+│   │   ├── analysis.py # 核心分析接口
+│   │   ├── dependencies.py # 依赖注入
+│   │   ├── file.py     # 文件上传接口
+│   │   └── postgresql.py # 数据库测试接口
+│   ├── schemas/        # 数据契约：入参/出参 Pydantic 模型
+│   │   ├── analysis.py
+│   │   ├── postgresql.py
+│   │   └── recognition.py
+│   ├── service/        # 业务逻辑层
+│   │   ├── analysis/   # 多人协作区：各业务子模块
+│   │   │   ├── __init__.py               # 包初始化文件
+│   │   │   ├── deviation.py              # 偏离项检查 (高海斌)
+│   │   │   ├── integrity.py              # 完整性/格式检查 (虞光勇、陶明宇)
+│   │   │   ├── itemized_pricing.py       # 分项报价表 (江宇)
+│   │   │   ├── pricing_reasonableness.py # 报价合理性 (曾俊、滑鹏鹏)
+│   │   │   └── verification.py           # 盖章/日期检查 (镇昊天、张化飞)
+│   │   ├── analysis_service.py   # 统一调度中心：负责导入并调用上述子模块
+│   │   ├── minio_service.py      # OSS 对象存储服务
+│   │   ├── ocr_service.py        # OCR 基础识别服务
+│   │   └── postgresql_service.py # 数据库交互服务
+│   ├── tasks/          # 异步任务：Celery 任务定义
+│   │   └── __init__.py
+│   ├── utils/          # 工具链：通用提取与处理工具
+│   │   └── text_utils.py # PDF/Word 文本提取工具
+│   └── main.py         # 应用入口
+├── db/                 # 数据库 SQL 迁移脚本目录
+├── venv/               # Python 虚拟环境
+├── .dockerignore       # Docker 镜像构建忽略配置
+├── requirements.txt    # 依赖包列表
+└── run.py              # 本地快捷启动脚本
 
 ## 4. 开发指引
 安装依赖：
@@ -43,11 +68,6 @@ pip install -r requirements.txt
 python run.py
 服务启动后将自动打开 http://127.0.0.1:8080/docs 查看交互式 API 文档。
 
-开发规范：
-Router 层：仅负责参数接收。
-Service 层：所有业务校验、计算、数据库交互封装在 Service 类中。
-配置管理：统一使用 app/config/settings.py。
-
 ## 5. 部署流程
 同步代码：
 git pull
@@ -55,3 +75,22 @@ git pull
 git log --oneline
 执行部署：
 make commit_id=<commit_id>
+
+## 6. 通过API交互测试
+运行run.py启动服务，找到 POST /api/analysis/run (统一文本分析接口)，点击右侧的 "Try it out" 按钮。
+在 Request body 中修改 JSON 内容：
+task_type: 选择任务类型{
+    "integrity_check",     # 完整性审查
+    "pricing_reason",      # 报价合理性
+    "itemized_pricing",    # 分项报价
+    "deviation_check",     # 偏离检查
+    "full_analysis"        # 全量分析
+}
+text: 粘贴一段从 PDF 或 Word 中复制的测试文本；
+点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。如果报错，系统会通过统一响应包装器返回详细的错误信息。
+
+## 7. 业务模块独立自测
+为了提高开发效率，无需启动整个项目即可测试自己的 `.py` 代码：
+1. **准备测试文件**：在根目录准备一个测试 PDF 或 Word。
+2. **修改脚本配置**：打开 `test_modules.py`，将底部的 `SAMPLE_FILE` 修改为你的文件名。
+3. **运行测试**：python test_modules.py

@@ -85,18 +85,29 @@ async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service = Depends(get_text_analysis_service)
 ):
-    """按 task_type 分发到统一分析服务。"""
+    """按 task_type 分发到对应的子业务模块。"""
     text = preprocess_text(payload.text)
 
-    if payload.task_type == "business_format":
-        result = analysis_service.check_business_format(text)
-    elif payload.task_type == "business_sections":
-        result = analysis_service.validate_business_sections(text)
-    elif payload.task_type == "technical_content":
-        result = analysis_service.check_technical_content(text)
-    elif payload.task_type == "extract_parameters":
-        result = {"status": "success", "parameters": analysis_service.extract_parameters(text)}
+    # 1. 完整性与格式检查 (虞光勇、陶明宇)
+    if payload.task_type == "integrity_check":
+        return analysis_service.integrity.check_integrity(text)
+    
+    # 2. 报价合理性检查 (曾俊、滑鹏鹏)
+    elif payload.task_type == "pricing_reason":
+        return analysis_service.reasonableness.check_price_reasonableness(text)
+    
+    # 3. 分项报价表校验 (江宇)
+    elif payload.task_type == "itemized_pricing":
+        return analysis_service.itemized.check_itemized_logic(text)
+    
+    # 4. 偏离条款检查 (高海斌)
+    elif payload.task_type == "deviation_check":
+        return analysis_service.deviation.check_technical_deviation(text)
+    
+    # 5. 一键全量分析
+    elif payload.task_type == "full_analysis":
+        # 注意：全量分析可能需要文件识别时的元数据（如印章信息）
+        return analysis_service.run_full_analysis(text, extraction_meta={})
+    
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")
-
-    return result
