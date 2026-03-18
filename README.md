@@ -19,7 +19,48 @@
 
 ---
 
-## 3. 目录结构说明
+## 3. 开发指引
+同步代码：
+git pull
+获取 Commit ID：
+git log --oneline
+执行部署：
+make commit_id=<commit_id>
+
+## 4. 部署流程
+docker部署（推荐）：
+docker pull python:3.13-slim
+docker-compose up -d --build
+
+本地部署：
+在虚拟环境下执行依赖安装：
+pip install -r requirements.txt
+在初始化环境后，还需要手动安装对应cuda的paddle库才支持gpu版本，查看requirements.txt
+
+执行启动脚本，系统将自动配置环境并启动服务：
+python run.py
+服务启动后将自动打开 http://127.0.0.1:8080/docs 查看交互式 API 文档。
+
+## 5. 通过API交互测试
+运行run.py启动服务，找到 POST /api/analysis/run (统一文本分析接口)，点击右侧的 "Try it out" 按钮。
+在 Request body 中修改 JSON 内容：
+task_type: 选择任务类型{
+    "integrity_check",     # 完整性审查
+    "pricing_reason",      # 报价合理性
+    "itemized_pricing",    # 分项报价
+    "deviation_check",     # 偏离检查
+    "full_analysis"        # 全量分析
+}
+text: 粘贴一段从 PDF 或 Word 中复制的测试文本；
+点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。如果报错，系统会通过统一响应包装器返回详细的错误信息。
+
+## 6. 业务模块独立自测
+为了提高开发效率，无需启动整个项目即可测试自己的 `.py` 代码：
+1. **准备测试文件**：在根目录准备一个测试 PDF 或 Word。
+2. **修改脚本配置**：打开 `test_modules.py`，将底部的 `SAMPLE_FILE` 修改为你的文件名。
+3. **运行测试**：python test_modules.py
+
+## 7. 目录结构说明
 PROJECT-XTJS/
 ├── app/
 │   ├── config/           # 全局配置参数目录 (settings.py)
@@ -41,42 +82,3 @@ PROJECT-XTJS/
 ├── db/                   # 数据库 SQL 迁移脚本
 ├── requirements.txt      # 依赖包列表
 └── run.py                # 本地一键启动脚本
-
-## 4. 开发指引
-docker部署（建议）：
-docker-compose up -d --build
-本地部署：
-在虚拟环境下执行依赖安装：
-pip install -r requirements.txt
-在初始化环境后，还需要手动安装对应cuda的paddle库才支持gpu版本，查看requirements.txt
-
-执行启动脚本，系统将自动配置环境并启动服务：
-python run.py
-服务启动后将自动打开 http://127.0.0.1:8080/docs 查看交互式 API 文档。
-
-## 5. 部署流程
-同步代码：
-git pull
-获取 Commit ID：
-git log --oneline
-执行部署：
-make commit_id=<commit_id>
-
-## 6. 通过API交互测试
-运行run.py启动服务，找到 POST /api/analysis/run (统一文本分析接口)，点击右侧的 "Try it out" 按钮。
-在 Request body 中修改 JSON 内容：
-task_type: 选择任务类型{
-    "integrity_check",     # 完整性审查
-    "pricing_reason",      # 报价合理性
-    "itemized_pricing",    # 分项报价
-    "deviation_check",     # 偏离检查
-    "full_analysis"        # 全量分析
-}
-text: 粘贴一段从 PDF 或 Word 中复制的测试文本；
-点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。如果报错，系统会通过统一响应包装器返回详细的错误信息。
-
-## 7. 业务模块独立自测
-为了提高开发效率，无需启动整个项目即可测试自己的 `.py` 代码：
-1. **准备测试文件**：在根目录准备一个测试 PDF 或 Word。
-2. **修改脚本配置**：打开 `test_modules.py`，将底部的 `SAMPLE_FILE` 修改为你的文件名。
-3. **运行测试**：python test_modules.py
