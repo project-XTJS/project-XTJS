@@ -33,3 +33,7 @@ test_image.png
 .idea/
 .DS_Store
 Thumbs.db
+
+# 7. 其他不必要的文件
+test_modules.py
+test.json

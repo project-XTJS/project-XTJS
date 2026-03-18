@@ -10,7 +10,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
 # 引入各业务模块
-from app.service.analysis.integrity import IntegrityChecker
+from app.service.analysis.integrity import IntegrityChecker, TemplateConsistencyChecker
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
 from app.service.analysis.itemized_pricing import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
