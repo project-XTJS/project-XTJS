@@ -1,27 +1,36 @@
+# --- Web 框架核心 ---
 fastapi==0.104.1
 uvicorn==0.24.0.post1
 python-multipart==0.0.6
-pydantic-settings>=2.0.0      # 用于配置管理
-paddleocr
-# 需要手动指定官方源安装 paddlepaddle-gpu。
-# 下方cu130版本的安装命令仅供参考，实际安装时请根据你的CUDA版本选择合适的paddlepaddle-gpu版本。
-# 手动安装命令: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
+pydantic-settings>=2.0.0
 
+# --- 数据库与缓存 ---
+psycopg2-binary==2.9.10
+SQLAlchemy>=2.0.0      
+alembic>=1.12.0       
+redis
+minio>=7.2.20
+
+# --- OCR 与图像处理 ---
+paddleocr
+# 手动安装 GPU 驱动命令: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
+opencv-contrib-python==4.10.0.84
+numpy>=1.26.4,<3
+urllib3<2.0            
+requests               
+
+# --- 文档处理与分析 ---
 pdfplumber==0.10.2
 pymupdf
 python-docx==0.8.11
-numpy>=1.26.4,<3
-language-tool-python
 openpyxl
-tqdm
-opencv-contrib-python==4.10.0.84
 
+# --- 工具与异步任务 ---
+language-tool-python
+tqdm
 python-dotenv
 celery
 chardet<8
-redis
-minio>=7.2.20
-psycopg2-binary==2.9.10
 
 # [可选] Windows 环境下用于 .doc 文件解析的 COM 依赖
 # pywin32>=306
