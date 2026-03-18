@@ -1,120 +1,44 @@
 version: '3.8'
 
 services:
-  # 主应用服务
-  app:
-    image: project-xtjs:release-7d89c74
-    container_name: project-xtjs
+  # 核心主程序 (FastAPI + PaddleOCR)
+  web:
+    build: .
+    container_name: xtjs_web
     ports:
       - "8080:8080"
+    volumes:
+      # 把本地的一个目录挂载给 PaddleX
+      - paddlex_cache:/root/.paddlex  
+    environment:
+      - MINIO_ENDPOINT=minio:9000  # 注意：在 Docker 网络里，直接用服务名 "minio" 替代 "127.0.0.1"
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET_NAME=xtjs-files
     depends_on:
-      - milvus
-      - postgres
       - minio
-    environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql://admin:password@postgres:5432/xtjs_db}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
-      - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-update_file}
-      - MINIO_SECURE=${MINIO_SECURE:-false}
-      - MINIO_ALLOWED_EXTENSIONS=${MINIO_ALLOWED_EXTENSIONS:-pdf,docx,doc,png,jpg,jpeg,bmp,tif,tiff}
-      - PADDLE_OCR_DEVICE=${PADDLE_OCR_DEVICE:-gpu:0}
-      - PADDLE_OCR_VERSION=${PADDLE_OCR_VERSION:-PP-OCRv5}
-      - PADDLE_OCR_FALLBACK_TO_CPU=${PADDLE_OCR_FALLBACK_TO_CPU:-true}
-      - PADDLE_OCR_DISABLE_MKLDNN=${PADDLE_OCR_DISABLE_MKLDNN:-true}
-      - PADDLE_OCR_FORCE_PDF_OCR=${PADDLE_OCR_FORCE_PDF_OCR:-false}
-      - PADDLE_OCR_USE_DOC_ORIENTATION=${PADDLE_OCR_USE_DOC_ORIENTATION:-true}
-      - PADDLE_OCR_USE_DOC_UNWARPING=${PADDLE_OCR_USE_DOC_UNWARPING:-true}
-      - PADDLE_OCR_USE_TEXTLINE_ORIENTATION=${PADDLE_OCR_USE_TEXTLINE_ORIENTATION:-true}
-      - PADDLE_OCR_ENABLE_HPI=${PADDLE_OCR_ENABLE_HPI:-false}
-      - PADDLE_OCR_ENABLE_STRUCTURE=${PADDLE_OCR_ENABLE_STRUCTURE:-true}
-      - PADDLE_OCR_ENABLE_SEAL_RECOGNITION=${PADDLE_OCR_ENABLE_SEAL_RECOGNITION:-true}
-      - PADDLE_OCR_EXCLUDE_SEAL_TEXT=${PADDLE_OCR_EXCLUDE_SEAL_TEXT:-true}
-      - PADDLE_STRUCTURE_USE_TABLE=${PADDLE_STRUCTURE_USE_TABLE:-true}
-      - PADDLE_STRUCTURE_USE_FORMULA=${PADDLE_STRUCTURE_USE_FORMULA:-false}
-      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=${PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK:-true}
-      - OCR_STORAGE_ROOT=${OCR_STORAGE_ROOT:-/app/.ocr_runtime}
-      - PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/app/.ocr_runtime/paddlex-cache}
-      - OCR_RUNTIME_TEMP_DIR=${OCR_RUNTIME_TEMP_DIR:-/app/.ocr_runtime/runtime-tmp}
-    volumes:
-      - ocr_runtime:/app/.ocr_runtime
-    networks:
-      - app_network
-    restart: always
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia   # 强制要求 Docker 挂载宿主机的显卡
+              count: all
+              capabilities: [gpu]
 
-  # Milvus 服务
-  milvus:
-    image: milvusdb/milvus:v2.3.0
-    container_name: milvus
-    ports:
-      - "19530:19530"
-      - "9091:9091"
-    volumes:
-      - milvus_data:/var/lib/milvus
-    environment:
-      - MILVUS_LOG_LEVEL=info
-    networks:
-      - app_network
-    restart: always
-
-  # PostgreSQL 服务
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=admin
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=xtjs_db
-    networks:
-      - app_network
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d xtjs_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # MinIO 服务
+  # MinIO 存储服务 (自动部署)
   minio:
     image: minio/minio:latest
-    container_name: minio
-    command: server /data --console-address ":9001"
+    container_name: xtjs_minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"  # API 端口
+      - "9001:9001"  # 控制台端口
     environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
     volumes:
       - minio_data:/data
-    networks:
-      - app_network
-    restart: always
-
-  # Flyway 服务
-  flyway:
-    image: flyway/flyway:latest
-    container_name: flyway
-    volumes:
-      - ./db/migration:/flyway/sql
-    command: -url=jdbc:postgresql://postgres:5432/xtjs_db -user=admin -password=password migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - app_network
-
-networks:
-  app_network:
-    driver: bridge
+    command: server /data --console-address ":9001"
 
 volumes:
-  milvus_data:
-  postgres_data:
+  paddlex_cache:
   minio_data:
-  ocr_runtime:

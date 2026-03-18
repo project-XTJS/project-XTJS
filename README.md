@@ -43,11 +43,13 @@ PROJECT-XTJS/
 └── run.py                # 本地一键启动脚本
 
 ## 4. 开发指引
-安装依赖：
-请在虚拟环境下执行依赖安装：
+docker部署（建议）：
+docker-compose up -d --build
+本地部署：
+在虚拟环境下执行依赖安装：
 pip install -r requirements.txt
 在初始化环境后，还需要手动安装对应cuda的paddle库才支持gpu版本，查看requirements.txt
-本地启动：
+
 执行启动脚本，系统将自动配置环境并启动服务：
 python run.py
 服务启动后将自动打开 http://127.0.0.1:8080/docs 查看交互式 API 文档。

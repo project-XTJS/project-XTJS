@@ -1,72 +1,34 @@
-ARG PADDLE_BASE_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
-ARG PADDLE_VERSION=3.3.0
-ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu130/
-ARG PADDLE_TRUSTED_HOST=www.paddlepaddle.org.cn
-ARG PADDLE_OCR_PACKAGE_VERSION=3.3.0
-ARG PADDLE_OCR_DEPENDENCY_GROUP=doc-parser
-ARG INSTALL_HPI_DEPS=false
-FROM ${PADDLE_BASE_IMAGE}
-ARG PADDLE_VERSION
-ARG PADDLE_INDEX_URL
-ARG PADDLE_TRUSTED_HOST
-ARG PADDLE_OCR_PACKAGE_VERSION
-ARG PADDLE_OCR_DEPENDENCY_GROUP
-ARG INSTALL_HPI_DEPS
-LABEL authors="Stan1ey"
+# 1. 使用极其精简的 Python 3.13 官方镜像作为底座
+FROM python:3.13-slim
 
-WORKDIR /app
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+# 2. 设置环境变量：防止 Python 乱写缓存，强制使用无缓冲的标准输出
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV UV_LINK_MODE=copy
-ENV PADDLE_PDX_MODEL_SOURCE=BOS
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        libgl1 \
-        libglib2.0-0 \
-        libgomp1 \
-        python3 \
-        python3-pip \
-        python3-venv \
+# 3. 安装 Linux 系统底层的依赖库 (OpenCV 和 Paddle 必须用到这些 C++ 库)
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY wheels/ /tmp/wheels/
+# 4. 设定工作目录
+WORKDIR /app
 
-RUN python3 -m venv "${VIRTUAL_ENV}"
-RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
-RUN set -eux; \
-    local_wheel="$(find /tmp/wheels -maxdepth 1 -type f -name 'paddlepaddle_gpu-*.whl' | head -n 1)"; \
-    if [ -n "${local_wheel}" ]; then \
-        python -m pip install --no-cache-dir \
-            httpx \
-            "numpy>=1.21" \
-            "protobuf>=3.20.2" \
-            Pillow \
-            opt_einsum==3.3.0 \
-            networkx \
-            typing_extensions \
-            "safetensors>=0.6.0"; \
-        python -m pip install --no-cache-dir --no-deps "${local_wheel}"; \
-    else \
-        python -m pip install --no-cache-dir \
-            --trusted-host "${PADDLE_TRUSTED_HOST}" \
-            "paddlepaddle-gpu==${PADDLE_VERSION}" \
-            -i "${PADDLE_INDEX_URL}"; \
-    fi
-RUN python -m pip install --no-cache-dir "paddleocr[${PADDLE_OCR_DEPENDENCY_GROUP}]==${PADDLE_OCR_PACKAGE_VERSION}"
-RUN if [ "${INSTALL_HPI_DEPS}" = "true" ]; then python -m paddleocr install_hpi_deps gpu; fi
+# 5. 先复制依赖清单，利用 Docker 缓存机制加速构建
+COPY requirements.txt .
 
-COPY requirements.txt ./
-RUN python -m pip install --no-cache-dir -r requirements.txt
+# 6. 🌟 核心：先强行安装适配 CUDA 13.0 的 PaddlePaddle-GPU！
+RUN pip install --no-cache-dir paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
 
+# 7. 安装项目其余的常规依赖
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 8. 把你本地所有的代码全盘复制到容器里
 COPY . .
 
+# 9. 暴露 FastAPI 运行的 8080 端口
 EXPOSE 8080
 
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# 10. 容器启动时的默认命令
+CMD ["python", "run.py"]
