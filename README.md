@@ -47,13 +47,11 @@ task_type: 选择任务类型{
     "full_analysis"        # 全量分析
 }
 text: 粘贴一段从 PDF 或 Word 中复制的测试文本；
-点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。如果报错，系统会通过统一响应包装器返回详细的错误信息。
+点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。
 
 ## 6. 业务模块独立自测
 为了提高开发效率，无需启动整个项目即可测试自己的 `.py` 代码：
-1. **准备测试文件**：在根目录准备一个测试 PDF 或 Word。
-2. **修改脚本配置**：打开 `test_modules.py`，将底部的 `SAMPLE_FILE` 修改为你的文件名。
-3. **运行测试**：python test_modules.py
+**运行测试**：可在_test目录下测试自己的模块
 
 ## 7. 目录结构说明
 PROJECT-XTJS/
