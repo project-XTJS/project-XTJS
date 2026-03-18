@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     MINIO_ENDPOINT: str = "127.0.0.1:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
-    MINIO_BUCKET_NAME: str = "update_file"  # 固定的业务 bucket
+    MINIO_BUCKET_NAME: str = "update-file"  # 固定的业务 bucket
     MINIO_SECURE: bool = False              # Pydantic 自动处理 "true"/"false" 等字符串
     MINIO_PRESIGNED_EXPIRES_DAYS: int = 7
     MINIO_MAX_FILE_SIZE: int = 500 * 1024 * 1024
