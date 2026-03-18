@@ -1,53 +1,94 @@
 """
-投标文件完整性与格式检查模块
-负责人：虞光勇、陶明宇
+投标文件完整性检查模块
 """
 import re
 
 class IntegrityChecker:
-    # 商务标关键章节白名单
-    BUSINESS_REQUIRED_SECTIONS = ["报价函", "商务偏离表", "资格证明文件", "售后服务承诺", "报价明细"]
+    # 商务标核心材料白名单
+    BUSINESS_REQUIRED_SECTIONS = [
+        "投标保证书",
+        "开标一览表",
+        "分项报价表",
+        "商务条款偏离表",
+        "技术条款偏离表",
+        "投标人基本情况介绍",
+        "类似项目业绩清单",
+        "投标人的资格证明文件",
+        "保证金缴纳凭证",
+        "投标人认为需加以说明的其他内容"
+    ]
+
+    # “投标人的资格证明文件”的核心材料
+    QUALIFICATION_SUB_SECTIONS = [
+        "营业执照",
+        "法定代表人/单位负责人证明书",
+        "缴纳社保的证明材料",
+        "投标人承诺声明函",
+        "不参与围标串标承诺书",
+        "财务状况及税收、社会保障资金缴纳情况声明函",
+        "制造商声明函"
+    ]
 
     def check_integrity(self, text: str) -> dict:
         """
-        虞光勇：检查必备章节是否齐全
-        升级亮点：使用多行正则匹配，彻底排除“目录”或“正文提及”造成的误判。
-        必须是独立成行，且带有类似“一、”、“1.”、“附件一”前缀的才算真正的章节标题。
+        投标文件完整性检查
         """
         found_sections = []
         missing_sections = []
         details = {}
 
-        # 匹配常见的标书标题前缀：一、 / 1. / 1.1 / 第一章 / 附件一 等
-        # \s* 代表允许有空格
-        header_prefix = r'(?:第[一二三四五六七八九十百]+[章部分]|附件[一二三四五六七八九十]+|[一二三四五六七八九十]、|\d{1,2}\.[\d\.]*)\s*'
+        # 匹配常见的标书标题前缀：一、 / 1. / A. / (一) / 附件 等
+        # 允许标题前后有一些空格
+        header_prefix = r'(?:第[一二三四五六七八九十百]+[章部分]|附件[一二三四五六七八九十]+|[一二三四五六七八九十]、|\d{1,2}\.[\d\.]*|[A-G]\.|（[一二三四五六七八九十]）|\([A-G]\))\s*'
 
+        # 1. 检查主项目录
         for section in self.BUSINESS_REQUIRED_SECTIONS:
-            # 策略1：匹配带编号的正规标题 (必须是在一行的开头)
-            # 例如： "一、报价函" 或 "附件一 报价函"
-            strict_pattern = re.compile(rf'^{header_prefix}{section}', re.MULTILINE)
+            # 引入模糊匹配容错，允许中间加字（例如：商务条款偏离表 -> 商.*?务.*?偏.*?离.*?表）
+            fuzzy_section = ".*?".join(list(section))
             
-            # 策略2：匹配不带编号，但独占一行的居中标题
-            # 例如： "      报价函      "
-            loose_pattern = re.compile(rf'^\s*{section}\s*$', re.MULTILINE)
+            # 必须匹配在行首的正规标题
+            strict_pattern = re.compile(rf'^{header_prefix}.*?{fuzzy_section}.*?$', re.MULTILINE)
+            loose_pattern = re.compile(rf'^\s*.*?{fuzzy_section}.*?\s*$', re.MULTILINE)
 
-            # 执行检索
             strict_matches = strict_pattern.findall(text)
             loose_matches = loose_pattern.findall(text)
 
             if strict_matches or loose_matches:
                 found_sections.append(section)
                 details[section] = {
-                    "status": "✅ 已找到",
-                    "match_type": "正规编号标题" if strict_matches else "独立成行标题",
-                    "preview": (strict_matches + loose_matches)[0].strip() # 截取第一个匹配项供前端展示
+                    "status": "已找到",
+                    "preview": (strict_matches + loose_matches)[0].strip(),
+                    "category": "主项文件"
                 }
             else:
-                missing_sections.append(section)
-                details[section] = {"status": "❌ 缺失"}
+                # 按照需求，“其他内容”可能是可选的，即使没有也不算严重缺失
+                if section == "投标人认为需加以说明的其他内容":
+                    details[section] = {"status": "可选项目，未提供", "category": "可选文件"}
+                else:
+                    missing_sections.append(section)
+                    details[section] = {"status": "缺失", "category": "主项文件"}
 
-        # 评分算法：百分制，每缺一项扣对应的分数
-        score = (len(found_sections) / len(self.BUSINESS_REQUIRED_SECTIONS)) * 100
+        # 2. 如果找到了“投标人的资格证明文件”，继续深挖里面的子项
+        if "投标人的资格证明文件" in found_sections:
+            for sub_section in self.QUALIFICATION_SUB_SECTIONS:
+                # 针对子项标题往往比较长，可以截取关键词来模糊匹配
+                # 例如："缴纳社保的证明材料" -> 重点找 "社保" 或 "劳动合同"
+                search_term = "社保" if "社保" in sub_section else ".*?".join(list(sub_section.split('/')[0][:4]))
+                
+                sub_pattern = re.compile(rf'^{header_prefix}.*?{search_term}.*?$', re.MULTILINE)
+                sub_loose_pattern = re.compile(rf'^\s*.*?{search_term}.*?\s*$', re.MULTILINE)
+                
+                if sub_pattern.findall(text) or sub_loose_pattern.findall(text):
+                    found_sections.append(f"子项: {sub_section}")
+                    details[f"子项: {sub_section}"] = {"status": "已找到", "category": "资格证明文件子项"}
+                else:
+                    missing_sections.append(f"子项: {sub_section}")
+                    details[f"子项: {sub_section}"] = {"status": "缺失 (判定：未按规范标注标题)", "category": "资格证明文件子项"}
+
+        # 计算得分逻辑 (主项权重高，去掉可选的第10项)
+        required_main_count = len(self.BUSINESS_REQUIRED_SECTIONS) - 1
+        found_main_count = len([s for s in found_sections if not s.startswith("子项:")])
+        score = (found_main_count / required_main_count) * 100 if required_main_count > 0 else 0
 
         return {
             "integrity_score": round(score, 2),
@@ -55,45 +96,5 @@ class IntegrityChecker:
             "missing_count": len(missing_sections),
             "found_sections": found_sections,
             "missing_sections": missing_sections,
-            "details": details # 详细的审查报告
-        }
-
-    def check_format_consistency(self, text: str) -> dict:
-        """
-        陶明宇：实现格式模板一致性检查
-        注意：由于入参是纯文本(text: str)，无法检查字体(如宋体/黑体)。
-        升级亮点：利用纯文本特征，进行标点符号规范、空白行泛滥、中英文混杂等结构性排版检查。
-        """
-        issues = []
-        deduct_score = 0
-
-        # 1. 空行泛滥检查（排版松散）
-        if re.search(r'\n{4,}', text):
-            issues.append("文档存在连续4个以上的空行，排版可能过于松散或存在异常分页。")
-            deduct_score += 5
-
-        # 2. 中英文标点严重混用检查（专业性校验）
-        # 统计英文逗号和中文逗号的数量
-        en_comma_count = text.count(',')
-        zh_comma_count = text.count('，')
-        
-        # 如果总逗号数大于20，且英文逗号占比超过30%（在中文标书里很不正常）
-        total_commas = en_comma_count + zh_comma_count
-        if total_commas > 20 and (en_comma_count / total_commas) > 0.3:
-            issues.append(f"中英文标点混杂：检测到大量英文半角逗号({en_comma_count}个)，建议统一使用中文全角标点。")
-            deduct_score += 10
-
-        # 3. 序号混乱检查（比如出现了 "1." 后紧跟 "3."）
-        # 这里仅作简单预警示例，复杂逻辑可由陶明宇继续扩展
-        if "一、" in text and "三、" in text and "二、" not in text:
-             issues.append("大纲编号可能存在跳跃：检测到'一、'和'三、'，但缺失'二、'。")
-             deduct_score += 15
-
-        final_score = max(0, 100 - deduct_score)
-
-        return {
-            "format_score": final_score,
-            "is_standard": len(issues) == 0,
-            "detected_issues": issues,
-            "suggestion": "排版规范，符合投标要求" if final_score == 100 else "建议根据检查出的问题重新排版"
+            "details": details
         }

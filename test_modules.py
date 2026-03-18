@@ -4,7 +4,7 @@ import os
 import time
 import json
 
-# 1. 确保项目根目录在系统路径中，解决跨文件夹导入问题
+# 确保项目根目录在系统路径中，解决跨文件夹导入问题
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
@@ -18,14 +18,13 @@ from app.service.analysis.verification import VerificationChecker
 
 def run_business_tests_with_ocr(json_path: str):
     """
-    使用 OCR 识别 JSON 结果进行业务模块全量测试
+    使用真实的 OCR 识别 JSON 结果进行业务模块全量测试
     """
     if not os.path.exists(json_path):
-        print(f"错误：找不到文件 '{json_path}'，请确认文件路径。")
+        print(f"错误：找不到文件 '{json_path}'，请确认文件是否在项目根目录下。")
         return
     
     print(f"正在加载 OCR 解析结果: {json_path}")
-    start_time = time.time()
 
     try:
         # 读取 JSON
@@ -35,13 +34,12 @@ def run_business_tests_with_ocr(json_path: str):
         # 1. 提取核心文本
         raw_text = res_data.get("data", {}).get("content", "")
         
-        # 2. 提取印章与元数据 
+        # 2. 提取真实的印章与元数据
         real_meta = {
             "seal_count": res_data.get("data", {}).get("seal_count", 0),
             "seal_texts": res_data.get("data", {}).get("seal_texts", []),
             "ocr_used": res_data.get("data", {}).get("ocr_used", True)
         }
-        duration = time.time() - start_time
     except Exception as e:
         print(f"解析 JSON 失败: {str(e)}")
         return
@@ -50,10 +48,10 @@ def run_business_tests_with_ocr(json_path: str):
         print("警告：提取到的文本几乎为空，检查 JSON 结构。")
         return
     else:
-        #print(f"提取到印章数据: {real_meta['seal_texts']}\n")
-        return
+        print(f"提取到真实印章数据: {real_meta['seal_texts']}\n")
+ 
 
-    # 1. 虞光勇、陶明宇 - 完整性
+    # 1. 虞光勇、陶明宇 - 完整性与格式审查
     integrity_res = IntegrityChecker().check_integrity(raw_text)
     print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
 
@@ -70,6 +68,6 @@ def run_business_tests_with_ocr(json_path: str):
     #print(VerificationChecker(ocr_service=None).check_seal_and_date(real_meta))
 
 if __name__ == "__main__":
-    # 指向 JSON 文件
+    # 填入解析出来的 JSON 文件路径，确保该文件在项目根目录下
     SAMPLE_JSON = "test.json" 
     run_business_tests_with_ocr(SAMPLE_JSON)
