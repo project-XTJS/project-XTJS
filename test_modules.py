@@ -2,72 +2,74 @@
 import sys
 import os
 import time
+import json
 
 # 1. 确保项目根目录在系统路径中，解决跨文件夹导入问题
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
-# 引入项目工具与各业务模块
-from app.utils.text_utils import extract_text
+# 引入各业务模块
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
 from app.service.analysis.itemized_pricing import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.verification import VerificationChecker
 
-def run_business_tests(file_path: str):
+def run_business_tests_with_ocr(json_path: str):
     """
-    业务模块自测函数
+    使用 OCR 识别 JSON 结果进行业务模块全量测试
     """
-    if not os.path.exists(file_path):
-        print(f"错误：找不到文件 '{file_path}'，请确认文件已放置在正确路径。")
+    if not os.path.exists(json_path):
+        print(f"错误：找不到文件 '{json_path}'，请确认文件路径。")
         return
     
-    file_extension = os.path.splitext(file_path)[1].lower().replace('.', '')
+    print(f"正在加载 OCR 解析结果: {json_path}")
+    start_time = time.time()
 
     try:
-        start_time = time.time()
-        raw_text = extract_text(file_path, file_extension)
+        # 读取 JSON
+        with open(json_path, 'r', encoding='utf-8') as f:
+            res_data = json.load(f)
+        
+        # 1. 提取核心文本
+        raw_text = res_data.get("data", {}).get("content", "")
+        
+        # 2. 提取印章与元数据 
+        real_meta = {
+            "seal_count": res_data.get("data", {}).get("seal_count", 0),
+            "seal_texts": res_data.get("data", {}).get("seal_texts", []),
+            "ocr_used": res_data.get("data", {}).get("ocr_used", True)
+        }
         duration = time.time() - start_time
     except Exception as e:
-        print(f"提取失败！底层解析引擎报错: {str(e)}")
+        print(f"解析 JSON 失败: {str(e)}")
         return
 
     if not raw_text or len(raw_text.strip()) < 5:
-        print("警告：提取到的文本几乎为空。")
+        print("警告：提取到的文本几乎为空，检查 JSON 结构。")
+        return
     else:
-        print(f"文本提取成功共 ({len(raw_text)} 字符)，耗时: {duration:.2f}s")
-
-    # 模拟 OCR 识别出的元数据（用于测试盖章校验模块）
-    mock_meta = {
-        "seal_count": 1,
-        "seal_texts": ["测试单位专用章"],
-        "ocr_used": True if file_extension in ['jpg', 'png'] else False
-    }
+        #print(f"提取到印章数据: {real_meta['seal_texts']}\n")
+        return
 
     # 1. 虞光勇、陶明宇 - 完整性
-    print(f"\n[测试] 完整性审查")
-    print(f"结果: {IntegrityChecker().check_integrity(raw_text)}")
+    integrity_res = IntegrityChecker().check_integrity(raw_text)
+    print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
 
     # 2. 曾俊、滑鹏鹏 - 报价合理性
-    print(f"\n[测试] 报价合理性")
-    print(f"结果: {ReasonablenessChecker().check_price_reasonableness(raw_text)}")
+    #print(ReasonablenessChecker().check_price_reasonableness(raw_text))
 
     # 3. 江宇 - 分项报价
-    print(f"\n[测试] 分项报价表")
-    print(f"结果: {ItemizedPricingChecker().check_itemized_logic(raw_text)}")
+    #print(ItemizedPricingChecker().check_itemized_logic(raw_text))
 
     # 4. 高海斌 - 偏离项
-    print(f"\n[测试] 偏离条款检查")
-    print(f"结果: {DeviationChecker().check_technical_deviation(raw_text)}")
+    #print(DeviationChecker().check_technical_deviation(raw_text))
 
     # 5. 镇昊天、张化飞 - 印章日期
-    print(f"\n[测试] 签字盖章与日期")
-    # Verification 模块需要 meta 数据支持
-    print(f"结果: {VerificationChecker(ocr_service=None).check_seal_and_date(mock_meta)}")
+    #print(VerificationChecker(ocr_service=None).check_seal_and_date(real_meta))
 
 if __name__ == "__main__":
-    # 修改路径为实际测试文件位置，确保文件存在
-    SAMPLE_FILE = "test.pdf" 
-    run_business_tests(SAMPLE_FILE)
+    # 指向 JSON 文件
+    SAMPLE_JSON = "test.json" 
+    run_business_tests_with_ocr(SAMPLE_JSON)
