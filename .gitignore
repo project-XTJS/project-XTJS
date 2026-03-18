@@ -1,0 +1,35 @@
+# 1. 虚拟环境
+venv/
+env/
+.venv/
+
+# 2. Python 编译缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 3. 环境变量与机密配置
+.env
+.env.*
+*.pem
+
+# 4. PaddleOCR 运行时缓存与自动下载的大模型权重
+.paddlex/
+~/.paddlex/
+.ocr_runtime/
+
+# 5. 本地运行生成的临时文件和输出结果
+output_seals/
+test_image.png
+*.log
+
+# 7. 文档与报告文件
+ *.pdf
+ *.docx
+ *.doc
+
+# 6. 编辑器与操作系统缓存
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

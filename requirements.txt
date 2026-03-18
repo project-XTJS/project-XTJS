@@ -5,7 +5,7 @@ pydantic-settings>=2.0.0      # 用于配置管理
 paddleocr
 # 需要手动指定官方源安装 paddlepaddle-gpu。
 # 下方cu130版本的安装命令仅供参考，实际安装时请根据你的CUDA版本选择合适的paddlepaddle-gpu版本。
-# 手动安装命令: pip install paddlepaddle-gpu==3.0.0b2 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
+# 手动安装命令: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
 
 pdfplumber==0.10.2
 pymupdf
