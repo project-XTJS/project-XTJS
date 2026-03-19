@@ -2,7 +2,7 @@ SHELL := /bin/sh
 .DEFAULT_GOAL := run
 
 version ?= release
-commit_id ?= fd92b4a
+commit_id ?= $(shell git rev-parse --short HEAD)
 project ?= $(CURDIR)
 project_name ?= project-xtjs
 image ?= $(project_name):$(version)-$(commit_id)
