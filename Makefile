@@ -1,4 +1,5 @@
 SHELL := /bin/sh
+.DEFAULT_GOAL := run
 
 version ?= release
 commit_id ?= fd92b4a
@@ -9,12 +10,14 @@ image ?= $(project_name):$(version)-$(commit_id)
 compose_file ?= docker-compose.yml
 python_bin ?= python
 
-.PHONY: all build fmt clean test lint help run start package prepare update_docker_compose status stop
+.PHONY: all build fmt clean test lint help run deploy start package prepare update_docker_compose status stop
 
 help:
 	@echo "Usage: make <target> [version=<v>] [commit_id=<id>] [project_name=<name>]"
 	@echo ""
 	@echo "Targets:"
+	@echo "  all                    Alias of run"
+	@echo "  deploy                 Alias of run"
 	@echo "  run                    update_docker_compose -> package -> prepare -> start"
 	@echo "  update_docker_compose  Replace $(project_name):* to $(image) in $(compose_file)"
 	@echo "  package                docker build -t $(image) ."
@@ -22,6 +25,10 @@ help:
 	@echo "  start                  docker compose up -d"
 	@echo "  status                 docker compose ps"
 	@echo "  stop                   docker compose down"
+
+all: run
+
+deploy: run
 
 run: update_docker_compose package prepare start
 
