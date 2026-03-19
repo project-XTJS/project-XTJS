@@ -20,7 +20,7 @@ help:
 	@echo "  deploy                 Alias of run"
 	@echo "  run                    update_docker_compose -> package -> prepare -> start"
 	@echo "  update_docker_compose  Replace $(project_name):* to $(image) in $(compose_file)"
-	@echo "  package                docker build -t $(image) ."
+	@echo "  package                docker build --provenance=false -t $(image) ."
 	@echo "  prepare                docker compose down"
 	@echo "  start                  docker compose up -d"
 	@echo "  status                 docker compose ps"
@@ -44,7 +44,7 @@ package:
 		echo "[skip] Dockerfile not found."; \
 		exit 0; \
 	fi
-	docker build -t $(image) .
+	docker build --provenance=false -t $(image) .
 
 prepare:
 	@if [ ! -f "$(compose_file)" ]; then \

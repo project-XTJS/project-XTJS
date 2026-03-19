@@ -1,12 +1,12 @@
 ARG PADDLE_BASE_IMAGE=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
 ARG PADDLE_VERSION=3.3.0
 ARG PADDLE_OCR_VERSION=3.4.0
-ARG PADDLE_INDEX_URL=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+ARG PADDLE_WHEEL_BASE_URL=https://paddle-whl.bj.bcebos.com/stable/cu130/paddlepaddle-gpu
 
 FROM ${PADDLE_BASE_IMAGE}
 ARG PADDLE_VERSION
 ARG PADDLE_OCR_VERSION
-ARG PADDLE_INDEX_URL
+ARG PADDLE_WHEEL_BASE_URL
 LABEL authors="Stan1ey"
 
 WORKDIR /app
@@ -40,7 +40,9 @@ RUN apt-get update \
 
 RUN python3 -m venv "${VIRTUAL_ENV}"
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel uv
-RUN python -m pip install --no-cache-dir "paddlepaddle-gpu==${PADDLE_VERSION}" -i "${PADDLE_INDEX_URL}"
+RUN PY_TAG="$(python -c 'import sys; print("cp%d%d" % sys.version_info[:2])')" \
+    && python -m pip install --no-cache-dir \
+        "${PADDLE_WHEEL_BASE_URL}/paddlepaddle_gpu-${PADDLE_VERSION}-${PY_TAG}-${PY_TAG}-linux_x86_64.whl"
 RUN python -m pip install --no-cache-dir "paddleocr[doc-parser]==${PADDLE_OCR_VERSION}"
 
 COPY pyproject.toml uv.lock ./
