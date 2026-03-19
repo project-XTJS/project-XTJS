@@ -61,7 +61,7 @@ class AnalysisService:
             # --- 引擎与模式相关 ---
             "parser_engine": file_data.get("parser_engine", "unknown"), 
             "source_mode": "local",
-            "active_device": "gpu" if self.ocr_service and getattr(self.ocr_service, 'available', False) else "cpu",
+            "active_device": getattr(self.ocr_service, "active_device", "cpu"),
             
             # --- OCR 相关 ---
             "ocr_engine": "PaddleOCR" if ocr_used else "none",

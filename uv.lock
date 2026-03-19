@@ -1215,7 +1215,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.4,<3" },
     { name = "opencv-contrib-python", specifier = "==4.10.0.84" },
     { name = "openpyxl", specifier = ">=3.1.5" },
-    { name = "paddleocr" },
+    { name = "paddleocr", specifier = "==3.4.0" },
     { name = "pdfplumber", specifier = "==0.10.2" },
     { name = "psycopg2-binary", specifier = "==2.9.10" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },

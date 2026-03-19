@@ -1,28 +1,120 @@
 import os
+import re
+from typing import Any
+
 import cv2
 import fitz  # PyMuPDF
 import numpy as np
 from tqdm import tqdm
-import re
+
+from app.config.settings import settings
 
 class OCRService:
     def __init__(self):
         self.available = False
         self.ocr = None
+        self.structure = None
+        self.structure_available = False
+        self.active_device = "cpu"
         # 定义印章保存路径
         self.seal_dir = "output_seals"
         if not os.path.exists(self.seal_dir):
             os.makedirs(self.seal_dir)
-        
+
+        self._prepare_runtime_dirs()
+        self._prepare_runtime_env()
+        self._init_engines()
+
+    def _prepare_runtime_dirs(self) -> None:
+        for path in (
+            settings.OCR_STORAGE_ROOT,
+            settings.PADDLE_PDX_CACHE_HOME,
+            settings.OCR_RUNTIME_TEMP_DIR,
+        ):
+            os.makedirs(path, exist_ok=True)
+
+    def _prepare_runtime_env(self) -> None:
+        os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(settings.PADDLE_PDX_CACHE_HOME))
+        os.environ.setdefault(
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK",
+            "1" if settings.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK else "0",
+        )
+        os.environ.setdefault("TMPDIR", str(settings.OCR_RUNTIME_TEMP_DIR))
+
+    def _candidate_devices(self) -> list[str]:
+        candidates = [settings.PADDLE_OCR_DEVICE]
+        if settings.PADDLE_OCR_DEVICE.startswith("gpu:"):
+            candidates.append("gpu")
+        if settings.PADDLE_OCR_FALLBACK_TO_CPU:
+            candidates.append("cpu")
+
+        unique_candidates: list[str] = []
+        for device in candidates:
+            if device and device not in unique_candidates:
+                unique_candidates.append(device)
+        return unique_candidates
+
+    def _build_ocr_kwargs(self, device: str) -> dict[str, Any]:
+        return {
+            "lang": settings.PADDLE_OCR_LANG,
+            "device": device,
+            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
+            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
+            "use_textline_orientation": settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
+        }
+
+    def _build_structure_kwargs(self, device: str) -> dict[str, Any]:
+        return {
+            "device": device,
+            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
+            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
+            "use_textline_orientation": settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
+        }
+
+    def _init_engines(self) -> None:
         try:
             from paddleocr import PaddleOCR
-            # 初始化最新版 PaddleX 架构引擎
-            self.ocr = PaddleOCR(lang='ch') 
-            self.available = True
-            print(f"OCRService: PaddleOCR 加载成功")
-            print(f"印章截图将保存至: {self.seal_dir}")
         except Exception as exc:
             print(f"OCRService 加载失败: {exc}")
+            return
+
+        last_error: Exception | None = None
+        for device in self._candidate_devices():
+            try:
+                self.ocr = PaddleOCR(**self._build_ocr_kwargs(device))
+                self.available = True
+                self.active_device = device
+                print(
+                    "OCRService: PaddleOCR 3.4.0 加载成功"
+                    f" (device={self.active_device}, lang={settings.PADDLE_OCR_LANG})"
+                )
+                print(f"印章截图将保存至: {self.seal_dir}")
+                break
+            except Exception as exc:
+                last_error = exc
+                print(f"OCRService: PaddleOCR 初始化失败 (device={device}): {exc}")
+
+        if not self.available:
+            print(f"OCRService 加载失败: {last_error}")
+            return
+
+        if settings.PADDLE_OCR_ENABLE_STRUCTURE:
+            self._init_structure_engine()
+
+    def _init_structure_engine(self) -> None:
+        try:
+            from paddleocr import PPStructureV3
+
+            self.structure = PPStructureV3(**self._build_structure_kwargs(self.active_device))
+            self.structure_available = True
+            print(
+                "OCRService: PPStructureV3 加载成功"
+                f" (device={self.active_device})"
+            )
+        except Exception as exc:
+            self.structure = None
+            self.structure_available = False
+            print(f"OCRService: PPStructureV3 未启用，回退为通用 OCR 流程: {exc}")
 
     def extract_all(self, file_path: str, file_type: str = "pdf") -> dict:
         if not self.available:

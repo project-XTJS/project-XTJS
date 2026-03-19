@@ -14,7 +14,7 @@ dependencies = [
     "numpy>=1.26.4,<3",
     "opencv-contrib-python==4.10.0.84",
     "openpyxl>=3.1.5",
-    "paddleocr",
+    "paddleocr==3.4.0",
     "pdfplumber==0.10.2",
     "pydantic-settings>=2.0.0",
     "psycopg2-binary==2.9.10",
