@@ -10,15 +10,16 @@ from app.router.dependencies import get_text_analysis_service
 
 router = APIRouter()
 
+
 @router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(
     file: UploadFile = File(...),
-    analysis_service = Depends(get_text_analysis_service)
+    analysis_service=Depends(get_text_analysis_service),
 ):
     """上传单个文档并返回抽取后的正文内容。"""
     allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
-    
+
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
@@ -30,7 +31,7 @@ async def analyze_file(
 
     content = await file.read()
     temp_file_path = save_temp_file(content, f".{file_extension}")
-    
+
     try:
         extraction_result = analysis_service.extract_text_result(temp_file_path, file_extension)
         text = extraction_result["content"]
@@ -47,13 +48,16 @@ async def analyze_file(
             ocr_used=extraction_result["ocr_used"],
             ocr_available=extraction_result["ocr_available"],
             active_device=extraction_result["active_device"],
+            structure_available=extraction_result["structure_available"],
+            layout_engine=extraction_result["layout_engine"],
+            layout_used=extraction_result["layout_used"],
+            layout_block_count=extraction_result["layout_block_count"],
             seal_enabled=extraction_result["seal_enabled"],
             seal_removed=extraction_result["seal_removed"],
             seal_detected=extraction_result["seal_detected"],
             seal_count=extraction_result["seal_count"],
             seal_texts=extraction_result["seal_texts"],
         )
-        # 返回核心字典
         return {
             "filename": file.filename,
             "file_type": file_extension,
@@ -65,7 +69,12 @@ async def analyze_file(
             "source_mode": extraction_result["source_mode"],
             "ocr_engine": extraction_result["ocr_engine"],
             "ocr_used": extraction_result["ocr_used"],
+            "ocr_available": extraction_result["ocr_available"],
             "active_device": extraction_result["active_device"],
+            "structure_available": extraction_result["structure_available"],
+            "layout_engine": extraction_result["layout_engine"],
+            "layout_used": extraction_result["layout_used"],
+            "layout_block_count": extraction_result["layout_block_count"],
             "seal_enabled": extraction_result["seal_enabled"],
             "seal_removed": extraction_result["seal_removed"],
             "seal_detected": extraction_result["seal_detected"],
@@ -80,34 +89,24 @@ async def analyze_file(
     finally:
         cleanup_temp_file(temp_file_path)
 
+
 @router.post("/run", summary="统一文本分析接口")
 async def run_text_analysis(
     payload: TextAnalysisRequest,
-    analysis_service = Depends(get_text_analysis_service)
+    analysis_service=Depends(get_text_analysis_service),
 ):
     """按 task_type 分发到对应的子业务模块。"""
     text = preprocess_text(payload.text)
 
-    # 1. 完整性与格式检查 (虞光勇、陶明宇)
     if payload.task_type == "integrity_check":
         return analysis_service.integrity.check_integrity(text)
-    
-    # 2. 报价合理性检查 (曾俊、滑鹏鹏)
     elif payload.task_type == "pricing_reason":
         return analysis_service.reasonableness.check_price_reasonableness(text)
-    
-    # 3. 分项报价表校验 (江宇)
     elif payload.task_type == "itemized_pricing":
         return analysis_service.itemized.check_itemized_logic(text)
-    
-    # 4. 偏离条款检查 (高海斌)
     elif payload.task_type == "deviation_check":
         return analysis_service.deviation.check_technical_deviation(text)
-    
-    # 5. 一键全量分析
     elif payload.task_type == "full_analysis":
-        # 注意：全量分析可能需要文件识别时的元数据（如印章信息）
         return analysis_service.run_full_analysis(text, extraction_meta={})
-    
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")

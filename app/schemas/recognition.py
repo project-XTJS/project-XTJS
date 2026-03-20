@@ -1,6 +1,7 @@
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 
+
 # 1. 供 analyze-file 接口使用的元数据构建函数
 def build_analyze_file_metadata(
     *,
@@ -16,6 +17,10 @@ def build_analyze_file_metadata(
     ocr_used: bool = False,
     ocr_available: bool = False,
     active_device: str = "",
+    structure_available: bool = False,
+    layout_engine: str = "",
+    layout_used: bool = False,
+    layout_block_count: int = 0,
     seal_enabled: bool = False,
     seal_removed: bool = False,
     seal_detected: bool = False,
@@ -43,6 +48,12 @@ def build_analyze_file_metadata(
             "engine": ocr_engine,
             "active_device": active_device,
         },
+        "layout": {
+            "available": structure_available,
+            "used": layout_used,
+            "engine": layout_engine,
+            "block_count": layout_block_count,
+        },
         "seal": {
             "enabled": seal_enabled,
             "removed": seal_removed,
@@ -51,6 +62,7 @@ def build_analyze_file_metadata(
             "texts": seal_texts or [],
         },
     }
+
 
 # 2. PDF 一轮识别
 class DocumentMeta(BaseModel):
@@ -61,6 +73,7 @@ class DocumentMeta(BaseModel):
     page_count: int = 0
     document_type: str = ""
 
+
 class ProcessingMeta(BaseModel):
     parser_engine: str = ""
     ocr_engine: str = ""
@@ -69,13 +82,16 @@ class ProcessingMeta(BaseModel):
     avg_confidence: Optional[float] = None
     errors: List[str] = Field(default_factory=list)
 
+
 class QualityFlags(BaseModel):
     is_scanned_pdf: Optional[bool] = None
     low_confidence_pages: List[int] = Field(default_factory=list)
     suspect_garbled_pages: List[int] = Field(default_factory=list)
 
+
 class PdfRound1Response(BaseModel):
     """PDF 一轮识别的标准返回结构"""
+
     schema_version: str = "pdf_round1_lite_v1"
     document_meta: DocumentMeta
     processing_meta: ProcessingMeta
@@ -84,14 +100,18 @@ class PdfRound1Response(BaseModel):
     headings: List[Dict[str, Any]] = Field(default_factory=list)
     anchors: List[Dict[str, Any]] = Field(default_factory=list)
 
+
 class TenderPdfResponse(PdfRound1Response):
     """招标文件的专属响应模型（继承自通用模型）"""
+
     def __init__(self, **data):
         super().__init__(**data)
         self.document_meta.document_type = "tender"
 
+
 class BidPdfResponse(PdfRound1Response):
     """投标文件的专属响应模型"""
+
     def __init__(self, **data):
         super().__init__(**data)
         self.document_meta.document_type = "bid"
