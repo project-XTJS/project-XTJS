@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     
     # 使用逗号分隔的字符串接收环境变量，通过 @property 转换为 Set
     MINIO_ALLOWED_EXTENSIONS_STR: str = Field(
-        default="pdf,docx,doc,png,jpg,jpeg,bmp,tif,tiff", 
+        default="pdf,png,jpg,jpeg,bmp,tif,tiff",
         validation_alias="MINIO_ALLOWED_EXTENSIONS"
     )
 

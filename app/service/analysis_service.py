@@ -10,6 +10,8 @@ from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.verification import VerificationChecker
 
 class AnalysisService:
+    SUPPORTED_EXTENSIONS = ["pdf", "jpg", "jpeg", "png"]
+
     def __init__(self, ocr_service: OCRService) -> None:
         self.ocr_service = ocr_service
         self.integrity = IntegrityChecker()
@@ -19,7 +21,7 @@ class AnalysisService:
         self.verification = VerificationChecker(ocr_service)
     
     def get_supported_extensions(self) -> list:
-        return ["pdf", "docx", "jpg", "jpeg", "png"]
+        return self.SUPPORTED_EXTENSIONS.copy()
     
     def extract_text_result(self, file_path: str, file_extension: str) -> dict:
         """
