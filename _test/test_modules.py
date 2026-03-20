@@ -12,6 +12,50 @@ if PROJECT_ROOT not in sys.path:
 
 # 引入各业务模块
 from app.service.analysis.integrity import IntegrityChecker, TemplateConsistencyChecker
+from app.service.analysis.itemized_pricing import ItemizedPricingChecker
+
+
+def print_itemized_manual_review(result: dict):
+    checks = result.get("checks", {})
+    evidence = result.get("evidence", {})
+    sum_check = checks.get("sum_consistency", {})
+    row_check = checks.get("row_arithmetic", {})
+    duplicate_check = checks.get("duplicate_items", {})
+    missing_check = checks.get("missing_item", {})
+    review_payload = {
+        "mode": result.get("mode"),
+        "status": result.get("status"),
+        "summary": result.get("summary"),
+        "amount_review": {
+            "calculated_total": sum_check.get("calculated_total"),
+            "declared_total": sum_check.get("declared_total"),
+            "difference": sum_check.get("difference"),
+            "matched_total_label": sum_check.get("matched_total_label"),
+            "sum_consistency_status": sum_check.get("status"),
+        },
+        "items": [
+            {
+                "label": item.get("label"),
+                "amount": item.get("amount"),
+            }
+            for item in evidence.get("extracted_items", [])
+        ],
+        "total_candidates": [
+            {
+                "label": item.get("label"),
+                "amount": item.get("amount"),
+            }
+            for item in evidence.get("total_candidates", [])
+        ],
+        "exceptions": {
+            "row_arithmetic": row_check.get("issues", []),
+            "duplicate_items": duplicate_check.get("issues", []),
+            "missing_items": missing_check.get("missing_items", []),
+            "hints": missing_check.get("hints", []),
+        },
+    }
+    print(json.dumps(review_payload, indent=4, ensure_ascii=False))
+
 
 def run_business_tests_with_ocr(bidder_json_path: str, template_json_path: str):
     if not os.path.exists(bidder_json_path) or not os.path.exists(template_json_path):
@@ -35,7 +79,12 @@ def run_business_tests_with_ocr(bidder_json_path: str, template_json_path: str):
     integrity_res = IntegrityChecker().check_integrity(bidder_text)
     print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
 
-    # 2. 智能切片与防篡改检查
+    # 2. 分项报价表检查（江宇）
+    itemized_res = ItemizedPricingChecker().check_itemized_logic(bidder_text)
+    print(json.dumps(itemized_res, indent=4, ensure_ascii=False))
+    print_itemized_manual_review(itemized_res)
+
+    # 3. 智能切片与防篡改检查
     # 从招标模版中找出《投标保证书》的原版模板
     template_match = re.search(r'附件1\s*投标保证书.*?致（招标人）：(.*?)\(4\)\s*投标有效期', template_text, re.DOTALL)
     template_chunk = template_match.group(1) if template_match else ""
