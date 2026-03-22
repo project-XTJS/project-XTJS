@@ -18,8 +18,11 @@ class OCRService:
         self.structure_available = False
         self.active_device = "cpu"
         self.seal_dir = "output_seals"
+        self.signature_dir = "output_signatures"
         if not os.path.exists(self.seal_dir):
             os.makedirs(self.seal_dir)
+        if not os.path.exists(self.signature_dir):
+            os.makedirs(self.signature_dir)
 
         self._prepare_runtime_dirs()
         self._prepare_runtime_env()
@@ -119,7 +122,7 @@ class OCRService:
         try:
             from paddleocr import PaddleOCR
         except Exception as exc:
-            print(f"OCRService 加载失败: {exc}")
+            print(f"OCRService bootstrap failed: {exc}")
             return
 
         last_error: Exception | None = None
@@ -130,19 +133,19 @@ class OCRService:
                     self.available = True
                     self.active_device = device
                     print(
-                        "OCRService: PaddleOCR 加载成功"
-                        f" (device={self.active_device}, lang={settings.PADDLE_OCR_LANG}, version={settings.PADDLE_OCR_VERSION})"
+                        "OCRService: PaddleOCR initialized "
+                        f"(device={self.active_device}, lang={settings.PADDLE_OCR_LANG}, version={settings.PADDLE_OCR_VERSION})"
                     )
-                    print(f"印章截图将保存至: {self.seal_dir}")
+                    print(f"OCRService: seal crops will be saved to {self.seal_dir}")
                     break
                 except Exception as exc:
                     last_error = exc
             if self.available:
                 break
-            print(f"OCRService: PaddleOCR 初始化失败 (device={device}): {last_error}")
+            print(f"OCRService: PaddleOCR init failed (device={device}): {last_error}")
 
         if not self.available:
-            print(f"OCRService 加载失败: {last_error}")
+            print(f"OCRService bootstrap failed: {last_error}")
             return
 
         if settings.PADDLE_OCR_ENABLE_STRUCTURE:
@@ -154,7 +157,7 @@ class OCRService:
         except Exception as exc:
             self.structure = None
             self.structure_available = False
-            print(f"OCRService: PPStructureV3 未启用，回退为通用 OCR 流程: {exc}")
+            print(f"OCRService: PPStructureV3 disabled, fallback to OCR-only pipeline: {exc}")
             return
 
         last_error: Exception | None = None
@@ -162,24 +165,22 @@ class OCRService:
             try:
                 self.structure = PPStructureV3(**kwargs)
                 self.structure_available = True
-                print(
-                    "OCRService: PPStructureV3 加载成功"
-                    f" (device={self.active_device})"
-                )
+                print(f"OCRService: PPStructureV3 initialized (device={self.active_device})")
                 return
             except Exception as exc:
                 last_error = exc
 
         self.structure = None
         self.structure_available = False
-        print(f"OCRService: PPStructureV3 未启用，回退为通用 OCR 流程: {last_error}")
+        print(f"OCRService: PPStructureV3 disabled, fallback to OCR-only pipeline: {last_error}")
 
     def _empty_result(self) -> dict:
         return {
             "text": "",
             "pages": [],
-            "seals": {"count": 0, "texts": [], "locations": []},
-            "layout_blocks": [],
+            "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
+            "signatures": {"count": 0, "texts": [], "locations": []},
+            "layout_sections": [],
             "ocr_applied": False,
             "structure_used": False,
         }
@@ -193,13 +194,108 @@ class OCRService:
             return self._recognize_pdf(file_path)
         return self._recognize_image(file_path)
 
+    def _empty_marker_result(self) -> dict:
+        return {
+            "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
+            "signatures": {"count": 0, "texts": [], "locations": []},
+            "marker_applied": False,
+        }
+
+    def _finalize_marker_result(self, seals: dict, signatures: dict) -> tuple[dict, dict]:
+        seals["texts"] = list(dict.fromkeys(seals.get("texts", [])))
+        dedup_covered_texts: list[dict] = []
+        covered_seen = set()
+        for item in seals.get("covered_texts", []):
+            signature = (item.get("page"), str(item.get("box")), item.get("text"))
+            if signature in covered_seen or not item.get("text"):
+                continue
+            covered_seen.add(signature)
+            dedup_covered_texts.append(item)
+        seals["covered_texts"] = dedup_covered_texts
+        signatures["texts"] = list(dict.fromkeys(signatures.get("texts", [])))
+        return seals, signatures
+
+    def extract_visual_markers(self, file_path: str, file_type: str = "pdf") -> dict:
+        if not self.available:
+            return self._empty_marker_result()
+
+        ext = file_type.lower().lstrip(".")
+        all_seals = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
+        all_signatures = {"count": 0, "texts": [], "locations": []}
+        marker_applied = False
+
+        if ext == "pdf":
+            doc = fitz.open(file_path)
+            try:
+                total_pages = len(doc)
+                for page_index in range(total_pages):
+                    page_no = page_index + 1
+                    image = self._render_pdf_page(doc[page_index])
+                    seal_result = self._detect_seals(image, page_no=page_no)
+                    signature_result = self._detect_handwritten_signatures(image, page_no=page_no)
+
+                    if seal_result["count"] > 0:
+                        all_seals["count"] += seal_result["count"]
+                        all_seals["texts"].extend(seal_result["texts"])
+                        for box in seal_result["locations"]:
+                            all_seals["locations"].append({"page": page_no, "box": box})
+                        for covered in seal_result.get("covered_texts", []):
+                            if not isinstance(covered, dict):
+                                continue
+                            all_seals["covered_texts"].append(
+                                {
+                                    "page": int(covered.get("page", page_no)),
+                                    "box": covered.get("box", []),
+                                    "text": str(covered.get("text") or "").strip(),
+                                }
+                            )
+
+                    if signature_result["count"] > 0:
+                        all_signatures["count"] += signature_result["count"]
+                        all_signatures["texts"].extend(signature_result["texts"])
+                        for box in signature_result["locations"]:
+                            all_signatures["locations"].append({"page": page_no, "box": box})
+
+                    marker_applied = marker_applied or bool(
+                        seal_result["count"] or seal_result.get("covered_texts") or signature_result["count"]
+                    )
+            finally:
+                doc.close()
+        else:
+            image = cv2.imread(file_path)
+            if image is None:
+                return self._empty_marker_result()
+
+            seal_result = self._detect_seals(image, page_no=1)
+            signature_result = self._detect_handwritten_signatures(image, page_no=1)
+
+            all_seals["count"] = seal_result["count"]
+            all_seals["texts"] = seal_result["texts"]
+            all_seals["locations"] = [{"page": 1, "box": box} for box in seal_result["locations"]]
+            all_seals["covered_texts"] = seal_result.get("covered_texts", [])
+
+            all_signatures["count"] = signature_result["count"]
+            all_signatures["texts"] = signature_result["texts"]
+            all_signatures["locations"] = [{"page": 1, "box": box} for box in signature_result["locations"]]
+
+            marker_applied = bool(
+                seal_result["count"] or seal_result.get("covered_texts") or signature_result["count"]
+            )
+
+        finalized_seals, finalized_signatures = self._finalize_marker_result(all_seals, all_signatures)
+        return {
+            "seals": finalized_seals,
+            "signatures": finalized_signatures,
+            "marker_applied": marker_applied,
+        }
+
     def _run_predictor(self, predictor: Any, image: np.ndarray, predictor_name: str) -> list:
         if predictor is None:
             return []
         try:
             return list(predictor.predict(image))
         except Exception as exc:
-            print(f"{predictor_name} 推理失败: {exc}")
+            print(f"{predictor_name} inference failed: {exc}")
             return []
 
     def _extract_text_from_result(self, ocr_res: list, join_char: str = "\n") -> str:
@@ -220,7 +316,7 @@ class OCRService:
                             if text:
                                 texts.append(text)
         except Exception as exc:
-            print(f"OCR 结果解析警告: {exc}")
+            print(f"OCR result parsing warning: {exc}")
 
         return join_char.join(texts)
 
@@ -287,6 +383,93 @@ class OCRService:
             return None
         return builtin_value
 
+    def _bbox_anchor(self, bbox: Any) -> tuple[float, float]:
+        builtin_bbox = self._to_builtin(bbox)
+        if builtin_bbox is None:
+            return (1e9, 1e9)
+        if isinstance(builtin_bbox, (list, tuple)):
+            # [x1, y1, x2, y2]
+            if len(builtin_bbox) >= 2 and all(isinstance(item, (int, float)) for item in builtin_bbox[:2]):
+                return (float(builtin_bbox[0]), float(builtin_bbox[1]))
+            # [[x, y], ...]
+            if builtin_bbox and all(
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+                and isinstance(item[0], (int, float))
+                and isinstance(item[1], (int, float))
+                for item in builtin_bbox
+            ):
+                x_values = [float(item[0]) for item in builtin_bbox]
+                y_values = [float(item[1]) for item in builtin_bbox]
+                return (min(x_values), min(y_values))
+        return (1e9, 1e9)
+
+    def _normalize_layout_type(self, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return "text"
+        if any(token in normalized for token in ("title", "header", "heading")):
+            return "heading"
+        if "table" in normalized:
+            return "table"
+        if any(token in normalized for token in ("figure", "image", "chart", "photo")):
+            return "figure"
+        return "text"
+
+    def _normalize_section_text(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not normalized:
+            return ""
+        # Avoid persisting markdown/html fragments directly.
+        normalized = re.sub(r"<[^>]+>", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    def _clip_section_text(self, text: str, max_chars: int = 240) -> str:
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars].rstrip()}..."
+
+    def _simplify_layout_sections(self, layout_blocks: list[dict]) -> list[dict]:
+        if not layout_blocks:
+            return []
+
+        sorted_blocks = sorted(
+            layout_blocks,
+            key=lambda item: (
+                int(item.get("page", 0) or 0),
+                float(item.get("_order_y", 1e9) or 1e9),
+                float(item.get("_order_x", 1e9) or 1e9),
+            ),
+        )
+
+        sections: list[dict] = []
+        seen = set()
+        page_section_count: dict[int, int] = {}
+        max_sections_per_page = 60
+
+        for block in sorted_blocks:
+            page_no = int(block.get("page", 0) or 0)
+            if page_no <= 0:
+                continue
+            if page_section_count.get(page_no, 0) >= max_sections_per_page:
+                continue
+
+            section_type = self._normalize_layout_type(str(block.get("type") or "text"))
+            section_text = self._normalize_section_text(block.get("text") or "")
+            if len(section_text) < 2:
+                continue
+            section_text = self._clip_section_text(section_text)
+
+            signature = (page_no, section_type, section_text)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            sections.append({"page": page_no, "type": section_type, "text": section_text})
+            page_section_count[page_no] = page_section_count.get(page_no, 0) + 1
+
+        return sections
+
     def _extract_layout_blocks(self, structure_result: list, page_no: int) -> list[dict]:
         built_result = self._to_builtin(structure_result)
         if not built_result:
@@ -337,12 +520,15 @@ class OCRService:
             if is_layout_block and text:
                 signature = (label, text, str(bbox))
                 if signature not in seen:
+                    x_anchor, y_anchor = self._bbox_anchor(bbox)
                     blocks.append(
                         {
                             "page": page_no,
                             "type": label or "text",
                             "text": text,
                             "bbox": bbox,
+                            "_order_x": x_anchor,
+                            "_order_y": y_anchor,
                         }
                     )
                     seen.add(signature)
@@ -377,11 +563,12 @@ class OCRService:
             return "", [], False
 
         layout_blocks = self._extract_layout_blocks(structure_result, page_no)
-        layout_text = self._merge_text_parts([block["text"] for block in layout_blocks])
+        layout_sections = self._simplify_layout_sections(layout_blocks)
+        layout_text = self._merge_text_parts([section["text"] for section in layout_sections])
         if not layout_text:
             layout_text = self._extract_structure_text(structure_result)
 
-        return layout_text, layout_blocks, bool(layout_text or layout_blocks)
+        return layout_text, layout_sections, bool(layout_text or layout_sections)
 
     def _remove_seal_texts(self, text: str, seal_texts: list[str]) -> str:
         if not text or not seal_texts or not settings.PADDLE_OCR_EXCLUDE_SEAL_TEXT:
@@ -394,8 +581,203 @@ class OCRService:
                 cleaned_text = cleaned_text.replace(normalized, "")
         return re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
 
+    def _sanitize_recognized_text(self, text: str, *, min_len: int = 2, max_len: int = 80) -> str:
+        normalized = re.sub(r"\s+", "", str(text or ""))
+        normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]", "", normalized)
+        if len(normalized) < min_len:
+            return ""
+        if len(normalized) > max_len:
+            return normalized[:max_len]
+        return normalized
+
+    def _expand_box(self, box: list[int], img_shape: tuple[int, int, int], pad: int = 12) -> tuple[int, int, int, int]:
+        x, y, w, h = box
+        img_h, img_w = img_shape[:2]
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(img_w, x + w + pad)
+        y2 = min(img_h, y + h + pad)
+        return x1, y1, x2, y2
+
+    def _recover_text_from_seal_region(
+        self,
+        img_bgr: np.ndarray,
+        seal_box: list[int],
+        full_seal_mask: np.ndarray,
+    ) -> str:
+        if img_bgr is None or self.ocr is None:
+            return ""
+
+        x1, y1, x2, y2 = self._expand_box(seal_box, img_bgr.shape, pad=14)
+        if x2 <= x1 or y2 <= y1:
+            return ""
+
+        roi = img_bgr[y1:y2, x1:x2]
+        roi_mask = full_seal_mask[y1:y2, x1:x2]
+        if roi.size == 0 or roi_mask.size == 0:
+            return ""
+
+        inpainted = cv2.inpaint(roi, roi_mask, 3, cv2.INPAINT_TELEA)
+
+        b_channel, g_channel, _ = cv2.split(roi)
+        red_suppressed_gray = cv2.max(b_channel, g_channel)
+        red_suppressed = cv2.cvtColor(red_suppressed_gray, cv2.COLOR_GRAY2BGR)
+
+        gray = cv2.cvtColor(inpainted, cv2.COLOR_BGR2GRAY)
+        enhanced_binary = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            31,
+            11,
+        )
+        enhanced = cv2.cvtColor(enhanced_binary, cv2.COLOR_GRAY2BGR)
+
+        recovered_candidates: list[str] = []
+        for candidate in (inpainted, red_suppressed, enhanced):
+            resized = cv2.resize(candidate, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            candidate_result = self._run_predictor(self.ocr, resized, "Seal Covered OCR")
+            raw_text = self._extract_text_from_result(candidate_result, join_char="")
+            cleaned = self._sanitize_recognized_text(raw_text, min_len=2, max_len=40)
+            if cleaned:
+                recovered_candidates.append(cleaned)
+
+        return self._merge_text_parts(recovered_candidates, join_char=" ")
+
+    def _is_box_close(self, box_a: list[int], box_b: list[int], x_gap: int, y_gap: int) -> bool:
+        ax1, ay1, aw, ah = box_a
+        bx1, by1, bw, bh = box_b
+        ax2, ay2 = ax1 + aw, ay1 + ah
+        bx2, by2 = bx1 + bw, by1 + bh
+        return not (
+            ax2 + x_gap < bx1
+            or bx2 + x_gap < ax1
+            or ay2 + y_gap < by1
+            or by2 + y_gap < ay1
+        )
+
+    def _merge_nearby_boxes(self, boxes: list[list[int]], x_gap: int = 24, y_gap: int = 20) -> list[list[int]]:
+        if not boxes:
+            return []
+        merged: list[list[int]] = []
+        for box in sorted(boxes, key=lambda item: (item[1], item[0])):
+            merged_into_existing = False
+            for current in merged:
+                if self._is_box_close(current, box, x_gap=x_gap, y_gap=y_gap):
+                    cx, cy, cw, ch = current
+                    bx, by, bw, bh = box
+                    x1 = min(cx, bx)
+                    y1 = min(cy, by)
+                    x2 = max(cx + cw, bx + bw)
+                    y2 = max(cy + ch, by + bh)
+                    current[0] = x1
+                    current[1] = y1
+                    current[2] = x2 - x1
+                    current[3] = y2 - y1
+                    merged_into_existing = True
+                    break
+            if not merged_into_existing:
+                merged.append(box.copy())
+        return merged
+
+    def _detect_handwritten_signatures(self, img_bgr: np.ndarray, page_no: int = 1) -> dict:
+        signature_info = {"count": 0, "texts": [], "locations": []}
+        if img_bgr is None or not getattr(settings, "PADDLE_OCR_ENABLE_SIGNATURE_RECOGNITION", True):
+            return signature_info
+
+        img_h, img_w = img_bgr.shape[:2]
+        if img_h < 20 or img_w < 20:
+            return signature_info
+
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+
+        blue_mask = cv2.inRange(hsv, np.array([90, 40, 20]), np.array([140, 255, 255]))
+        dark_mask = cv2.inRange(gray, 0, 130)
+        stroke_mask = cv2.bitwise_or(blue_mask, dark_mask)
+
+        roi_top = int(img_h * 0.35)
+        bottom_mask = stroke_mask[roi_top:, :]
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+        bottom_mask = cv2.morphologyEx(bottom_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        bottom_mask = cv2.erode(bottom_mask, np.ones((2, 2), np.uint8), iterations=1)
+
+        contours, _ = cv2.findContours(bottom_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidate_boxes: list[list[int]] = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < 280 or area > 15000:
+                continue
+            x, y, w, h = cv2.boundingRect(contour)
+            aspect_ratio = float(w) / max(float(h), 1.0)
+            fill_ratio = float(area) / max(float(w * h), 1.0)
+            if w < 50 or h < 12:
+                continue
+            if not 1.4 < aspect_ratio < 14.0:
+                continue
+            if not 0.02 < fill_ratio < 0.65:
+                continue
+
+            candidate_boxes.append([int(x), int(y + roi_top), int(w), int(h)])
+
+        merged_boxes = self._merge_nearby_boxes(candidate_boxes, x_gap=28, y_gap=22)
+        merged_boxes = sorted(merged_boxes, key=lambda item: item[1], reverse=True)[:8]
+
+        signature_idx = 0
+        for box in merged_boxes:
+            x, y, w, h = box
+            signature_idx += 1
+            x1, y1, x2, y2 = self._expand_box(box, img_bgr.shape, pad=10)
+            signature_crop = img_bgr[y1:y2, x1:x2]
+            if signature_crop.size == 0:
+                continue
+
+            save_path = os.path.join(self.signature_dir, f"signature_P{page_no}_{signature_idx}.png")
+            cv2.imwrite(save_path, signature_crop)
+
+            gray_crop = cv2.cvtColor(signature_crop, cv2.COLOR_BGR2GRAY)
+            binary_crop = cv2.adaptiveThreshold(
+                gray_crop,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                35,
+                15,
+            )
+            binary_bgr = cv2.cvtColor(binary_crop, cv2.COLOR_GRAY2BGR)
+
+            signature_text_candidates: list[str] = []
+            for candidate in (signature_crop, binary_bgr):
+                resized = cv2.resize(candidate, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                candidate_result = self._run_predictor(self.ocr, resized, "Signature OCR")
+                raw_text = self._extract_text_from_result(candidate_result, join_char="")
+                clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=20)
+                if clean_text:
+                    signature_text_candidates.append(clean_text)
+
+            merged_text = self._merge_text_parts(signature_text_candidates, join_char=" ")
+            if merged_text:
+                signature_info["texts"].append(merged_text)
+
+            signature_info["count"] += 1
+            signature_info["locations"].append([x, y, w, h])
+
+        signature_info["texts"] = list(dict.fromkeys(signature_info["texts"]))
+        return signature_info
+
+    def _append_recovered_texts(self, page_text: str, recovered_items: list[dict]) -> str:
+        recovered_text = self._merge_text_parts(
+            [str(item.get("text") or "").strip() for item in recovered_items if isinstance(item, dict)],
+            join_char="\n",
+        )
+        if not recovered_text:
+            return page_text
+        return self._merge_text_parts([page_text, recovered_text], join_char="\n")
+
     def _detect_seals(self, img_bgr: np.ndarray, page_no: int = 1) -> dict:
-        seal_info = {"count": 0, "texts": [], "locations": []}
+        seal_info = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
         if img_bgr is None or not settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION:
             return seal_info
 
@@ -431,14 +813,27 @@ class OCRService:
             resized_crop = cv2.resize(seal_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
             crop_result = self._run_predictor(self.ocr, resized_crop, "Seal OCR")
             raw_text = self._extract_text_from_result(crop_result, join_char="")
-            clean_text = re.sub(r"[〇一二三四五六七八九十月年\d\-\.：:（）\(\)]", "", raw_text)
-            if len(clean_text) > 2:
+            clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=30)
+            if clean_text:
                 seal_info["texts"].append(clean_text)
+
+            recovered_text = self._recover_text_from_seal_region(img_bgr, box, mask)
+            if recovered_text:
+                seal_info["covered_texts"].append({"page": page_no, "box": box, "text": recovered_text})
 
             seal_info["count"] += 1
             seal_info["locations"].append(box)
 
         seal_info["texts"] = list(dict.fromkeys(seal_info["texts"]))
+        dedup_covered_texts: list[dict] = []
+        covered_seen = set()
+        for item in seal_info["covered_texts"]:
+            signature = (item.get("page"), item.get("text"), str(item.get("box")))
+            if signature in covered_seen:
+                continue
+            covered_seen.add(signature)
+            dedup_covered_texts.append(item)
+        seal_info["covered_texts"] = dedup_covered_texts
         return seal_info
 
     def _render_pdf_page(self, page) -> np.ndarray:
@@ -453,50 +848,86 @@ class OCRService:
     def _recognize_pdf(self, pdf_path: str) -> dict:
         pages_data: list[dict] = []
         full_text: list[str] = []
-        layout_blocks: list[dict] = []
-        all_seals = {"count": 0, "texts": [], "locations": []}
+        layout_sections: list[dict] = []
+        all_seals = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
+        all_signatures = {"count": 0, "texts": [], "locations": []}
         ocr_applied = False
         structure_used = False
 
         doc = fitz.open(pdf_path)
         try:
             total_pages = len(doc)
-            pbar = tqdm(range(total_pages), desc="解析中", unit="页")
+            pbar = tqdm(range(total_pages), desc="OCR processing", unit="page")
             for page_index in pbar:
                 page_no = page_index + 1
                 image = self._render_pdf_page(doc[page_index])
 
                 ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
                 ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
-                layout_text, page_layout_blocks, page_structure_used = self._run_structure_layout(image, page_no)
+                layout_text, page_layout_sections, page_structure_used = self._run_structure_layout(image, page_no)
                 seal_result = self._detect_seals(image, page_no=page_no)
+                signature_result = self._detect_handwritten_signatures(image, page_no=page_no)
 
                 page_text = self._combine_page_text(layout_text, ocr_text)
                 page_text = self._remove_seal_texts(page_text, seal_result["texts"])
+                page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
 
                 if seal_result["count"] > 0:
                     all_seals["count"] += seal_result["count"]
                     all_seals["texts"].extend(seal_result["texts"])
                     for box in seal_result["locations"]:
                         all_seals["locations"].append({"page": page_no, "box": box})
+                    for covered in seal_result.get("covered_texts", []):
+                        if not isinstance(covered, dict):
+                            continue
+                        all_seals["covered_texts"].append(
+                            {
+                                "page": int(covered.get("page", page_no)),
+                                "box": covered.get("box", []),
+                                "text": str(covered.get("text") or "").strip(),
+                            }
+                        )
 
-                if page_layout_blocks:
-                    layout_blocks.extend(page_layout_blocks)
+                if signature_result["count"] > 0:
+                    all_signatures["count"] += signature_result["count"]
+                    all_signatures["texts"].extend(signature_result["texts"])
+                    for box in signature_result["locations"]:
+                        all_signatures["locations"].append({"page": page_no, "box": box})
+
+                if page_layout_sections:
+                    layout_sections.extend(page_layout_sections)
 
                 pages_data.append({"page": page_no, "text": page_text})
                 full_text.append(page_text)
-                ocr_applied = ocr_applied or bool(ocr_text.strip() or layout_text.strip() or seal_result["count"])
+                ocr_applied = ocr_applied or bool(
+                    ocr_text.strip()
+                    or layout_text.strip()
+                    or seal_result["count"]
+                    or seal_result.get("covered_texts")
+                    or signature_result["count"]
+                )
                 structure_used = structure_used or page_structure_used
-                pbar.set_postfix({"印章数": all_seals["count"]})
+                pbar.set_postfix({"seal_count": all_seals["count"], "signature_count": all_signatures["count"]})
         finally:
             doc.close()
 
         all_seals["texts"] = list(dict.fromkeys(all_seals["texts"]))
+        dedup_covered_texts: list[dict] = []
+        covered_seen = set()
+        for item in all_seals["covered_texts"]:
+            signature = (item.get("page"), str(item.get("box")), item.get("text"))
+            if signature in covered_seen or not item.get("text"):
+                continue
+            covered_seen.add(signature)
+            dedup_covered_texts.append(item)
+        all_seals["covered_texts"] = dedup_covered_texts
+        all_signatures["texts"] = list(dict.fromkeys(all_signatures["texts"]))
         return {
             "text": self._merge_text_parts(full_text),
             "pages": pages_data,
             "seals": all_seals,
-            "layout_blocks": layout_blocks,
+            "signatures": all_signatures,
+            "layout_sections": layout_sections,
             "ocr_applied": ocr_applied,
             "structure_used": structure_used,
         }
@@ -508,12 +939,15 @@ class OCRService:
 
         ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
         ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
-        layout_text, layout_blocks, structure_used = self._run_structure_layout(image, page_no=1)
+        layout_text, layout_sections, structure_used = self._run_structure_layout(image, page_no=1)
         seal_result = self._detect_seals(image, page_no=1)
+        signature_result = self._detect_handwritten_signatures(image, page_no=1)
 
         page_text = self._combine_page_text(layout_text, ocr_text)
         page_text = self._remove_seal_texts(page_text, seal_result["texts"])
+        page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
         formatted_locations = [{"page": 1, "box": box} for box in seal_result["locations"]]
+        formatted_signature_locations = [{"page": 1, "box": box} for box in signature_result["locations"]]
 
         return {
             "text": page_text,
@@ -522,8 +956,20 @@ class OCRService:
                 "count": seal_result["count"],
                 "texts": seal_result["texts"],
                 "locations": formatted_locations,
+                "covered_texts": seal_result.get("covered_texts", []),
             },
-            "layout_blocks": layout_blocks,
-            "ocr_applied": bool(ocr_text.strip() or layout_text.strip() or seal_result["count"]),
+            "signatures": {
+                "count": signature_result["count"],
+                "texts": list(dict.fromkeys(signature_result["texts"])),
+                "locations": formatted_signature_locations,
+            },
+            "layout_sections": layout_sections,
+            "ocr_applied": bool(
+                ocr_text.strip()
+                or layout_text.strip()
+                or seal_result["count"]
+                or seal_result.get("covered_texts")
+                or signature_result["count"]
+            ),
             "structure_used": structure_used,
         }

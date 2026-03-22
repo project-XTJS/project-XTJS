@@ -1,12 +1,13 @@
 """文本分析路由：统一承接文档解析与规则分析能力。"""
 
 import os
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 
-from app.schemas.recognition import build_analyze_file_metadata
-from app.schemas.analysis import TextAnalysisRequest
-from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+
 from app.router.dependencies import get_text_analysis_service
+from app.schemas.analysis import TextAnalysisRequest
+from app.schemas.recognition import build_analyze_file_metadata
+from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
 router = APIRouter()
 
@@ -16,7 +17,7 @@ async def analyze_file(
     file: UploadFile = File(...),
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """上传单个文档并返回抽取后的正文内容。"""
+    """上传单个文档并返回识别结果（精简可读版）。"""
     allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
 
@@ -34,7 +35,6 @@ async def analyze_file(
 
     try:
         extraction_result = analysis_service.extract_text_result(temp_file_path, file_extension)
-        text = extraction_result["content"]
         metadata = build_analyze_file_metadata(
             filename=file.filename,
             file_type=file_extension,
@@ -46,40 +46,51 @@ async def analyze_file(
             source_mode=extraction_result["source_mode"],
             ocr_engine=extraction_result["ocr_engine"],
             ocr_used=extraction_result["ocr_used"],
-            ocr_available=extraction_result["ocr_available"],
-            active_device=extraction_result["active_device"],
-            structure_available=extraction_result["structure_available"],
-            layout_engine=extraction_result["layout_engine"],
             layout_used=extraction_result["layout_used"],
-            layout_block_count=extraction_result["layout_block_count"],
-            seal_enabled=extraction_result["seal_enabled"],
-            seal_removed=extraction_result["seal_removed"],
+            layout_section_count=extraction_result["layout_section_count"],
+            recognition_route=extraction_result["recognition_route"],
+            recognition_reason=extraction_result["recognition_reason"],
+            pdf_mode=extraction_result["pdf_mode"],
+            active_device=extraction_result["active_device"],
             seal_detected=extraction_result["seal_detected"],
             seal_count=extraction_result["seal_count"],
-            seal_texts=extraction_result["seal_texts"],
+            seal_covered_text_count=extraction_result["seal_covered_text_count"],
+            signature_detected=extraction_result["signature_detected"],
+            signature_count=extraction_result["signature_count"],
         )
+
         return {
             "filename": file.filename,
             "file_type": file_extension,
             "file_size": len(content),
-            "content": text,
+            "content": extraction_result["content"],
+            "text_length": extraction_result["text_length"],
             "pages": extraction_result["pages"],
             "page_count": extraction_result["page_count"],
-            "parser_engine": extraction_result["parser_engine"],
-            "source_mode": extraction_result["source_mode"],
-            "ocr_engine": extraction_result["ocr_engine"],
-            "ocr_used": extraction_result["ocr_used"],
-            "ocr_available": extraction_result["ocr_available"],
-            "active_device": extraction_result["active_device"],
-            "structure_available": extraction_result["structure_available"],
-            "layout_engine": extraction_result["layout_engine"],
-            "layout_used": extraction_result["layout_used"],
-            "layout_block_count": extraction_result["layout_block_count"],
-            "seal_enabled": extraction_result["seal_enabled"],
-            "seal_removed": extraction_result["seal_removed"],
-            "seal_detected": extraction_result["seal_detected"],
-            "seal_count": extraction_result["seal_count"],
-            "seal_texts": extraction_result["seal_texts"],
+            "layout_sections": extraction_result["layout_sections"],
+            "recognition": {
+                "route": extraction_result["recognition_route"],
+                "reason": extraction_result["recognition_reason"],
+                "pdf_mode": extraction_result["pdf_mode"],
+                "pdf_text_stats": extraction_result["pdf_text_stats"],
+                "parser_engine": extraction_result["parser_engine"],
+                "ocr_engine": extraction_result["ocr_engine"],
+                "ocr_used": extraction_result["ocr_used"],
+                "layout_used": extraction_result["layout_used"],
+                "layout_section_count": extraction_result["layout_section_count"],
+                "active_device": extraction_result["active_device"],
+            },
+            "seal": {
+                "detected": extraction_result["seal_detected"],
+                "count": extraction_result["seal_count"],
+                "texts": extraction_result["seal_texts"],
+                "covered_texts": extraction_result["seal_covered_texts"],
+            },
+            "signature": {
+                "detected": extraction_result["signature_detected"],
+                "count": extraction_result["signature_count"],
+                "texts": extraction_result["signature_texts"],
+            },
             "metadata": metadata,
         }
     except ValueError as exc:
@@ -95,18 +106,18 @@ async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """按 task_type 分发到对应的子业务模块。"""
+    """按 task_type 分发到对应子业务模块。"""
     text = preprocess_text(payload.text)
 
     if payload.task_type == "integrity_check":
         return analysis_service.integrity.check_integrity(text)
-    elif payload.task_type == "pricing_reason":
+    if payload.task_type == "pricing_reason":
         return analysis_service.reasonableness.check_price_reasonableness(text)
-    elif payload.task_type == "itemized_pricing":
+    if payload.task_type == "itemized_pricing":
         return analysis_service.itemized.check_itemized_logic(text)
-    elif payload.task_type == "deviation_check":
+    if payload.task_type == "deviation_check":
         return analysis_service.deviation.check_technical_deviation(text)
-    elif payload.task_type == "full_analysis":
+    if payload.task_type == "full_analysis":
         return analysis_service.run_full_analysis(text, extraction_meta={})
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")
+
+    raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")

@@ -1,8 +1,8 @@
-from typing import List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
-# 1. 供 analyze-file 接口使用的元数据构建函数
 def build_analyze_file_metadata(
     *,
     filename: str,
@@ -15,21 +15,21 @@ def build_analyze_file_metadata(
     source_mode: str = "",
     ocr_engine: str = "",
     ocr_used: bool = False,
-    ocr_available: bool = False,
-    active_device: str = "",
-    structure_available: bool = False,
-    layout_engine: str = "",
     layout_used: bool = False,
-    layout_block_count: int = 0,
-    seal_enabled: bool = False,
-    seal_removed: bool = False,
+    layout_section_count: int = 0,
+    recognition_route: str = "",
+    recognition_reason: str = "",
+    pdf_mode: str = "",
+    active_device: str = "",
     seal_detected: bool = False,
     seal_count: int = 0,
-    seal_texts: list[str] | None = None,
+    seal_covered_text_count: int = 0,
+    signature_detected: bool = False,
+    signature_count: int = 0,
 ) -> Dict[str, Any]:
-    """构建 analyze-file 的结构化元数据。"""
+    """构建 analyze-file 的轻量元数据。"""
     return {
-        "schema_version": "analyze_file_v1",
+        "schema_version": "analyze_file_v3",
         "document": {
             "filename": filename,
             "file_type": file_type,
@@ -38,33 +38,32 @@ def build_analyze_file_metadata(
             "mime_type": mime_type,
             "text_length": text_length,
         },
-        "processing": {
+        "recognition": {
+            "route": recognition_route,
+            "reason": recognition_reason,
+            "pdf_mode": pdf_mode,
             "parser_engine": parser_engine,
+            "ocr_engine": ocr_engine,
+            "ocr_used": ocr_used,
+            "layout_used": layout_used,
+            "layout_section_count": layout_section_count,
             "source_mode": source_mode,
         },
-        "ocr": {
-            "available": ocr_available,
-            "used": ocr_used,
-            "engine": ocr_engine,
-            "active_device": active_device,
-        },
-        "layout": {
-            "available": structure_available,
-            "used": layout_used,
-            "engine": layout_engine,
-            "block_count": layout_block_count,
+        "runtime": {
+            "device": active_device,
         },
         "seal": {
-            "enabled": seal_enabled,
-            "removed": seal_removed,
             "detected": seal_detected,
             "count": seal_count,
-            "texts": seal_texts or [],
+            "covered_text_count": seal_covered_text_count,
+        },
+        "signature": {
+            "detected": signature_detected,
+            "count": signature_count,
         },
     }
 
 
-# 2. PDF 一轮识别
 class DocumentMeta(BaseModel):
     document_id: str = ""
     file_name: str = ""
@@ -90,7 +89,7 @@ class QualityFlags(BaseModel):
 
 
 class PdfRound1Response(BaseModel):
-    """PDF 一轮识别的标准返回结构"""
+    """PDF 一轮识别标准返回结构。"""
 
     schema_version: str = "pdf_round1_lite_v1"
     document_meta: DocumentMeta
@@ -102,7 +101,7 @@ class PdfRound1Response(BaseModel):
 
 
 class TenderPdfResponse(PdfRound1Response):
-    """招标文件的专属响应模型（继承自通用模型）"""
+    """招标文档专用返回模型。"""
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -110,7 +109,7 @@ class TenderPdfResponse(PdfRound1Response):
 
 
 class BidPdfResponse(PdfRound1Response):
-    """投标文件的专属响应模型"""
+    """投标文档专用返回模型。"""
 
     def __init__(self, **data):
         super().__init__(**data)
