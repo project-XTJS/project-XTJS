@@ -335,6 +335,12 @@ class AnalysisService:
         except (TypeError, ValueError):
             signature_count = 0
 
+        table_sections = [
+            section
+            for section in layout_sections
+            if isinstance(section, dict) and str(section.get("type") or "").strip().lower() == "table"
+        ]
+
         return {
             "content": raw_text,
             "text_length": len(raw_text),
@@ -348,6 +354,8 @@ class AnalysisService:
             "layout_used": layout_used,
             "layout_sections": layout_sections,
             "layout_section_count": len(layout_sections),
+            "table_sections": table_sections,
+            "table_section_count": len(table_sections),
             "seal_detected": seal_count > 0,
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),

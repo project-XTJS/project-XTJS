@@ -68,6 +68,7 @@ async def analyze_file(
             "pages": extraction_result["pages"],
             "page_count": extraction_result["page_count"],
             "layout_sections": extraction_result["layout_sections"],
+            "table_sections": extraction_result["table_sections"],
             "recognition": {
                 "route": extraction_result["recognition_route"],
                 "reason": extraction_result["recognition_reason"],
@@ -78,6 +79,7 @@ async def analyze_file(
                 "ocr_used": extraction_result["ocr_used"],
                 "layout_used": extraction_result["layout_used"],
                 "layout_section_count": extraction_result["layout_section_count"],
+                "table_section_count": extraction_result["table_section_count"],
                 "active_device": extraction_result["active_device"],
             },
             "seal": {

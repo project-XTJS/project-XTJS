@@ -1,3 +1,4 @@
+import html
 import os
 import re
 from typing import Any
@@ -352,6 +353,16 @@ class OCRService:
                 seen.add(normalized)
         return join_char.join(merged)
 
+    def _dedupe_text_parts(self, parts: list[str]) -> list[str]:
+        deduped: list[str] = []
+        seen = set()
+        for part in parts:
+            normalized = str(part or "").strip()
+            if normalized and normalized not in seen:
+                deduped.append(normalized)
+                seen.add(normalized)
+        return deduped
+
     def _extract_text_value(self, value: Any) -> str:
         if value is None:
             return ""
@@ -376,6 +387,37 @@ class OCRService:
         if builtin_value is value:
             return ""
         return self._extract_text_value(builtin_value)
+
+    def _collect_nested_field_values(
+        self,
+        value: Any,
+        field_names: tuple[str, ...],
+        *,
+        keep_markup: bool = False,
+    ) -> list[str]:
+        collected: list[str] = []
+
+        def walk(node: Any, depth: int = 0) -> None:
+            if node is None or depth > 6:
+                return
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    if key in field_names:
+                        if keep_markup and isinstance(item, str):
+                            candidate = item.strip()
+                        else:
+                            candidate = self._extract_text_value(item)
+                        if candidate:
+                            collected.append(candidate)
+                    if isinstance(item, (dict, list, tuple, set)):
+                        walk(item, depth + 1)
+                return
+            if isinstance(node, (list, tuple, set)):
+                for item in node:
+                    walk(item, depth + 1)
+
+        walk(self._to_builtin(value))
+        return self._dedupe_text_parts(collected)
 
     def _normalize_bbox(self, value: Any) -> Any:
         builtin_value = self._to_builtin(value)
@@ -416,11 +458,24 @@ class OCRService:
             return "figure"
         return "text"
 
-    def _normalize_section_text(self, text: str) -> str:
-        normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    def _normalize_section_text(self, text: str, *, preserve_lines: bool = False) -> str:
+        normalized = html.unescape(str(text or ""))
+        if preserve_lines:
+            normalized = re.sub(r"\r\n?", "\n", normalized)
+            normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"</?(table|thead|tbody|tfoot|tr|p|div|section|article)[^>]*>", "\n", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"</?(td|th)[^>]*>", "\t", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"<[^>]+>", " ", normalized)
+            normalized = re.sub(r"[^\S\n\t]+", " ", normalized)
+            normalized = re.sub(r" *\t *", "\t", normalized)
+            normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+            normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+            lines = [re.sub(r"[ \t]+", " ", line).strip() for line in normalized.splitlines()]
+            return "\n".join(line for line in lines if line)
+
+        normalized = re.sub(r"\s+", " ", normalized).strip()
         if not normalized:
             return ""
-        # Avoid persisting markdown/html fragments directly.
         normalized = re.sub(r"<[^>]+>", " ", normalized)
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized
@@ -429,6 +484,43 @@ class OCRService:
         if len(text) <= max_chars:
             return text
         return f"{text[:max_chars].rstrip()}..."
+
+    def _build_table_section(self, page_no: int, block: dict) -> dict | None:
+        markdown_parts = self._dedupe_text_parts(block.get("table_markdown_parts") or [])
+        html_parts = self._dedupe_text_parts(block.get("table_html_parts") or [])
+        cell_texts = self._dedupe_text_parts(block.get("table_cell_texts") or [])
+        raw_text = str(block.get("text") or "")
+
+        full_text_candidates = [
+            self._merge_text_parts(
+                [self._normalize_section_text(item, preserve_lines=True) for item in markdown_parts],
+                join_char="\n\n",
+            ),
+            self._merge_text_parts(
+                [self._normalize_section_text(item, preserve_lines=True) for item in html_parts],
+                join_char="\n\n",
+            ),
+            self._normalize_section_text(raw_text, preserve_lines=True),
+            self._merge_text_parts(
+                [self._normalize_section_text(item, preserve_lines=True) for item in cell_texts],
+                join_char="\n",
+            ),
+        ]
+        section_text = next((candidate for candidate in full_text_candidates if candidate), "")
+        if len(section_text) < 2:
+            return None
+
+        section = {"page": page_no, "type": "table", "text": section_text}
+        normalized_raw_text = self._normalize_section_text(raw_text, preserve_lines=True)
+        if normalized_raw_text:
+            section["raw_text"] = normalized_raw_text
+        if markdown_parts:
+            section["markdown"] = "\n\n".join(markdown_parts)
+        if html_parts:
+            section["html"] = "\n\n".join(html_parts)
+        if cell_texts:
+            section["cell_texts"] = cell_texts
+        return section
 
     def _simplify_layout_sections(self, layout_blocks: list[dict]) -> list[dict]:
         if not layout_blocks:
@@ -456,16 +548,25 @@ class OCRService:
                 continue
 
             section_type = self._normalize_layout_type(str(block.get("type") or "text"))
-            section_text = self._normalize_section_text(block.get("text") or "")
-            if len(section_text) < 2:
-                continue
-            section_text = self._clip_section_text(section_text)
+            if section_type == "table":
+                section = self._build_table_section(page_no, block)
+                if section is None:
+                    continue
+            else:
+                section_text = self._normalize_section_text(block.get("text") or "")
+                if len(section_text) < 2:
+                    continue
+                section = {
+                    "page": page_no,
+                    "type": section_type,
+                    "text": self._clip_section_text(section_text),
+                }
 
-            signature = (page_no, section_type, section_text)
+            signature = (page_no, section["type"], section["text"])
             if signature in seen:
                 continue
             seen.add(signature)
-            sections.append({"page": page_no, "type": section_type, "text": section_text})
+            sections.append(section)
             page_section_count[page_no] = page_section_count.get(page_no, 0) + 1
 
         return sections
@@ -508,6 +609,7 @@ class OCRService:
                     label = candidate.strip()
                     break
 
+            section_type = self._normalize_layout_type(label or "text")
             text = self._extract_text_value(node)
             bbox = None
             for key in bbox_keys:
@@ -516,21 +618,41 @@ class OCRService:
                     if bbox is not None:
                         break
 
+            table_markdown_parts: list[str] = []
+            table_html_parts: list[str] = []
+            table_cell_texts: list[str] = []
+            if section_type == "table":
+                table_markdown_parts = self._collect_nested_field_values(node, ("markdown",), keep_markup=True)
+                table_html_parts = self._collect_nested_field_values(node, ("html", "pred_html"), keep_markup=True)
+                table_cell_texts = self._collect_nested_field_values(node, ("rec_texts",))
+
+            has_table_content = bool(table_markdown_parts or table_html_parts or table_cell_texts)
             is_layout_block = bool(label or bbox is not None or "block_content" in node)
-            if is_layout_block and text:
-                signature = (label, text, str(bbox))
+            if is_layout_block and (text or has_table_content):
+                signature_text = (
+                    text
+                    or "\n".join(table_cell_texts)
+                    or "\n\n".join(table_markdown_parts)
+                    or "\n\n".join(table_html_parts)
+                )
+                signature = (label or section_type, signature_text, str(bbox))
                 if signature not in seen:
                     x_anchor, y_anchor = self._bbox_anchor(bbox)
-                    blocks.append(
-                        {
-                            "page": page_no,
-                            "type": label or "text",
-                            "text": text,
-                            "bbox": bbox,
-                            "_order_x": x_anchor,
-                            "_order_y": y_anchor,
-                        }
-                    )
+                    block = {
+                        "page": page_no,
+                        "type": label or section_type or "text",
+                        "text": text,
+                        "bbox": bbox,
+                        "_order_x": x_anchor,
+                        "_order_y": y_anchor,
+                    }
+                    if table_markdown_parts:
+                        block["table_markdown_parts"] = table_markdown_parts
+                    if table_html_parts:
+                        block["table_html_parts"] = table_html_parts
+                    if table_cell_texts:
+                        block["table_cell_texts"] = table_cell_texts
+                    blocks.append(block)
                     seen.add(signature)
 
             for key in child_keys:
@@ -540,7 +662,7 @@ class OCRService:
             for key, value in node.items():
                 if key in child_keys or key in label_keys or key in bbox_keys:
                     continue
-                if key in {"block_content", "markdown", "text", "html", "content", "caption", "rec_texts", "texts"}:
+                if key in {"block_content", "markdown", "text", "html", "pred_html", "content", "caption", "rec_texts", "texts"}:
                     continue
                 if isinstance(value, (dict, list)):
                     walk(value)
