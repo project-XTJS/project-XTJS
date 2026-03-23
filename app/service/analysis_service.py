@@ -354,6 +354,29 @@ class AnalysisService:
             not extraction_route["use_ocr"]
             and normalized_extension == "pdf"
             and ocr_available
+            and ppstructure_enabled
+            and hasattr(self.ocr_service, "extract_structure_layout")
+        ):
+            try:
+                structure_result = self.ocr_service.extract_structure_layout(
+                    file_path,
+                    file_extension,
+                    use_structure=use_ppstructure_v3,
+                )
+                structure_layout_sections = structure_result.get("layout_sections") or []
+                if structure_layout_sections:
+                    layout_sections = structure_layout_sections
+                layout_used = bool(structure_result.get("structure_used"))
+                ppstructure_enabled = bool(
+                    structure_result.get("structure_enabled", ppstructure_enabled)
+                )
+            except Exception as exc:
+                print(f"Structure layout extraction failed: {exc}")
+
+        if (
+            not extraction_route["use_ocr"]
+            and normalized_extension == "pdf"
+            and ocr_available
             and getattr(settings, "PADDLE_OCR_DETECT_MARKERS_ON_TEXT_PDF", True)
             and (seal_recognition_enabled or signature_recognition_enabled)
             and hasattr(self.ocr_service, "extract_visual_markers")

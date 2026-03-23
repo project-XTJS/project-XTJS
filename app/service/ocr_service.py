@@ -525,6 +525,76 @@ class OCRService:
             signature_enabled=signature_enabled,
         )
 
+    def _empty_layout_result(self) -> dict:
+        return {
+            "layout_sections": [],
+            "structure_used": False,
+            "structure_enabled": False,
+            "layout_text": "",
+        }
+
+    def extract_structure_layout(
+        self,
+        file_path: str,
+        file_type: str = "pdf",
+        use_structure: bool | None = None,
+    ) -> dict:
+        if not self.available:
+            return self._empty_layout_result()
+
+        structure_enabled = self._resolve_structure_enabled(use_structure=use_structure)
+        if not structure_enabled:
+            return self._empty_layout_result()
+
+        ext = file_type.lower().lstrip(".")
+        layout_sections: list[dict] = []
+        layout_text_parts: list[str] = []
+        structure_used = False
+
+        if ext == "pdf":
+            doc = fitz.open(file_path)
+            try:
+                total_pages = len(doc)
+                for page_index in range(total_pages):
+                    page_no = page_index + 1
+                    image = self._render_pdf_page(doc[page_index])
+                    page_text, page_sections, page_structure_used = self._run_structure_layout(
+                        image,
+                        page_no,
+                        structure_enabled=structure_enabled,
+                    )
+                    if page_text.strip():
+                        layout_text_parts.append(page_text)
+                    if page_sections:
+                        layout_sections.extend(page_sections)
+                    structure_used = structure_used or page_structure_used
+            finally:
+                doc.close()
+        else:
+            image = cv2.imread(file_path)
+            if image is None:
+                empty_result = self._empty_layout_result()
+                empty_result["structure_enabled"] = structure_enabled
+                return empty_result
+
+            page_text, page_sections, page_structure_used = self._run_structure_layout(
+                image,
+                page_no=1,
+                structure_enabled=structure_enabled,
+            )
+            if page_text.strip():
+                layout_text_parts.append(page_text)
+            if page_sections:
+                layout_sections.extend(page_sections)
+            structure_used = page_structure_used
+
+        return {
+            "layout_sections": layout_sections,
+            "structure_used": structure_used,
+            "structure_enabled": structure_enabled,
+            "layout_text": self._merge_text_parts(layout_text_parts),
+        }
+
     def _empty_marker_result(self) -> dict:
         return {
             "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
