@@ -48,7 +48,15 @@ def _rollback_uploaded_object(upload_result: Optional[dict], oss_service: MinioS
         logger.exception("MinIO upload rollback failed: object_name=%s", object_name)
         return str(cleanup_exc)
 
-def _extract_recognition_content(file_bytes: bytes, file_name: str, analysis_service) -> dict:
+def _extract_recognition_content(
+    file_bytes: bytes,
+    file_name: str,
+    analysis_service,
+    use_ppstructure_v3: Optional[bool] = None,
+    use_seal_recognition: Optional[bool] = None,
+    use_signature_recognition: Optional[bool] = None,
+    pdf_mode: Optional[Literal["auto", "text", "ocr", "hybrid"]] = None,
+) -> dict:
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
     allowed_extensions = set(analysis_service.get_supported_extensions())
     if file_extension not in allowed_extensions:
@@ -59,7 +67,14 @@ def _extract_recognition_content(file_bytes: bytes, file_name: str, analysis_ser
 
     temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
     try:
-        recognition_result = analysis_service.extract_text_result(temp_file_path, file_extension)
+        recognition_result = analysis_service.extract_text_result(
+            temp_file_path,
+            file_extension,
+            use_ppstructure_v3=use_ppstructure_v3,
+            use_seal_recognition=use_seal_recognition,
+            use_signature_recognition=use_signature_recognition,
+            pdf_mode=pdf_mode,
+        )
         recognition_result["filename"] = file_name
         return recognition_result
     finally:
@@ -218,6 +233,22 @@ async def create_document(
     identifier_id: Optional[str] = Form(default=None),
     document_name: Optional[str] = Form(default=None),
     object_name: Optional[str] = Form(default=None),
+    use_ppstructure_v3: Optional[bool] = Form(
+        default=None,
+        description="是否启用 PPStructureV3。null 表示使用服务默认配置。",
+    ),
+    use_seal_recognition: Optional[bool] = Form(
+        default=None,
+        description="是否启用印章识别。null 表示使用服务默认配置。",
+    ),
+    use_signature_recognition: Optional[bool] = Form(
+        default=None,
+        description="是否启用签名识别。null 表示使用服务默认配置。",
+    ),
+    pdf_mode: Optional[Literal["auto", "text", "ocr", "hybrid"]] = Form(
+        default=None,
+        description="PDF 抽取策略覆盖。text 适合可复制文本 PDF。",
+    ),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
     analysis_service = Depends(get_text_analysis_service)
@@ -241,7 +272,11 @@ async def create_document(
         recognition_content = _extract_recognition_content(
             file_bytes=file_bytes,
             file_name=(file.filename or resolved_file_name),
-            analysis_service=analysis_service
+            analysis_service=analysis_service,
+            use_ppstructure_v3=use_ppstructure_v3,
+            use_seal_recognition=use_seal_recognition,
+            use_signature_recognition=use_signature_recognition,
+            pdf_mode=pdf_mode,
         )
         
         creation_result = db_service.create_document_with_content(

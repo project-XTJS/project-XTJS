@@ -1,8 +1,9 @@
 """文本分析路由：统一承接文档解析与规则分析能力。"""
 
 import os
+from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 
 from app.router.dependencies import get_text_analysis_service
 from app.schemas.analysis import TextAnalysisRequest
@@ -15,6 +16,22 @@ router = APIRouter()
 @router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(
     file: UploadFile = File(...),
+    use_ppstructure_v3: bool | None = Query(
+        default=None,
+        description="是否启用 PPStructureV3 版面结构化。null 表示沿用服务默认配置。",
+    ),
+    use_seal_recognition: bool | None = Query(
+        default=None,
+        description="是否启用印章识别。null 表示沿用服务默认配置。",
+    ),
+    use_signature_recognition: bool | None = Query(
+        default=None,
+        description="是否启用签名识别。null 表示沿用服务默认配置。",
+    ),
+    pdf_mode: Literal["auto", "text", "ocr", "hybrid"] | None = Query(
+        default=None,
+        description="PDF 抽取策略覆盖。text 适合可复制文本 PDF。",
+    ),
     analysis_service=Depends(get_text_analysis_service),
 ):
     """上传单个文档并返回识别结果（精简可读版）。"""
@@ -34,7 +51,14 @@ async def analyze_file(
     temp_file_path = save_temp_file(content, f".{file_extension}")
 
     try:
-        extraction_result = analysis_service.extract_text_result(temp_file_path, file_extension)
+        extraction_result = analysis_service.extract_text_result(
+            temp_file_path,
+            file_extension,
+            use_ppstructure_v3=use_ppstructure_v3,
+            use_seal_recognition=use_seal_recognition,
+            use_signature_recognition=use_signature_recognition,
+            pdf_mode=pdf_mode,
+        )
         metadata = build_analyze_file_metadata(
             filename=file.filename,
             file_type=file_extension,
@@ -57,6 +81,10 @@ async def analyze_file(
             seal_covered_text_count=extraction_result["seal_covered_text_count"],
             signature_detected=extraction_result["signature_detected"],
             signature_count=extraction_result["signature_count"],
+            ppstructure_v3_requested=extraction_result["ppstructure_v3_requested"],
+            ppstructure_v3_enabled=extraction_result["ppstructure_v3_enabled"],
+            seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
+            signature_recognition_enabled=extraction_result["signature_recognition_enabled"],
         )
 
         return {
@@ -81,6 +109,10 @@ async def analyze_file(
                 "layout_section_count": extraction_result["layout_section_count"],
                 "table_section_count": extraction_result["table_section_count"],
                 "active_device": extraction_result["active_device"],
+                "ppstructure_v3_requested": extraction_result["ppstructure_v3_requested"],
+                "ppstructure_v3_enabled": extraction_result["ppstructure_v3_enabled"],
+                "seal_recognition_enabled": extraction_result["seal_recognition_enabled"],
+                "signature_recognition_enabled": extraction_result["signature_recognition_enabled"],
             },
             "seal": {
                 "detected": extraction_result["seal_detected"],

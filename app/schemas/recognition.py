@@ -26,6 +26,10 @@ def build_analyze_file_metadata(
     seal_covered_text_count: int = 0,
     signature_detected: bool = False,
     signature_count: int = 0,
+    ppstructure_v3_requested: bool | None = None,
+    ppstructure_v3_enabled: bool = False,
+    seal_recognition_enabled: bool = False,
+    signature_recognition_enabled: bool = False,
 ) -> Dict[str, Any]:
     """构建 analyze-file 的轻量元数据。"""
     return {
@@ -48,6 +52,10 @@ def build_analyze_file_metadata(
             "layout_used": layout_used,
             "layout_section_count": layout_section_count,
             "source_mode": source_mode,
+            "ppstructure_v3_requested": ppstructure_v3_requested,
+            "ppstructure_v3_enabled": ppstructure_v3_enabled,
+            "seal_recognition_enabled": seal_recognition_enabled,
+            "signature_recognition_enabled": signature_recognition_enabled,
         },
         "runtime": {
             "device": active_device,

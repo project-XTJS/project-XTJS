@@ -1,6 +1,6 @@
 # app/service/analysis_service.py
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 from app.config.settings import settings
 from app.service.ocr_service import OCRService
@@ -19,6 +19,7 @@ class AnalysisService:
     MIN_PDF_TEXT_LENGTH = 120
     MIN_PDF_AVG_CHARS_PER_PAGE = 45
     MAX_PDF_EMPTY_PAGE_RATIO = 0.4
+    MIN_PDF_SPARSE_PAGE_CHARS = 24
 
     def __init__(self, ocr_service: OCRService) -> None:
         self.ocr_service = ocr_service
@@ -31,7 +32,10 @@ class AnalysisService:
     def get_supported_extensions(self) -> list:
         return self.SUPPORTED_EXTENSIONS.copy()
 
-    def _normalize_pdf_mode(self) -> str:
+    def _normalize_pdf_mode(self, pdf_mode_override: str | None = None) -> str:
+        override = str(pdf_mode_override or "").strip().lower()
+        if override in {"auto", "text", "ocr", "hybrid"}:
+            return override
         if settings.PADDLE_OCR_FORCE_PDF_OCR:
             return "ocr"
         mode = str(getattr(settings, "PADDLE_OCR_PDF_MODE", "auto") or "auto").strip().lower()
@@ -46,6 +50,8 @@ class AnalysisService:
 
         page_char_total = 0
         non_empty_pages = 0
+        empty_pages = 0
+        sparse_pages = 0
         for page in pages or []:
             page_text = ""
             if isinstance(page, dict):
@@ -57,22 +63,32 @@ class AnalysisService:
             page_char_total += page_chars
             if page_chars > 0:
                 non_empty_pages += 1
+            else:
+                empty_pages += 1
+            if page_chars <= self.MIN_PDF_SPARSE_PAGE_CHARS:
+                sparse_pages += 1
 
         if total_pages == 0:
             avg_chars = float(total_chars)
             empty_page_ratio = 1.0 if total_chars == 0 else 0.0
+            sparse_page_ratio = empty_page_ratio
         else:
             if page_char_total == 0 and total_chars > 0:
                 page_char_total = total_chars
                 non_empty_pages = 1
+                empty_pages = 0
             avg_chars = page_char_total / max(total_pages, 1)
             empty_page_ratio = 1.0 - (non_empty_pages / max(total_pages, 1))
+            sparse_page_ratio = sparse_pages / max(total_pages, 1)
 
         return {
             "total_chars": total_chars,
             "total_pages": total_pages,
             "avg_chars_per_page": round(avg_chars, 2),
             "empty_page_ratio": round(empty_page_ratio, 4),
+            "empty_pages": int(empty_pages),
+            "sparse_page_count": int(sparse_pages),
+            "sparse_page_ratio": round(sparse_page_ratio, 4),
         }
 
     def _decide_extraction_route(
@@ -80,6 +96,7 @@ class AnalysisService:
         file_extension: str,
         raw_text: str,
         pages: list[dict],
+        pdf_mode_override: str | None = None,
     ) -> dict[str, Any]:
         normalized_extension = file_extension.lower().lstrip(".")
         if normalized_extension in self.IMAGE_EXTENSIONS:
@@ -100,7 +117,7 @@ class AnalysisService:
                 "pdf_text_stats": {},
             }
 
-        pdf_mode = self._normalize_pdf_mode()
+        pdf_mode = self._normalize_pdf_mode(pdf_mode_override)
         text_stats = self._build_pdf_text_stats(raw_text, pages)
 
         if pdf_mode == "text":
@@ -153,6 +170,24 @@ class AnalysisService:
                 "use_ocr": True,
                 "route": "ocr",
                 "reason": "pdf_too_many_empty_pages",
+                "pdf_mode": pdf_mode,
+                "pdf_text_stats": text_stats,
+            }
+
+        if text_stats.get("empty_pages", 0) > 0:
+            return {
+                "use_ocr": True,
+                "route": "ocr",
+                "reason": "pdf_has_empty_page",
+                "pdf_mode": pdf_mode,
+                "pdf_text_stats": text_stats,
+            }
+
+        if text_stats.get("sparse_page_count", 0) > 0:
+            return {
+                "use_ocr": True,
+                "route": "ocr",
+                "reason": "pdf_has_sparse_page",
                 "pdf_mode": pdf_mode,
                 "pdf_text_stats": text_stats,
             }
@@ -211,7 +246,15 @@ class AnalysisService:
             return "PaddleOCR"
         return "none"
 
-    def extract_text_result(self, file_path: str, file_extension: str) -> dict:
+    def extract_text_result(
+        self,
+        file_path: str,
+        file_extension: str,
+        use_ppstructure_v3: bool | None = None,
+        use_seal_recognition: bool | None = None,
+        use_signature_recognition: bool | None = None,
+        pdf_mode: Literal["auto", "text", "ocr", "hybrid"] | None = None,
+    ) -> dict:
         """
         核心调度：先走文件结构化抽取，再根据策略决定是否 OCR/版面分析。
         """
@@ -222,13 +265,38 @@ class AnalysisService:
         normalized_extension = file_extension.lower().lstrip(".")
 
         ocr_available = bool(getattr(self.ocr_service, "available", False))
+        ppstructure_requested = use_ppstructure_v3
+        ppstructure_enabled = bool(
+            settings.PADDLE_OCR_ENABLE_STRUCTURE
+            if use_ppstructure_v3 is None
+            else use_ppstructure_v3
+        )
+        seal_recognition_enabled = bool(
+            settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION
+            if use_seal_recognition is None
+            else use_seal_recognition
+        )
+        signature_recognition_enabled = bool(
+            settings.PADDLE_OCR_ENABLE_SIGNATURE_RECOGNITION
+            if use_signature_recognition is None
+            else use_signature_recognition
+        )
+        if not ocr_available:
+            ppstructure_enabled = False
+            seal_recognition_enabled = False
+            signature_recognition_enabled = False
         ocr_used = False
         layout_used = False
         layout_sections: list[dict] = []
         seal_data = {"count": 0, "texts": [], "covered_texts": []}
         signature_data = {"count": 0, "texts": []}
 
-        extraction_route = self._decide_extraction_route(file_extension, raw_text, pages)
+        extraction_route = self._decide_extraction_route(
+            file_extension,
+            raw_text,
+            pages,
+            pdf_mode_override=pdf_mode,
+        )
 
         if extraction_route["use_ocr"] and not ocr_available:
             if normalized_extension in self.IMAGE_EXTENSIONS:
@@ -240,13 +308,26 @@ class AnalysisService:
 
         if extraction_route["use_ocr"] and ocr_available and hasattr(self.ocr_service, "extract_all"):
             try:
-                ocr_result = self.ocr_service.extract_all(file_path, file_extension)
+                ocr_result = self.ocr_service.extract_all(
+                    file_path,
+                    file_extension,
+                    use_structure=use_ppstructure_v3,
+                    use_seal_recognition=use_seal_recognition,
+                    use_signature_recognition=use_signature_recognition,
+                )
                 candidate_text = str(ocr_result.get("text") or "").strip()
                 candidate_pages = ocr_result.get("pages") or []
                 candidate_seals = ocr_result.get("seals") or seal_data
                 candidate_signatures = ocr_result.get("signatures") or signature_data
                 layout_sections = ocr_result.get("layout_sections") or ocr_result.get("layout_blocks") or []
                 layout_used = bool(ocr_result.get("structure_used"))
+                ppstructure_enabled = bool(ocr_result.get("structure_enabled", ppstructure_enabled))
+                seal_recognition_enabled = bool(
+                    ocr_result.get("seal_recognition_enabled", seal_recognition_enabled)
+                )
+                signature_recognition_enabled = bool(
+                    ocr_result.get("signature_recognition_enabled", signature_recognition_enabled)
+                )
 
                 if candidate_text:
                     raw_text = candidate_text
@@ -272,10 +353,16 @@ class AnalysisService:
             and normalized_extension == "pdf"
             and ocr_available
             and getattr(settings, "PADDLE_OCR_DETECT_MARKERS_ON_TEXT_PDF", True)
+            and (seal_recognition_enabled or signature_recognition_enabled)
             and hasattr(self.ocr_service, "extract_visual_markers")
         ):
             try:
-                marker_result = self.ocr_service.extract_visual_markers(file_path, file_extension)
+                marker_result = self.ocr_service.extract_visual_markers(
+                    file_path,
+                    file_extension,
+                    use_seal_recognition=use_seal_recognition,
+                    use_signature_recognition=use_signature_recognition,
+                )
                 marker_seals = marker_result.get("seals") or seal_data
                 marker_signatures = marker_result.get("signatures") or signature_data
                 marker_covered_texts = marker_seals.get("covered_texts") or []
@@ -368,6 +455,10 @@ class AnalysisService:
             "recognition_reason": extraction_route["reason"],
             "pdf_mode": extraction_route["pdf_mode"],
             "pdf_text_stats": extraction_route["pdf_text_stats"],
+            "ppstructure_v3_requested": ppstructure_requested,
+            "ppstructure_v3_enabled": ppstructure_enabled,
+            "seal_recognition_enabled": seal_recognition_enabled,
+            "signature_recognition_enabled": signature_recognition_enabled,
         }
 
     def run_full_analysis(self, text: str, extraction_meta: dict) -> dict:
