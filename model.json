@@ -1,7 +1,7 @@
 {
   "code": 200,
   "message": "success",
-  "rid": "5fa0e3f4-4aef-4c9d-83c9-a3ce85e9cac6",
+  "rid": "81c5b565-936a-4f7c-9c67-d28478f29465",
   "data": {
     "filename": "模版.pdf",
     "file_type": "pdf",
@@ -238,7 +238,7 @@
     "source_mode": "local",
     "ocr_engine": "none",
     "ocr_used": false,
-    "active_device": "gpu",
+    "active_device": "gpu:0",
     "seal_enabled": true,
     "seal_removed": false,
     "seal_detected": false,
@@ -262,7 +262,7 @@
         "available": true,
         "used": false,
         "engine": "none",
-        "active_device": "gpu"
+        "active_device": "gpu:0"
       },
       "seal": {
         "enabled": true,

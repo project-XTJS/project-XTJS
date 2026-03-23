@@ -4,6 +4,7 @@ from app.service.ocr_service import OCRService
 from app.utils.text_utils import preprocess_text, extract_file_data 
 
 from app.service.analysis.integrity import IntegrityChecker
+from app.service.analysis.consistency import TemplateAnalysisService
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
 from app.service.analysis.itemized_pricing import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
@@ -13,6 +14,7 @@ class AnalysisService:
     def __init__(self, ocr_service: OCRService) -> None:
         self.ocr_service = ocr_service
         self.integrity = IntegrityChecker()
+        self.consistency = TemplateAnalysisService()
         self.reasonableness = ReasonablenessChecker()
         self.itemized = ItemizedPricingChecker()
         self.deviation = DeviationChecker()
