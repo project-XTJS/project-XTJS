@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     
     # 使用逗号分隔的字符串接收环境变量，通过 @property 转换为 Set
     MINIO_ALLOWED_EXTENSIONS_STR: str = Field(
-        default="pdf,docx,doc,png,jpg,jpeg,bmp,tif,tiff", 
+        default="pdf,png,jpg,jpeg,bmp,tif,tiff",
         validation_alias="MINIO_ALLOWED_EXTENSIONS"
     )
 
@@ -51,8 +51,13 @@ class Settings(BaseSettings):
     PADDLE_OCR_ENABLE_HPI: bool = False
     PADDLE_OCR_ENABLE_STRUCTURE: bool = True
     PADDLE_OCR_ENABLE_SEAL_RECOGNITION: bool = True
+    PADDLE_OCR_ENABLE_SIGNATURE_RECOGNITION: bool = True
     PADDLE_OCR_EXCLUDE_SEAL_TEXT: bool = True
     PADDLE_OCR_FORCE_PDF_OCR: bool = False
+    # PDF 抽取策略：auto | text | ocr | hybrid
+    PADDLE_OCR_PDF_MODE: str = "auto"
+    # 文本可直接抽取时，是否仍执行印章/签字检测
+    PADDLE_OCR_DETECT_MARKERS_ON_TEXT_PDF: bool = True
 
     PADDLE_OCR_USE_DOC_ORIENTATION: bool = True
     PADDLE_OCR_USE_DOC_UNWARPING: bool = True

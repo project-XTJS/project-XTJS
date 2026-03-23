@@ -8,6 +8,8 @@ from typing import List
 from docx import Document
 from pdfplumber import open as open_pdf
 
+UNSUPPORTED_WORD_EXTENSIONS = {"doc", "docx"}
+
 # 文本处理与切片
 def preprocess_text(text: str) -> str:
     """文本预处理：去首尾空白并压缩连续空白字符。"""
@@ -216,12 +218,10 @@ def extract_text_from_doc(file_path: str) -> str:
 def extract_text(file_path: str, file_type: str) -> str:
     """根据文件类型分发到对应解析器。"""
     normalized_type = file_type.lower().lstrip(".")
+    if normalized_type in UNSUPPORTED_WORD_EXTENSIONS:
+        raise ValueError("Word files are not supported")
     if normalized_type == "pdf":
         return extract_text_from_pdf(file_path)
-    if normalized_type == "docx":
-        return extract_text_from_docx(file_path)
-    if normalized_type == "doc":
-        return extract_text_from_doc(file_path)
     raise ValueError(f"Unsupported file type: {file_type}")
 
 # 临时文件管理
@@ -245,10 +245,12 @@ def cleanup_temp_file(file_path: str) -> None:
 def extract_file_data(file_path: str, file_type: str) -> dict:
     """
     结构化抽取文件数据，返回包含分页信息、页数和解析引擎的字典。
-    复用项目中已有的高质量抽取逻辑 (pdfplumber, docx, doc)。
+    复用项目中已有的高质量抽取逻辑 (pdfplumber, image)。
     """
     normalized_type = file_type.lower().lstrip(".")
-    
+    if normalized_type in UNSUPPORTED_WORD_EXTENSIONS:
+        raise ValueError("Word files are not supported")
+
     result = {
         "content": "",
         "pages": [],
@@ -268,22 +270,6 @@ def extract_file_data(file_path: str, file_type: str) -> dict:
             for i, text in enumerate(page_texts):
                 result["pages"].append({"page": i + 1, "text": text})
                 
-        elif normalized_type == "docx":
-            # 复用 docx 抽取逻辑
-            content = extract_text_from_docx(file_path)
-            result["content"] = content
-            result["page_count"] = 1  # docx 较难精确计算物理页，视为单页
-            result["pages"] = [{"page": 1, "text": content}]
-            result["parser_engine"] = "python-docx"
-            
-        elif normalized_type == "doc":
-            # 复用复杂 doc 回退抽取逻辑
-            content = extract_text_from_doc(file_path)
-            result["content"] = content
-            result["page_count"] = 1
-            result["pages"] = [{"page": 1, "text": content}]
-            result["parser_engine"] = "doc_fallback_engine"
-            
         elif normalized_type in ["jpg", "jpeg", "png"]:
             result["parser_engine"] = "image_input"
             result["page_count"] = 1

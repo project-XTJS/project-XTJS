@@ -1,80 +1,47 @@
-SHELL := /bin/sh
-.DEFAULT_GOAL := run
-
-version ?= release
-commit_id ?= fd92b4a
-project ?= $(CURDIR)
-project_name ?= project-xtjs
-image ?= $(project_name):$(version)-$(commit_id)
-
-compose_file ?= docker-compose.yml
-python_bin ?= python
-
-.PHONY: all build fmt clean test lint help run deploy start package prepare update_docker_compose status stop
-
-help:
-	@echo "Usage: make <target> [version=<v>] [commit_id=<id>] [project_name=<name>]"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all                    Alias of run"
-	@echo "  deploy                 Alias of run"
-	@echo "  run                    update_docker_compose -> package -> prepare -> start"
-	@echo "  update_docker_compose  Replace $(project_name):* to $(image) in $(compose_file)"
-	@echo "  package                docker build -t $(image) ."
-	@echo "  prepare                docker compose down"
-	@echo "  start                  docker compose up -d"
-	@echo "  status                 docker compose ps"
-	@echo "  stop                   docker compose down"
-
-all: run
-
-deploy: run
+version?=release
+commit_id?=$(shell git rev-parse --short HEAD)
+project?=$(CURDIR)
+project_name?=project-xtjs
+image?=project-xtjs:${version}-${commit_id}
+paddle_base_image?=nvidia/cuda:13.0.0-cudnn-devel-ubuntu24.04
+paddle_version?=3.3.0
+paddle_index_url?=https://www.paddlepaddle.org.cn/packages/stable/cu130/
+paddle_trusted_host?=www.paddlepaddle.org.cn
+paddle_ocr_package_version?=3.3.0
+paddle_ocr_dependency_group?=doc-parser
+install_hpi_deps?=false
+compose_files?=-f docker-compose.yml -f docker-compose.gpu.yml
+compose?=docker compose ${compose_files}
+python_cmd?=python3
 
 run: update_docker_compose package prepare start
 
 start:
-	@if [ ! -f "$(compose_file)" ]; then \
-		echo "[skip] $(compose_file) not found."; \
-		exit 0; \
-	fi
-	docker compose up -d
+	${compose} up -d
+	${compose} logs -f app
 
 package:
-	@if [ ! -f Dockerfile ]; then \
-		echo "[skip] Dockerfile not found."; \
-		exit 0; \
-	fi
-	docker build -t $(image) .
+	docker pull ${paddle_base_image}
+	docker build \
+		--build-arg PADDLE_BASE_IMAGE=${paddle_base_image} \
+		--build-arg PADDLE_VERSION=${paddle_version} \
+		--build-arg PADDLE_INDEX_URL=${paddle_index_url} \
+		--build-arg PADDLE_TRUSTED_HOST=${paddle_trusted_host} \
+		--build-arg PADDLE_OCR_PACKAGE_VERSION=${paddle_ocr_package_version} \
+		--build-arg PADDLE_OCR_DEPENDENCY_GROUP=${paddle_ocr_dependency_group} \
+		--build-arg INSTALL_HPI_DEPS=${install_hpi_deps} \
+		-t ${image} .
 
 prepare:
-	@if [ ! -f "$(compose_file)" ]; then \
-		echo "[skip] $(compose_file) not found."; \
-		exit 0; \
-	fi
-	docker compose down
+	${compose} down
 
 update_docker_compose:
-	@if [ ! -f "$(compose_file)" ]; then \
-		echo "[skip] $(compose_file) not found."; \
-		exit 0; \
-	fi
-	@if command -v sed >/dev/null 2>&1; then \
-		sed -i "s#$(project_name):[^[:space:]]*#$(image)#g" "$(project)/$(compose_file)"; \
-		echo "updated $(project)/$(compose_file) by sed"; \
-	else \
-		PROJECT_FILE="$(project)/$(compose_file)" PROJECT_NAME="$(project_name)" IMAGE="$(image)" "$(python_bin)" -c "import os,pathlib,re; p=pathlib.Path(os.environ['PROJECT_FILE']); s=p.read_text(encoding='utf-8'); pat=re.escape(os.environ['PROJECT_NAME']) + r':[^\s\"\x27]+'; n,c=re.subn(pat, os.environ['IMAGE'], s); p.write_text(n,encoding='utf-8'); print('updated', p, 'replacements=', c)"; \
-	fi
+	@${python_cmd} -c "from pathlib import Path; p = Path('${project}/docker-compose.yml'); lines = p.read_text(encoding='utf-8').splitlines(); updated = [('    image: ${image}' if line.strip().startswith('image: ${project_name}:') else line) for line in lines]; p.write_text('\n'.join(updated) + '\n', encoding='utf-8')"
 
 status:
-	@if [ ! -f "$(compose_file)" ]; then \
-		echo "[skip] $(compose_file) not found."; \
-		exit 0; \
-	fi
-	docker compose ps
+	${compose} ps
 
 stop:
-	@if [ ! -f "$(compose_file)" ]; then \
-		echo "[skip] $(compose_file) not found."; \
-		exit 0; \
-	fi
-	docker compose down
+	${compose} down
+
+.PHONY: all build fmt clean test lint run start package prepare update_docker_compose status stop

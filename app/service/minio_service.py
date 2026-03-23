@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 class MinioService:
     """Service layer for MinIO object operations."""
 
+    UNSUPPORTED_WORD_EXTENSIONS = {"doc", "docx"}
+
     def __init__(self) -> None:
         self.client = Minio(
             endpoint=settings.MINIO_ENDPOINT,
@@ -63,6 +65,8 @@ class MinioService:
             raise ValueError("File name cannot be empty")
 
         extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
+        if extension in self.UNSUPPORTED_WORD_EXTENSIONS:
+            raise ValueError("Word files are not supported")
         if extension not in settings.minio_allowed_extensions:
             raise ValueError(f"Unsupported file type: {extension}")
 

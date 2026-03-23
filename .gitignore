@@ -33,3 +33,5 @@ test_image.png
 .idea/
 .DS_Store
 Thumbs.db
+wheels/paddleocr-3.4.0-py3-none-any.whl
+wheels/paddlepaddle_gpu-3.3.0-cp312-cp312-linux_x86_64.whl
