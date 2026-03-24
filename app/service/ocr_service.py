@@ -1,6 +1,10 @@
 import html
 import os
+import queue
 import re
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
 import cv2
@@ -18,6 +22,7 @@ class OCRService:
         self.structure = None
         self.structure_available = False
         self._structure_init_attempted = False
+        self._predictor_lock = threading.Lock()
         self.active_device = "cpu"
         self.seal_dir = "output_seals"
         self.signature_dir = "output_signatures"
@@ -480,6 +485,42 @@ class OCRService:
         )
         return seal_enabled, signature_enabled
 
+    def _resolve_pipeline_enabled(self, total_pages: int) -> bool:
+        if total_pages < 1:
+            return False
+        enabled = bool(getattr(settings, "PADDLE_OCR_ENABLE_PIPELINE_PARALLEL", True))
+        try:
+            min_pages = int(getattr(settings, "PADDLE_OCR_PIPELINE_MIN_PAGES", 2))
+        except Exception:
+            min_pages = 2
+        return enabled and total_pages >= max(2, min_pages)
+
+    def _resolve_pipeline_queue_size(self) -> int:
+        try:
+            queue_size = int(getattr(settings, "PADDLE_OCR_PIPELINE_QUEUE_SIZE", 4))
+        except Exception:
+            queue_size = 4
+        return max(1, min(queue_size, 64))
+
+    def _resolve_pipeline_render_workers(self, total_pages: int) -> int:
+        try:
+            workers = int(getattr(settings, "PADDLE_OCR_PIPELINE_RENDER_WORKERS", 2))
+        except Exception:
+            workers = 2
+        cpu_cap = max(1, (os.cpu_count() or 4) // 2)
+        return max(1, min(workers, total_pages, cpu_cap))
+
+    def _resolve_pipeline_post_workers(self, total_pages: int) -> int:
+        try:
+            workers = int(getattr(settings, "PADDLE_OCR_PIPELINE_POST_WORKERS", 2))
+        except Exception:
+            workers = 2
+        cpu_cap = max(1, os.cpu_count() or 4)
+        return max(1, min(workers, total_pages, cpu_cap))
+
+    def _should_log_pipeline_metrics(self) -> bool:
+        return bool(getattr(settings, "PADDLE_OCR_PIPELINE_LOG_METRICS", True))
+
     def _empty_result(self) -> dict:
         return {
             "text": "",
@@ -712,7 +753,8 @@ class OCRService:
         if predictor is None:
             return []
         try:
-            return list(predictor.predict(image))
+            with self._predictor_lock:
+                return list(predictor.predict(image))
         except Exception as exc:
             print(f"{predictor_name} inference failed: {exc}")
             return []
@@ -1810,6 +1852,121 @@ class OCRService:
         seal_enabled: bool,
         signature_enabled: bool,
     ) -> dict:
+        doc = fitz.open(pdf_path)
+        try:
+            total_pages = len(doc)
+        finally:
+            doc.close()
+
+        if self._resolve_pipeline_enabled(total_pages):
+            return self._recognize_pdf_pipeline(
+                pdf_path,
+                total_pages=total_pages,
+                structure_enabled=structure_enabled,
+                seal_enabled=seal_enabled,
+                signature_enabled=signature_enabled,
+            )
+
+        return self._recognize_pdf_serial(
+            pdf_path,
+            total_pages=total_pages,
+            structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
+            signature_enabled=signature_enabled,
+        )
+
+    def _run_pdf_stage_b(
+        self,
+        image: np.ndarray,
+        page_no: int,
+        *,
+        structure_enabled: bool,
+    ) -> dict:
+        timings_ms = {"ocr_ms": 0.0, "layout_ms": 0.0}
+
+        start = time.perf_counter()
+        ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
+        ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
+        timings_ms["ocr_ms"] = (time.perf_counter() - start) * 1000.0
+
+        start = time.perf_counter()
+        layout_text, layout_sections, structure_used = self._run_structure_layout(
+            image,
+            page_no,
+            structure_enabled=structure_enabled,
+        )
+        timings_ms["layout_ms"] = (time.perf_counter() - start) * 1000.0
+
+        return {
+            "page_no": page_no,
+            "image": image,
+            "ocr_text": ocr_text,
+            "layout_text": layout_text,
+            "layout_sections": layout_sections,
+            "structure_used": structure_used,
+            "text_signal": bool(ocr_text.strip() or layout_text.strip()),
+            "timings_ms": timings_ms,
+        }
+
+    def _run_pdf_stage_c(
+        self,
+        stage_b_payload: dict,
+        *,
+        seal_enabled: bool,
+        signature_enabled: bool,
+    ) -> dict:
+        page_no = int(stage_b_payload.get("page_no", 0))
+        image = stage_b_payload.get("image")
+        ocr_text = str(stage_b_payload.get("ocr_text") or "")
+        layout_text = str(stage_b_payload.get("layout_text") or "")
+        layout_sections = stage_b_payload.get("layout_sections") or []
+        structure_used = bool(stage_b_payload.get("structure_used"))
+
+        timings_ms = {"seal_ms": 0.0, "signature_ms": 0.0, "merge_ms": 0.0}
+
+        start = time.perf_counter()
+        seal_result = self._detect_seals(image, page_no=page_no, enabled=seal_enabled)
+        timings_ms["seal_ms"] = (time.perf_counter() - start) * 1000.0
+
+        start = time.perf_counter()
+        signature_result = self._detect_handwritten_signatures(
+            image,
+            page_no=page_no,
+            enabled=signature_enabled,
+        )
+        timings_ms["signature_ms"] = (time.perf_counter() - start) * 1000.0
+
+        start = time.perf_counter()
+        page_text = self._combine_page_text(layout_text, ocr_text)
+        page_text = self._remove_seal_texts(page_text, seal_result["texts"])
+        page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
+        timings_ms["merge_ms"] = (time.perf_counter() - start) * 1000.0
+
+        text_signal = bool(stage_b_payload.get("text_signal"))
+        return {
+            "page_no": page_no,
+            "page_text": page_text,
+            "layout_sections": layout_sections,
+            "seal_result": seal_result,
+            "signature_result": signature_result,
+            "structure_used": structure_used,
+            "ocr_applied": bool(
+                text_signal
+                or seal_result["count"]
+                or seal_result.get("covered_texts")
+                or signature_result["count"]
+            ),
+            "timings_ms": timings_ms,
+        }
+
+    def _build_pdf_result_from_page_results(
+        self,
+        page_results: list[dict],
+        *,
+        structure_enabled: bool,
+        seal_enabled: bool,
+        signature_enabled: bool,
+    ) -> dict:
         pages_data: list[dict] = []
         full_text: list[str] = []
         layout_sections: list[dict] = []
@@ -1818,70 +1975,46 @@ class OCRService:
         ocr_applied = False
         structure_used = False
 
-        doc = fitz.open(pdf_path)
-        try:
-            total_pages = len(doc)
-            pbar = tqdm(range(total_pages), desc="OCR processing", unit="page")
-            for page_index in pbar:
-                page_no = page_index + 1
-                image = self._render_pdf_page(doc[page_index])
+        ordered_results = sorted(page_results, key=lambda item: int(item.get("page_no", 0)))
+        for page_result in ordered_results:
+            page_no = int(page_result.get("page_no", 0))
+            if page_no <= 0:
+                continue
 
-                ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
-                ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
-                layout_text, page_layout_sections, page_structure_used = self._run_structure_layout(
-                    image,
-                    page_no,
-                    structure_enabled=structure_enabled,
-                )
-                seal_result = self._detect_seals(image, page_no=page_no, enabled=seal_enabled)
-                signature_result = self._detect_handwritten_signatures(
-                    image,
-                    page_no=page_no,
-                    enabled=signature_enabled,
-                )
+            page_text = str(page_result.get("page_text") or "")
+            page_layout_sections = page_result.get("layout_sections") or []
+            seal_result = page_result.get("seal_result") or {"count": 0, "texts": [], "locations": [], "covered_texts": []}
+            signature_result = page_result.get("signature_result") or {"count": 0, "texts": [], "locations": []}
 
-                page_text = self._combine_page_text(layout_text, ocr_text)
-                page_text = self._remove_seal_texts(page_text, seal_result["texts"])
-                page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
+            if page_layout_sections:
+                layout_sections.extend(page_layout_sections)
 
-                if seal_result["count"] > 0:
-                    all_seals["count"] += seal_result["count"]
-                    all_seals["texts"].extend(seal_result["texts"])
-                    for box in seal_result["locations"]:
-                        all_seals["locations"].append({"page": page_no, "box": box})
-                    for covered in seal_result.get("covered_texts", []):
-                        if not isinstance(covered, dict):
-                            continue
-                        all_seals["covered_texts"].append(
-                            {
-                                "page": int(covered.get("page", page_no)),
-                                "box": covered.get("box", []),
-                                "text": str(covered.get("text") or "").strip(),
-                            }
-                        )
+            if seal_result["count"] > 0:
+                all_seals["count"] += seal_result["count"]
+                all_seals["texts"].extend(seal_result["texts"])
+                for box in seal_result["locations"]:
+                    all_seals["locations"].append({"page": page_no, "box": box})
+                for covered in seal_result.get("covered_texts", []):
+                    if not isinstance(covered, dict):
+                        continue
+                    all_seals["covered_texts"].append(
+                        {
+                            "page": int(covered.get("page", page_no)),
+                            "box": covered.get("box", []),
+                            "text": str(covered.get("text") or "").strip(),
+                        }
+                    )
 
-                if signature_result["count"] > 0:
-                    all_signatures["count"] += signature_result["count"]
-                    all_signatures["texts"].extend(signature_result["texts"])
-                    for box in signature_result["locations"]:
-                        all_signatures["locations"].append({"page": page_no, "box": box})
+            if signature_result["count"] > 0:
+                all_signatures["count"] += signature_result["count"]
+                all_signatures["texts"].extend(signature_result["texts"])
+                for box in signature_result["locations"]:
+                    all_signatures["locations"].append({"page": page_no, "box": box})
 
-                if page_layout_sections:
-                    layout_sections.extend(page_layout_sections)
-
-                pages_data.append({"page": page_no, "text": page_text})
-                full_text.append(page_text)
-                ocr_applied = ocr_applied or bool(
-                    ocr_text.strip()
-                    or layout_text.strip()
-                    or seal_result["count"]
-                    or seal_result.get("covered_texts")
-                    or signature_result["count"]
-                )
-                structure_used = structure_used or page_structure_used
-                pbar.set_postfix({"seal_count": all_seals["count"], "signature_count": all_signatures["count"]})
-        finally:
-            doc.close()
+            pages_data.append({"page": page_no, "text": page_text})
+            full_text.append(page_text)
+            ocr_applied = ocr_applied or bool(page_result.get("ocr_applied"))
+            structure_used = structure_used or bool(page_result.get("structure_used"))
 
         all_seals["texts"] = list(dict.fromkeys(all_seals["texts"]))
         dedup_covered_texts: list[dict] = []
@@ -1894,6 +2027,7 @@ class OCRService:
             dedup_covered_texts.append(item)
         all_seals["covered_texts"] = dedup_covered_texts
         all_signatures["texts"] = list(dict.fromkeys(all_signatures["texts"]))
+
         return {
             "text": self._merge_text_parts(full_text),
             "pages": pages_data,
@@ -1906,6 +2040,292 @@ class OCRService:
             "seal_recognition_enabled": seal_enabled,
             "signature_recognition_enabled": signature_enabled,
         }
+
+    def _log_pdf_stage_metrics(
+        self,
+        *,
+        mode: str,
+        total_pages: int,
+        total_ms: float,
+        stage_metrics: dict[str, float],
+        render_workers: int | None = None,
+        post_workers: int | None = None,
+        queue_size: int | None = None,
+    ) -> None:
+        if not self._should_log_pipeline_metrics():
+            return
+
+        avg_ms = total_ms / max(total_pages, 1)
+        extra = ""
+        if render_workers is not None and post_workers is not None and queue_size is not None:
+            extra = f", render_workers={render_workers}, post_workers={post_workers}, queue={queue_size}"
+        print(
+            "OCRService: PDF OCR "
+            f"mode={mode}, pages={total_pages}{extra}, total={total_ms:.1f}ms, "
+            f"render={stage_metrics.get('render_ms', 0.0):.1f}ms, "
+            f"ocr={stage_metrics.get('ocr_ms', 0.0):.1f}ms, "
+            f"layout={stage_metrics.get('layout_ms', 0.0):.1f}ms, "
+            f"seal={stage_metrics.get('seal_ms', 0.0):.1f}ms, "
+            f"signature={stage_metrics.get('signature_ms', 0.0):.1f}ms, "
+            f"merge={stage_metrics.get('merge_ms', 0.0):.1f}ms, "
+            f"avg={avg_ms:.1f}ms/page"
+        )
+
+    def _recognize_pdf_serial(
+        self,
+        pdf_path: str,
+        *,
+        total_pages: int,
+        structure_enabled: bool,
+        seal_enabled: bool,
+        signature_enabled: bool,
+    ) -> dict:
+        stage_metrics = {
+            "render_ms": 0.0,
+            "ocr_ms": 0.0,
+            "layout_ms": 0.0,
+            "seal_ms": 0.0,
+            "signature_ms": 0.0,
+            "merge_ms": 0.0,
+        }
+        page_results: list[dict] = []
+        running_seal_count = 0
+        running_signature_count = 0
+        started_all = time.perf_counter()
+
+        doc = fitz.open(pdf_path)
+        try:
+            pbar = tqdm(range(total_pages), desc="OCR processing", unit="page")
+            for page_index in pbar:
+                page_no = page_index + 1
+                start = time.perf_counter()
+                image = self._render_pdf_page(doc[page_index])
+                stage_metrics["render_ms"] += (time.perf_counter() - start) * 1000.0
+
+                stage_b_payload = self._run_pdf_stage_b(
+                    image,
+                    page_no,
+                    structure_enabled=structure_enabled,
+                )
+                stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
+                stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
+
+                page_result = self._run_pdf_stage_c(
+                    stage_b_payload,
+                    seal_enabled=seal_enabled,
+                    signature_enabled=signature_enabled,
+                )
+                page_results.append(page_result)
+
+                stage_metrics["seal_ms"] += float(page_result["timings_ms"].get("seal_ms", 0.0))
+                stage_metrics["signature_ms"] += float(page_result["timings_ms"].get("signature_ms", 0.0))
+                stage_metrics["merge_ms"] += float(page_result["timings_ms"].get("merge_ms", 0.0))
+
+                running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
+                running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
+                pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+        finally:
+            doc.close()
+
+        result = self._build_pdf_result_from_page_results(
+            page_results,
+            structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
+            signature_enabled=signature_enabled,
+        )
+        self._log_pdf_stage_metrics(
+            mode="serial",
+            total_pages=total_pages,
+            total_ms=(time.perf_counter() - started_all) * 1000.0,
+            stage_metrics=stage_metrics,
+        )
+        return result
+
+    def _recognize_pdf_pipeline(
+        self,
+        pdf_path: str,
+        *,
+        total_pages: int,
+        structure_enabled: bool,
+        seal_enabled: bool,
+        signature_enabled: bool,
+    ) -> dict:
+        queue_size = self._resolve_pipeline_queue_size()
+        render_workers = self._resolve_pipeline_render_workers(total_pages)
+        post_workers = self._resolve_pipeline_post_workers(total_pages)
+
+        stage_metrics = {
+            "render_ms": 0.0,
+            "ocr_ms": 0.0,
+            "layout_ms": 0.0,
+            "seal_ms": 0.0,
+            "signature_ms": 0.0,
+            "merge_ms": 0.0,
+        }
+        page_results: list[dict] = []
+        running_seal_count = 0
+        running_signature_count = 0
+
+        render_queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        page_index_queue: queue.Queue = queue.Queue()
+        for page_index in range(total_pages):
+            page_index_queue.put(page_index)
+
+        render_error: dict[str, Exception | None] = {"error": None}
+        render_error_lock = threading.Lock()
+        stop_event = threading.Event()
+
+        def render_worker() -> None:
+            local_doc = None
+            try:
+                local_doc = fitz.open(pdf_path)
+                while not stop_event.is_set():
+                    try:
+                        page_index = page_index_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    start = time.perf_counter()
+                    image = self._render_pdf_page(local_doc[page_index])
+                    render_ms = (time.perf_counter() - start) * 1000.0
+                    item = {"page_index": page_index, "image": image, "render_ms": render_ms}
+
+                    while not stop_event.is_set():
+                        try:
+                            render_queue.put(item, timeout=0.2)
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as exc:
+                with render_error_lock:
+                    if render_error["error"] is None:
+                        render_error["error"] = exc
+                stop_event.set()
+            finally:
+                if local_doc is not None:
+                    try:
+                        local_doc.close()
+                    except Exception:
+                        pass
+                while not stop_event.is_set():
+                    try:
+                        render_queue.put({"_render_done": True}, timeout=0.2)
+                        break
+                    except queue.Full:
+                        continue
+
+        render_threads = [
+            threading.Thread(target=render_worker, name=f"ocr-render-{idx + 1}", daemon=True)
+            for idx in range(render_workers)
+        ]
+        for thread in render_threads:
+            thread.start()
+
+        started_all = time.perf_counter()
+        pending_futures: set[Any] = set()
+        completed_pages = 0
+        processed_stage_b = 0
+        render_done_count = 0
+
+        pbar = tqdm(total=total_pages, desc="OCR processing", unit="page")
+
+        def collect_completed_futures(*, block: bool) -> None:
+            nonlocal completed_pages, running_seal_count, running_signature_count
+            if not pending_futures:
+                return
+            timeout = None if block else 0
+            done, _ = wait(pending_futures, timeout=timeout, return_when=FIRST_COMPLETED)
+            for future in done:
+                pending_futures.remove(future)
+                page_result = future.result()
+                page_results.append(page_result)
+                stage_metrics["seal_ms"] += float(page_result["timings_ms"].get("seal_ms", 0.0))
+                stage_metrics["signature_ms"] += float(page_result["timings_ms"].get("signature_ms", 0.0))
+                stage_metrics["merge_ms"] += float(page_result["timings_ms"].get("merge_ms", 0.0))
+                running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
+                running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
+                completed_pages += 1
+                pbar.update(1)
+                pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+
+        try:
+            with ThreadPoolExecutor(max_workers=post_workers, thread_name_prefix="ocr-post") as post_pool:
+                while processed_stage_b < total_pages:
+                    collect_completed_futures(block=False)
+
+                    with render_error_lock:
+                        render_exc = render_error["error"]
+                    if render_exc is not None and render_done_count >= render_workers:
+                        raise RuntimeError(f"PDF render pipeline failed: {render_exc}") from render_exc
+
+                    try:
+                        item = render_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        if render_done_count >= render_workers and processed_stage_b < total_pages:
+                            raise RuntimeError(
+                                "PDF render pipeline ended early "
+                                f"(processed={processed_stage_b}, total={total_pages})"
+                            )
+                        continue
+
+                    if item.get("_render_done"):
+                        render_done_count += 1
+                        continue
+
+                    page_no = int(item["page_index"]) + 1
+                    stage_metrics["render_ms"] += float(item.get("render_ms", 0.0))
+
+                    stage_b_payload = self._run_pdf_stage_b(
+                        item["image"],
+                        page_no,
+                        structure_enabled=structure_enabled,
+                    )
+                    stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
+                    stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
+                    processed_stage_b += 1
+
+                    max_pending = max(queue_size, post_workers)
+                    while len(pending_futures) >= max_pending:
+                        collect_completed_futures(block=True)
+
+                    future = post_pool.submit(
+                        self._run_pdf_stage_c,
+                        stage_b_payload,
+                        seal_enabled=seal_enabled,
+                        signature_enabled=signature_enabled,
+                    )
+                    pending_futures.add(future)
+
+                while pending_futures:
+                    collect_completed_futures(block=True)
+        finally:
+            stop_event.set()
+            for thread in render_threads:
+                thread.join(timeout=5.0)
+            pbar.close()
+
+        if completed_pages != total_pages:
+            raise RuntimeError(
+                "PDF post-processing pipeline ended early "
+                f"(completed={completed_pages}, total={total_pages})"
+            )
+
+        result = self._build_pdf_result_from_page_results(
+            page_results,
+            structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
+            signature_enabled=signature_enabled,
+        )
+        self._log_pdf_stage_metrics(
+            mode="pipeline",
+            total_pages=total_pages,
+            total_ms=(time.perf_counter() - started_all) * 1000.0,
+            stage_metrics=stage_metrics,
+            render_workers=render_workers,
+            post_workers=post_workers,
+            queue_size=queue_size,
+        )
+        return result
 
     def _recognize_image(
         self,

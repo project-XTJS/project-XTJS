@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     PADDLE_OCR_PDF_MODE: str = "auto"
     # 文本可直接抽取时，是否仍执行印章/签字检测
     PADDLE_OCR_DETECT_MARKERS_ON_TEXT_PDF: bool = True
+    # PDF single-document pipeline parallelism (Stage A/B/C)
+    PADDLE_OCR_ENABLE_PIPELINE_PARALLEL: bool = True
+    PADDLE_OCR_PIPELINE_MIN_PAGES: int = 2
+    PADDLE_OCR_PIPELINE_RENDER_WORKERS: int = 2
+    PADDLE_OCR_PIPELINE_POST_WORKERS: int = 2
+    PADDLE_OCR_PIPELINE_QUEUE_SIZE: int = 4
+    PADDLE_OCR_PIPELINE_LOG_METRICS: bool = True
 
     PADDLE_OCR_USE_DOC_ORIENTATION: bool = True
     PADDLE_OCR_USE_DOC_UNWARPING: bool = True
