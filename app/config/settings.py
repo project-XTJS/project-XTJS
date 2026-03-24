@@ -44,6 +44,11 @@ class Settings(BaseSettings):
 
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: bool = True
     PADDLE_OCR_DEVICE: str = "gpu:0"
+    # Comma-separated device list for multi-GPU service pool, e.g. "gpu:0,gpu:1,gpu:2"
+    PADDLE_OCR_DEVICE_POOL: str = ""
+    # Max concurrent documents per device worker. Keep 1 for stable OCR/GPU memory.
+    PADDLE_OCR_MAX_INFLIGHT_PER_DEVICE: int = 1
+    PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING: bool = False
     PADDLE_OCR_FALLBACK_TO_CPU: bool = True
     PADDLE_OCR_DISABLE_MKLDNN: bool = True
     PADDLE_OCR_LANG: str = "ch"

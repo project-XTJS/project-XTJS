@@ -16,13 +16,14 @@ from app.config.settings import settings
 
 
 class OCRService:
-    def __init__(self):
+    def __init__(self, preferred_device: str | None = None):
         self.available = False
         self.ocr = None
         self.structure = None
         self.structure_available = False
         self._structure_init_attempted = False
         self._predictor_lock = threading.Lock()
+        self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
         self.seal_dir = "output_seals"
         self.signature_dir = "output_signatures"
@@ -328,8 +329,9 @@ class OCRService:
         return any(token in merged for token in certificate_tokens)
 
     def _candidate_devices(self) -> list[str]:
-        candidates = [settings.PADDLE_OCR_DEVICE]
-        if settings.PADDLE_OCR_DEVICE.startswith("gpu:"):
+        primary_device = self.preferred_device or settings.PADDLE_OCR_DEVICE
+        candidates = [primary_device]
+        if self.preferred_device is None and settings.PADDLE_OCR_DEVICE.startswith("gpu:"):
             candidates.append("gpu")
         if settings.PADDLE_OCR_FALLBACK_TO_CPU:
             candidates.append("cpu")

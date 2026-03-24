@@ -6,6 +6,7 @@ from typing import Literal, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, Depends
 from psycopg2 import Error as PsycopgError
+from starlette.concurrency import run_in_threadpool
 
 from app.schemas.postgresql import (
     DocumentUpdateRequest,
@@ -272,14 +273,15 @@ async def create_document(
         if not file_bytes:
             raise ValueError("uploaded file content is empty")
 
-        recognition_content = _extract_recognition_content(
-            file_bytes=file_bytes,
-            file_name=(file.filename or resolved_file_name),
-            analysis_service=analysis_service,
-            use_ppstructure_v3=use_ppstructure_v3,
-            use_seal_recognition=use_seal_recognition,
-            use_signature_recognition=use_signature_recognition,
-            pdf_mode=pdf_mode,
+        recognition_content = await run_in_threadpool(
+            _extract_recognition_content,
+            file_bytes,
+            (file.filename or resolved_file_name),
+            analysis_service,
+            use_ppstructure_v3,
+            use_seal_recognition,
+            use_signature_recognition,
+            pdf_mode,
         )
         
         creation_result = db_service.create_document_with_content(

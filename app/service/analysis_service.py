@@ -1,5 +1,6 @@
 # app/service/analysis_service.py
 from functools import lru_cache
+import threading
 from typing import Any, Literal
 
 from app.config.settings import settings
@@ -497,6 +498,142 @@ class AnalysisService:
         }
 
 
+class AnalysisServiceDispatcher:
+    """Dispatch OCR requests across multiple AnalysisService workers (usually one per GPU)."""
+
+    def __init__(
+        self,
+        services: list[AnalysisService],
+        devices: list[str],
+        *,
+        max_inflight_per_device: int = 1,
+    ) -> None:
+        if not services:
+            raise ValueError("services cannot be empty")
+        if len(services) != len(devices):
+            raise ValueError("services/devices length mismatch")
+
+        self._services = services
+        self._devices = devices
+        self._capacity = max(1, int(max_inflight_per_device))
+        self._permits = [
+            threading.BoundedSemaphore(value=self._capacity)
+            for _ in services
+        ]
+        self._inflight = [0 for _ in services]
+        self._state_lock = threading.Lock()
+        self._rr_cursor = 0
+
+        # Keep existing router behavior unchanged for non-OCR paths.
+        primary = services[0]
+        self.integrity = primary.integrity
+        self.consistency = primary.consistency
+        self.reasonableness = primary.reasonableness
+        self.itemized = primary.itemized
+        self.deviation = primary.deviation
+        self.verification = primary.verification
+
+    def get_supported_extensions(self) -> list:
+        return self._services[0].get_supported_extensions()
+
+    def run_full_analysis(self, text: str, extraction_meta: dict) -> dict:
+        return self._services[0].run_full_analysis(text, extraction_meta)
+
+    def _acquire_slot(self) -> int:
+        total = len(self._services)
+        while True:
+            with self._state_lock:
+                start = self._rr_cursor
+                ordered = sorted(
+                    range(total),
+                    key=lambda idx: (self._inflight[idx], (idx - start) % total),
+                )
+                self._rr_cursor = (self._rr_cursor + 1) % total
+
+            for idx in ordered:
+                if self._permits[idx].acquire(blocking=False):
+                    with self._state_lock:
+                        self._inflight[idx] += 1
+                    return idx
+
+            # All workers are busy; block on the least-loaded one.
+            fallback_idx = ordered[0]
+            self._permits[fallback_idx].acquire()
+            with self._state_lock:
+                self._inflight[fallback_idx] += 1
+            return fallback_idx
+
+    def _release_slot(self, idx: int) -> None:
+        with self._state_lock:
+            self._inflight[idx] = max(0, self._inflight[idx] - 1)
+        self._permits[idx].release()
+
+    def extract_text_result(
+        self,
+        file_path: str,
+        file_extension: str,
+        use_ppstructure_v3: bool | None = None,
+        use_seal_recognition: bool | None = None,
+        use_signature_recognition: bool | None = None,
+        pdf_mode: Literal["auto", "text", "ocr", "hybrid"] | None = None,
+    ) -> dict:
+        idx = self._acquire_slot()
+        service = self._services[idx]
+        device = self._devices[idx]
+        if bool(getattr(settings, "PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING", False)):
+            print(
+                f"AnalysisServiceDispatcher: route request to worker={idx}, "
+                f"configured_device={device}, active_device={service.ocr_service.active_device}"
+            )
+        try:
+            return service.extract_text_result(
+                file_path,
+                file_extension,
+                use_ppstructure_v3=use_ppstructure_v3,
+                use_seal_recognition=use_seal_recognition,
+                use_signature_recognition=use_signature_recognition,
+                pdf_mode=pdf_mode,
+            )
+        finally:
+            self._release_slot(idx)
+
+
+def _resolve_ocr_device_pool() -> list[str]:
+    raw_pool = str(getattr(settings, "PADDLE_OCR_DEVICE_POOL", "") or "").strip()
+    if not raw_pool:
+        return [str(settings.PADDLE_OCR_DEVICE).strip()]
+
+    normalized = raw_pool.replace(";", ",").replace("|", ",")
+    devices: list[str] = []
+    for item in normalized.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if token.isdigit():
+            token = f"gpu:{token}"
+        if token not in devices:
+            devices.append(token)
+    return devices or [str(settings.PADDLE_OCR_DEVICE).strip()]
+
+
 @lru_cache(maxsize=1)
-def get_analysis_service() -> AnalysisService:
-    return AnalysisService(ocr_service=OCRService())
+def get_analysis_service() -> AnalysisService | AnalysisServiceDispatcher:
+    devices = _resolve_ocr_device_pool()
+    if len(devices) <= 1:
+        preferred = devices[0] if devices else None
+        return AnalysisService(ocr_service=OCRService(preferred_device=preferred))
+
+    max_inflight = max(1, int(getattr(settings, "PADDLE_OCR_MAX_INFLIGHT_PER_DEVICE", 1)))
+    services: list[AnalysisService] = []
+    for device in devices:
+        services.append(AnalysisService(ocr_service=OCRService(preferred_device=device)))
+
+    print(
+        "AnalysisService: multi-device OCR pool initialized "
+        f"(devices={devices}, max_inflight_per_device={max_inflight})"
+    )
+    return AnalysisServiceDispatcher(
+        services=services,
+        devices=devices,
+        max_inflight_per_device=max_inflight,
+    )

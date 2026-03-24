@@ -4,6 +4,7 @@ import os
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.router.dependencies import get_text_analysis_service
 from app.schemas.analysis import TextAnalysisRequest
@@ -51,13 +52,14 @@ async def analyze_file(
     temp_file_path = save_temp_file(content, f".{file_extension}")
 
     try:
-        extraction_result = analysis_service.extract_text_result(
+        extraction_result = await run_in_threadpool(
+            analysis_service.extract_text_result,
             temp_file_path,
             file_extension,
-            use_ppstructure_v3=use_ppstructure_v3,
-            use_seal_recognition=use_seal_recognition,
-            use_signature_recognition=use_signature_recognition,
-            pdf_mode=pdf_mode,
+            use_ppstructure_v3,
+            use_seal_recognition,
+            use_signature_recognition,
+            pdf_mode,
         )
         metadata = build_analyze_file_metadata(
             filename=file.filename,
