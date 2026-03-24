@@ -2,6 +2,7 @@ import html
 import os
 import queue
 import re
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -522,6 +523,108 @@ class OCRService:
 
     def _should_log_pipeline_metrics(self) -> bool:
         return bool(getattr(settings, "PADDLE_OCR_PIPELINE_LOG_METRICS", True))
+
+    def _should_log_progress(self) -> bool:
+        return bool(getattr(settings, "PADDLE_OCR_LOG_PROGRESS", True))
+
+    def _resolve_progress_log_interval_seconds(self) -> float:
+        raw_value = getattr(settings, "PADDLE_OCR_PROGRESS_LOG_INTERVAL_SECONDS", 2.0)
+        try:
+            return max(0.2, float(raw_value))
+        except (TypeError, ValueError):
+            return 2.0
+
+    def _should_use_tqdm_progress(self) -> bool:
+        stream = getattr(sys, "stderr", None)
+        return bool(stream is not None and hasattr(stream, "isatty") and stream.isatty())
+
+    def _format_progress_eta(self, eta_seconds: float | None) -> str:
+        if eta_seconds is None or eta_seconds < 0:
+            return "n/a"
+
+        if eta_seconds < 60:
+            return f"{eta_seconds:.1f}s"
+
+        total_seconds = int(round(eta_seconds))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
+        return f"{minutes:d}m{seconds:02d}s"
+
+    def _start_pdf_progress(
+        self,
+        *,
+        pdf_path: str,
+        mode: str,
+        total_pages: int,
+        structure_enabled: bool,
+        seal_enabled: bool,
+        signature_enabled: bool,
+        enabled: bool,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        state = {
+            "enabled": enabled,
+            "mode": mode,
+            "file_label": os.path.basename(pdf_path) or pdf_path,
+            "started_at": started_at,
+            "last_logged_at": started_at - self._resolve_progress_log_interval_seconds(),
+            "last_logged_completed_pages": 0,
+        }
+        if enabled:
+            print(
+                "OCRService: progress start "
+                f"file={state['file_label']}, mode={mode}, pages={total_pages}, "
+                f"device={self.active_device}, structure={structure_enabled}, "
+                f"seal={seal_enabled}, signature={signature_enabled}"
+            )
+        return state
+
+    def _log_pdf_progress(
+        self,
+        *,
+        progress_state: dict[str, Any],
+        completed_pages: int,
+        total_pages: int,
+        running_seal_count: int,
+        running_signature_count: int,
+        force: bool = False,
+    ) -> None:
+        if not progress_state.get("enabled"):
+            return
+
+        if not force and completed_pages <= 0:
+            return
+
+        now = time.perf_counter()
+        last_completed_pages = int(progress_state.get("last_logged_completed_pages", 0))
+        if force and completed_pages == last_completed_pages:
+            return
+        if not force:
+            if completed_pages == last_completed_pages:
+                return
+            elapsed_since_last_log = now - float(progress_state.get("last_logged_at", 0.0))
+            if elapsed_since_last_log < self._resolve_progress_log_interval_seconds() and completed_pages < total_pages:
+                return
+
+        started_at = float(progress_state.get("started_at", now))
+        elapsed = max(now - started_at, 1e-6)
+        speed = completed_pages / elapsed if completed_pages > 0 else 0.0
+        eta_seconds = None
+        if 0 < completed_pages < total_pages and speed > 0:
+            eta_seconds = (total_pages - completed_pages) / speed
+
+        percent = (completed_pages / total_pages * 100.0) if total_pages else 100.0
+        print(
+            "OCRService: progress "
+            f"file={progress_state['file_label']}, mode={progress_state['mode']}, "
+            f"done={completed_pages}/{total_pages} ({percent:.1f}%), "
+            f"speed={speed:.2f} page/s, eta={self._format_progress_eta(eta_seconds)}, "
+            f"seal_count={running_seal_count}, signature_count={running_signature_count}"
+        )
+        progress_state["last_logged_at"] = now
+        progress_state["last_logged_completed_pages"] = completed_pages
 
     def _empty_result(self) -> dict:
         return {
@@ -2095,10 +2198,22 @@ class OCRService:
         running_signature_count = 0
         started_all = time.perf_counter()
 
+        use_tqdm = self._should_use_tqdm_progress()
+        progress_state = self._start_pdf_progress(
+            pdf_path=pdf_path,
+            mode="serial",
+            total_pages=total_pages,
+            structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
+            signature_enabled=signature_enabled,
+            enabled=self._should_log_progress() and not use_tqdm,
+        )
+
         doc = fitz.open(pdf_path)
+        pbar = tqdm(range(total_pages), desc="OCR processing", unit="page") if use_tqdm else None
         try:
-            pbar = tqdm(range(total_pages), desc="OCR processing", unit="page")
-            for page_index in pbar:
+            page_iter = pbar if pbar is not None else range(total_pages)
+            for page_index in page_iter:
                 page_no = page_index + 1
                 start = time.perf_counter()
                 image = self._render_pdf_page(doc[page_index])
@@ -2125,9 +2240,28 @@ class OCRService:
 
                 running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
                 running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
-                pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+                if pbar is not None:
+                    pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+                self._log_pdf_progress(
+                    progress_state=progress_state,
+                    completed_pages=len(page_results),
+                    total_pages=total_pages,
+                    running_seal_count=running_seal_count,
+                    running_signature_count=running_signature_count,
+                )
         finally:
             doc.close()
+            if pbar is not None:
+                pbar.close()
+
+        self._log_pdf_progress(
+            progress_state=progress_state,
+            completed_pages=len(page_results),
+            total_pages=total_pages,
+            running_seal_count=running_seal_count,
+            running_signature_count=running_signature_count,
+            force=True,
+        )
 
         result = self._build_pdf_result_from_page_results(
             page_results,
@@ -2229,7 +2363,17 @@ class OCRService:
         processed_stage_b = 0
         render_done_count = 0
 
-        pbar = tqdm(total=total_pages, desc="OCR processing", unit="page")
+        use_tqdm = self._should_use_tqdm_progress()
+        progress_state = self._start_pdf_progress(
+            pdf_path=pdf_path,
+            mode="pipeline",
+            total_pages=total_pages,
+            structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
+            signature_enabled=signature_enabled,
+            enabled=self._should_log_progress() and not use_tqdm,
+        )
+        pbar = tqdm(total=total_pages, desc="OCR processing", unit="page") if use_tqdm else None
 
         def collect_completed_futures(*, block: bool) -> None:
             nonlocal completed_pages, running_seal_count, running_signature_count
@@ -2247,8 +2391,16 @@ class OCRService:
                 running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
                 running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
                 completed_pages += 1
-                pbar.update(1)
-                pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+                if pbar is not None:
+                    pbar.update(1)
+                    pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
+                self._log_pdf_progress(
+                    progress_state=progress_state,
+                    completed_pages=completed_pages,
+                    total_pages=total_pages,
+                    running_seal_count=running_seal_count,
+                    running_signature_count=running_signature_count,
+                )
 
         try:
             with ThreadPoolExecutor(max_workers=post_workers, thread_name_prefix="ocr-post") as post_pool:
@@ -2304,7 +2456,17 @@ class OCRService:
             stop_event.set()
             for thread in render_threads:
                 thread.join(timeout=5.0)
-            pbar.close()
+            if pbar is not None:
+                pbar.close()
+
+        self._log_pdf_progress(
+            progress_state=progress_state,
+            completed_pages=completed_pages,
+            total_pages=total_pages,
+            running_seal_count=running_seal_count,
+            running_signature_count=running_signature_count,
+            force=True,
+        )
 
         if completed_pages != total_pages:
             raise RuntimeError(

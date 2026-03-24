@@ -13,12 +13,17 @@ install_hpi_deps?=false
 compose_files?=-f docker-compose.yml -f docker-compose.gpu.yml
 compose?=docker compose ${compose_files}
 python_cmd?=python3
+service?=app
+tail?=100
 
 run: update_docker_compose package prepare start
 
 start:
 	${compose} up -d
 	${compose} logs -f app
+
+logs:
+	${compose} logs -f --tail=${tail} ${service}
 
 package:
 	docker pull ${paddle_base_image}
@@ -44,4 +49,4 @@ status:
 stop:
 	${compose} down
 
-.PHONY: all build fmt clean test lint run start package prepare update_docker_compose status stop
+.PHONY: all build fmt clean test lint run start logs package prepare update_docker_compose status stop
