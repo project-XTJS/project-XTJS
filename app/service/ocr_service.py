@@ -898,11 +898,6 @@ class OCRService:
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized
 
-    def _clip_section_text(self, text: str, max_chars: int = 240) -> str:
-        if len(text) <= max_chars:
-            return text
-        return f"{text[:max_chars].rstrip()}..."
-
     def _build_table_section(self, page_no: int, block: dict) -> dict | None:
         markdown_parts = self._dedupe_text_parts(block.get("table_markdown_parts") or [])
         html_parts = self._dedupe_text_parts(block.get("table_html_parts") or [])
@@ -977,7 +972,7 @@ class OCRService:
                 section = {
                     "page": page_no,
                     "type": section_type,
-                    "text": self._clip_section_text(section_text),
+                    "text": section_text,
                 }
 
             signature = (page_no, section["type"], section["text"])

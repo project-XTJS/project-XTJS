@@ -75,6 +75,9 @@ def _extract_recognition_content(
             use_signature_recognition=use_signature_recognition,
             pdf_mode=pdf_mode,
         )
+        # Keep recognition payload slim for storage.
+        recognition_result.pop("content", None)
+        recognition_result.pop("pages", None)
         recognition_result["filename"] = file_name
         return recognition_result
     finally:
