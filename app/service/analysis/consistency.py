@@ -1,7 +1,9 @@
 import re
-import json
+import difflib
 
+# =====================================================================
 # 1. 业务标准配置：定义 13 个核心附件的起止锚点
+# =====================================================================
 MODULE_CONFIG = [
     {"id": 1, "title": "投标保证书", "start": "投标保证书", "end": "通讯请寄"},
     {"id": 2, "title": "开标一览表", "start": "开标一览表", "end": "计算错误"},
@@ -19,7 +21,17 @@ MODULE_CONFIG = [
 ]
 
 class DocumentProcessor:
-    """内部处理类：负责在内存中提取指定片段"""
+    """针对新版 OCR (layout_sections) 的内存提取器"""
+    @staticmethod
+    def _get_full_text(raw_json_data):
+        data_node = raw_json_data.get('data', raw_json_data)
+        full_text = data_node.get('text') or data_node.get('content', '')
+        if not full_text and 'layout_sections' in data_node:
+            full_text = "\n".join([str(sec.get('text') or sec.get('content') or '') for sec in data_node['layout_sections'] if isinstance(sec, dict)])
+        if not full_text and 'pages' in data_node:
+            full_text = "\n".join([p.get('text', '') for p in data_node['pages'] if isinstance(p, dict)])
+        return full_text
+
     @staticmethod
     def _find_nth(text, pattern, n):
         matches = list(re.finditer(re.escape(pattern), text))
@@ -27,13 +39,9 @@ class DocumentProcessor:
 
     @classmethod
     def extract_segments(cls, raw_json_data):
-        """从原始 JSON 字典中提取内容"""
-        full_text = raw_json_data.get('data', {}).get('content', '')
-        if not full_text:
-            pages = raw_json_data.get('data', {}).get('pages', [])
-            full_text = "\n".join([p.get('text', '') for p in pages])
+        full_text = cls._get_full_text(raw_json_data)
+        if not full_text: return []
 
-        # 定位正文：跳过目录区
         body_start = cls._find_nth(full_text, "商务标文件", 2)
         search_area = full_text[body_start:] if body_start != -1 else full_text
 
@@ -44,40 +52,87 @@ class DocumentProcessor:
                 match = re.search(re.escape(cfg['start']), search_area)
                 start_idx = match.start() if match else -1
 
-            content = ""
+            text_content = ""
             if start_idx != -1:
                 chunk = search_area[start_idx:]
                 end_match = re.search(re.escape(cfg['end']), chunk, re.S)
-                content = chunk[:end_match.end()].strip() if end_match else chunk[:4000].strip()
+                text_content = chunk[:end_match.end()] if end_match else chunk[:5000]
             
-            extracted.append({"id": cfg['id'], "title": cfg['title'], "text": content})
+            extracted.append({"id": cfg['id'], "title": cfg['title'], "text": text_content.strip()})
         return extracted
 
 class TemplateAnalysisService:
-    """一致性审查服务"""
+    """格式一致性审查服务"""
     def __init__(self):
-        # 骨架比对模式：豁免括号内容、忽略标点
-        self.GAP_PATTERN = re.compile(r'（[^）]*）|\([^\)]*\)|[，,。．.；;！!？?：:【】\[\]“”"\'、\s\n\r_\\@<@>·・·]+')
+        # 🟢 新增：专门匹配各类中英文括号及内部全部内容
+        self.BRACKET_PATTERN = re.compile(r'（[^）]*）|\([^\)]*\)|【[^】]*】|\[[^\]]*\]|<[^>]*>')
+        # 标点符号用作骨架切割的缝隙
+        self.GAP_PATTERN = re.compile(r'[，,。．.；;！!？?：:“”"\'、\s\n\r_\\@·・·]+')
         self.CONTENT_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
 
-    def _normalize(self, text: str) -> str:
+    def _remove_brackets(self, text: str) -> str:
+        """【核心方法】：去除文本中所有括号及内部内容，实现彻底的填空豁免"""
         if not text: return ""
-        return "".join(self.CONTENT_PATTERN.findall(text))
+        return self.BRACKET_PATTERN.sub('', text)
+
+    def _normalize(self, text: str) -> str:
+        """获取纯文字骨架"""
+        if not text: return ""
+        # 提取骨架前，先将括号里的内容一网打尽
+        clean_text = self._remove_brackets(text)
+        return "".join(self.CONTENT_PATTERN.findall(clean_text))
 
     def _get_anchors(self, template_text: str):
-        segments = self.GAP_PATTERN.split(template_text)
+        """获取模板的固定锚点片段"""
+        clean_template = self._remove_brackets(template_text)
+        segments = self.GAP_PATTERN.split(clean_template)
         return [self._normalize(s) for s in segments if len(self._normalize(s)) >= 2]
 
+    def _generate_diff_snippets(self, m_text: str, b_text: str):
+        """核心高亮对比算法：提取上下文并标注删改内容"""
+        # 对比前也先脱去括号内容，避免括号填空的正常差异被算作红绿篡改
+        clean_m = self._remove_brackets(m_text)
+        clean_b = self._remove_brackets(b_text)
+        
+        t1 = re.sub(r'\s+', '', clean_m)
+        t2 = re.sub(r'\s+', '', clean_b)
+        matcher = difflib.SequenceMatcher(None, t1, t2)
+        
+        snippets = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in ('replace', 'delete'):
+                deleted = t1[i1:i2]
+                
+                # 过滤无意义差异
+                if not re.search(r'[\u4e00-\u9fa5a-zA-Z0-9]', deleted):
+                    continue
+                if len(self._normalize(deleted)) < 2: 
+                    continue
+                    
+                ctx_start = max(0, i1 - 10)
+                ctx_end = min(len(t1), i2 + 10)
+                prefix = t1[ctx_start:i1]
+                suffix = t1[i2:ctx_end]
+                
+                if tag == 'replace':
+                    added = t2[j1:j2]
+                    snippets.append(f"{prefix}\033[91m[-{deleted}-]\033[0m\033[92m[+{added}+]\033[0m{suffix}")
+                elif tag == 'delete':
+                    snippets.append(f"{prefix}\033[91m[-{deleted} (恶意删减)-]\033[0m{suffix}")
+                    
+        return snippets
+
     def compare_raw_data(self, model_raw_json, test_raw_json):
-        """输入原始 JSON，返回一致性报告"""
         m_segs = DocumentProcessor.extract_segments(model_raw_json)
         b_segs = DocumentProcessor.extract_segments(test_raw_json)
+        if not m_segs or not b_segs: return []
 
         reports = []
         for i in range(len(MODULE_CONFIG)):
             m_text = m_segs[i]['text']
             b_text = b_segs[i]['text']
             
+            # _normalize 内部已经包含了去除括号逻辑
             norm_bidder = self._normalize(b_text)
             anchors = self._get_anchors(m_text)
             
@@ -87,12 +142,17 @@ class TemplateAnalysisService:
                 if pos == -1: issues.append(anchor)
                 else: last_pos = pos + len(anchor)
             
-            match_rate = (len(anchors) - len(issues)) / len(anchors) if anchors else 1.0
+            is_passed = len(issues) == 0 and len(norm_bidder) > 0
+            
+            # 只有不过关时，才去生成高亮对比片段
+            diff_snippets = self._generate_diff_snippets(m_text, b_text) if not is_passed else []
+
             reports.append({
                 "index": i + 1,
                 "name": MODULE_CONFIG[i]['title'],
-                "is_passed": len(issues) == 0,
-                "match_rate": match_rate,
+                "is_passed": is_passed,
+                "match_rate": (len(anchors) - len(issues)) / len(anchors) if anchors else 1.0,
+                "diff_snippets": diff_snippets,
                 "missing_segments": issues
             })
         return reports

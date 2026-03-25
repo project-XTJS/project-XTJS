@@ -1,16 +1,11 @@
 """
 投标文件商务标合规性审查模块
-包含功能：
-1. 完整性检查 (IntegrityChecker) - 聚焦核心材料的缺失与漏报核查
-2. 格式模板一致性检查 (TemplateConsistencyChecker) - 核心条款防篡改与近义词容错
-负责人：虞光勇、陶明宇
 """
 import re
-import difflib
 
-# 1. 投标文件完整性检查
 class IntegrityChecker:
-    # 商务标核心材料 10 大项白名单 (按需求文档严格定义)
+    """投标文件完整性检查器"""
+    # 商务标核心材料白名单 
     BUSINESS_REQUIRED_SECTIONS = [
         "投标保证书",
         "开标一览表",
@@ -24,7 +19,7 @@ class IntegrityChecker:
         "投标人认为需加以说明的其他内容"
     ]
 
-    # 第 8 项“投标人的资格证明文件”下的核心子项材料白名单
+    # “投标人的资格证明文件”下的子项材料白名单
     QUALIFICATION_SUB_SECTIONS = [
         "营业执照",
         "法定代表人/单位负责人证明书",
@@ -35,15 +30,32 @@ class IntegrityChecker:
         "制造商声明函"
     ]
 
-    def check_integrity(self, text: str) -> dict:
+    @classmethod
+    def extract_text(cls, raw_json_data: dict) -> str:
+        """文本提取方法"""
+        data_node = raw_json_data.get('data', raw_json_data)
+        
+        # 从 layout_sections 组装 
+        if not full_text and 'layout_sections' in data_node:
+            parts = []
+            for sec in data_node['layout_sections']:
+                if isinstance(sec, dict):
+                    text_val = sec.get('text') or sec.get('content') or ''
+                    parts.append(str(text_val))
+            full_text = "\n".join(parts)
+            
+        return full_text
+
+    def check_integrity(self, text_or_json) -> dict:
         """
         投标文件完整性检查
         """
+        text = self.extract_text(text_or_json)
         found_sections = []
         missing_sections = []
         details = {}
 
-        # 匹配常见的标书标题前缀：一、 / 1. / A. / (一) / 附件 等
+        # 匹配常见的标书标题前缀
         header_prefix = r'(?:第[一二三四五六七八九十百]+[章部分]|附件[一二三四五六七八九十]+|[一二三四五六七八九十]、|\d{1,2}\.[\d\.]*|[A-G]\.|（[一二三四五六七八九十]）|\([A-G]\))\s*'
 
         # 1. 检查 10 大主项目录

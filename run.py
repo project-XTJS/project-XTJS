@@ -9,12 +9,12 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 def open_browser():
-    """延迟 1.5 秒后自动打开 Swagger 文档页面"""
+    """延迟 2 秒后自动打开 Swagger 文档页面"""
     url = "http://127.0.0.1:8080/docs"
     webbrowser.open(url)
 
 if __name__ == "__main__":
-    threading.Timer(1.5, open_browser).start()
+    threading.Timer(2, open_browser).start()
 
     # 启动 Uvicorn
     uvicorn.run(

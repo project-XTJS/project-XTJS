@@ -12,7 +12,7 @@ redis>=7.2.1
 minio>=7.2.20
 
 # --- OCR 与图像处理 ---
-paddleocr[doc-parser]==3.4.0
+paddleocr[all]
 # 手动安装 GPU 框架命令: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
 opencv-contrib-python==4.10.0.84
 numpy>=1.26.4,<3
@@ -21,7 +21,7 @@ requests
 
 # --- 文档处理与分析 ---
 pdfplumber==0.10.2
-pymupdf==1.23.8
+pymupdf
 python-docx==0.8.11
 openpyxl>=3.1.5
 
