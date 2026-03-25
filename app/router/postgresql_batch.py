@@ -1,4 +1,4 @@
-"""批量项目识别路由：支持 1 份招标 + 多份投标并行处理。"""
+"""批量项目识别路由：支持 1 份招标 + N 份投标并行处理。"""
 
 import asyncio
 from typing import Any, Optional
@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
+from app.config.settings import settings
 from app.router.dependencies import (
     RecognitionOptions,
     get_db_service,
@@ -20,8 +21,11 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 
-PROJECT_BATCH_MIN_BID_FILES = 5
-PROJECT_BATCH_MAX_BID_FILES = 30
+# 批量投标文件数量控制：
+# - 最小值至少为 1
+# - 最大值 <= 0 代表不限制
+PROJECT_BATCH_MIN_BID_FILES = max(1, int(getattr(settings, "PROJECT_BATCH_MIN_BID_FILES", 1)))
+PROJECT_BATCH_MAX_BID_FILES = int(getattr(settings, "PROJECT_BATCH_MAX_BID_FILES", 0))
 
 
 async def _ensure_batch_project(
@@ -58,7 +62,7 @@ async def _ensure_batch_project(
     return created, True
 
 
-@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + 多份投标）")
+@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + N 份投标）")
 async def batch_recognize_project_documents(
     tender_file: UploadFile = File(...),
     bid_files: list[UploadFile] = File(...),
@@ -71,13 +75,15 @@ async def batch_recognize_project_documents(
 ):
     """批量识别并自动绑定项目关系。"""
     bid_count = len(bid_files or [])
-    if bid_count < PROJECT_BATCH_MIN_BID_FILES or bid_count > PROJECT_BATCH_MAX_BID_FILES:
+    if bid_count < PROJECT_BATCH_MIN_BID_FILES:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "bid_files count must be between "
-                f"{PROJECT_BATCH_MIN_BID_FILES} and {PROJECT_BATCH_MAX_BID_FILES}"
-            ),
+            detail=f"bid_files count must be at least {PROJECT_BATCH_MIN_BID_FILES}",
+        )
+    if PROJECT_BATCH_MAX_BID_FILES > 0 and bid_count > PROJECT_BATCH_MAX_BID_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"bid_files count must be <= {PROJECT_BATCH_MAX_BID_FILES}",
         )
 
     try:
