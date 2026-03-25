@@ -492,7 +492,7 @@ class AnalysisService:
         return {
             "integrity_result": self.integrity.check_integrity(clean_text),
             "pricing_reasonableness": self.reasonableness.check_price_reasonableness(clean_text),
-            "itemized_check": self.itemized.check_itemized_logic(clean_text),
+            "itemized_check": self.itemized.check_itemized_logic(text),
             "deviation_result": self.deviation.check_technical_deviation(clean_text),
             "verification_result": self.verification.check_seal_and_date(extraction_meta),
         }
