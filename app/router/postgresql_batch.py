@@ -58,7 +58,7 @@ async def _ensure_batch_project(
     return created, True
 
 
-@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + 5-30 份投标）")
+@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + 多份投标）")
 async def batch_recognize_project_documents(
     tender_file: UploadFile = File(...),
     bid_files: list[UploadFile] = File(...),
