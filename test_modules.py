@@ -79,7 +79,7 @@ def run_business_tests_with_ocr(json_path: str):
     # integrity_res = IntegrityChecker().check_integrity(raw_text)
     # print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
 
-    # 2. 曾俊、滑鹏鹏 - 报价合理性
+    # 2. 曾俊、滑鹏鹏 -
     result = ReasonablenessChecker().check_price_reasonableness(raw_text)
     print(result)
 
