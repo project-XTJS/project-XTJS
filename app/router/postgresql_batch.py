@@ -1,4 +1,4 @@
-"""Batch project recognition routes."""
+"""批量项目识别路由：支持 1 份招标 + 多份投标并行处理。"""
 
 import asyncio
 from typing import Any, Optional
@@ -28,6 +28,7 @@ async def _ensure_batch_project(
     db_service: PostgreSQLService,
     project_identifier: Optional[str],
 ) -> tuple[dict[str, Any], bool]:
+    """确保项目存在：存在则复用，不存在则创建。"""
     normalized_identifier = (project_identifier or "").strip()
     if normalized_identifier:
         existing = await run_in_threadpool(
@@ -43,6 +44,7 @@ async def _ensure_batch_project(
             )
             return created, True
         except PsycopgError as exc:
+            # 并发创建时若冲突，回查一次并复用已创建项目。
             if getattr(exc, "pgcode", None) == "23505":
                 existing = await run_in_threadpool(
                     db_service.get_project_by_identifier,
@@ -56,7 +58,7 @@ async def _ensure_batch_project(
     return created, True
 
 
-@router.post("/projects/batch/recognize", summary="Batch recognize project (1 tender + 5-30 bids)")
+@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + 5-30 份投标）")
 async def batch_recognize_project_documents(
     tender_file: UploadFile = File(...),
     bid_files: list[UploadFile] = File(...),
@@ -67,6 +69,7 @@ async def batch_recognize_project_documents(
     oss_service: MinioService = Depends(get_oss_service),
     analysis_service=Depends(get_text_analysis_service),
 ):
+    """批量识别并自动绑定项目关系。"""
     bid_count = len(bid_files or [])
     if bid_count < PROJECT_BATCH_MIN_BID_FILES or bid_count > PROJECT_BATCH_MAX_BID_FILES:
         raise HTTPException(
@@ -82,6 +85,7 @@ async def batch_recognize_project_documents(
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
+    # 先识别招标文件，后续所有投标文件都绑定到该招标文档。
     tender_result = await upload_extract_and_create_document(
         file=tender_file,
         document_type="tender",
@@ -93,10 +97,12 @@ async def batch_recognize_project_documents(
     )
     tender_document_identifier = tender_result["document"]["identifier_id"]
 
+    # 用信号量控制并发，避免同时压垮 OCR/GPU 资源。
     effective_parallelism = max(1, min(int(bid_parallelism), bid_count))
     semaphore = asyncio.Semaphore(effective_parallelism)
 
     async def _handle_single_bid(index: int, bid_file: UploadFile) -> dict[str, Any]:
+        """处理单份投标：识别 -> 绑定 -> 组装结果。"""
         file_name = (bid_file.filename or "").strip() or f"bid_{index}"
         async with semaphore:
             bid_result = await upload_extract_and_create_document(
@@ -159,6 +165,7 @@ async def batch_recognize_project_documents(
             "relation": relation,
         }
 
+    # 并行处理所有投标文件。
     bid_items = await asyncio.gather(
         *(
             _handle_single_bid(index, bid_file)

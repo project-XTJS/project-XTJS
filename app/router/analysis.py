@@ -1,4 +1,4 @@
-"""Text analysis routes."""
+"""文本分析路由：负责文件解析与规则分析分发。"""
 
 import os
 
@@ -17,15 +17,17 @@ from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_f
 router = APIRouter()
 
 
-@router.post("/analyze-file", summary="Analyze document and extract text")
+@router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(
     file: UploadFile = File(...),
     recognition_options: RecognitionOptions = Depends(get_query_recognition_options),
     analysis_service=Depends(get_text_analysis_service),
 ):
+    """上传单个文件并返回识别结果。"""
     allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
 
+    # 先做扩展名校验，避免无效文件进入耗时识别流程。
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
@@ -39,6 +41,7 @@ async def analyze_file(
     temp_file_path = save_temp_file(content, f".{file_extension}")
 
     try:
+        # 识别调用放入线程池，避免阻塞事件循环。
         extraction_result = await run_in_threadpool(
             analysis_service.extract_text_result,
             temp_file_path,
@@ -119,14 +122,16 @@ async def analyze_file(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
+        # 无论成功失败都清理临时文件。
         cleanup_temp_file(temp_file_path)
 
 
-@router.post("/run", summary="Run text analysis")
+@router.post("/run", summary="统一文本分析接口")
 async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
 ):
+    """按 task_type 分发到对应分析模块。"""
     text = preprocess_text(payload.text)
 
     if payload.task_type == "integrity_check":
