@@ -1,12 +1,15 @@
-"""文本分析路由：统一承接文档解析与规则分析能力。"""
+"""Text analysis routes."""
 
 import os
-from typing import Literal
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
-from app.router.dependencies import get_text_analysis_service
+from app.router.dependencies import (
+    RecognitionOptions,
+    get_query_recognition_options,
+    get_text_analysis_service,
+)
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
@@ -14,28 +17,12 @@ from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_f
 router = APIRouter()
 
 
-@router.post("/analyze-file", summary="文档解析（抽取文本）")
+@router.post("/analyze-file", summary="Analyze document and extract text")
 async def analyze_file(
     file: UploadFile = File(...),
-    use_ppstructure_v3: bool | None = Query(
-        default=None,
-        description="是否启用 PPStructureV3 版面结构化。null 表示沿用服务默认配置。",
-    ),
-    use_seal_recognition: bool | None = Query(
-        default=None,
-        description="是否启用印章识别。null 表示沿用服务默认配置。",
-    ),
-    use_signature_recognition: bool | None = Query(
-        default=None,
-        description="是否启用签名识别。null 表示沿用服务默认配置。",
-    ),
-    pdf_mode: Literal["auto", "text", "ocr", "hybrid"] | None = Query(
-        default=None,
-        description="PDF 抽取策略覆盖。text 适合可复制文本 PDF。",
-    ),
+    recognition_options: RecognitionOptions = Depends(get_query_recognition_options),
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """上传单个文档并返回识别结果（精简可读版）。"""
     allowed_extensions = set(analysis_service.get_supported_extensions())
     file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
 
@@ -56,10 +43,10 @@ async def analyze_file(
             analysis_service.extract_text_result,
             temp_file_path,
             file_extension,
-            use_ppstructure_v3,
-            use_seal_recognition,
-            use_signature_recognition,
-            pdf_mode,
+            recognition_options.use_ppstructure_v3,
+            recognition_options.use_seal_recognition,
+            recognition_options.use_signature_recognition,
+            recognition_options.pdf_mode,
         )
         metadata = build_analyze_file_metadata(
             filename=file.filename,
@@ -135,12 +122,11 @@ async def analyze_file(
         cleanup_temp_file(temp_file_path)
 
 
-@router.post("/run", summary="统一文本分析接口")
+@router.post("/run", summary="Run text analysis")
 async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """按 task_type 分发到对应子业务模块。"""
     text = preprocess_text(payload.text)
 
     if payload.task_type == "integrity_check":

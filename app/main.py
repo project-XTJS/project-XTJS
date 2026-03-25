@@ -8,6 +8,7 @@ from app.core.response import UnifiedResponse, configure_exception_handlers
 from app.router.analysis import router as analysis_router
 from app.router.file import router as file_router
 from app.router.postgresql import router as postgresql_router
+from app.router.postgresql_batch import router as postgresql_batch_router
 
 app = FastAPI(
     title="XTJS API",
@@ -32,6 +33,7 @@ configure_exception_handlers(app)
 app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(file_router, prefix="/api/files", tags=["files"])
 app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresql"])
+app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["postgresql"])
 
 @app.get("/", summary="系统根目录", tags=["system"])
 def read_root():
