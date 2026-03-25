@@ -36,13 +36,12 @@ class IntegrityChecker:
         data_node = raw_json_data.get('data', raw_json_data)
         
         # 从 layout_sections 组装 
-        if not full_text and 'layout_sections' in data_node:
-            parts = []
-            for sec in data_node['layout_sections']:
-                if isinstance(sec, dict):
-                    text_val = sec.get('text') or sec.get('content') or ''
-                    parts.append(str(text_val))
-            full_text = "\n".join(parts)
+        parts = []
+        for sec in data_node['layout_sections']:
+            if isinstance(sec, dict):
+                text_val = sec.get('text') or sec.get('content') or ''
+                parts.append(str(text_val))
+        full_text = "\n".join(parts)
             
         return full_text
 
