@@ -132,14 +132,15 @@ async def run_text_analysis(
     analysis_service=Depends(get_text_analysis_service),
 ):
     """按 task_type 分发到对应分析模块。"""
-    text = preprocess_text(payload.text)
+    raw_text = payload.text or ""
+    text = preprocess_text(raw_text)
 
     if payload.task_type == "integrity_check":
         return analysis_service.integrity.check_integrity(text)
     if payload.task_type == "pricing_reason":
         return analysis_service.reasonableness.check_price_reasonableness(text)
     if payload.task_type == "itemized_pricing":
-        return analysis_service.itemized.check_itemized_logic(text)
+        return analysis_service.itemized.check_itemized_logic(raw_text)
     if payload.task_type == "deviation_check":
         return analysis_service.deviation.check_technical_deviation(text)
     if payload.task_type == "full_analysis":

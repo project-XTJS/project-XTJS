@@ -1,0 +1,127 @@
+{
+  "code": 200,
+  "message": "success",
+  "rid": "d5055911-c812-43b7-a716-e58e44840080",
+  "data": {
+    "filename": "ef497cad63b0988efa40685be0e2d5aa.png",
+    "file_type": "png",
+    "file_size": 211555,
+    "text_length": 681,
+    "page_count": 1,
+    "layout_sections": [
+      {
+        "page": 1,
+        "type": "heading",
+        "text": "中国通信服务上海电信科技发展有限公司 CHINACOMSERVICE"
+      },
+      {
+        "page": 1,
+        "type": "heading",
+        "text": "1.3.投标函附录A：开标一览表"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "投标函附录A：开标一览表（回包件一/口包件二）"
+      },
+      {
+        "page": 1,
+        "type": "heading",
+        "text": "建设工程名称：上海市信息管线有限公司2025-2027年楼宇、沟通施工项目"
+      },
+      {
+        "page": 1,
+        "type": "table",
+        "text": "单位工程名称 报 价 备注\n下浮率（%) 税率（%)\n上海市信息管线有限公司 2025-2027年楼宇、沟通施工项目 2.4% 9",
+        "raw_text": "单位工程名称 报 价 备注\n下浮率（%) 税率（%)\n上海市信息管线有限公司 2025-2027年楼宇、沟通施工项目 2.4% 9"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "2.具体以采购订单为准，合同有效期内招标人不承诺满额执行。"
+      }
+    ],
+    "table_sections": [
+      {
+        "page": 1,
+        "type": "table",
+        "text": "单位工程名称 报 价 备注\n下浮率（%) 税率（%)\n上海市信息管线有限公司 2025-2027年楼宇、沟通施工项目 2.4% 9",
+        "raw_text": "单位工程名称 报 价 备注\n下浮率（%) 税率（%)\n上海市信息管线有限公司 2025-2027年楼宇、沟通施工项目 2.4% 9"
+      }
+    ],
+    "recognition": {
+      "route": "ocr",
+      "reason": "image_input",
+      "pdf_mode": "n/a",
+      "pdf_text_stats": {},
+      "parser_engine": "image_input+PaddleOCR+PPStructureV3",
+      "ocr_engine": "PaddleOCR+PPStructureV3",
+      "ocr_used": true,
+      "layout_used": true,
+      "layout_section_count": 6,
+      "table_section_count": 1,
+      "active_device": "gpu:0",
+      "ppstructure_v3_requested": null,
+      "ppstructure_v3_enabled": true,
+      "seal_recognition_enabled": true,
+      "signature_recognition_enabled": true
+    },
+    "seal": {
+      "detected": true,
+      "count": 2,
+      "texts": [
+        "24"
+      ],
+      "covered_texts": [
+        "24目",
+        "电科技发展有限公司"
+      ]
+    },
+    "signature": {
+      "detected": true,
+      "count": 2,
+      "texts": [
+        "承诺满额执",
+        "工期以招标人"
+      ]
+    },
+    "metadata": {
+      "schema_version": "analyze_file_v3",
+      "document": {
+        "filename": "ef497cad63b0988efa40685be0e2d5aa.png",
+        "file_type": "png",
+        "file_size": 211555,
+        "page_count": 1,
+        "mime_type": "image/png",
+        "text_length": 681
+      },
+      "recognition": {
+        "route": "ocr",
+        "reason": "image_input",
+        "pdf_mode": "n/a",
+        "parser_engine": "image_input+PaddleOCR+PPStructureV3",
+        "ocr_engine": "PaddleOCR+PPStructureV3",
+        "ocr_used": true,
+        "layout_used": true,
+        "layout_section_count": 6,
+        "source_mode": "local",
+        "ppstructure_v3_requested": null,
+        "ppstructure_v3_enabled": true,
+        "seal_recognition_enabled": true,
+        "signature_recognition_enabled": true
+      },
+      "runtime": {
+        "device": "gpu:0"
+      },
+      "seal": {
+        "detected": true,
+        "count": 2,
+        "covered_text_count": 2
+      },
+      "signature": {
+        "detected": true,
+        "count": 2
+      }
+    }
+  }
+}

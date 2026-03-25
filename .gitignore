@@ -35,3 +35,8 @@ test_image.png
 Thumbs.db
 wheels/paddleocr-3.4.0-py3-none-any.whl
 wheels/paddlepaddle_gpu-3.3.0-cp312-cp312-linux_x86_64.whl
+
+
+# 8. 其他不需要版本控制的文件
+output_seals/
+output_signatures/
