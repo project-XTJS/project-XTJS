@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import sys
 from collections import Counter
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 
 class ItemizedPricingChecker:
@@ -61,7 +65,7 @@ class ItemizedPricingChecker:
     )
     MONEY_TOLERANCE = Decimal("0.10")
 
-    def check_itemized_logic(self, text: str) -> dict:
+    def check_itemized_logic(self, text: str, tender_text: str | None = None) -> dict:
         normalized_text = self._normalize_text(text)
         lines = self._split_lines(normalized_text)
 
@@ -72,7 +76,7 @@ class ItemizedPricingChecker:
             candidate_sections = [{"anchor": "全文", "lines": lines}]
 
         if self._detect_downward_rate_mode(candidate_sections):
-            return self._check_downward_rate_mode(candidate_sections)
+            return self._check_downward_rate_mode(candidate_sections, tender_text=tender_text)
         return self._check_normal_mode(item_sections, total_sections, candidate_sections)
 
     def _normalize_text(self, text: str) -> str:
@@ -90,11 +94,20 @@ class ItemizedPricingChecker:
     def _split_lines(self, text: str) -> list[str]:
         return [line.strip() for line in text.split("\n") if line and line.strip()]
 
-    def _find_sections(self, lines: list[str], anchors: tuple[str, ...], window: int = 80) -> list[dict]:
+    def _find_sections(
+        self,
+        lines: list[str],
+        anchors: tuple[str, ...],
+        window: int = 80,
+        *,
+        require_score: bool = True,
+    ) -> list[dict]:
         sections = []
         for idx, line in enumerate(lines):
             matched_anchor = next((anchor for anchor in anchors if anchor in line), None)
             if not matched_anchor:
+                continue
+            if not self._is_anchor_line(line, matched_anchor):
                 continue
 
             end = min(len(lines), idx + window)
@@ -105,7 +118,7 @@ class ItemizedPricingChecker:
 
             section_lines = lines[idx:end]
             score = self._score_section(section_lines, matched_anchor)
-            if score <= 0:
+            if require_score and score <= 0:
                 continue
 
             sections.append(
@@ -128,6 +141,33 @@ class ItemizedPricingChecker:
             seen.add(key)
             deduped.append({"anchor": section["anchor"], "lines": section["lines"]})
         return deduped
+
+    def _is_anchor_line(self, line: str, anchor: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        anchor_index = compact.find(anchor)
+        if anchor_index < 0:
+            return False
+        if "目录" in compact or "..." in line or ".." in line:
+            return False
+        if len(compact) > 40 and anchor_index > 6:
+            return False
+        if len(compact) > 30 and any(
+            hint in compact
+            for hint in (
+                "内容与",
+                "须与",
+                "不一致",
+                "应为",
+                "填写",
+                "计入",
+                "中标价",
+                "最高价",
+                "量化",
+                "修正",
+            )
+        ):
+            return False
+        return True
 
     def _score_section(self, lines: list[str], anchor: str) -> int:
         text = "\n".join(lines)
@@ -259,7 +299,7 @@ class ItemizedPricingChecker:
             "details": details,
         }
 
-    def _check_downward_rate_mode(self, candidate_sections: list[dict]) -> dict:
+    def _check_downward_rate_mode(self, candidate_sections: list[dict], tender_text: str | None = None) -> dict:
         relevant_sections = [
             section for section in candidate_sections if any(keyword in "\n".join(section["lines"]) for keyword in self.RATE_KEYWORDS)
         ]
@@ -273,20 +313,36 @@ class ItemizedPricingChecker:
             extracted_items.extend(self._extract_rate_items(section["lines"]))
 
         extracted_items = self._dedupe_entries(extracted_items)
-        missing_serials = self._find_missing_serials(serials)
-        missing_item_status = "fail" if missing_serials else "unknown"
-        status = "fail" if missing_serials else "unknown"
+        serial_gap_hints = self._find_missing_serials(serials)
+        comparison_items = self._extract_comparison_items_from_sections(relevant_sections, rate_mode=True)
+        reference_items = self._extract_reference_items_from_text(tender_text) if tender_text else []
+        comparison_result = self._compare_reference_items(reference_items, comparison_items) if reference_items else None
+
+        if comparison_result is None:
+            missing_items = []
+            missing_item_status = "unknown"
+            comparison_basis = None
+            status = "unknown"
+        else:
+            missing_items = comparison_result["missing_items"]
+            missing_item_status = "fail" if missing_items else "pass"
+            comparison_basis = comparison_result["comparison_basis"]
+            status = "fail" if missing_items else "pass"
 
         details = [
             "检测到下浮率模式，按业务规则跳过下浮率数值本身的校验。",
         ]
-        if missing_serials:
-            details.append(f"发现疑似删减项，序号存在缺口：{', '.join(missing_serials)}。")
+        if comparison_result is None:
+            details.append("当前未提供招标文件，无法完成招标列项与投标列项的删减项比对。")
+        elif missing_items:
+            details.append(f"对比招标列项后发现疑似删减项：{', '.join(missing_items)}。")
         else:
-            details.append("当前仅根据单份文本做序号连续性检查，暂未发现明显缺口。")
+            details.append("已对比招标文件与投标文件列项，暂未发现明显删减项。")
+        if serial_gap_hints:
+            details.append(f"投标文件内部还存在疑似序号缺口：{', '.join(serial_gap_hints)}。")
 
         return {
-            "itemized_table_detected": bool(relevant_sections or extracted_items),
+            "itemized_table_detected": bool(relevant_sections or extracted_items or comparison_items),
             "mode": "downward_rate",
             "status": status,
             "passed": self._status_to_passed(status),
@@ -311,15 +367,18 @@ class ItemizedPricingChecker:
                 },
                 "missing_item": {
                     "status": missing_item_status,
-                    "missing_items": missing_serials,
-                    "comparison_basis": "serial_continuity",
-                    "hints": [],
+                    "missing_items": missing_items,
+                    "comparison_basis": comparison_basis,
+                    "hints": serial_gap_hints,
                 },
             },
             "evidence": {
                 "extracted_item_count": len(extracted_items),
                 "extracted_items": self._serialize_entries(extracted_items),
                 "total_candidates": [],
+                "comparison_items": self._serialize_entries(comparison_items),
+                "reference_item_count": len(reference_items),
+                "reference_items": self._serialize_entries(reference_items),
             },
             "details": details,
         }
@@ -579,6 +638,114 @@ class ItemizedPricingChecker:
             )
         return items
 
+    def _extract_reference_items_from_text(self, text: str | None) -> list[dict]:
+        normalized_text = self._normalize_text(text)
+        lines = self._split_lines(normalized_text)
+        item_sections = self._find_sections(lines, self.ITEM_SECTION_ANCHORS, require_score=False)
+        return self._extract_comparison_items_from_sections(item_sections, rate_mode=False)
+
+    def _extract_comparison_items_from_sections(self, sections: list[dict], *, rate_mode: bool) -> list[dict]:
+        items = []
+        for section in sections:
+            items.extend(self._extract_comparison_items(section["lines"], rate_mode=rate_mode))
+
+        deduped = []
+        seen = set()
+        for item in items:
+            key = (item.get("serial"), item.get("label_key"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _extract_comparison_items(self, lines: list[str], *, rate_mode: bool) -> list[dict]:
+        items = []
+        for idx, line in enumerate(lines):
+            compact = re.sub(r"\s+", "", line)
+            if not compact:
+                continue
+            if compact.startswith("随机备品备件") or ("备件名称" in compact and "规格型号" in compact):
+                break
+            if self._should_skip_line(line) or self._looks_like_total_line(line):
+                if self._looks_like_total_line(line):
+                    break
+                continue
+            if "序号" in line and "名称" in line:
+                continue
+            if not re.search(r"[\u4e00-\u9fff]", compact):
+                continue
+
+            serial_match = re.match(r"^(\d+(?:\.\d+)?)", compact)
+            has_rate = any(keyword in line for keyword in self.RATE_KEYWORDS) or "%" in line or "％" in line
+            if not (self._looks_like_item_row(line) or serial_match or has_rate):
+                continue
+            if rate_mode and not has_rate and not serial_match:
+                continue
+
+            label = self._extract_comparison_label(line, idx, rate_mode=rate_mode)
+            if not label:
+                continue
+            items.append(
+                {
+                    "serial": serial_match.group(1) if serial_match else None,
+                    "label": label,
+                    "label_key": self._normalize_label_key(label),
+                    "source": "rate_item" if rate_mode else "reference_item",
+                }
+            )
+        return items
+
+    def _extract_comparison_label(self, line: str, index: int, *, rate_mode: bool) -> str:
+        label = re.sub(r"^\s*\d+(?:\.\d+)?\s*", "", line)
+        label = re.sub(r"^\s*\d+(?:\.\d+)?\s+", "", label)
+        if rate_mode:
+            label = re.split(r"(?:下浮率|优惠率|折扣率|折让率|下浮|%|％)", label, maxsplit=1)[0]
+        label = re.sub(r"\s*(?:￥|¥)?\s*\d[\d,]*(?:\.\d{1,2})?\s*$", "", label)
+        label = re.sub(r"\b(?:免费)\b.*$", "", label)
+        label = re.sub(r"\s*(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡)\s*\d+(?:\.\d+)?\s.*$", "", label)
+        label = re.sub(r"\s+", " ", label).strip("：: /")
+        return label[:80] if label else f"第{index + 1}行"
+
+    def _compare_reference_items(self, reference_items: list[dict], bid_items: list[dict]) -> dict:
+        reference_with_serial = [item for item in reference_items if item.get("serial")]
+        bid_serials = {item["serial"] for item in bid_items if item.get("serial")}
+        missing_items = []
+        comparison_basis = "tender_vs_bid_label"
+
+        if reference_with_serial and bid_serials:
+            comparison_basis = "tender_vs_bid_serial"
+            for item in reference_with_serial:
+                if item["serial"] in bid_serials:
+                    continue
+                missing_items.append(self._format_comparison_item(item))
+        else:
+            bid_label_keys = {item["label_key"] for item in bid_items if item.get("label_key")}
+            for item in reference_items:
+                label_key = item.get("label_key")
+                if not label_key or label_key in bid_label_keys:
+                    continue
+                missing_items.append(self._format_comparison_item(item))
+
+        deduped_missing = []
+        seen = set()
+        for item in missing_items:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped_missing.append(item)
+        return {
+            "comparison_basis": comparison_basis,
+            "missing_items": deduped_missing,
+        }
+
+    def _format_comparison_item(self, item: dict) -> str:
+        serial = item.get("serial")
+        label = item.get("label")
+        if serial and label:
+            return f"{serial}:{label}"
+        return label or str(serial or "")
+
     def _extract_duplicate_items(self, entries: list[dict]) -> list[dict]:
         normalized_labels = []
         for entry in entries:
@@ -670,7 +837,9 @@ class ItemizedPricingChecker:
     def _build_downward_rate_summary(self, missing_item_status: str) -> str:
         if missing_item_status == "fail":
             return "检测到下浮率模式，并发现疑似删减项。"
-        return "检测到下浮率模式，已跳过下浮率数值校验，当前仅完成序号连续性检查。"
+        if missing_item_status == "pass":
+            return "检测到下浮率模式，已完成招标列项与投标列项比对，暂未发现删减项。"
+        return "检测到下浮率模式，但当前缺少足够参考信息，无法完成删减项比对。"
 
     def _dedupe_entries(self, entries: list[dict]) -> list[dict]:
         deduped = []
@@ -740,3 +909,234 @@ class ItemizedPricingChecker:
             return None
         normalized = value.quantize(Decimal("0.01"))
         return format(normalized, "f")
+
+
+def _service_style_preprocess(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip()) if text else ""
+
+
+def _extract_text_from_payload(payload: object) -> str:
+    if isinstance(payload, str):
+        return payload
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            content = data.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+
+            layout_sections = data.get("layout_sections")
+            if isinstance(layout_sections, list):
+                lines = []
+                for section in layout_sections:
+                    if not isinstance(section, dict):
+                        continue
+                    text = section.get("raw_text") or section.get("text")
+                    if isinstance(text, str) and text.strip():
+                        lines.append(text.strip())
+                if lines:
+                    return "\n".join(lines)
+
+            recognition = data.get("recognition")
+            if isinstance(recognition, dict):
+                for key in ("content", "raw_text", "text", "full_text"):
+                    value = recognition.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value
+
+        for key in ("content", "raw_text", "text", "full_text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+    return str(payload or "")
+
+
+def _load_text_for_local_test(file_path: Path) -> str:
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"读取文件失败: {exc}") from exc
+
+    if file_path.suffix.lower() != ".json":
+        return text
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+    extracted = _extract_text_from_payload(payload)
+    if extracted.strip():
+        return extracted
+    raise RuntimeError("未能从 JSON 中提取可分析文本。")
+
+
+def _collect_missing_amount_lines(checker: ItemizedPricingChecker, text: str) -> list[str]:
+    normalized_text = checker._normalize_text(text)
+    lines = checker._split_lines(normalized_text)
+    item_sections = checker._find_sections(lines, checker.ITEM_SECTION_ANCHORS)
+    candidate_sections = item_sections or checker._find_sections(lines, checker.TOTAL_SECTION_ANCHORS)
+
+    missing_lines = []
+    for section in candidate_sections:
+        for line in section["lines"]:
+            if checker._should_skip_line(line) or checker._looks_like_total_line(line):
+                continue
+            if not checker._looks_like_item_row(line):
+                continue
+            if checker._extract_money_candidates(line):
+                continue
+            missing_lines.append(line)
+
+    deduped = []
+    seen = set()
+    for line in missing_lines:
+        key = re.sub(r"\s+", " ", line).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _print_local_test_report(
+    path: Path,
+    checker: ItemizedPricingChecker,
+    *,
+    simulate_service: bool,
+    tender_path: Path | None = None,
+) -> int:
+    text = _load_text_for_local_test(path)
+    analysis_text = _service_style_preprocess(text) if simulate_service else text
+    tender_text = None
+    if tender_path is not None:
+        loaded_tender_text = _load_text_for_local_test(tender_path)
+        tender_text = _service_style_preprocess(loaded_tender_text) if simulate_service else loaded_tender_text
+    result = checker.check_itemized_logic(analysis_text, tender_text=tender_text)
+
+    print(f"\n=== {path} ===")
+    if tender_path is not None:
+        print(f"reference_tender: {tender_path}")
+    print(f"text_length: {len(analysis_text)}")
+    print(f"mode: {result.get('mode')}")
+    print(f"status: {result.get('status')}")
+    print(f"passed: {result.get('passed')}")
+    print(f"summary: {result.get('summary')}")
+
+    details = result.get("details") or []
+    if details:
+        print("details:")
+        for detail in details:
+            print(f"  - {detail}")
+
+    checks = result.get("checks") or {}
+    sum_check = checks.get("sum_consistency") or {}
+    print("checks:")
+    print(
+        "  - sum_consistency: "
+        f"{sum_check.get('status')} "
+        f"(calc={sum_check.get('calculated_total')}, declared={sum_check.get('declared_total')}, diff={sum_check.get('difference')})"
+    )
+    print(
+        "  - row_arithmetic: "
+        f"{(checks.get('row_arithmetic') or {}).get('status')} "
+        f"(issues={(checks.get('row_arithmetic') or {}).get('issue_count')})"
+    )
+    print(
+        "  - duplicate_items: "
+        f"{(checks.get('duplicate_items') or {}).get('status')} "
+        f"(issues={(checks.get('duplicate_items') or {}).get('issue_count')})"
+    )
+    print(
+        "  - missing_item: "
+        f"{(checks.get('missing_item') or {}).get('status')} "
+        f"(items={(checks.get('missing_item') or {}).get('missing_items')})"
+    )
+
+    evidence = result.get("evidence") or {}
+    extracted_items = evidence.get("extracted_items") or []
+    total_candidates = evidence.get("total_candidates") or []
+    print(f"evidence: items={len(extracted_items)}, totals={len(total_candidates)}")
+    for entry in extracted_items:
+        print(f"  - item: {entry.get('label')} => {entry.get('amount')} ({entry.get('source')})")
+    for entry in total_candidates:
+        print(f"  - total: {entry.get('label')} => {entry.get('amount')} ({entry.get('source')})")
+
+    missing_amount_lines = _collect_missing_amount_lines(checker, analysis_text)
+    if missing_amount_lines:
+        print("missing_amount_candidates:")
+        for line in missing_amount_lines:
+            print(f"  - {line}")
+
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="本地测试分项报价检查器。")
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        default=["tender.json", "bid.json"],
+        help="待测试的文本或 OCR JSON 文件路径。",
+    )
+    parser.add_argument(
+        "--simulate-service",
+        action="store_true",
+        help="模拟 analysis_service 中压缩空白后的输入效果。",
+    )
+    parser.add_argument(
+        "--bid",
+        help="按业务模式指定待检查的投标文件路径。",
+    )
+    parser.add_argument(
+        "--tender",
+        help="在下浮率模式下指定对照用的招标文件路径。",
+    )
+    args = parser.parse_args(argv)
+
+    checker = ItemizedPricingChecker()
+    exit_code = 0
+    if args.bid:
+        bid_path = Path(args.bid).expanduser()
+        if not bid_path.is_absolute():
+            bid_path = Path.cwd() / bid_path
+        tender_path = None
+        if args.tender:
+            tender_path = Path(args.tender).expanduser()
+            if not tender_path.is_absolute():
+                tender_path = Path.cwd() / tender_path
+        try:
+            _print_local_test_report(
+                bid_path,
+                checker,
+                simulate_service=args.simulate_service,
+                tender_path=tender_path,
+            )
+        except Exception as exc:  # pragma: no cover - local debug entrypoint
+            print(f"\n=== {bid_path} ===")
+            print(f"error: {exc}")
+            return 1
+        return 0
+
+    for raw_path in args.paths:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.exists():
+            print(f"\n=== {path} ===")
+            print("error: 文件不存在。")
+            exit_code = 1
+            continue
+        try:
+            _print_local_test_report(path, checker, simulate_service=args.simulate_service)
+        except Exception as exc:  # pragma: no cover - local debug entrypoint
+            print(f"\n=== {path} ===")
+            print(f"error: {exc}")
+            exit_code = 1
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

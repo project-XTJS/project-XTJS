@@ -219,6 +219,117 @@ class OCRService:
             return True
         return False
 
+    def _side_red_density(self, roi_red_mask: np.ndarray) -> dict[str, float]:
+        if roi_red_mask is None or roi_red_mask.size == 0:
+            return {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+        h, w = roi_red_mask.shape[:2]
+        if h <= 0 or w <= 0:
+            return {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+        band = max(2, int(min(h, w) * 0.14))
+        max_band = max(1, min(h, w) // 2)
+        band = min(band, max_band)
+        top = roi_red_mask[:band, :]
+        bottom = roi_red_mask[h - band :, :]
+        left = roi_red_mask[:, :band]
+        right = roi_red_mask[:, w - band :]
+        top_area = float(max(top.shape[0] * top.shape[1], 1))
+        bottom_area = float(max(bottom.shape[0] * bottom.shape[1], 1))
+        left_area = float(max(left.shape[0] * left.shape[1], 1))
+        right_area = float(max(right.shape[0] * right.shape[1], 1))
+        return {
+            "top": float(cv2.countNonZero(top)) / top_area,
+            "bottom": float(cv2.countNonZero(bottom)) / bottom_area,
+            "left": float(cv2.countNonZero(left)) / left_area,
+            "right": float(cv2.countNonZero(right)) / right_area,
+        }
+
+    def _dominant_red_quadrant_ratio(self, roi_red_mask: np.ndarray) -> float:
+        if roi_red_mask is None or roi_red_mask.size == 0:
+            return 0.0
+        h, w = roi_red_mask.shape[:2]
+        if h <= 1 or w <= 1:
+            return 0.0
+        h_half = max(1, h // 2)
+        w_half = max(1, w // 2)
+        quadrants = (
+            roi_red_mask[:h_half, :w_half],
+            roi_red_mask[:h_half, w - w_half :],
+            roi_red_mask[h - h_half :, :w_half],
+            roi_red_mask[h - h_half :, w - w_half :],
+        )
+        total_red = float(max(cv2.countNonZero(roi_red_mask), 1))
+        return max(float(cv2.countNonZero(part)) / total_red for part in quadrants if part.size > 0)
+
+    def _is_decorative_border_like_candidate(
+        self,
+        box: list[int],
+        image_shape: tuple[int, ...],
+        roi_red_mask: np.ndarray,
+        profile: dict[str, float],
+    ) -> bool:
+        if not isinstance(box, list) or len(box) != 4:
+            return False
+        if roi_red_mask is None or roi_red_mask.size == 0:
+            return False
+        img_h, img_w = image_shape[:2]
+        if img_h <= 0 or img_w <= 0:
+            return False
+        x, y, w, h = [int(v) for v in box]
+        if w <= 0 or h <= 0:
+            return False
+
+        margin = max(3, int(min(img_h, img_w) * 0.006))
+        touches_left = x <= margin
+        touches_top = y <= margin
+        touches_right = (x + w) >= (img_w - margin)
+        touches_bottom = (y + h) >= (img_h - margin)
+        touched_count = int(touches_left) + int(touches_top) + int(touches_right) + int(touches_bottom)
+        if touched_count == 0:
+            return False
+
+        side_density = self._side_red_density(roi_red_mask)
+        side_values = list(side_density.values())
+        max_side_density = max(side_values) if side_values else 0.0
+        min_side_density = min(side_values) if side_values else 0.0
+        dense_side_count = sum(1 for value in side_values if value >= 0.14)
+        side_gap = max_side_density - min_side_density
+
+        center_red_ratio = float(profile.get("center_red_ratio", 0.0))
+        red_ratio = float(profile.get("red_ratio", 0.0))
+        ring_contrast = float(profile.get("ring_contrast", 0.0))
+        edge_ratio = float(profile.get("edge_ratio", 0.0))
+        dominant_quadrant_ratio = self._dominant_red_quadrant_ratio(roi_red_mask)
+        touching_corner = (
+            (touches_left and touches_top)
+            or (touches_left and touches_bottom)
+            or (touches_right and touches_top)
+            or (touches_right and touches_bottom)
+        )
+
+        corner_ornament_like = (
+            touching_corner
+            and dominant_quadrant_ratio >= 0.58
+            and center_red_ratio <= 0.065
+            and red_ratio <= 0.30
+            and ring_contrast >= 0.03
+        )
+        border_frame_like = (
+            touched_count >= 1
+            and dense_side_count <= 2
+            and side_gap >= 0.14
+            and center_red_ratio <= 0.06
+            and red_ratio <= 0.26
+            and ring_contrast >= 0.04
+        )
+        border_texture_like = (
+            touched_count >= 1
+            and edge_ratio >= 0.14
+            and max_side_density >= 0.22
+            and center_red_ratio <= 0.05
+            and red_ratio <= 0.20
+        )
+        return bool(corner_ornament_like or border_frame_like or border_texture_like)
+
     def _is_reliable_marker_text(self, seal_text: str, covered_text: str) -> bool:
         merged = self._merge_text_parts([seal_text, covered_text], join_char="")
         if not merged:
@@ -1896,6 +2007,13 @@ class OCRService:
                 merged_red_density=merged_red_density,
             )
             has_visual_stamp_evidence = strong_round_stamp or strong_dense_stamp or round_star_stamp
+            reliable_marker_text = self._is_reliable_marker_text(clean_text, recovered_text)
+            decorative_border_like = self._is_decorative_border_like_candidate(
+                box,
+                img_bgr.shape,
+                roi_mask,
+                candidate_profile,
+            )
             if (weak_stamp_shape or clutter_like) and not has_seal_hint and not has_visual_stamp_evidence:
                 continue
             if colorful_background and not has_strong_seal_hint and not has_visual_stamp_evidence:
@@ -1904,9 +2022,10 @@ class OCRService:
                 continue
             if certificate_like and not has_strong_seal_hint and not has_visual_stamp_evidence:
                 continue
+            if decorative_border_like and not has_strong_seal_hint and not reliable_marker_text and not strong_dense_stamp:
+                continue
             if not has_seal_hint and not has_visual_stamp_evidence:
                 continue
-            reliable_marker_text = self._is_reliable_marker_text(clean_text, recovered_text)
             small_fragment_threshold = max(36, int(min(img_h, img_w) * 0.022))
             if min(w, h) < small_fragment_threshold and not has_seal_hint and not reliable_marker_text:
                 continue
