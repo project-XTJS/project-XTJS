@@ -23,7 +23,9 @@ class OCRService:
         self.structure = None
         self.structure_available = False
         self._structure_init_attempted = False
-        self._predictor_lock = threading.Lock()
+        self._ocr_predictor_lock = threading.Lock()
+        self._structure_predictor_lock = threading.Lock()
+        self._predictor_fallback_lock = threading.Lock()
         self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
         self.seal_dir = "output_seals"
@@ -616,6 +618,13 @@ class OCRService:
             queue_size = 4
         return max(1, min(queue_size, 64))
 
+    def _resolve_pipeline_infer_batch_size(self, total_pages: int) -> int:
+        try:
+            batch_size = int(getattr(settings, "PADDLE_OCR_PIPELINE_INFER_BATCH_SIZE", 2))
+        except Exception:
+            batch_size = 2
+        return max(1, min(batch_size, total_pages, 8))
+
     def _resolve_pipeline_render_workers(self, total_pages: int) -> int:
         try:
             workers = int(getattr(settings, "PADDLE_OCR_PIPELINE_RENDER_WORKERS", 2))
@@ -965,15 +974,38 @@ class OCRService:
             "marker_applied": marker_applied,
         }
 
-    def _run_predictor(self, predictor: Any, image: np.ndarray, predictor_name: str) -> list:
+    def _run_predictor(self, predictor: Any, image: Any, predictor_name: str) -> list:
         if predictor is None:
             return []
         try:
-            with self._predictor_lock:
+            with self._select_predictor_lock(predictor):
                 return list(predictor.predict(image))
         except Exception as exc:
             print(f"{predictor_name} inference failed: {exc}")
             return []
+
+    def _select_predictor_lock(self, predictor: Any):
+        if predictor is self.ocr:
+            return self._ocr_predictor_lock
+        if predictor is self.structure:
+            return self._structure_predictor_lock
+        return self._predictor_fallback_lock
+
+    def _split_predict_result_batches(self, predictor_result: list, expected_size: int) -> list[list]:
+        if expected_size <= 1:
+            return [list(predictor_result or [])]
+
+        raw_items = list(predictor_result or [])
+        if not raw_items:
+            return [[] for _ in range(expected_size)]
+
+        if len(raw_items) == expected_size:
+            return [item if isinstance(item, list) else [item] for item in raw_items]
+
+        batches = [item if isinstance(item, list) else [item] for item in raw_items[:expected_size]]
+        if len(batches) < expected_size:
+            batches.extend([[] for _ in range(expected_size - len(batches))])
+        return batches
 
     def _extract_text_from_result(self, ocr_res: list, join_char: str = "\n") -> str:
         if not ocr_res:
@@ -1358,6 +1390,21 @@ class OCRService:
             return "", [], False
 
         structure_result = self._run_predictor(self.structure, image, "PPStructureV3")
+        return self._extract_structure_layout_from_result(
+            structure_result,
+            page_no,
+            structure_enabled=structure_enabled,
+        )
+
+    def _extract_structure_layout_from_result(
+        self,
+        structure_result: list,
+        page_no: int,
+        *,
+        structure_enabled: bool,
+    ) -> tuple[str, list[dict], bool]:
+        if not structure_enabled:
+            return "", [], False
         if not structure_result:
             return "", [], False
 
@@ -1368,6 +1415,28 @@ class OCRService:
             layout_text = self._extract_structure_text(structure_result)
 
         return layout_text, layout_sections, bool(layout_text or layout_sections)
+
+    def _should_attempt_seal_text_recovery(
+        self,
+        *,
+        clean_text: str,
+        merged_red_density: float,
+        merged_aspect: float,
+        candidate_profile: dict[str, float],
+    ) -> bool:
+        if not clean_text:
+            return True
+        if not self._is_reliable_marker_text(clean_text, ""):
+            return True
+
+        ring_contrast = float(candidate_profile.get("ring_contrast", 0.0))
+        center_red_ratio = float(candidate_profile.get("center_red_ratio", 0.0))
+        return (
+            merged_red_density >= 0.14
+            and 0.62 <= merged_aspect <= 1.62
+            and ring_contrast >= 0.08
+            and center_red_ratio >= 0.035
+        )
 
     def _remove_seal_texts(self, text: str, seal_texts: list[str]) -> str:
         if not text or not seal_texts or not settings.PADDLE_OCR_EXCLUDE_SEAL_TEXT:
@@ -1807,19 +1876,25 @@ class OCRService:
             cv2.imwrite(save_path, signature_crop)
 
             gray_crop = cv2.cvtColor(signature_crop, cv2.COLOR_BGR2GRAY)
-            binary_crop = cv2.adaptiveThreshold(
-                gray_crop,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                35,
-                15,
-            )
-            binary_bgr = cv2.cvtColor(binary_crop, cv2.COLOR_GRAY2BGR)
-
             signature_text_candidates: list[str] = []
-            for candidate in (signature_crop, binary_bgr):
-                resized = cv2.resize(candidate, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            resized = cv2.resize(signature_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            candidate_result = self._run_predictor(self.ocr, resized, "Signature OCR")
+            raw_text = self._extract_text_from_result(candidate_result, join_char="")
+            clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=20)
+            if clean_text:
+                signature_text_candidates.append(clean_text)
+
+            if not clean_text or len(clean_text) < 3:
+                binary_crop = cv2.adaptiveThreshold(
+                    gray_crop,
+                    255,
+                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                    cv2.THRESH_BINARY,
+                    35,
+                    15,
+                )
+                binary_bgr = cv2.cvtColor(binary_crop, cv2.COLOR_GRAY2BGR)
+                resized = cv2.resize(binary_bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
                 candidate_result = self._run_predictor(self.ocr, resized, "Signature OCR")
                 raw_text = self._extract_text_from_result(candidate_result, join_char="")
                 clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=20)
@@ -1970,7 +2045,14 @@ class OCRService:
             raw_text = self._extract_text_from_result(crop_result, join_char="")
             clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=30)
 
-            recovered_text = self._recover_text_from_seal_region(img_bgr, box, mask)
+            recovered_text = ""
+            if self._should_attempt_seal_text_recovery(
+                clean_text=clean_text,
+                merged_red_density=merged_red_density,
+                merged_aspect=merged_aspect,
+                candidate_profile=candidate_profile,
+            ):
+                recovered_text = self._recover_text_from_seal_region(img_bgr, box, mask)
             has_seal_hint = self._contains_seal_hint_text(clean_text, recovered_text)
             has_strong_seal_hint = self._contains_strong_seal_hint_text(clean_text, recovered_text)
             identity_document_like = self._contains_identity_document_text(clean_text, recovered_text)
@@ -2106,31 +2188,67 @@ class OCRService:
         *,
         structure_enabled: bool,
     ) -> dict:
-        timings_ms = {"ocr_ms": 0.0, "layout_ms": 0.0}
-
-        start = time.perf_counter()
-        ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
-        ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
-        timings_ms["ocr_ms"] = (time.perf_counter() - start) * 1000.0
-
-        start = time.perf_counter()
-        layout_text, layout_sections, structure_used = self._run_structure_layout(
-            image,
-            page_no,
+        return self._run_pdf_stage_b_batch(
+            [{"page_no": page_no, "image": image}],
             structure_enabled=structure_enabled,
-        )
-        timings_ms["layout_ms"] = (time.perf_counter() - start) * 1000.0
+        )[0]
 
-        return {
-            "page_no": page_no,
-            "image": image,
-            "ocr_text": ocr_text,
-            "layout_text": layout_text,
-            "layout_sections": layout_sections,
-            "structure_used": structure_used,
-            "text_signal": bool(ocr_text.strip() or layout_text.strip()),
-            "timings_ms": timings_ms,
-        }
+    def _run_pdf_stage_b_batch(
+        self,
+        render_items: list[dict],
+        *,
+        structure_enabled: bool,
+    ) -> list[dict]:
+        if not render_items:
+            return []
+
+        images = [item["image"] for item in render_items]
+        predictor_input = images if len(images) > 1 else images[0]
+
+        start = time.perf_counter()
+        ocr_predict_result = self._run_predictor(self.ocr, predictor_input, "PaddleOCR")
+        total_ocr_ms = (time.perf_counter() - start) * 1000.0
+        ocr_batches = self._split_predict_result_batches(ocr_predict_result, len(render_items))
+
+        structure_batches = [[] for _ in render_items]
+        total_layout_ms = 0.0
+        if structure_enabled and self.structure_available and self.structure is not None:
+            start = time.perf_counter()
+            structure_predict_result = self._run_predictor(self.structure, predictor_input, "PPStructureV3")
+            total_layout_ms = (time.perf_counter() - start) * 1000.0
+            structure_batches = self._split_predict_result_batches(
+                structure_predict_result,
+                len(render_items),
+            )
+
+        per_page_ocr_ms = total_ocr_ms / max(len(render_items), 1)
+        per_page_layout_ms = total_layout_ms / max(len(render_items), 1)
+
+        payloads: list[dict] = []
+        for index, item in enumerate(render_items):
+            page_no = int(item["page_no"])
+            ocr_text = self._extract_text_from_result(ocr_batches[index], join_char="\n")
+            layout_text, layout_sections, structure_used = self._extract_structure_layout_from_result(
+                structure_batches[index],
+                page_no,
+                structure_enabled=structure_enabled,
+            )
+            payloads.append(
+                {
+                    "page_no": page_no,
+                    "image": item["image"],
+                    "ocr_text": ocr_text,
+                    "layout_text": layout_text,
+                    "layout_sections": layout_sections,
+                    "structure_used": structure_used,
+                    "text_signal": bool(ocr_text.strip() or layout_text.strip()),
+                    "timings_ms": {
+                        "ocr_ms": per_page_ocr_ms,
+                        "layout_ms": per_page_layout_ms,
+                    },
+                }
+            )
+        return payloads
 
     def _run_pdf_stage_c(
         self,
@@ -2272,6 +2390,7 @@ class OCRService:
         total_pages: int,
         total_ms: float,
         stage_metrics: dict[str, float],
+        infer_batch_size: int | None = None,
         render_workers: int | None = None,
         post_workers: int | None = None,
         queue_size: int | None = None,
@@ -2283,6 +2402,8 @@ class OCRService:
         extra = ""
         if render_workers is not None and post_workers is not None and queue_size is not None:
             extra = f", render_workers={render_workers}, post_workers={post_workers}, queue={queue_size}"
+            if infer_batch_size is not None:
+                extra += f", infer_batch={infer_batch_size}"
         print(
             "OCRService: PDF OCR "
             f"mode={mode}, pages={total_pages}{extra}, total={total_ms:.1f}ms, "
@@ -2406,6 +2527,7 @@ class OCRService:
         signature_enabled: bool,
     ) -> dict:
         queue_size = self._resolve_pipeline_queue_size()
+        infer_batch_size = self._resolve_pipeline_infer_batch_size(total_pages)
         render_workers = self._resolve_pipeline_render_workers(total_pages)
         post_workers = self._resolve_pipeline_post_workers(total_pages)
 
@@ -2545,29 +2667,50 @@ class OCRService:
                         render_done_count += 1
                         continue
 
-                    page_no = int(item["page_index"]) + 1
+                    batch_items = [item]
                     stage_metrics["render_ms"] += float(item.get("render_ms", 0.0))
 
-                    stage_b_payload = self._run_pdf_stage_b(
-                        item["image"],
-                        page_no,
+                    while len(batch_items) < infer_batch_size:
+                        try:
+                            buffered_item = render_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                        if buffered_item.get("_render_done"):
+                            render_done_count += 1
+                            continue
+
+                        batch_items.append(buffered_item)
+                        stage_metrics["render_ms"] += float(buffered_item.get("render_ms", 0.0))
+
+                    batch_render_items = [
+                        {
+                            "page_no": int(render_item["page_index"]) + 1,
+                            "image": render_item["image"],
+                        }
+                        for render_item in batch_items
+                    ]
+                    stage_b_payloads = self._run_pdf_stage_b_batch(
+                        batch_render_items,
                         structure_enabled=structure_enabled,
                     )
-                    stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
-                    stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
-                    processed_stage_b += 1
+                    for stage_b_payload in stage_b_payloads:
+                        stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
+                        stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
+                    processed_stage_b += len(stage_b_payloads)
 
                     max_pending = max(queue_size, post_workers)
-                    while len(pending_futures) >= max_pending:
-                        collect_completed_futures(block=True)
+                    for stage_b_payload in stage_b_payloads:
+                        while len(pending_futures) >= max_pending:
+                            collect_completed_futures(block=True)
 
-                    future = post_pool.submit(
-                        self._run_pdf_stage_c,
-                        stage_b_payload,
-                        seal_enabled=seal_enabled,
-                        signature_enabled=signature_enabled,
-                    )
-                    pending_futures.add(future)
+                        future = post_pool.submit(
+                            self._run_pdf_stage_c,
+                            stage_b_payload,
+                            seal_enabled=seal_enabled,
+                            signature_enabled=signature_enabled,
+                        )
+                        pending_futures.add(future)
 
                 while pending_futures:
                     collect_completed_futures(block=True)
@@ -2607,6 +2750,7 @@ class OCRService:
             render_workers=render_workers,
             post_workers=post_workers,
             queue_size=queue_size,
+            infer_batch_size=infer_batch_size,
         )
         return result
 
