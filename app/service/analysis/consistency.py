@@ -108,7 +108,7 @@ class TemplateAnalysisService:
     def _get_anchors(self, template_text: str):
         """核心代码：按括号、冒号、下划线和标点全方位切割模板"""
         template_text = template_text.replace('（', '(').replace('）', ')').replace('：', ':')
-        template_text = re.sub(r'(项目|编号|金额|日期|地址)', r' \1 ', template_text)
+        template_text = re.sub(r'(项目)', r' \1 ', template_text)
         template_text = self._replace_synonyms(template_text)
         segments = self.TEMPLATE_SPLIT_PATTERN.split(template_text)
         
