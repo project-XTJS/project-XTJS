@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     PADDLE_STRUCTURE_USE_FORMULA: bool = False
 
     # 4. 项目批量识别配置
+    # 以“商务标 + 技术标”为一组进行批量处理。
+    PROJECT_BATCH_MIN_BID_GROUPS: int = 1
+    PROJECT_BATCH_MAX_BID_GROUPS: int = 0
+
+    # 4. 项目批量识别配置
     # 最少投标文件数，默认 1
     PROJECT_BATCH_MIN_BID_FILES: int = 1
     # 最多投标文件数；<=0 表示不限制上限

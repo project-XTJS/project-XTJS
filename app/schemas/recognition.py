@@ -2,6 +2,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.core.document_types import (
+    DOCUMENT_TYPE_BUSINESS_BID,
+    DOCUMENT_TYPE_TECHNICAL_BID,
+    DOCUMENT_TYPE_TENDER,
+)
+
 
 def build_analyze_file_metadata(
     *,
@@ -31,7 +37,6 @@ def build_analyze_file_metadata(
     seal_recognition_enabled: bool = False,
     signature_recognition_enabled: bool = False,
 ) -> Dict[str, Any]:
-    """构建 analyze-file 的轻量元数据。"""
     return {
         "schema_version": "analyze_file_v3",
         "document": {
@@ -97,8 +102,6 @@ class QualityFlags(BaseModel):
 
 
 class PdfRound1Response(BaseModel):
-    """PDF 一轮识别标准返回结构。"""
-
     schema_version: str = "pdf_round1_lite_v1"
     document_meta: DocumentMeta
     processing_meta: ProcessingMeta
@@ -109,16 +112,18 @@ class PdfRound1Response(BaseModel):
 
 
 class TenderPdfResponse(PdfRound1Response):
-    """招标文档专用返回模型。"""
-
     def __init__(self, **data):
         super().__init__(**data)
-        self.document_meta.document_type = "tender"
+        self.document_meta.document_type = DOCUMENT_TYPE_TENDER
 
 
-class BidPdfResponse(PdfRound1Response):
-    """投标文档专用返回模型。"""
-
+class BusinessBidPdfResponse(PdfRound1Response):
     def __init__(self, **data):
         super().__init__(**data)
-        self.document_meta.document_type = "bid"
+        self.document_meta.document_type = DOCUMENT_TYPE_BUSINESS_BID
+
+
+class TechnicalBidPdfResponse(PdfRound1Response):
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.document_meta.document_type = DOCUMENT_TYPE_TECHNICAL_BID

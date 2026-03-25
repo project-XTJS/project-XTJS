@@ -33,7 +33,7 @@ class DeviationChecker:
     def check_technical_deviation(self, tender_document: Any, bid_document: Any | None = None) -> dict:
         """
         支持：
-        1) check_technical_deviation(tender_json, bid_json)
+        1) check_technical_deviation(招标JSON, 技术标JSON)
         2) check_technical_deviation(single_text_or_json) -> 返回输入不足提示
         """
         tender = self._coerce_payload(tender_document)
@@ -58,8 +58,8 @@ class DeviationChecker:
         # 严格规则：无★则直接通过，不比对
         if not star_requirements:
             return {
-                "mode": "tender_bid_json",
-                "summary": "No mandatory (★) requirement was found in the tender document. Comparison is skipped.",
+                "mode": "tender_technical_bid_json",
+                "summary": "招标文件中未发现带 ★ 的强制性要求，已跳过偏离比对。",
                 "compliance_status": "pass",
                 "deviation_status": "no_star_requirements",
                 "requirement_extraction_mode": "star",
@@ -89,7 +89,7 @@ class DeviationChecker:
                     "covered_by_global_statement_count": 0,
                     "covered_by_deviation_table_count": 0,
                 },
-                "key_findings": ["No ★ requirement detected in tender document; no deviation comparison required."],
+                "key_findings": ["招标文件中未发现带 ★ 的强制性要求，无需执行偏离比对。"],
                 "extracted_parameters": [],
             }
 
@@ -146,12 +146,12 @@ class DeviationChecker:
         negative = len(negative_items)
         unclear = len(unclear_items)
         status, deviation_status, summary = self._overall_status(total, missing, negative, unclear)
-        findings = [f"Detected {total} mandatory (★) requirements in tender document."]
-        findings.append(f"Responded {responded}, missing {missing}, negative {negative}, unclear {unclear}.")
-        findings.append(f"Compliant responses (no deviation/positive deviation): {no_dev + positive}.")
+        findings = [f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。"]
+        findings.append(f"已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
+        findings.append(f"合规响应数量（无偏离/正偏离）：{no_dev + positive} 条。")
 
         return {
-            "mode": "tender_bid_json",
+            "mode": "tender_technical_bid_json",
             "summary": summary,
             "compliance_status": status,
             "deviation_status": deviation_status,
@@ -192,7 +192,7 @@ class DeviationChecker:
         sections = self._extract_bid_deviation_sections(payload)
         return {
             "mode": "single_document",
-            "summary": "Both tender JSON and bid JSON are required for requirement-response validation.",
+            "summary": "要求响应校验需要同时提供招标 JSON 和技术标 JSON。",
             "compliance_status": "manual_review",
             "deviation_status": "insufficient_input",
             "requirement_extraction_mode": "star",
@@ -219,7 +219,7 @@ class DeviationChecker:
                 "covered_by_global_statement_count": 0,
                 "covered_by_deviation_table_count": 0,
             },
-            "key_findings": ["Insufficient input: single document only."],
+            "key_findings": ["输入不足：当前仅提供了单份文档。"],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
     def _extract_star_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
@@ -402,7 +402,7 @@ class DeviationChecker:
                     if "偏离" in line:
                         score += 0.05
 
-                    # Collect multiple clause-hit candidates, then aggregate deviation type.
+                    # 收集多个可能命中的条款，再统一判断偏离类型。
                     line_is_hit = bool(score >= 0.62 or (hits >= 2 and score >= 0.45) or long_hit)
                     if line_is_hit:
                         candidate_texts.append(str(line or "").strip())
@@ -434,10 +434,10 @@ class DeviationChecker:
         strict_match = bool(best["matched"] and (best["score"] >= 0.72 or (best["hits"] >= 2 and best["score"] >= 0.48) or best["long_hit"]))
         matched = bool(strict_match or candidate_texts)
 
-        # Priority:
-        # 1) any negative -> negative
-        # 2) else any no_deviation / positive_deviation -> pass
-        # 3) else unclear
+        # 判定优先级：
+        # 1) 只要存在负偏离就判定为负偏离
+        # 2) 否则只要存在无偏离/正偏离就判定为通过
+        # 3) 其余情况判定为不明确
         merged_candidates = "\n".join(candidate_texts)
         if matched and self._match_patterns(merged_candidates, self.NEG_DEV_PATTERNS):
             dev_type = "negative_deviation"
@@ -474,16 +474,29 @@ class DeviationChecker:
 
     def _overall_status(self, total: int, missing: int, negative: int, unclear: int) -> tuple[str, str, str]:
         if total == 0:
-            return "pass", "no_star_requirements", "No mandatory (★) requirement was found; comparison skipped."
+            return "pass", "no_star_requirements", "未发现带 ★ 的强制性要求，已跳过比对。"
         if missing > 0 or negative > 0 or unclear > 0:
             return (
                 "fail",
                 "fail",
-                f"Detected {total} mandatory (★) requirements; missing={missing}, negative={negative}, unclear={unclear}.",
+                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}，不明确={unclear}。",
             )
-        return "pass", "pass", "All mandatory (★) requirements are mentioned and marked as no deviation/positive deviation."
+        return "pass", "pass", "所有带 ★ 的强制性要求均已响应，且结论为无偏离或正偏离。"
     def _extract_pair(self, payload: dict) -> tuple[dict, dict] | None:
-        keys = (("tender_document", "bid_document"), ("tender", "bid"), ("tender_json", "bid_json"), ("招标文件", "投标文件"))
+        keys = (
+            ("tender_document", "technical_bid_document"),
+            ("tender", "technical_bid"),
+            ("tender_json", "technical_bid_json"),
+            ("招标文件", "技术标文件"),
+            ("tender_document", "business_bid_document"),
+            ("tender", "business_bid"),
+            ("tender_json", "business_bid_json"),
+            ("招标文件", "商务标文件"),
+            ("tender_document", "bid_document"),
+            ("tender", "bid"),
+            ("tender_json", "bid_json"),
+            ("招标文件", "投标文件"),
+        )
         candidates = [payload]
         data = payload.get("data")
         if isinstance(data, dict):
