@@ -1,0 +1,128 @@
+{
+  "code": 200,
+  "message": "success",
+  "rid": "59f6bbfd-fcba-4836-b80f-fa6300feff35",
+  "data": {
+    "filename": "e9261c75ffee1ada6c698dbae166727c.png",
+    "file_type": "png",
+    "file_size": 169530,
+    "text_length": 646,
+    "page_count": 1,
+    "layout_sections": [
+      {
+        "page": 1,
+        "type": "heading",
+        "text": "二、开标一览表"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "项目名称：6G紧缩场系统招标编号：XTJS2025-369"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "货币单位：元/人民币"
+      },
+      {
+        "page": 1,
+        "type": "table",
+        "text": "1 投标总价 小写：3,860,000元 大写：叁佰捌拾陆万元整\n.2 交货期 合同签订后3个月\n3 交货地点 上海市浦东新区（客户指定地点）\n4 质保期 设备3年，其中暗室壳体和吸波材料10年",
+        "raw_text": "1 投标总价 小写：3,860,000元 大写：叁佰捌拾陆万元整\n.2 交货期 合同签订后3个月\n3 交货地点 上海市浦东新区（客户指定地点）\n4 质保期 设备3年，其中暗室壳体和吸波材料10年"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "注："
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "1.所有价格均系用人民币表示，单位为元，精确到小数点后两位。"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "2.投标总价应为含税价，包含达到货物/服务使用和验收要求，备品备件费用及完成所有相关服务的所有费用。投标人若有漏项则自行承担相关风险；若报价有虚增项目或数量，合同结算时相应扣除该部分费用。"
+      }
+    ],
+    "table_sections": [
+      {
+        "page": 1,
+        "type": "table",
+        "text": "1 投标总价 小写：3,860,000元 大写：叁佰捌拾陆万元整\n.2 交货期 合同签订后3个月\n3 交货地点 上海市浦东新区（客户指定地点）\n4 质保期 设备3年，其中暗室壳体和吸波材料10年",
+        "raw_text": "1 投标总价 小写：3,860,000元 大写：叁佰捌拾陆万元整\n.2 交货期 合同签订后3个月\n3 交货地点 上海市浦东新区（客户指定地点）\n4 质保期 设备3年，其中暗室壳体和吸波材料10年"
+      }
+    ],
+    "recognition": {
+      "route": "ocr",
+      "reason": "image_input",
+      "pdf_mode": "n/a",
+      "pdf_text_stats": {},
+      "parser_engine": "image_input+PaddleOCR+PPStructureV3",
+      "ocr_engine": "PaddleOCR+PPStructureV3",
+      "ocr_used": true,
+      "layout_used": true,
+      "layout_section_count": 7,
+      "table_section_count": 1,
+      "active_device": "gpu:0",
+      "ppstructure_v3_requested": null,
+      "ppstructure_v3_enabled": true,
+      "seal_recognition_enabled": true,
+      "signature_recognition_enabled": true
+    },
+    "seal": {
+      "detected": true,
+      "count": 1,
+      "texts": [
+        "宇科技有或授权代表签字或盖酒日期202511010006"
+      ],
+      "covered_texts": [
+        "宇科技有标人法定代表人或授权代表签字或盖章北京中测国宇科技有限公司盖章草北投标人名称日期2025"
+      ]
+    },
+    "signature": {
+      "detected": false,
+      "count": 0,
+      "texts": []
+    },
+    "metadata": {
+      "schema_version": "analyze_file_v3",
+      "document": {
+        "filename": "e9261c75ffee1ada6c698dbae166727c.png",
+        "file_type": "png",
+        "file_size": 169530,
+        "page_count": 1,
+        "mime_type": "image/png",
+        "text_length": 646
+      },
+      "recognition": {
+        "route": "ocr",
+        "reason": "image_input",
+        "pdf_mode": "n/a",
+        "parser_engine": "image_input+PaddleOCR+PPStructureV3",
+        "ocr_engine": "PaddleOCR+PPStructureV3",
+        "ocr_used": true,
+        "layout_used": true,
+        "layout_section_count": 7,
+        "source_mode": "local",
+        "ppstructure_v3_requested": null,
+        "ppstructure_v3_enabled": true,
+        "seal_recognition_enabled": true,
+        "signature_recognition_enabled": true
+      },
+      "runtime": {
+        "device": "gpu:0"
+      },
+      "seal": {
+        "detected": true,
+        "count": 1,
+        "covered_text_count": 1
+      },
+      "signature": {
+        "detected": false,
+        "count": 0
+      }
+    }
+  }
+}
