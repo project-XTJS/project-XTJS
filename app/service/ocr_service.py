@@ -21,10 +21,15 @@ class OCRService:
         self.available = False
         self.ocr = None
         self.structure = None
+        # 印章识别单独走官方 SealRecognition，避免和正文 OCR 结果互相干扰。
+        self.seal_pipeline = None
         self.structure_available = False
+        self.seal_pipeline_available = False
         self._structure_init_attempted = False
+        self._seal_init_attempted = False
         self._ocr_predictor_lock = threading.Lock()
         self._structure_predictor_lock = threading.Lock()
+        self._seal_predictor_lock = threading.Lock()
         self._predictor_fallback_lock = threading.Lock()
         self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
@@ -519,7 +524,7 @@ class OCRService:
 
     def _init_engines(self) -> None:
         try:
-            from paddleocr import PaddleOCR
+            from paddleocr import PaddleOCR, SealRecognition
         except Exception as exc:
             print(f"OCRService bootstrap failed: {exc}")
             return
@@ -547,8 +552,52 @@ class OCRService:
             print(f"OCRService bootstrap failed: {last_error}")
             return
 
+        if settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION:
+            self._init_seal_pipeline(SealRecognition)
         if settings.PADDLE_OCR_ENABLE_STRUCTURE:
             self._init_structure_engine()
+
+    def _init_seal_pipeline(self, seal_pipeline_cls) -> None:
+        self._seal_init_attempted = True
+        # 这里统一复用当前选中的设备，保证印章识别和主 OCR 的部署方式一致。
+        kwargs: dict[str, Any] = {
+            "device": self.active_device,
+            "use_layout_detection": True,
+            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
+            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
+        }
+        seal_rec_model_name = getattr(settings, "PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_NAME", None)
+        seal_rec_model_dir = getattr(settings, "PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_DIR", None)
+        seal_det_box_thresh = getattr(settings, "PADDLE_OCR_SEAL_DET_BOX_THRESH", None)
+        seal_det_unclip_ratio = getattr(settings, "PADDLE_OCR_SEAL_DET_UNCLIP_RATIO", None)
+        seal_rec_score_thresh = getattr(settings, "PADDLE_OCR_SEAL_REC_SCORE_THRESH", None)
+        if seal_rec_model_name:
+            kwargs["text_recognition_model_name"] = str(seal_rec_model_name).strip()
+        if seal_rec_model_dir:
+            kwargs["text_recognition_model_dir"] = str(seal_rec_model_dir)
+        if seal_det_box_thresh is not None:
+            kwargs["seal_det_box_thresh"] = float(seal_det_box_thresh)
+        if seal_det_unclip_ratio is not None:
+            kwargs["seal_det_unclip_ratio"] = float(seal_det_unclip_ratio)
+        if seal_rec_score_thresh is not None:
+            kwargs["seal_rec_score_thresh"] = float(seal_rec_score_thresh)
+        if settings.PADDLE_OCR_ENABLE_HPI:
+            kwargs["enable_hpi"] = True
+
+        try:
+            self.seal_pipeline = seal_pipeline_cls(**kwargs)
+            self.seal_pipeline_available = True
+            print(
+                "OCRService: SealRecognition initialized "
+                f"(device={self.active_device}, rec_model={kwargs.get('text_recognition_model_name', 'default')}, "
+                f"det_box_thresh={kwargs.get('seal_det_box_thresh', 'default')}, "
+                f"det_unclip_ratio={kwargs.get('seal_det_unclip_ratio', 'default')}, "
+                f"rec_score_thresh={kwargs.get('seal_rec_score_thresh', 'default')})"
+            )
+        except Exception as exc:
+            self.seal_pipeline = None
+            self.seal_pipeline_available = False
+            print(f"OCRService: SealRecognition disabled: {exc}")
 
     def _init_structure_engine(self) -> None:
         self._structure_init_attempted = True
@@ -989,6 +1038,8 @@ class OCRService:
             return self._ocr_predictor_lock
         if predictor is self.structure:
             return self._structure_predictor_lock
+        if predictor is self.seal_pipeline:
+            return self._seal_predictor_lock
         return self._predictor_fallback_lock
 
     def _split_predict_result_batches(self, predictor_result: list, expected_size: int) -> list[list]:
@@ -1050,6 +1101,237 @@ class OCRService:
                 if not key.startswith("_")
             }
         return str(value)
+
+    def _bbox_to_rect(self, bbox: Any) -> list[int] | None:
+        # Paddle 各模型返回的框格式不完全一致，这里统一转成 [x, y, w, h]。
+        builtin_bbox = self._to_builtin(bbox)
+        if builtin_bbox is None:
+            return None
+
+        if isinstance(builtin_bbox, dict):
+            if all(key in builtin_bbox for key in ("x", "y", "w", "h")):
+                x = int(round(float(builtin_bbox.get("x", 0))))
+                y = int(round(float(builtin_bbox.get("y", 0))))
+                w = int(round(float(builtin_bbox.get("w", 0))))
+                h = int(round(float(builtin_bbox.get("h", 0))))
+                if w > 0 and h > 0:
+                    return [x, y, w, h]
+            if all(key in builtin_bbox for key in ("left", "top", "right", "bottom")):
+                x1 = int(round(float(builtin_bbox.get("left", 0))))
+                y1 = int(round(float(builtin_bbox.get("top", 0))))
+                x2 = int(round(float(builtin_bbox.get("right", 0))))
+                y2 = int(round(float(builtin_bbox.get("bottom", 0))))
+                if x2 > x1 and y2 > y1:
+                    return [x1, y1, x2 - x1, y2 - y1]
+
+        if isinstance(builtin_bbox, (list, tuple)):
+            if len(builtin_bbox) >= 4 and all(isinstance(item, (int, float)) for item in builtin_bbox[:4]):
+                x1 = float(builtin_bbox[0])
+                y1 = float(builtin_bbox[1])
+                x3 = float(builtin_bbox[2])
+                y3 = float(builtin_bbox[3])
+                if x3 > x1 and y3 > y1:
+                    return [int(round(x1)), int(round(y1)), int(round(x3 - x1)), int(round(y3 - y1))]
+                w = int(round(x3))
+                h = int(round(y3))
+                if w > 0 and h > 0:
+                    return [int(round(x1)), int(round(y1)), w, h]
+
+            if builtin_bbox and all(
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+                and isinstance(item[0], (int, float))
+                and isinstance(item[1], (int, float))
+                for item in builtin_bbox
+            ):
+                x_values = [float(item[0]) for item in builtin_bbox]
+                y_values = [float(item[1]) for item in builtin_bbox]
+                x1 = int(round(min(x_values)))
+                y1 = int(round(min(y_values)))
+                x2 = int(round(max(x_values)))
+                y2 = int(round(max(y_values)))
+                if x2 > x1 and y2 > y1:
+                    return [x1, y1, x2 - x1, y2 - y1]
+        return None
+
+    def _clip_box_to_image(self, box: list[int], img_shape: tuple[int, int, int]) -> list[int] | None:
+        if not isinstance(box, list) or len(box) != 4:
+            return None
+        img_h, img_w = img_shape[:2]
+        x, y, w, h = [int(v) for v in box]
+        x1 = max(0, x)
+        y1 = max(0, y)
+        x2 = min(img_w, x + w)
+        y2 = min(img_h, y + h)
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return [x1, y1, x2 - x1, y2 - y1]
+
+    def _extract_official_seal_layout_boxes(self, layout_det_res: Any) -> list[list[int]]:
+        built_layout = self._to_builtin(layout_det_res)
+        if not built_layout:
+            return []
+
+        boxes: list[list[int]] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, list):
+                for item in node:
+                    walk(item)
+                return
+            if not isinstance(node, dict):
+                return
+
+            label = str(node.get("label") or node.get("type") or node.get("category") or "").strip().lower()
+            if label == "seal":
+                # 官方结果里可能混着多种字段名，逐个兜底取出印章框。
+                for key in ("coordinate", "bbox", "box", "region_box", "points", "polygon", "poly"):
+                    if key in node:
+                        rect = self._bbox_to_rect(node.get(key))
+                        if rect is not None:
+                            boxes.append(rect)
+                            break
+
+            for value in node.values():
+                if isinstance(value, (list, dict)):
+                    walk(value)
+
+        walk(built_layout)
+        return boxes
+
+    def _extract_official_seal_result(
+        self,
+        predictor_result: list,
+        *,
+        image: np.ndarray,
+        page_no: int,
+    ) -> dict:
+        seal_info = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
+        built_result = self._to_builtin(predictor_result)
+        if not built_result:
+            return seal_info
+
+        # SealRecognition 会同时返回版面定位和印章识别结果，这里把两部分重新拼起来。
+        result_payload = built_result[0] if isinstance(built_result, list) and built_result else built_result
+        if not isinstance(result_payload, dict):
+            return seal_info
+
+        layout_boxes = self._extract_official_seal_layout_boxes(result_payload.get("layout_det_res"))
+        seal_res_list = result_payload.get("seal_res_list") or []
+        if not isinstance(seal_res_list, list):
+            return seal_info
+
+        for index, seal_res in enumerate(seal_res_list, start=1):
+            if not isinstance(seal_res, dict):
+                continue
+            box = layout_boxes[index - 1] if index - 1 < len(layout_boxes) else None
+            if box is None:
+                continue
+            clipped_box = self._clip_box_to_image(box, image.shape)
+            if clipped_box is None:
+                continue
+
+            x, y, w, h = clipped_box
+            seal_crop = image[y : y + h, x : x + w]
+            if seal_crop.size == 0:
+                continue
+
+            # 保留印章裁图，便于后续排查识别误差。
+            save_path = os.path.join(self.seal_dir, f"seal_P{page_no}_{index}.png")
+            cv2.imwrite(save_path, seal_crop)
+
+            rec_texts = seal_res.get("rec_texts") or []
+            cleaned_texts: list[str] = []
+            for text in rec_texts:
+                normalized_text = self._sanitize_recognized_text(self._extract_text_value(text), min_len=2, max_len=64)
+                if normalized_text and normalized_text not in cleaned_texts:
+                    cleaned_texts.append(normalized_text)
+
+            merged_text = self._merge_text_parts(cleaned_texts, join_char=" ")
+            if merged_text:
+                seal_info["texts"].append(merged_text)
+            seal_info["locations"].append(clipped_box)
+            seal_info["count"] += 1
+
+        seal_info["texts"] = list(dict.fromkeys(seal_info["texts"]))
+        return seal_info
+
+    def _build_seal_removal_mask(
+        self,
+        img_bgr: np.ndarray,
+        seal_boxes: list[list[int]],
+    ) -> np.ndarray:
+        img_h, img_w = img_bgr.shape[:2]
+        full_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        if not seal_boxes:
+            return full_mask
+
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        lower_red1, upper_red1 = np.array([0, 28, 28]), np.array([12, 255, 255])
+        lower_red2, upper_red2 = np.array([150, 28, 28]), np.array([180, 255, 255])
+
+        for seal_box in seal_boxes:
+            clipped_box = self._clip_box_to_image(seal_box, img_bgr.shape)
+            if clipped_box is None:
+                continue
+            x, y, w, h = clipped_box
+            roi_hsv = hsv[y : y + h, x : x + w]
+            if roi_hsv.size == 0:
+                continue
+
+            roi_mask = cv2.add(
+                cv2.inRange(roi_hsv, lower_red1, upper_red1),
+                cv2.inRange(roi_hsv, lower_red2, upper_red2),
+            )
+            roi_mask = cv2.medianBlur(roi_mask, 3)
+            roi_mask = cv2.morphologyEx(
+                roi_mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+                iterations=1,
+            )
+            roi_mask = cv2.dilate(
+                roi_mask,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+                iterations=1,
+            )
+            if cv2.countNonZero(roi_mask) <= 0:
+                continue
+            # 只在印章框内提取红色区域，尽量少伤到正文。
+            full_mask[y : y + h, x : x + w] = cv2.bitwise_or(full_mask[y : y + h, x : x + w], roi_mask)
+
+        return full_mask
+
+    def _build_destamped_image_for_ocr(
+        self,
+        img_bgr: np.ndarray,
+        seal_boxes: list[list[int]],
+    ) -> np.ndarray:
+        if img_bgr is None or img_bgr.size == 0 or not seal_boxes:
+            return img_bgr
+
+        seal_mask = self._build_seal_removal_mask(img_bgr, seal_boxes)
+        if seal_mask.size == 0 or cv2.countNonZero(seal_mask) <= 0:
+            return img_bgr
+
+        # 正文 OCR 改在去章图上跑，减少红章把正文和章文一起识别进去。
+        return cv2.inpaint(img_bgr, seal_mask, 3, cv2.INPAINT_TELEA)
+
+    def _append_seal_texts(self, page_text: str, seal_texts: list[str]) -> str:
+        if not seal_texts:
+            return page_text
+
+        # 印章文本单独识别后再补回最终文本，避免去章图把章文一起抹掉。
+        merged_parts = [page_text]
+        base_text = str(page_text or "")
+        for seal_text in seal_texts:
+            normalized = str(seal_text or "").strip()
+            if not normalized:
+                continue
+            if normalized in base_text:
+                continue
+            merged_parts.append(normalized)
+        return self._merge_text_parts(merged_parts)
 
     def _merge_text_parts(self, parts: list[str], join_char: str = "\n") -> str:
         merged: list[str] = []
@@ -1832,10 +2114,10 @@ class OCRService:
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
         blue_mask = cv2.inRange(hsv, np.array([90, 40, 20]), np.array([140, 255, 255]))
-        dark_mask = cv2.inRange(gray, 0, 130)
+        dark_mask = cv2.inRange(gray, 0, 110)
         stroke_mask = cv2.bitwise_or(blue_mask, dark_mask)
 
-        roi_top = int(img_h * 0.32)
+        roi_top = int(img_h * 0.50)
         bottom_mask = stroke_mask[roi_top:, :]
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
         bottom_mask = cv2.morphologyEx(bottom_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -1846,12 +2128,12 @@ class OCRService:
         candidate_boxes: list[list[int]] = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < 220 or area > 18000:
+            if area < 450 or area > 18000:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             aspect_ratio = float(w) / max(float(h), 1.0)
             fill_ratio = float(area) / max(float(w * h), 1.0)
-            if w < 44 or h < 10:
+            if w < 60 or h < 14:
                 continue
             if not 1.1 < aspect_ratio < 15.0:
                 continue
@@ -1860,8 +2142,8 @@ class OCRService:
 
             candidate_boxes.append([int(x), int(y + roi_top), int(w), int(h)])
 
-        merged_boxes = self._merge_nearby_boxes(candidate_boxes, x_gap=28, y_gap=22)
-        merged_boxes = sorted(merged_boxes, key=lambda item: item[1], reverse=True)[:8]
+        merged_boxes = self._merge_nearby_boxes(candidate_boxes, x_gap=16, y_gap=12)
+        merged_boxes = sorted(merged_boxes, key=lambda item: item[1], reverse=True)[:4]
 
         signature_idx = 0
         for box in merged_boxes:
@@ -1924,222 +2206,25 @@ class OCRService:
         seal_info = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
         if img_bgr is None or not enabled:
             return seal_info
+        if (not self.seal_pipeline_available or self.seal_pipeline is None) and not self._seal_init_attempted:
+            try:
+                from paddleocr import SealRecognition
 
-        img_h, img_w = img_bgr.shape[:2]
-        image_area = float(max(img_h * img_w, 1))
-        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        lower_red1, upper_red1 = np.array([0, 28, 28]), np.array([12, 255, 255])
-        lower_red2, upper_red2 = np.array([150, 28, 28]), np.array([180, 255, 255])
-        mask = cv2.add(
-            cv2.inRange(hsv, lower_red1, upper_red1),
-            cv2.inRange(hsv, lower_red2, upper_red2),
+                self._init_seal_pipeline(SealRecognition)
+            except Exception as exc:
+                print(f"OCRService: SealRecognition lazy init failed: {exc}")
+                return seal_info
+
+        if not self.seal_pipeline_available or self.seal_pipeline is None:
+            return seal_info
+
+        # 当前主流程只保留官方印章识别，不再走旧的红章规则链。
+        predictor_result = self._run_predictor(self.seal_pipeline, img_bgr, "SealRecognition")
+        return self._extract_official_seal_result(
+            predictor_result,
+            image=img_bgr,
+            page_no=page_no,
         )
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.medianBlur(mask, 5)
-        # Keep thin circular stamp rings while still connecting fragmented red pixels.
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 9))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, bridge_kernel, iterations=1)
-        mask = cv2.dilate(mask, kernel, iterations=1)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        face_boxes = self._detect_faces(img_bgr)
-
-        candidate_boxes: list[list[int]] = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area <= 400:
-                continue
-
-            area_ratio = area / image_area
-            if area_ratio > 0.35:
-                continue
-
-            perimeter = cv2.arcLength(contour, True)
-            if perimeter <= 0:
-                continue
-            circularity = float((4.0 * np.pi * area) / (perimeter * perimeter))
-            if circularity < 0.16:
-                continue
-
-            x, y, w, h = cv2.boundingRect(contour)
-            if w <= 0 or h <= 0:
-                continue
-            # Hard-stop for page-level false positives.
-            if w >= int(img_w * 0.92) or h >= int(img_h * 0.92):
-                continue
-            if (w * h) >= int(image_area * 0.55):
-                continue
-            aspect_ratio = float(w) / h if h else 0.0
-            if not 0.5 <= aspect_ratio <= 2.0:
-                continue
-
-            bbox_ratio = float(w * h) / image_area
-            if bbox_ratio > 0.45:
-                continue
-
-            touching_border = x <= 2 or y <= 2 or (x + w) >= (img_w - 2) or (y + h) >= (img_h - 2)
-            if touching_border and bbox_ratio > 0.22:
-                continue
-
-            (_, _), radius = cv2.minEnclosingCircle(contour)
-            if radius < 10:
-                continue
-            circle_area = float(np.pi * radius * radius)
-            if circle_area <= 0:
-                continue
-            fill_ratio = area / circle_area
-            if not 0.12 <= fill_ratio <= 1.20:
-                continue
-
-            roi_mask = mask[y : y + h, x : x + w]
-            red_density = float(cv2.countNonZero(roi_mask)) / float(max(w * h, 1))
-            if red_density < 0.018:
-                continue
-
-            candidate_boxes.append([int(x), int(y), int(w), int(h)])
-
-        merged_boxes = self._merge_fragmented_seal_boxes(candidate_boxes)
-        refined_boxes = [
-            self._refine_seal_box_with_mask(box, mask, img_bgr.shape)
-            for box in merged_boxes
-            if isinstance(box, list) and len(box) == 4
-        ]
-        merged_boxes = self._merge_fragmented_seal_boxes(refined_boxes)
-        merged_boxes = sorted(merged_boxes, key=lambda item: (item[1], item[0]))
-
-        seal_idx = 0
-        for box in merged_boxes:
-            x, y, w, h = box
-            if w <= 0 or h <= 0:
-                continue
-            merged_aspect = float(w) / float(max(h, 1))
-            if not 0.52 <= merged_aspect <= 1.92:
-                continue
-            min_side_threshold = max(24, int(min(img_h, img_w) * 0.018))
-            if min(w, h) < min_side_threshold:
-                continue
-            bbox_ratio = float(w * h) / image_area
-            if w >= int(img_w * 0.92) or h >= int(img_h * 0.92):
-                continue
-            if bbox_ratio > 0.55:
-                continue
-            touching_border = x <= 2 or y <= 2 or (x + w) >= (img_w - 2) or (y + h) >= (img_h - 2)
-            if touching_border and bbox_ratio > 0.28:
-                continue
-
-            roi_mask = mask[y : y + h, x : x + w]
-            merged_red_density = float(cv2.countNonZero(roi_mask)) / float(max(w * h, 1))
-            if merged_red_density < 0.012:
-                continue
-
-            seal_crop = img_bgr[y : y + h, x : x + w]
-            if seal_crop.size == 0:
-                continue
-            candidate_profile = self._build_candidate_profile(seal_crop, roi_mask)
-            face_like = self._is_face_like_candidate(box, candidate_profile, face_boxes)
-            emblem_like = self._is_national_emblem_like(candidate_profile)
-
-            resized_crop = cv2.resize(seal_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            crop_result = self._run_predictor(self.ocr, resized_crop, "Seal OCR")
-            raw_text = self._extract_text_from_result(crop_result, join_char="")
-            clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=30)
-
-            recovered_text = ""
-            if self._should_attempt_seal_text_recovery(
-                clean_text=clean_text,
-                merged_red_density=merged_red_density,
-                merged_aspect=merged_aspect,
-                candidate_profile=candidate_profile,
-            ):
-                recovered_text = self._recover_text_from_seal_region(img_bgr, box, mask)
-            has_seal_hint = self._contains_seal_hint_text(clean_text, recovered_text)
-            has_strong_seal_hint = self._contains_strong_seal_hint_text(clean_text, recovered_text)
-            identity_document_like = self._contains_identity_document_text(clean_text, recovered_text)
-            ring_contrast = float(candidate_profile.get("ring_contrast", 0.0))
-            edge_ratio = float(candidate_profile.get("edge_ratio", 0.0))
-            yellow_ratio = float(candidate_profile.get("yellow_ratio", 0.0))
-            green_ratio = float(candidate_profile.get("green_ratio", 0.0))
-            blue_ratio = float(candidate_profile.get("blue_ratio", 0.0))
-            skin_ratio = float(candidate_profile.get("skin_ratio", 0.0))
-            weak_stamp_shape = ring_contrast < 0.05 and merged_red_density < 0.055
-            clutter_like = edge_ratio > 0.17 and ring_contrast < 0.07
-            colorful_background = (green_ratio > 0.05 or blue_ratio > 0.05) and merged_red_density < 0.16
-            certificate_like = self._is_certificate_title_text(clean_text, recovered_text)
-            strong_round_stamp = (
-                ring_contrast >= 0.10
-                and merged_red_density >= 0.045
-                and 0.62 <= merged_aspect <= 1.62
-                and edge_ratio <= 0.16
-                and yellow_ratio <= 0.12
-                and green_ratio <= 0.06
-                and blue_ratio <= 0.06
-            )
-            strong_dense_stamp = (
-                merged_red_density >= 0.18
-                and edge_ratio <= 0.18
-                and skin_ratio < 0.24
-                and yellow_ratio <= 0.14
-                and green_ratio <= 0.04
-                and blue_ratio <= 0.04
-            )
-            round_star_stamp = self._has_round_star_stamp_evidence(
-                candidate_profile,
-                merged_aspect=merged_aspect,
-                merged_red_density=merged_red_density,
-            )
-            has_visual_stamp_evidence = strong_round_stamp or strong_dense_stamp or round_star_stamp
-            reliable_marker_text = self._is_reliable_marker_text(clean_text, recovered_text)
-            decorative_border_like = self._is_decorative_border_like_candidate(
-                box,
-                img_bgr.shape,
-                roi_mask,
-                candidate_profile,
-            )
-            if (weak_stamp_shape or clutter_like) and not has_seal_hint and not has_visual_stamp_evidence:
-                continue
-            if colorful_background and not has_strong_seal_hint and not has_visual_stamp_evidence:
-                continue
-            if identity_document_like and not has_strong_seal_hint:
-                continue
-            if certificate_like and not has_strong_seal_hint and not has_visual_stamp_evidence:
-                continue
-            if decorative_border_like and not has_strong_seal_hint and not reliable_marker_text and not strong_dense_stamp:
-                continue
-            if not has_seal_hint and not has_visual_stamp_evidence:
-                continue
-            small_fragment_threshold = max(36, int(min(img_h, img_w) * 0.022))
-            if min(w, h) < small_fragment_threshold and not has_seal_hint and not reliable_marker_text:
-                continue
-            if face_like and not has_seal_hint:
-                continue
-            if identity_document_like and emblem_like and not has_strong_seal_hint:
-                continue
-            if emblem_like and not reliable_marker_text:
-                continue
-
-            seal_idx += 1
-            save_path = os.path.join(self.seal_dir, f"seal_P{page_no}_{seal_idx}.png")
-            cv2.imwrite(save_path, seal_crop)
-            if clean_text:
-                seal_info["texts"].append(clean_text)
-            if recovered_text:
-                seal_info["covered_texts"].append({"page": page_no, "box": box, "text": recovered_text})
-
-            seal_info["count"] += 1
-            seal_info["locations"].append(box)
-
-        seal_info["texts"] = list(dict.fromkeys(seal_info["texts"]))
-        dedup_covered_texts: list[dict] = []
-        covered_seen = set()
-        for item in seal_info["covered_texts"]:
-            signature = (item.get("page"), item.get("text"), str(item.get("box")))
-            if signature in covered_seen:
-                continue
-            covered_seen.add(signature)
-            dedup_covered_texts.append(item)
-        seal_info["covered_texts"] = dedup_covered_texts
-        return seal_info
 
     def _render_pdf_page(self, page) -> np.ndarray:
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
@@ -2187,10 +2272,12 @@ class OCRService:
         page_no: int,
         *,
         structure_enabled: bool,
+        seal_enabled: bool,
     ) -> dict:
         return self._run_pdf_stage_b_batch(
             [{"page_no": page_no, "image": image}],
             structure_enabled=structure_enabled,
+            seal_enabled=seal_enabled,
         )[0]
 
     def _run_pdf_stage_b_batch(
@@ -2198,12 +2285,29 @@ class OCRService:
         render_items: list[dict],
         *,
         structure_enabled: bool,
+        seal_enabled: bool,
     ) -> list[dict]:
         if not render_items:
             return []
 
-        images = [item["image"] for item in render_items]
-        predictor_input = images if len(images) > 1 else images[0]
+        cleaned_images: list[np.ndarray] = []
+        seal_results: list[dict] = []
+        seal_timings_ms: list[float] = []
+
+        for item in render_items:
+            page_no = int(item["page_no"])
+            original_image = item["image"]
+            start = time.perf_counter()
+            # 先在原图上找章，后面的去章和章文识别都依赖这一步。
+            seal_result = self._detect_seals(original_image, page_no=page_no, enabled=seal_enabled)
+            seal_ms = (time.perf_counter() - start) * 1000.0
+            cleaned_images.append(
+                self._build_destamped_image_for_ocr(original_image, seal_result.get("locations") or [])
+            )
+            seal_results.append(seal_result)
+            seal_timings_ms.append(seal_ms)
+
+        predictor_input = cleaned_images if len(cleaned_images) > 1 else cleaned_images[0]
 
         start = time.perf_counter()
         ocr_predict_result = self._run_predictor(self.ocr, predictor_input, "PaddleOCR")
@@ -2237,12 +2341,15 @@ class OCRService:
                 {
                     "page_no": page_no,
                     "image": item["image"],
+                    # Stage C 仍然需要原图做签字检测，所以这里保留原图和印章结果。
+                    "seal_result": seal_results[index],
                     "ocr_text": ocr_text,
                     "layout_text": layout_text,
                     "layout_sections": layout_sections,
                     "structure_used": structure_used,
                     "text_signal": bool(ocr_text.strip() or layout_text.strip()),
                     "timings_ms": {
+                        "seal_ms": seal_timings_ms[index],
                         "ocr_ms": per_page_ocr_ms,
                         "layout_ms": per_page_layout_ms,
                     },
@@ -2254,21 +2361,21 @@ class OCRService:
         self,
         stage_b_payload: dict,
         *,
-        seal_enabled: bool,
         signature_enabled: bool,
     ) -> dict:
         page_no = int(stage_b_payload.get("page_no", 0))
         image = stage_b_payload.get("image")
+        seal_result = stage_b_payload.get("seal_result") or {"count": 0, "texts": [], "locations": [], "covered_texts": []}
         ocr_text = str(stage_b_payload.get("ocr_text") or "")
         layout_text = str(stage_b_payload.get("layout_text") or "")
         layout_sections = stage_b_payload.get("layout_sections") or []
         structure_used = bool(stage_b_payload.get("structure_used"))
 
-        timings_ms = {"seal_ms": 0.0, "signature_ms": 0.0, "merge_ms": 0.0}
-
-        start = time.perf_counter()
-        seal_result = self._detect_seals(image, page_no=page_no, enabled=seal_enabled)
-        timings_ms["seal_ms"] = (time.perf_counter() - start) * 1000.0
+        timings_ms = {
+            "seal_ms": float((stage_b_payload.get("timings_ms") or {}).get("seal_ms", 0.0)),
+            "signature_ms": 0.0,
+            "merge_ms": 0.0,
+        }
 
         start = time.perf_counter()
         signature_result = self._detect_handwritten_signatures(
@@ -2279,9 +2386,11 @@ class OCRService:
         timings_ms["signature_ms"] = (time.perf_counter() - start) * 1000.0
 
         start = time.perf_counter()
+        # 最终文本按“正文结果优先，印章文本补回”的方式合并。
         page_text = self._combine_page_text(layout_text, ocr_text)
         page_text = self._remove_seal_texts(page_text, seal_result["texts"])
         page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
+        page_text = self._append_seal_texts(page_text, seal_result["texts"])
         timings_ms["merge_ms"] = (time.perf_counter() - start) * 1000.0
 
         text_signal = bool(stage_b_payload.get("text_signal"))
@@ -2463,13 +2572,13 @@ class OCRService:
                     image,
                     page_no,
                     structure_enabled=structure_enabled,
+                    seal_enabled=seal_enabled,
                 )
                 stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
                 stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
 
                 page_result = self._run_pdf_stage_c(
                     stage_b_payload,
-                    seal_enabled=seal_enabled,
                     signature_enabled=signature_enabled,
                 )
                 page_results.append(page_result)
@@ -2565,6 +2674,7 @@ class OCRService:
                     start = time.perf_counter()
                     image = self._render_pdf_page(local_doc[page_index])
                     render_ms = (time.perf_counter() - start) * 1000.0
+                    # 渲染线程只负责把 PDF 页转成图片，推理放到后续阶段集中处理。
                     item = {"page_index": page_index, "image": image, "render_ms": render_ms}
 
                     while not stop_event.is_set():
@@ -2693,6 +2803,7 @@ class OCRService:
                     stage_b_payloads = self._run_pdf_stage_b_batch(
                         batch_render_items,
                         structure_enabled=structure_enabled,
+                        seal_enabled=seal_enabled,
                     )
                     for stage_b_payload in stage_b_payloads:
                         stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
@@ -2707,7 +2818,6 @@ class OCRService:
                         future = post_pool.submit(
                             self._run_pdf_stage_c,
                             stage_b_payload,
-                            seal_enabled=seal_enabled,
                             signature_enabled=signature_enabled,
                         )
                         pending_futures.add(future)
@@ -2766,23 +2876,28 @@ class OCRService:
         if image is None:
             return self._empty_result()
 
-        ocr_result = self._run_predictor(self.ocr, image, "PaddleOCR")
+        # 图片主链路和 PDF 一致：先找章，再去章，再做正文 OCR。
+        seal_result = self._detect_seals(image, page_no=1, enabled=seal_enabled)
+        ocr_image = self._build_destamped_image_for_ocr(image, seal_result.get("locations") or [])
+
+        ocr_result = self._run_predictor(self.ocr, ocr_image, "PaddleOCR")
         ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
         layout_text, layout_sections, structure_used = self._run_structure_layout(
-            image,
+            ocr_image,
             page_no=1,
             structure_enabled=structure_enabled,
         )
-        seal_result = self._detect_seals(image, page_no=1, enabled=seal_enabled)
         signature_result = self._detect_handwritten_signatures(
             image,
             page_no=1,
             enabled=signature_enabled,
         )
 
+        # 签字仍然在原图上找，避免去章过程把细笔迹一并抹掉。
         page_text = self._combine_page_text(layout_text, ocr_text)
         page_text = self._remove_seal_texts(page_text, seal_result["texts"])
         page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
+        page_text = self._append_seal_texts(page_text, seal_result["texts"])
         formatted_locations = [{"page": 1, "box": box} for box in seal_result["locations"]]
         formatted_signature_locations = [{"page": 1, "box": box} for box in signature_result["locations"]]
 

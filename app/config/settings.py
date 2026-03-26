@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     PADDLE_OCR_ENABLE_SEAL_RECOGNITION: bool = True
     PADDLE_OCR_ENABLE_SIGNATURE_RECOGNITION: bool = True
     PADDLE_OCR_EXCLUDE_SEAL_TEXT: bool = True
+    PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_NAME: str | None = "PP-OCRv5_server_rec"
+    PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_DIR: Path | None = None
+    PADDLE_OCR_SEAL_DET_BOX_THRESH: float | None = 0.70
+    PADDLE_OCR_SEAL_DET_UNCLIP_RATIO: float | None = 0.35
+    PADDLE_OCR_SEAL_REC_SCORE_THRESH: float | None = 0.2
     PADDLE_OCR_FORCE_PDF_OCR: bool = False
     # PDF 抽取策略：auto | text | ocr | hybrid
     PADDLE_OCR_PDF_MODE: str = "auto"
