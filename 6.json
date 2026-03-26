@@ -1,0 +1,189 @@
+{
+  "code": 200,
+  "message": "success",
+  "rid": "b6ac131e-16d5-4434-8f89-23fe27b6e15d",
+  "data": {
+    "filename": "下浮率1.pdf",
+    "file_type": "pdf",
+    "file_size": 157863,
+    "text_length": 1867,
+    "page_count": 2,
+    "layout_sections": [
+      {
+        "page": 1,
+        "type": "heading",
+        "text": "投标函"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "致：上海市信息管线有限公司"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "在考察现场并充分研究2026-2027年度管道维护服务项目（代维区域）项目（以下简称“本工程”）施工招标文件的全部内容后，我方兹以本投标函附录A所载明的投标总价和按合同约定有权得到的其它金额，并严格按照合同约定，施工、峻工和交付本工程并维修其中的任何缺陷。中"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "如果我方中标，我保证按照合同约定的开期开始本工程的施工，投标函附录A载明的工期内峻工，并确保工程质量达到投标函附录A载明的质量标准。我方同意本投标函在招标文件规定的提交投标文件截止时间后，在招标文件规定的投标有效期期满前对我方具有约束力，且随时准备接受你方发出的中标通知书。"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "本投标文件投标有效期为自投标文件递交截止日起90个日历天。"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "随本投标函提交的投标函附录A是本投标函的组成部分，对我方构成约束力。"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "随同本投标函提交投标保证金一份，金额为（大写）：壹万元（10000.00元）。在签署协议书之前，你方的中标通知书连同本投标函，包括投标函附录A，对双方具有约束力。"
+      },
+      {
+        "page": 1,
+        "type": "text",
+        "text": "投标人：上海富亨电信安装有限新沈（单位公章）法定代表人或共委托代理人印永（签字或盖章）2026年1月29日"
+      },
+      {
+        "page": 2,
+        "type": "heading",
+        "text": "投标函附录A：开标一览表"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "项目名称：2026-2027年度管道维护服务项目（代维区域）项目"
+      },
+      {
+        "page": 2,
+        "type": "table",
+        "text": "业务名称 暂估金额 （含税/万元） 税率（%) 投标下浮率 (%) 投标报价 （含税/万元) 备注\n代维区域维护 1283 6% 10.5% 1148.285\n代维区域抢维修 533 9%（暂定） 5.5% 503.685\n代维区域资产盘 点 40 6% 5.5% 37.8\n合计 1689.77",
+        "raw_text": "业务名称 暂估金额 （含税/万元） 税率（%) 投标下浮率 (%) 投标报价 （含税/万元) 备注\n代维区域维护 1283 6% 10.5% 1148.285\n代维区域抢维修 533 9%（暂定） 5.5% 503.685\n代维区域资产盘 点 40 6% 5.5% 37.8\n合计 1689.77"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "注：1.本项目由投标人自报下浮率，其中代维区域维护费下浮率不低于10%、代维区域抢维修费下浮率不低于5%、代维区域资产盘点费下浮率不低于5%，投标人所报下浮率低于或等于所要求的下浮比例，其投标将被否决。"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "2.如果暂估金额与1-下浮率的乘积与投标价格不一致时，以所报的下浮率为准并修正投标价格。公司"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "3.开标一览表格式不能更改，如开标一览表与分项报价表下浮率不一致，以开标一览表为准。上海"
+      },
+      {
+        "page": 2,
+        "type": "figure",
+        "text": "新沈印永"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "投标人（单位公章：上海富亨电信安装有限公司"
+      },
+      {
+        "page": 2,
+        "type": "text",
+        "text": "15"
+      }
+    ],
+    "table_sections": [
+      {
+        "page": 2,
+        "type": "table",
+        "text": "业务名称 暂估金额 （含税/万元） 税率（%) 投标下浮率 (%) 投标报价 （含税/万元) 备注\n代维区域维护 1283 6% 10.5% 1148.285\n代维区域抢维修 533 9%（暂定） 5.5% 503.685\n代维区域资产盘 点 40 6% 5.5% 37.8\n合计 1689.77",
+        "raw_text": "业务名称 暂估金额 （含税/万元） 税率（%) 投标下浮率 (%) 投标报价 （含税/万元) 备注\n代维区域维护 1283 6% 10.5% 1148.285\n代维区域抢维修 533 9%（暂定） 5.5% 503.685\n代维区域资产盘 点 40 6% 5.5% 37.8\n合计 1689.77"
+      }
+    ],
+    "recognition": {
+      "route": "ocr",
+      "reason": "forced_pdf_ocr_mode",
+      "pdf_mode": "ocr",
+      "pdf_text_stats": {
+        "total_chars": 0,
+        "total_pages": 2,
+        "avg_chars_per_page": 0,
+        "empty_page_ratio": 1,
+        "empty_pages": 2,
+        "sparse_page_count": 2,
+        "sparse_page_ratio": 1
+      },
+      "parser_engine": "pdfplumber+PaddleOCR+PPStructureV3",
+      "ocr_engine": "PaddleOCR+PPStructureV3",
+      "ocr_used": true,
+      "layout_used": true,
+      "layout_section_count": 17,
+      "table_section_count": 1,
+      "active_device": "gpu:0",
+      "ppstructure_v3_requested": null,
+      "ppstructure_v3_enabled": true,
+      "seal_recognition_enabled": true,
+      "signature_recognition_enabled": true
+    },
+    "seal": {
+      "detected": true,
+      "count": 2,
+      "texts": [
+        "新沈上海富亨电信安装有限印永人或其委托代理人",
+        "上海投标人单位公章D法定代表人或委托72026日期"
+      ],
+      "covered_texts": []
+    },
+    "signature": {
+      "detected": true,
+      "count": 3,
+      "texts": [
+        "标函的组成部",
+        "期期满前",
+        "投标函附"
+      ]
+    },
+    "metadata": {
+      "schema_version": "analyze_file_v3",
+      "document": {
+        "filename": "下浮率1.pdf",
+        "file_type": "pdf",
+        "file_size": 157863,
+        "page_count": 2,
+        "mime_type": "application/pdf",
+        "text_length": 1867
+      },
+      "recognition": {
+        "route": "ocr",
+        "reason": "forced_pdf_ocr_mode",
+        "pdf_mode": "ocr",
+        "parser_engine": "pdfplumber+PaddleOCR+PPStructureV3",
+        "ocr_engine": "PaddleOCR+PPStructureV3",
+        "ocr_used": true,
+        "layout_used": true,
+        "layout_section_count": 17,
+        "source_mode": "local",
+        "ppstructure_v3_requested": null,
+        "ppstructure_v3_enabled": true,
+        "seal_recognition_enabled": true,
+        "signature_recognition_enabled": true
+      },
+      "runtime": {
+        "device": "gpu:0"
+      },
+      "seal": {
+        "detected": true,
+        "count": 2,
+        "covered_text_count": 0
+      },
+      "signature": {
+        "detected": true,
+        "count": 3
+      }
+    }
+  }
+}

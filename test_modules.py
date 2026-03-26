@@ -17,13 +17,7 @@ from app.service.analysis.verification import VerificationChecker
 
 
 def extract_text_from_json(res_data: dict) -> str:
-    """
-    从当前 OCR/解析 JSON 中提取文本
 
-    这里专门保持 layout_sections 的原始顺序，
-    不再手动重排 layout_sections / table_sections，
-    以免破坏原始阅读顺序，影响开标一览表截取逻辑。
-    """
     data = res_data.get("data", {})
     layout_sections = data.get("layout_sections", [])
 
@@ -42,10 +36,7 @@ def extract_text_from_json(res_data: dict) -> str:
 
 
 def run_business_tests_with_ocr(json_path: str):
-    """
-    使用真实 OCR 识别 JSON 结果进行业务模块全量测试
-    这里只输出最终业务结果
-    """
+
     if not os.path.exists(json_path):
         print(f"错误：找不到文件 '{json_path}'，请确认文件是否在项目根目录下。")
         return
@@ -95,6 +86,6 @@ def run_business_tests_with_ocr(json_path: str):
 
 if __name__ == "__main__":
     # 按你的实际文件名修改
-    SAMPLE_JSON = "3.json"
+    SAMPLE_JSON = "7.json"
     run_business_tests_with_ocr(SAMPLE_JSON)
 
