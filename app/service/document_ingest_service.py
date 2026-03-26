@@ -8,6 +8,7 @@ from fastapi import HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
+from app.core.document_types import DocumentType
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 from app.utils.text_utils import cleanup_temp_file, save_temp_file
@@ -120,7 +121,7 @@ def _format_upload_create_error(exc: Exception, rollback_error: Optional[str]) -
 async def upload_extract_and_create_document(
     *,
     file: UploadFile,
-    document_type: Literal["tender", "bid"],
+    document_type: DocumentType,
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,

@@ -4,15 +4,23 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import Json, RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
 
 from app.config.settings import settings
+from app.core.document_types import (
+    ACTIVE_DOCUMENT_TYPES,
+    BUSINESS_BID_COMPATIBLE_TYPES,
+    DOCUMENT_TYPE_TENDER,
+    SUPPORTED_DOCUMENT_TYPES,
+    TECHNICAL_BID_COMPATIBLE_TYPES,
+    get_document_type_label,
+)
 
 logger = logging.getLogger(__name__)
 
-# 数据库连接池单例
 _db_pool = None
+
 
 def get_db_pool():
     global _db_pool
@@ -20,28 +28,26 @@ def get_db_pool():
         try:
             _db_pool = ThreadedConnectionPool(
                 minconn=1,
-                maxconn=20, # 最大并发连接数
-                dsn=settings.DATABASE_URL
+                maxconn=20,
+                dsn=settings.DATABASE_URL,
             )
-            logger.info("PostgreSQL connection pool initialized successfully.")
-        except Exception as e:
-            logger.error(f"Failed to initialize PostgreSQL pool: {e}")
+            logger.info("PostgreSQL 连接池初始化成功。")
+        except Exception as exc:
+            logger.error("PostgreSQL 连接池初始化失败: %s", exc)
             raise
     return _db_pool
 
 
 class PostgreSQLService:
-    DOCUMENT_TYPES = {"tender", "bid"}
-    """PostgreSQL 业务服务：封装项目/文档 CRUD 与关联操作。"""
+    ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
+    SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
 
     @contextmanager
     def _get_connection(self):
-        """从连接池获取连接，并在完成后自动归还。自带事务（Transaction）管理。"""
         pool = get_db_pool()
         conn = pool.getconn()
         try:
-            # psycopg2 的 connection 上下文管理器会自动在结束时 commit，报错时 rollback
-            with conn: 
+            with conn:
                 yield conn
         finally:
             pool.putconn(conn)
@@ -68,8 +74,9 @@ class PostgreSQLService:
     @classmethod
     def _normalize_document_type(cls, document_type: str) -> str:
         normalized = (document_type or "").strip().lower()
-        if normalized not in cls.DOCUMENT_TYPES:
-            raise ValueError("document_type must be either 'tender' or 'bid'")
+        if normalized not in cls.ACTIVE_DOCUMENT_TYPES:
+            allowed = ", ".join(sorted(cls.ACTIVE_DOCUMENT_TYPES))
+            raise ValueError(f"document_type 必须是以下之一：{allowed}")
         return normalized
 
     def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
@@ -98,8 +105,29 @@ class PostgreSQLService:
         document = cursor.fetchone()
         return dict(document) if document else None
 
+    def _get_required_document_record(
+        self,
+        cursor,
+        identifier_id: str,
+        *,
+        role_label: str,
+        allowed_types: set[str],
+    ) -> Dict[str, Any]:
+        document = self._get_document_record(cursor, identifier_id)
+        if not document:
+            raise ValueError(f"{role_label}不存在：{identifier_id}")
+
+        document_type = str(document.get("document_type") or "").strip().lower()
+        if document_type not in allowed_types:
+            actual_label = get_document_type_label(document_type)
+            expected = ", ".join(get_document_type_label(item) for item in sorted(allowed_types))
+            raise ValueError(
+                f"文档 '{identifier_id}' 必须是{role_label}，当前类型为 {actual_label}。"
+                f"允许的类型：{expected}"
+            )
+        return document
+
     def create_project(self, identifier_id: Optional[str] = None) -> Dict[str, Any]:
-        """创建项目记录。"""
         identifier = self._normalize_identifier(identifier_id)
         query = """
             INSERT INTO xtjs_projects (identifier_id)
@@ -112,7 +140,6 @@ class PostgreSQLService:
                 return dict(cursor.fetchone())
 
     def list_projects(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
-        """分页查询项目列表（仅未删除）。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         with self._get_connection() as conn:
@@ -144,7 +171,6 @@ class PostgreSQLService:
         }
 
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
-        """按业务标识查询未删除项目。"""
         query = """
             SELECT id, identifier_id, deleted, create_time, update_time
             FROM xtjs_projects
@@ -157,11 +183,13 @@ class PostgreSQLService:
                 return dict(result) if result else None
 
     def update_project_identifier(
-        self, identifier_id: str, new_identifier_id: str
+        self,
+        identifier_id: str,
+        new_identifier_id: str,
     ) -> Optional[Dict[str, Any]]:
-        """更新项目业务标识。"""
         normalized_new_identifier = self._normalize_required_identifier(
-            new_identifier_id, "new_identifier_id"
+            new_identifier_id,
+            "new_identifier_id",
         )
         query = """
             UPDATE xtjs_projects
@@ -176,7 +204,6 @@ class PostgreSQLService:
                 return dict(updated) if updated else None
 
     def soft_delete_project(self, identifier_id: str) -> bool:
-        """逻辑删除项目。"""
         query = """
             UPDATE xtjs_projects
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
@@ -194,7 +221,6 @@ class PostgreSQLService:
         document_type: str,
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """创建文档记录。"""
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
@@ -204,7 +230,8 @@ class PostgreSQLService:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 existing = self._get_document_record(cursor, identifier)
                 if existing:
-                    raise ValueError(f"Document identifier already exists: {identifier}")
+                    raise ValueError(f"文档标识已存在：{identifier}")
+
                 cursor.execute(
                     """
                     INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
@@ -238,20 +265,19 @@ class PostgreSQLService:
         recognition_content: Dict[str, Any],
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """创建文档记录并写入识别内容（同事务）。"""
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
         normalized_document_type = self._normalize_document_type(document_type)
 
         if not isinstance(recognition_content, dict):
-            raise ValueError("recognition_content must be a JSON object")
+            raise ValueError("recognition_content 必须是 JSON 对象")
 
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 existing = self._get_document_record(cursor, identifier)
                 if existing:
-                    raise ValueError(f"Document identifier already exists: {identifier}")
+                    raise ValueError(f"文档标识已存在：{identifier}")
 
                 cursor.execute(
                     """
@@ -292,7 +318,6 @@ class PostgreSQLService:
                 return {"document": updated_document}
 
     def list_documents(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
-        """分页查询文档列表（仅未删除）。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         with self._get_connection() as conn:
@@ -334,7 +359,6 @@ class PostgreSQLService:
         }
 
     def get_document_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
-        """按业务标识查询未删除文档。"""
         query = """
             SELECT
                 id,
@@ -364,7 +388,6 @@ class PostgreSQLService:
         file_name: Optional[str] = None,
         file_url: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """更新文档元数据。"""
         updates: List[str] = []
         values: List[Any] = []
 
@@ -375,7 +398,7 @@ class PostgreSQLService:
             updates.append("file_url = %s")
             values.append(self._normalize_file_value(file_url, "file_url"))
         if not updates:
-            raise ValueError("At least one field of file_name/file_url is required")
+            raise ValueError("file_name 和 file_url 至少需要提供一个")
 
         updates.append("update_time = CURRENT_TIMESTAMP")
         values.append(identifier_id)
@@ -403,7 +426,6 @@ class PostgreSQLService:
                 return dict(updated) if updated else None
 
     def soft_delete_document(self, identifier_id: str) -> bool:
-        """逻辑删除文档记录。"""
         query = """
             UPDATE xtjs_documents
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
@@ -418,32 +440,33 @@ class PostgreSQLService:
         self,
         project_identifier: str,
         tender_document_identifier: str,
-        bid_document_identifier: str,
+        business_bid_document_identifier: str,
+        technical_bid_document_identifier: str,
     ) -> Dict[str, Any]:
-        """创建项目与招标/投标文档之间的关联记录。"""
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 project = self._get_project_record(cursor, project_identifier)
                 if not project:
-                    raise ValueError(f"Project not found: {project_identifier}")
+                    raise ValueError(f"项目不存在：{project_identifier}")
 
-                tender = self._get_document_record(cursor, tender_document_identifier)
-                if not tender:
-                    raise ValueError(
-                        f"Tender document not found: {tender_document_identifier}"
-                    )
-                if tender["document_type"] != "tender":
-                    raise ValueError(
-                        f"Document is not a tender document: {tender_document_identifier}"
-                    )
-
-                bid = self._get_document_record(cursor, bid_document_identifier)
-                if not bid:
-                    raise ValueError(f"Bid document not found: {bid_document_identifier}")
-                if bid["document_type"] != "bid":
-                    raise ValueError(
-                        f"Document is not a bid document: {bid_document_identifier}"
-                    )
+                tender = self._get_required_document_record(
+                    cursor,
+                    tender_document_identifier,
+                    role_label="招标文件",
+                    allowed_types={DOCUMENT_TYPE_TENDER},
+                )
+                business_bid = self._get_required_document_record(
+                    cursor,
+                    business_bid_document_identifier,
+                    role_label="商务标文件",
+                    allowed_types=set(BUSINESS_BID_COMPATIBLE_TYPES),
+                )
+                technical_bid = self._get_required_document_record(
+                    cursor,
+                    technical_bid_document_identifier,
+                    role_label="技术标文件",
+                    allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
+                )
 
                 cursor.execute(
                     """
@@ -451,35 +474,57 @@ class PostgreSQLService:
                     FROM xtjs_project_documents
                     WHERE project_id = %s
                       AND tender_document_id = %s
-                      AND bid_document_id = %s
+                      AND business_bid_document_id = %s
+                      AND technical_bid_document_id = %s
                     LIMIT 1
                     """,
-                    (project["id"], tender["id"], bid["id"]),
+                    (
+                        project["id"],
+                        tender["id"],
+                        business_bid["id"],
+                        technical_bid["id"],
+                    ),
                 )
                 duplicated = cursor.fetchone()
                 if duplicated:
                     raise ValueError(
-                        "Project-document relation already exists for this document pair"
+                        "当前招标文件、商务标文件、技术标文件的关联关系已存在"
                     )
 
                 cursor.execute(
                     """
-                    INSERT INTO xtjs_project_documents (project_id, tender_document_id, bid_document_id)
-                    VALUES (%s, %s, %s)
-                    RETURNING id, project_id, tender_document_id, bid_document_id, create_time
+                    INSERT INTO xtjs_project_documents (
+                        project_id,
+                        tender_document_id,
+                        business_bid_document_id,
+                        technical_bid_document_id
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING
+                        id,
+                        project_id,
+                        tender_document_id,
+                        business_bid_document_id,
+                        technical_bid_document_id,
+                        create_time
                     """,
-                    (project["id"], tender["id"], bid["id"]),
+                    (
+                        project["id"],
+                        tender["id"],
+                        business_bid["id"],
+                        technical_bid["id"],
+                    ),
                 )
                 binding = dict(cursor.fetchone())
                 return {
                     **binding,
                     "project_identifier": project_identifier,
                     "tender_document_identifier": tender_document_identifier,
-                    "bid_document_identifier": bid_document_identifier,
+                    "business_bid_document_identifier": business_bid_document_identifier,
+                    "technical_bid_document_identifier": technical_bid_document_identifier,
                 }
 
     def get_relation_by_id(self, relation_id: int) -> Optional[Dict[str, Any]]:
-        """按关联 ID 查询项目文档关联详情。"""
         query = """
             SELECT
                 pd.id AS relation_id,
@@ -488,15 +533,21 @@ class PostgreSQLService:
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
-                bd.identifier_id AS bid_identifier_id,
-                bd.document_type AS bid_document_type,
-                bd.file_name AS bid_file_name,
-                bd.file_url AS bid_file_url,
+                bbd.identifier_id AS business_bid_identifier_id,
+                bbd.document_type AS business_bid_document_type,
+                bbd.file_name AS business_bid_file_name,
+                bbd.file_url AS business_bid_file_url,
+                tbd.identifier_id AS technical_bid_identifier_id,
+                tbd.document_type AS technical_bid_document_type,
+                tbd.file_name AS technical_bid_file_name,
+                tbd.file_url AS technical_bid_file_url,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_projects p ON pd.project_id = p.id AND p.deleted = FALSE
             JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
-            JOIN xtjs_documents bd ON pd.bid_document_id = bd.id AND bd.deleted = FALSE
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+            LEFT JOIN xtjs_documents tbd
+                ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
             WHERE pd.id = %s
         """
         with self._get_connection() as conn:
@@ -509,9 +560,9 @@ class PostgreSQLService:
         self,
         relation_id: int,
         tender_document_identifier: str,
-        bid_document_identifier: str,
+        business_bid_document_identifier: str,
+        technical_bid_document_identifier: str,
     ) -> Optional[Dict[str, Any]]:
-        """更新项目文档关联（替换招标/投标文档）。"""
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
@@ -526,23 +577,24 @@ class PostgreSQLService:
                 if not relation:
                     return None
 
-                tender = self._get_document_record(cursor, tender_document_identifier)
-                if not tender:
-                    raise ValueError(
-                        f"Tender document not found: {tender_document_identifier}"
-                    )
-                if tender["document_type"] != "tender":
-                    raise ValueError(
-                        f"Document is not a tender document: {tender_document_identifier}"
-                    )
-
-                bid = self._get_document_record(cursor, bid_document_identifier)
-                if not bid:
-                    raise ValueError(f"Bid document not found: {bid_document_identifier}")
-                if bid["document_type"] != "bid":
-                    raise ValueError(
-                        f"Document is not a bid document: {bid_document_identifier}"
-                    )
+                tender = self._get_required_document_record(
+                    cursor,
+                    tender_document_identifier,
+                    role_label="招标文件",
+                    allowed_types={DOCUMENT_TYPE_TENDER},
+                )
+                business_bid = self._get_required_document_record(
+                    cursor,
+                    business_bid_document_identifier,
+                    role_label="商务标文件",
+                    allowed_types=set(BUSINESS_BID_COMPATIBLE_TYPES),
+                )
+                technical_bid = self._get_required_document_record(
+                    cursor,
+                    technical_bid_document_identifier,
+                    role_label="技术标文件",
+                    allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
+                )
 
                 cursor.execute(
                     """
@@ -550,26 +602,47 @@ class PostgreSQLService:
                     FROM xtjs_project_documents
                     WHERE project_id = %s
                       AND tender_document_id = %s
-                      AND bid_document_id = %s
+                      AND business_bid_document_id = %s
+                      AND technical_bid_document_id = %s
                       AND id <> %s
                     LIMIT 1
                     """,
-                    (relation["project_id"], tender["id"], bid["id"], relation_id),
+                    (
+                        relation["project_id"],
+                        tender["id"],
+                        business_bid["id"],
+                        technical_bid["id"],
+                        relation_id,
+                    ),
                 )
                 duplicated = cursor.fetchone()
                 if duplicated:
                     raise ValueError(
-                        "Project-document relation already exists for this document pair"
+                        "当前招标文件、商务标文件、技术标文件的关联关系已存在"
                     )
 
                 cursor.execute(
                     """
                     UPDATE xtjs_project_documents
-                    SET tender_document_id = %s, bid_document_id = %s
+                    SET
+                        tender_document_id = %s,
+                        business_bid_document_id = %s,
+                        technical_bid_document_id = %s
                     WHERE id = %s
-                    RETURNING id, project_id, tender_document_id, bid_document_id, create_time
+                    RETURNING
+                        id,
+                        project_id,
+                        tender_document_id,
+                        business_bid_document_id,
+                        technical_bid_document_id,
+                        create_time
                     """,
-                    (tender["id"], bid["id"], relation_id),
+                    (
+                        tender["id"],
+                        business_bid["id"],
+                        technical_bid["id"],
+                        relation_id,
+                    ),
                 )
                 updated = dict(cursor.fetchone())
 
@@ -587,11 +660,11 @@ class PostgreSQLService:
                     **updated,
                     "project_identifier": project_identifier,
                     "tender_document_identifier": tender_document_identifier,
-                    "bid_document_identifier": bid_document_identifier,
+                    "business_bid_document_identifier": business_bid_document_identifier,
+                    "technical_bid_document_identifier": technical_bid_document_identifier,
                 }
 
     def delete_relation(self, relation_id: int) -> bool:
-        """删除项目文档关联。"""
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -604,7 +677,6 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def get_project_detail(self, identifier_id: str) -> Optional[Dict[str, Any]]:
-        """查询项目详情及其关联文档列表。"""
         project = self.get_project_by_identifier(identifier_id)
         if not project:
             return None
@@ -616,14 +688,20 @@ class PostgreSQLService:
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
-                bd.identifier_id AS bid_identifier_id,
-                bd.document_type AS bid_document_type,
-                bd.file_name AS bid_file_name,
-                bd.file_url AS bid_file_url,
+                bbd.identifier_id AS business_bid_identifier_id,
+                bbd.document_type AS business_bid_document_type,
+                bbd.file_name AS business_bid_file_name,
+                bbd.file_url AS business_bid_file_url,
+                tbd.identifier_id AS technical_bid_identifier_id,
+                tbd.document_type AS technical_bid_document_type,
+                tbd.file_name AS technical_bid_file_name,
+                tbd.file_url AS technical_bid_file_url,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
-            JOIN xtjs_documents bd ON pd.bid_document_id = bd.id AND bd.deleted = FALSE
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+            LEFT JOIN xtjs_documents tbd
+                ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
             WHERE pd.project_id = %s
             ORDER BY pd.create_time DESC
         """

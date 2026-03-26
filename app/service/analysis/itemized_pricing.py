@@ -65,19 +65,54 @@ class ItemizedPricingChecker:
     )
     MONEY_TOLERANCE = Decimal("0.10")
 
-    def check_itemized_logic(self, text: str, tender_text: str | None = None) -> dict:
-        normalized_text = self._normalize_text(text)
-        lines = self._split_lines(normalized_text)
-
-        item_sections = self._find_sections(lines, self.ITEM_SECTION_ANCHORS)
-        total_sections = self._find_sections(lines, self.TOTAL_SECTION_ANCHORS)
-        candidate_sections = item_sections + total_sections
-        if not candidate_sections:
-            candidate_sections = [{"anchor": "全文", "lines": lines}]
+    def check_itemized_logic(self, text: object, tender_text: object | None = None) -> dict:
+        document = self._prepare_document(text)
+        item_sections = document["item_sections"]
+        total_sections = document["total_sections"]
+        candidate_sections = document["candidate_sections"]
 
         if self._detect_downward_rate_mode(candidate_sections):
-            return self._check_downward_rate_mode(candidate_sections, tender_text=tender_text)
+            tender_document = self._prepare_document(tender_text) if tender_text is not None else None
+            return self._check_downward_rate_mode(candidate_sections, tender_document=tender_document)
         return self._check_normal_mode(item_sections, total_sections, candidate_sections)
+
+    def _prepare_document(self, payload: object) -> dict:
+        parsed_payload = self._parse_payload(payload)
+        source_text = _extract_text_from_payload(parsed_payload) if parsed_payload is not None else str(payload or "")
+        normalized_text = self._normalize_text(source_text)
+        lines = self._split_lines(normalized_text)
+
+        structured_item_sections = self._find_layout_table_sections(parsed_payload, self.ITEM_SECTION_ANCHORS)
+        structured_total_sections = self._find_layout_table_sections(parsed_payload, self.TOTAL_SECTION_ANCHORS)
+        item_sections = structured_item_sections or self._find_sections(lines, self.ITEM_SECTION_ANCHORS)
+        total_sections = structured_total_sections or self._find_sections(lines, self.TOTAL_SECTION_ANCHORS)
+        candidate_sections = self._dedupe_sections(item_sections + total_sections)
+        if not candidate_sections:
+            candidate_sections = [{"anchor": "全文", "lines": lines, "source": "full_text"}]
+
+        return {
+            "payload": parsed_payload,
+            "text": source_text,
+            "normalized_text": normalized_text,
+            "lines": lines,
+            "item_sections": item_sections,
+            "total_sections": total_sections,
+            "candidate_sections": candidate_sections,
+        }
+
+    def _parse_payload(self, payload: object) -> dict | None:
+        if isinstance(payload, dict):
+            return payload
+        if not isinstance(payload, str):
+            return None
+        raw_text = payload.strip()
+        if not raw_text.startswith("{"):
+            return None
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
 
     def _normalize_text(self, text: str) -> str:
         normalized = str(text or "")
@@ -140,6 +175,113 @@ class ItemizedPricingChecker:
                 continue
             seen.add(key)
             deduped.append({"anchor": section["anchor"], "lines": section["lines"]})
+        return deduped
+
+    def _find_layout_table_sections(self, payload: dict | None, anchors: tuple[str, ...]) -> list[dict]:
+        layout_sections = self._get_layout_sections(payload)
+        if not layout_sections:
+            return []
+
+        sections = []
+        for idx, section in enumerate(layout_sections):
+            anchor_text = self._get_section_text(section)
+            if not anchor_text:
+                continue
+
+            matched_anchor = next((anchor for anchor in anchors if anchor in anchor_text), None)
+            if not matched_anchor or not self._is_anchor_line(anchor_text, matched_anchor):
+                continue
+
+            lines = []
+            pages = []
+            table_started = False
+            for follower in layout_sections[idx + 1:]:
+                section_type = str(follower.get("type") or "").lower()
+                section_text = self._get_section_text(follower)
+                if not section_text:
+                    continue
+
+                if not table_started:
+                    if section_type == "table":
+                        table_started = True
+                        lines.extend(self._split_lines(self._normalize_text(section_text)))
+                        pages.append(follower.get("page"))
+                        continue
+                    if self._matches_other_anchor(section_text, anchors):
+                        break
+                    if self._is_heading_line(section_text):
+                        break
+                    continue
+
+                if section_type == "table":
+                    lines.extend(self._split_lines(self._normalize_text(section_text)))
+                    pages.append(follower.get("page"))
+                    continue
+                if self._is_skippable_layout_text(section_text):
+                    continue
+                break
+
+            if not lines:
+                continue
+
+            deduped_pages = []
+            seen_pages = set()
+            for page in pages:
+                if page in seen_pages or page is None:
+                    continue
+                seen_pages.add(page)
+                deduped_pages.append(page)
+
+            sections.append(
+                {
+                    "anchor": matched_anchor,
+                    "lines": lines,
+                    "start": idx,
+                    "end": idx + len(lines),
+                    "score": len(lines),
+                    "source": "layout_table_sequence",
+                    "pages": deduped_pages,
+                }
+            )
+
+        sections.sort(key=lambda item: item.get("start", 0))
+        return self._dedupe_sections(sections)
+
+    def _get_layout_sections(self, payload: dict | None) -> list[dict]:
+        if not isinstance(payload, dict):
+            return []
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return []
+        layout_sections = data.get("layout_sections")
+        if not isinstance(layout_sections, list):
+            return []
+        return [section for section in layout_sections if isinstance(section, dict)]
+
+    def _get_section_text(self, section: dict) -> str:
+        text = section.get("raw_text") or section.get("text")
+        return text.strip() if isinstance(text, str) and text.strip() else ""
+
+    def _matches_other_anchor(self, text: str, anchors: tuple[str, ...]) -> bool:
+        matched_anchor = next((anchor for anchor in anchors if anchor in text), None)
+        return bool(matched_anchor and self._is_anchor_line(text, matched_anchor))
+
+    def _is_skippable_layout_text(self, text: str) -> bool:
+        lines = self._split_lines(self._normalize_text(text))
+        return bool(lines) and all(self._should_skip_line(line) for line in lines)
+
+    def _dedupe_sections(self, sections: list[dict]) -> list[dict]:
+        deduped = []
+        seen = set()
+        for section in sections:
+            key = (
+                section.get("anchor"),
+                tuple(section.get("lines") or []),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(section)
         return deduped
 
     def _is_anchor_line(self, line: str, anchor: str) -> bool:
@@ -207,34 +349,48 @@ class ItemizedPricingChecker:
         extracted_items = []
         extracted_totals = []
         row_issues = []
+        unresolved_rows = []
 
         for section in item_source_sections:
-            section_items, section_totals, section_row_issues = self._extract_section_entries(section["lines"])
+            section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
+                section["lines"]
+            )
             extracted_items.extend(section_items)
             extracted_totals.extend(section_totals)
             row_issues.extend(section_row_issues)
+            unresolved_rows.extend(section_unresolved_rows)
 
         if not extracted_items and total_sections:
             for section in total_sections:
-                section_items, section_totals, section_row_issues = self._extract_section_entries(section["lines"])
+                section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
+                    section["lines"]
+                )
                 extracted_items.extend(section_items)
                 extracted_totals.extend(section_totals)
                 row_issues.extend(section_row_issues)
+                unresolved_rows.extend(section_unresolved_rows)
 
         if not extracted_totals:
             for section in total_sections or candidate_sections:
-                _, section_totals, _ = self._extract_section_entries(section["lines"])
+                _, section_totals, _, _ = self._extract_section_entries(section["lines"])
                 extracted_totals.extend(section_totals)
 
         extracted_items = self._dedupe_entries(extracted_items)
         extracted_totals = self._dedupe_entries(extracted_totals)
         row_issues = self._dedupe_row_issues(row_issues)
+        unresolved_rows = self._dedupe_unresolved_rows(unresolved_rows)
         duplicate_items = self._extract_duplicate_items(extracted_items)
         serial_gap_hints = self._extract_serial_gap_hints(item_sections) if item_sections else []
 
         table_detected = bool(item_sections or total_sections or extracted_items or extracted_totals)
         sum_check = self._evaluate_sum_check(extracted_items, extracted_totals)
-        status = self._resolve_normal_status(table_detected, sum_check["status"], row_issues, duplicate_items)
+        status = self._resolve_normal_status(
+            table_detected,
+            sum_check["status"],
+            row_issues,
+            duplicate_items,
+            unresolved_rows,
+        )
         passed = self._status_to_passed(status)
 
         details = []
@@ -253,6 +409,8 @@ class ItemizedPricingChecker:
         else:
             details.append("未识别到足够的分项金额或总价信息。")
 
+        if unresolved_rows:
+            details.append(f"发现 {len(unresolved_rows)} 条未完整识别的分项行，当前结果可能受 OCR 拆行影响。")
         if row_issues:
             details.append(f"发现 {len(row_issues)} 条逐项算术疑点。")
         if duplicate_items:
@@ -265,15 +423,21 @@ class ItemizedPricingChecker:
             "mode": "normal",
             "status": status,
             "passed": passed,
-            "summary": self._build_normal_summary(status, sum_check["status"], row_issues, duplicate_items),
+            "summary": self._build_normal_summary(status, sum_check["status"], row_issues, duplicate_items, unresolved_rows),
             "checks": {
                 "row_arithmetic": {
-                    "status": "fail" if row_issues else ("not_detected" if not table_detected else "pass"),
+                    "status": (
+                        "fail"
+                        if row_issues
+                        else ("unknown" if unresolved_rows else ("not_detected" if not table_detected else "pass"))
+                    ),
                     "issue_count": len(row_issues),
                     "issues": row_issues,
+                    "unresolved_count": len(unresolved_rows),
+                    "unresolved_rows": unresolved_rows,
                 },
                 "sum_consistency": {
-                    "status": sum_check["status"],
+                    "status": "unknown" if unresolved_rows and sum_check["status"] in {"pass", "fail"} else sum_check["status"],
                     "calculated_total": sum_check["calculated_total"],
                     "declared_total": sum_check["declared_total"],
                     "difference": sum_check["difference"],
@@ -295,11 +459,12 @@ class ItemizedPricingChecker:
                 "extracted_item_count": len(extracted_items),
                 "extracted_items": self._serialize_entries(extracted_items),
                 "total_candidates": self._serialize_entries(extracted_totals),
+                "unresolved_rows": unresolved_rows,
             },
             "details": details,
         }
 
-    def _check_downward_rate_mode(self, candidate_sections: list[dict], tender_text: str | None = None) -> dict:
+    def _check_downward_rate_mode(self, candidate_sections: list[dict], tender_document: dict | None = None) -> dict:
         relevant_sections = [
             section for section in candidate_sections if any(keyword in "\n".join(section["lines"]) for keyword in self.RATE_KEYWORDS)
         ]
@@ -315,7 +480,7 @@ class ItemizedPricingChecker:
         extracted_items = self._dedupe_entries(extracted_items)
         serial_gap_hints = self._find_missing_serials(serials)
         comparison_items = self._extract_comparison_items_from_sections(relevant_sections, rate_mode=True)
-        reference_items = self._extract_reference_items_from_text(tender_text) if tender_text else []
+        reference_items = self._extract_reference_items(tender_document) if tender_document else []
         comparison_result = self._compare_reference_items(reference_items, comparison_items) if reference_items else None
 
         if comparison_result is None:
@@ -383,11 +548,13 @@ class ItemizedPricingChecker:
             "details": details,
         }
 
-    def _extract_section_entries(self, lines: list[str]) -> tuple[list[dict], list[dict], list[dict]]:
+    def _extract_section_entries(self, lines: list[str]) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
         explicit_entries = self._extract_explicit_amount_entries(lines)
         table_items = []
         table_totals = []
         row_issues = []
+        unresolved_rows = []
+        row_blocks = self._build_table_row_blocks(lines)
 
         for idx, line in enumerate(lines):
             if self._should_skip_line(line):
@@ -403,24 +570,31 @@ class ItemizedPricingChecker:
                             "source": "table_total",
                         }
                     )
-                continue
+                break
 
-            if not self._looks_like_item_row(line):
-                continue
-
-            amounts = self._extract_money_candidates(line)
+        for block in row_blocks:
+            block_text = " ".join(block["lines"])
+            amounts = self._extract_money_candidates(block_text)
             if not amounts:
+                if self._is_unresolved_item_block(block_text):
+                    unresolved_rows.append(
+                        {
+                            "serial": block.get("serial"),
+                            "label": self._extract_block_label(block),
+                            "text": block_text[:160],
+                        }
+                    )
                 continue
 
             table_items.append(
                 {
-                    "label": self._extract_row_label(line, idx),
+                    "label": self._extract_block_label(block),
                     "amount": amounts[-1],
                     "source": "table_row",
                 }
             )
 
-            arithmetic_info = self._extract_row_arithmetic(line)
+            arithmetic_info = self._extract_row_arithmetic(block_text)
             if arithmetic_info is None:
                 continue
 
@@ -429,7 +603,7 @@ class ItemizedPricingChecker:
             if abs(difference) > self.MONEY_TOLERANCE:
                 row_issues.append(
                     {
-                        "label": self._extract_row_label(line, idx),
+                        "label": self._extract_block_label(block),
                         "quantity": self._format_decimal(arithmetic_info["quantity"]),
                         "unit_price": self._format_decimal(arithmetic_info["unit_price"]),
                         "line_total": self._format_decimal(arithmetic_info["line_total"]),
@@ -442,7 +616,86 @@ class ItemizedPricingChecker:
         totals = [entry for entry in explicit_entries if entry["is_total"]]
         items.extend(table_items)
         totals.extend(table_totals)
-        return items, totals, row_issues
+        return items, totals, row_issues, unresolved_rows
+
+    def _build_table_row_blocks(self, lines: list[str]) -> list[dict]:
+        blocks = []
+        current_block = None
+
+        for idx, line in enumerate(lines):
+            compact = re.sub(r"\s+", "", line)
+            if self._should_skip_line(line):
+                continue
+            if compact.startswith("随机备品备件") or ("备件名称" in compact and "规格型号" in compact):
+                current_block = self._flush_table_row_block(blocks, current_block)
+                break
+            if self._looks_like_total_line(line):
+                current_block = self._flush_table_row_block(blocks, current_block)
+                break
+            if self._is_table_header_line(line):
+                current_block = self._flush_table_row_block(blocks, current_block)
+                continue
+            if self._is_row_start_line(line):
+                current_block = self._flush_table_row_block(blocks, current_block)
+                serial_match = re.match(r"^\s*(\d+(?:\.\d+)?)", line)
+                current_block = {
+                    "start_index": idx,
+                    "serial": serial_match.group(1) if serial_match else None,
+                    "lines": [line],
+                }
+                continue
+            if current_block is not None and self._is_row_continuation_line(line):
+                current_block["lines"].append(line)
+                continue
+            current_block = self._flush_table_row_block(blocks, current_block)
+
+        self._flush_table_row_block(blocks, current_block)
+        return blocks
+
+    def _flush_table_row_block(self, blocks: list[dict], block: dict | None) -> None:
+        if block and block.get("lines"):
+            blocks.append(block)
+        return None
+
+    def _is_table_header_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        return (
+            ("序号" in compact and ("名称" in compact or "项目名称" in compact))
+            or ("规格型号" in compact and "单位" in compact and "数量" in compact)
+        )
+
+    def _is_row_start_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not re.search(r"[\u4e00-\u9fff]", compact):
+            return False
+        if self._looks_like_total_line(compact) or self._is_heading_line(compact) or self._is_table_header_line(line):
+            return False
+        if re.match(r"^\d+(?:\.\d+)?", compact):
+            return True
+        return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
+
+    def _is_row_continuation_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not compact:
+            return False
+        if self._should_skip_line(line) or self._looks_like_total_line(line) or self._is_heading_line(compact):
+            return False
+        if self._is_table_header_line(line) or self._is_row_start_line(line):
+            return False
+        return bool(re.search(r"[\u4e00-\u9fff]", compact) or self._extract_money_candidates(line))
+
+    def _extract_block_label(self, block: dict) -> str:
+        first_line = (block.get("lines") or [""])[0]
+        start_index = int(block.get("start_index", 0))
+        return self._extract_row_label(first_line, start_index)
+
+    def _is_unresolved_item_block(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        if not compact or "免费" in compact:
+            return False
+        if not re.match(r"^\d+(?:\.\d+)?", compact):
+            return False
+        return bool(re.search(r"(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡|设备|系统|服务|子系统)", compact))
 
     def _extract_explicit_amount_entries(self, lines: list[str]) -> list[dict]:
         entries = []
@@ -638,10 +891,13 @@ class ItemizedPricingChecker:
             )
         return items
 
-    def _extract_reference_items_from_text(self, text: str | None) -> list[dict]:
-        normalized_text = self._normalize_text(text)
-        lines = self._split_lines(normalized_text)
-        item_sections = self._find_sections(lines, self.ITEM_SECTION_ANCHORS, require_score=False)
+    def _extract_reference_items(self, document: dict | None) -> list[dict]:
+        if not document:
+            return []
+        item_sections = document.get("item_sections") or []
+        if not item_sections:
+            lines = document.get("lines") or []
+            item_sections = self._find_sections(lines, self.ITEM_SECTION_ANCHORS, require_score=False)
         return self._extract_comparison_items_from_sections(item_sections, rate_mode=False)
 
     def _extract_comparison_items_from_sections(self, sections: list[dict], *, rate_mode: bool) -> list[dict]:
@@ -797,11 +1053,16 @@ class ItemizedPricingChecker:
         sum_status: str,
         row_issues: list[dict],
         duplicate_items: list[dict],
+        unresolved_rows: list[dict],
     ) -> str:
         if not table_detected:
             return "not_detected"
         if row_issues or sum_status == "fail" or duplicate_items:
+            if unresolved_rows and not (row_issues or duplicate_items):
+                return "unknown"
             return "fail"
+        if unresolved_rows:
+            return "unknown"
         if sum_status == "pass":
             return "pass"
         return "unknown"
@@ -819,11 +1080,14 @@ class ItemizedPricingChecker:
         sum_status: str,
         row_issues: list[dict],
         duplicate_items: list[dict],
+        unresolved_rows: list[dict],
     ) -> str:
         if status == "not_detected":
             return "未识别到可用于校验的分项报价表或报价一览表。"
         if status == "pass":
             return "分项报价检查通过。"
+        if unresolved_rows:
+            return "已识别到报价内容，但存在未完整识别的分项行，暂无法完成可靠校验。"
         if row_issues and sum_status == "fail":
             return "发现逐项算术错误，且分项汇总与声明总价不一致。"
         if row_issues:
@@ -871,6 +1135,17 @@ class ItemizedPricingChecker:
                 continue
             seen.add(key)
             deduped.append(issue)
+        return deduped
+
+    def _dedupe_unresolved_rows(self, rows: list[dict]) -> list[dict]:
+        deduped = []
+        seen = set()
+        for row in rows:
+            key = (row.get("serial"), self._normalize_label_key(row.get("label")))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
         return deduped
 
     def _serialize_entries(self, entries: list[dict]) -> list[dict]:
@@ -953,7 +1228,7 @@ def _extract_text_from_payload(payload: object) -> str:
     return str(payload or "")
 
 
-def _load_text_for_local_test(file_path: Path) -> str:
+def _load_input_for_local_test(file_path: Path) -> object:
     try:
         text = file_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -963,32 +1238,23 @@ def _load_text_for_local_test(file_path: Path) -> str:
         return text
 
     try:
-        payload = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
         return text
 
-    extracted = _extract_text_from_payload(payload)
-    if extracted.strip():
-        return extracted
-    raise RuntimeError("未能从 JSON 中提取可分析文本。")
 
-
-def _collect_missing_amount_lines(checker: ItemizedPricingChecker, text: str) -> list[str]:
-    normalized_text = checker._normalize_text(text)
-    lines = checker._split_lines(normalized_text)
-    item_sections = checker._find_sections(lines, checker.ITEM_SECTION_ANCHORS)
-    candidate_sections = item_sections or checker._find_sections(lines, checker.TOTAL_SECTION_ANCHORS)
+def _collect_missing_amount_lines(checker: ItemizedPricingChecker, payload: object) -> list[str]:
+    document = checker._prepare_document(payload)
+    item_sections = document["item_sections"]
+    candidate_sections = item_sections or document["total_sections"]
 
     missing_lines = []
     for section in candidate_sections:
-        for line in section["lines"]:
-            if checker._should_skip_line(line) or checker._looks_like_total_line(line):
-                continue
-            if not checker._looks_like_item_row(line):
-                continue
-            if checker._extract_money_candidates(line):
-                continue
-            missing_lines.append(line)
+        _, _, _, unresolved_rows = checker._extract_section_entries(section["lines"])
+        for row in unresolved_rows:
+            label = row.get("text") or row.get("label")
+            if label:
+                missing_lines.append(label)
 
     deduped = []
     seen = set()
@@ -1008,18 +1274,27 @@ def _print_local_test_report(
     simulate_service: bool,
     tender_path: Path | None = None,
 ) -> int:
-    text = _load_text_for_local_test(path)
-    analysis_text = _service_style_preprocess(text) if simulate_service else text
+    analysis_input = _load_input_for_local_test(path)
+    analysis_text = (
+        _service_style_preprocess(_extract_text_from_payload(analysis_input))
+        if simulate_service
+        else analysis_input
+    )
     tender_text = None
     if tender_path is not None:
-        loaded_tender_text = _load_text_for_local_test(tender_path)
-        tender_text = _service_style_preprocess(loaded_tender_text) if simulate_service else loaded_tender_text
+        loaded_tender_input = _load_input_for_local_test(tender_path)
+        tender_text = (
+            _service_style_preprocess(_extract_text_from_payload(loaded_tender_input))
+            if simulate_service
+            else loaded_tender_input
+        )
     result = checker.check_itemized_logic(analysis_text, tender_text=tender_text)
+    display_text = _extract_text_from_payload(analysis_text)
 
     print(f"\n=== {path} ===")
     if tender_path is not None:
         print(f"reference_tender: {tender_path}")
-    print(f"text_length: {len(analysis_text)}")
+    print(f"text_length: {len(display_text)}")
     print(f"mode: {result.get('mode')}")
     print(f"status: {result.get('status')}")
     print(f"passed: {result.get('passed')}")

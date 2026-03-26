@@ -1,4 +1,4 @@
-"""批量项目识别路由：支持 1 份招标 + N 份投标并行处理。"""
+"""项目批量识别：1 份招标文件加 N 组商务标/技术标文件。"""
 
 import asyncio
 from typing import Any, Optional
@@ -8,6 +8,11 @@ from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
 from app.config.settings import settings
+from app.core.document_types import (
+    DOCUMENT_TYPE_BUSINESS_BID,
+    DOCUMENT_TYPE_TECHNICAL_BID,
+    DOCUMENT_TYPE_TENDER,
+)
 from app.router.dependencies import (
     RecognitionOptions,
     get_db_service,
@@ -21,18 +26,29 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 
-# 批量投标文件数量控制：
-# - 最小值至少为 1
-# - 最大值 <= 0 代表不限制
-PROJECT_BATCH_MIN_BID_FILES = max(1, int(getattr(settings, "PROJECT_BATCH_MIN_BID_FILES", 1)))
-PROJECT_BATCH_MAX_BID_FILES = int(getattr(settings, "PROJECT_BATCH_MAX_BID_FILES", 0))
+PROJECT_BATCH_MIN_BID_GROUPS = max(
+    1,
+    int(
+        getattr(
+            settings,
+            "PROJECT_BATCH_MIN_BID_GROUPS",
+            getattr(settings, "PROJECT_BATCH_MIN_BID_FILES", 1),
+        )
+    ),
+)
+PROJECT_BATCH_MAX_BID_GROUPS = int(
+    getattr(
+        settings,
+        "PROJECT_BATCH_MAX_BID_GROUPS",
+        getattr(settings, "PROJECT_BATCH_MAX_BID_FILES", 0),
+    )
+)
 
 
 async def _ensure_batch_project(
     db_service: PostgreSQLService,
     project_identifier: Optional[str],
 ) -> tuple[dict[str, Any], bool]:
-    """确保项目存在：存在则复用，不存在则创建。"""
     normalized_identifier = (project_identifier or "").strip()
     if normalized_identifier:
         existing = await run_in_threadpool(
@@ -48,7 +64,6 @@ async def _ensure_batch_project(
             )
             return created, True
         except PsycopgError as exc:
-            # 并发创建时若冲突，回查一次并复用已创建项目。
             if getattr(exc, "pgcode", None) == "23505":
                 existing = await run_in_threadpool(
                     db_service.get_project_by_identifier,
@@ -62,39 +77,49 @@ async def _ensure_batch_project(
     return created, True
 
 
-@router.post("/projects/batch/recognize", summary="项目批量识别（1 份招标 + N 份投标）")
+@router.post("/projects/batch/recognize", summary="项目批量识别")
 async def batch_recognize_project_documents(
     tender_file: UploadFile = File(...),
-    bid_files: list[UploadFile] = File(...),
+    business_bid_files: list[UploadFile] = File(...),
+    technical_bid_files: list[UploadFile] = File(...),
     project_identifier: Optional[str] = Form(default=None),
-    bid_parallelism: int = Form(default=4, ge=1, le=16),
+    bid_group_parallelism: int = Form(default=4, ge=1, le=16),
     recognition_options: RecognitionOptions = Depends(get_form_recognition_options),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """批量识别并自动绑定项目关系。"""
-    bid_count = len(bid_files or [])
-    if bid_count < PROJECT_BATCH_MIN_BID_FILES:
+    business_count = len(business_bid_files or [])
+    technical_count = len(technical_bid_files or [])
+    if business_count != technical_count:
         raise HTTPException(
             status_code=400,
-            detail=f"bid_files count must be at least {PROJECT_BATCH_MIN_BID_FILES}",
+            detail=(
+                "business_bid_files 数量必须与 technical_bid_files 数量一致 "
+                f"(商务标={business_count}，技术标={technical_count})"
+            ),
         )
-    if PROJECT_BATCH_MAX_BID_FILES > 0 and bid_count > PROJECT_BATCH_MAX_BID_FILES:
+
+    bid_group_count = business_count
+    if bid_group_count < PROJECT_BATCH_MIN_BID_GROUPS:
         raise HTTPException(
             status_code=400,
-            detail=f"bid_files count must be <= {PROJECT_BATCH_MAX_BID_FILES}",
+            detail=f"标书组数量不能少于 {PROJECT_BATCH_MIN_BID_GROUPS}",
+        )
+    if PROJECT_BATCH_MAX_BID_GROUPS > 0 and bid_group_count > PROJECT_BATCH_MAX_BID_GROUPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"标书组数量不能超过 {PROJECT_BATCH_MAX_BID_GROUPS}",
         )
 
     try:
         project, project_created = await _ensure_batch_project(db_service, project_identifier)
     except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
-    # 先识别招标文件，后续所有投标文件都绑定到该招标文档。
     tender_result = await upload_extract_and_create_document(
         file=tender_file,
-        document_type="tender",
+        document_type=DOCUMENT_TYPE_TENDER,
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,
@@ -103,83 +128,122 @@ async def batch_recognize_project_documents(
     )
     tender_document_identifier = tender_result["document"]["identifier_id"]
 
-    # 用信号量控制并发，避免同时压垮 OCR/GPU 资源。
-    effective_parallelism = max(1, min(int(bid_parallelism), bid_count))
+    effective_parallelism = max(1, min(int(bid_group_parallelism), bid_group_count))
     semaphore = asyncio.Semaphore(effective_parallelism)
 
-    async def _handle_single_bid(index: int, bid_file: UploadFile) -> dict[str, Any]:
-        """处理单份投标：识别 -> 绑定 -> 组装结果。"""
-        file_name = (bid_file.filename or "").strip() or f"bid_{index}"
+    async def _handle_single_bid_group(
+        index: int,
+        business_bid_file: UploadFile,
+        technical_bid_file: UploadFile,
+    ) -> dict[str, Any]:
+        business_file_name = (business_bid_file.filename or "").strip() or f"business_bid_{index}"
+        technical_file_name = (technical_bid_file.filename or "").strip() or f"technical_bid_{index}"
+
         async with semaphore:
-            bid_result = await upload_extract_and_create_document(
-                file=bid_file,
-                document_type="bid",
+            business_result = await upload_extract_and_create_document(
+                file=business_bid_file,
+                document_type=DOCUMENT_TYPE_BUSINESS_BID,
                 db_service=db_service,
                 oss_service=oss_service,
                 analysis_service=analysis_service,
                 **recognition_options.as_kwargs(),
                 raise_http_exception=False,
             )
+            if not business_result["ok"]:
+                return {
+                    "index": index,
+                    "business_bid_file_name": business_file_name,
+                    "technical_bid_file_name": technical_file_name,
+                    "status": "failed",
+                    "stage": "business_bid_recognition",
+                    "error": business_result["error"],
+                    "status_code": business_result["status_code"],
+                }
 
-        if not bid_result["ok"]:
-            return {
-                "index": index,
-                "file_name": file_name,
-                "status": "failed",
-                "stage": "recognition",
-                "error": bid_result["error"],
-                "status_code": bid_result["status_code"],
-            }
+            technical_result = await upload_extract_and_create_document(
+                file=technical_bid_file,
+                document_type=DOCUMENT_TYPE_TECHNICAL_BID,
+                db_service=db_service,
+                oss_service=oss_service,
+                analysis_service=analysis_service,
+                **recognition_options.as_kwargs(),
+                raise_http_exception=False,
+            )
+            if not technical_result["ok"]:
+                return {
+                    "index": index,
+                    "business_bid_file_name": business_file_name,
+                    "technical_bid_file_name": technical_file_name,
+                    "status": "failed",
+                    "stage": "technical_bid_recognition",
+                    "error": technical_result["error"],
+                    "status_code": technical_result["status_code"],
+                    "business_bid_document": business_result["document_summary"],
+                    "business_bid_upload": business_result["upload"],
+                }
 
-        bid_document = bid_result["document"]
+        business_bid_document = business_result["document"]
+        technical_bid_document = technical_result["document"]
         try:
             relation = await run_in_threadpool(
                 db_service.bind_project_documents,
                 project["identifier_id"],
                 tender_document_identifier,
-                bid_document["identifier_id"],
+                business_bid_document["identifier_id"],
+                technical_bid_document["identifier_id"],
             )
         except ValueError as exc:
             return {
                 "index": index,
-                "file_name": file_name,
+                "business_bid_file_name": business_file_name,
+                "technical_bid_file_name": technical_file_name,
                 "status": "failed",
                 "stage": "binding",
                 "error": str(exc),
                 "status_code": 400,
-                "document": bid_result["document_summary"],
-                "upload": bid_result["upload"],
+                "business_bid_document": business_result["document_summary"],
+                "business_bid_upload": business_result["upload"],
+                "technical_bid_document": technical_result["document_summary"],
+                "technical_bid_upload": technical_result["upload"],
             }
         except PsycopgError as exc:
             return {
                 "index": index,
-                "file_name": file_name,
+                "business_bid_file_name": business_file_name,
+                "technical_bid_file_name": technical_file_name,
                 "status": "failed",
                 "stage": "binding",
-                "error": f"database error: {exc}",
+                "error": f"数据库错误：{exc}",
                 "status_code": 500,
-                "document": bid_result["document_summary"],
-                "upload": bid_result["upload"],
+                "business_bid_document": business_result["document_summary"],
+                "business_bid_upload": business_result["upload"],
+                "technical_bid_document": technical_result["document_summary"],
+                "technical_bid_upload": technical_result["upload"],
             }
 
         return {
             "index": index,
-            "file_name": file_name,
+            "business_bid_file_name": business_file_name,
+            "technical_bid_file_name": technical_file_name,
             "status": "success",
-            "document": bid_result["document_summary"],
-            "upload": bid_result["upload"],
+            "business_bid_document": business_result["document_summary"],
+            "business_bid_upload": business_result["upload"],
+            "technical_bid_document": technical_result["document_summary"],
+            "technical_bid_upload": technical_result["upload"],
             "relation": relation,
         }
 
-    # 并行处理所有投标文件。
-    bid_items = await asyncio.gather(
+    bid_group_items = await asyncio.gather(
         *(
-            _handle_single_bid(index, bid_file)
-            for index, bid_file in enumerate(bid_files, start=1)
+            _handle_single_bid_group(index, business_bid_file, technical_bid_file)
+            for index, (business_bid_file, technical_bid_file) in enumerate(
+                zip(business_bid_files, technical_bid_files),
+                start=1,
+            )
         )
     )
-    success_count = sum(1 for item in bid_items if item.get("status") == "success")
-    failed_count = bid_count - success_count
+    success_count = sum(1 for item in bid_group_items if item.get("status") == "success")
+    failed_count = bid_group_count - success_count
     if failed_count == 0:
         batch_status = "success"
     elif success_count == 0:
@@ -192,18 +256,18 @@ async def batch_recognize_project_documents(
         "project": project,
         "project_created": project_created,
         "parallel": {
-            "requested_bid_parallelism": bid_parallelism,
-            "effective_bid_parallelism": effective_parallelism,
+            "requested_bid_group_parallelism": bid_group_parallelism,
+            "effective_bid_group_parallelism": effective_parallelism,
         },
         "tender": {
             "status": "success",
             "document": tender_result["document_summary"],
             "upload": tender_result["upload"],
         },
-        "bids": {
-            "total": bid_count,
+        "bid_groups": {
+            "total": bid_group_count,
             "success": success_count,
             "failed": failed_count,
-            "items": bid_items,
+            "items": bid_group_items,
         },
     }
