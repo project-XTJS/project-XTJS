@@ -63,6 +63,13 @@ class ItemizedPricingChecker:
         "m2",
         "㎡",
     )
+    ZERO_AMOUNT_KEYWORDS = (
+        "包含",
+        "免费",
+        "赠送",
+        "无偿",
+        "不收费",
+    )
     MONEY_TOLERANCE = Decimal("0.10")
 
     def check_itemized_logic(self, text: object, tender_text: object | None = None) -> dict:
@@ -214,10 +221,12 @@ class ItemizedPricingChecker:
                     continue
 
                 if section_type == "table":
+                    if not self._should_attach_following_layout_table(section_text):
+                        continue
                     lines.extend(self._split_lines(self._normalize_text(section_text)))
                     pages.append(follower.get("page"))
                     continue
-                if self._is_skippable_layout_text(section_text):
+                if self._is_layout_bridge_text(section_text):
                     continue
                 break
 
@@ -269,6 +278,38 @@ class ItemizedPricingChecker:
     def _is_skippable_layout_text(self, text: str) -> bool:
         lines = self._split_lines(self._normalize_text(text))
         return bool(lines) and all(self._should_skip_line(line) for line in lines)
+
+    def _is_spare_parts_marker_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return compact.startswith("随机备品备件") or ("备件名称" in compact and "规格型号" in compact)
+
+    def _is_layout_bridge_text(self, text: str) -> bool:
+        return (
+            self._is_skippable_layout_text(text)
+            or self._is_spare_parts_marker_text(text)
+            or self._is_layout_page_marker_text(text)
+        )
+
+    def _is_layout_page_marker_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        if re.fullmatch(r"第\d+页", compact):
+            return True
+        return compact in {"投标文件-商务部分", "投标文件-技术部分", "商务部分", "技术部分"}
+
+    def _should_attach_following_layout_table(self, text: str) -> bool:
+        if self._is_spare_parts_marker_text(text):
+            return False
+
+        lines = self._split_lines(self._normalize_text(text))
+        if not lines:
+            return False
+        if any(self._extract_money_candidates(line) for line in lines):
+            return True
+        if any(self._extract_zero_amount_candidate(line) is not None for line in lines):
+            return True
+        if any(self._extract_row_serial(line) for line in lines) or any(self._looks_like_total_line(line) for line in lines):
+            return False
+        return True
 
     def _dedupe_sections(self, sections: list[dict]) -> list[dict]:
         deduped = []
@@ -322,8 +363,32 @@ class ItemizedPricingChecker:
             return 0
         return score
 
+    def _extract_row_serial(self, line: str) -> str | None:
+        leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．）)])", line)
+        if leading_match:
+            return leading_match.group(1)
+
+        trailing_match = re.search(r"(?:^|\s)(\d+(?:\.\d+)*)(?:[\.、．）)])\s*$", line)
+        if trailing_match and re.search(r"[\u4e00-\u9fff]", line):
+            return trailing_match.group(1)
+        return None
+
+    def _contains_quantity_unit(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
+        return bool(
+            re.search(
+                rf"(?:\d+(?:\.\d+)?\s*(?:{unit_pattern})|(?:{unit_pattern})\s*\d+(?:\.\d+)?)",
+                compact,
+                re.IGNORECASE,
+            )
+        )
+
     def _is_heading_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
+        serial = self._extract_row_serial(line)
+        if serial and (self._extract_money_candidates(line) or self._contains_quantity_unit(compact)):
+            return False
         return bool(
             re.match(r"^(第[一二三四五六七八九十百]+章|[一二三四五六七八九十]+、|\d+\.[\d\.]*|（[一二三四五六七八九十]+）)", compact)
         )
@@ -560,6 +625,8 @@ class ItemizedPricingChecker:
             if self._should_skip_line(line):
                 continue
 
+            if self._is_table_header_line(line):
+                continue
             if self._looks_like_total_line(line):
                 amounts = self._extract_money_candidates(line)
                 if amounts:
@@ -574,7 +641,7 @@ class ItemizedPricingChecker:
 
         for block in row_blocks:
             block_text = " ".join(block["lines"])
-            amounts = self._extract_money_candidates(block_text)
+            amounts = self._extract_row_amounts(block_text)
             if not amounts:
                 if self._is_unresolved_item_block(block_text):
                     unresolved_rows.append(
@@ -629,18 +696,17 @@ class ItemizedPricingChecker:
             if compact.startswith("随机备品备件") or ("备件名称" in compact and "规格型号" in compact):
                 current_block = self._flush_table_row_block(blocks, current_block)
                 break
-            if self._looks_like_total_line(line):
-                current_block = self._flush_table_row_block(blocks, current_block)
-                break
             if self._is_table_header_line(line):
                 current_block = self._flush_table_row_block(blocks, current_block)
                 continue
+            if self._looks_like_total_line(line):
+                current_block = self._flush_table_row_block(blocks, current_block)
+                break
             if self._is_row_start_line(line):
                 current_block = self._flush_table_row_block(blocks, current_block)
-                serial_match = re.match(r"^\s*(\d+(?:\.\d+)?)", line)
                 current_block = {
                     "start_index": idx,
-                    "serial": serial_match.group(1) if serial_match else None,
+                    "serial": self._extract_row_serial(line),
                     "lines": [line],
                 }
                 continue
@@ -660,7 +726,8 @@ class ItemizedPricingChecker:
     def _is_table_header_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         return (
-            ("序号" in compact and ("名称" in compact or "项目名称" in compact))
+            ("序号" in compact and "单价" in compact and "总价" in compact)
+            or ("序号" in compact and ("名称" in compact or "项目名称" in compact or "服务内容" in compact or "人员类型" in compact))
             or ("规格型号" in compact and "单位" in compact and "数量" in compact)
         )
 
@@ -668,17 +735,19 @@ class ItemizedPricingChecker:
         compact = re.sub(r"\s+", "", line)
         if not re.search(r"[\u4e00-\u9fff]", compact):
             return False
-        if self._looks_like_total_line(compact) or self._is_heading_line(compact) or self._is_table_header_line(line):
+        if self._looks_like_total_line(compact) or self._is_heading_line(line) or self._is_table_header_line(line):
             return False
-        if re.match(r"^\d+(?:\.\d+)?", compact):
+        if self._extract_row_serial(line):
             return True
+        if re.match(r"^\s*\d", line):
+            return False
         return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
 
     def _is_row_continuation_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not compact:
             return False
-        if self._should_skip_line(line) or self._looks_like_total_line(line) or self._is_heading_line(compact):
+        if self._should_skip_line(line) or self._looks_like_total_line(line) or self._is_heading_line(line):
             return False
         if self._is_table_header_line(line) or self._is_row_start_line(line):
             return False
@@ -693,7 +762,7 @@ class ItemizedPricingChecker:
         compact = re.sub(r"\s+", "", text)
         if not compact or "免费" in compact:
             return False
-        if not re.match(r"^\d+(?:\.\d+)?", compact):
+        if not self._extract_row_serial(text):
             return False
         return bool(re.search(r"(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡|设备|系统|服务|子系统)", compact))
 
@@ -707,7 +776,10 @@ class ItemizedPricingChecker:
             if len(amounts) != 1:
                 continue
 
-            label = self._resolve_neighbor_label(lines, idx)
+            if self._looks_like_total_line(line) and ("合计" in line or "总计" in line):
+                label = "合计"
+            else:
+                label = self._resolve_neighbor_label(lines, idx)
             if not label:
                 continue
 
@@ -757,6 +829,8 @@ class ItemizedPricingChecker:
         return False
 
     def _looks_like_total_line(self, line: str) -> bool:
+        if self._is_table_header_line(line):
+            return False
         compact = re.sub(r"\s+", "", line)
         return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
 
@@ -772,44 +846,61 @@ class ItemizedPricingChecker:
         return bool(re.search(rf"(?:{unit_pattern})\s*\d+(?:\.\d+)?", compact))
 
     def _extract_row_label(self, line: str, index: int) -> str:
-        label = re.sub(r"^\s*\d+(?:\.\d+)?\s*", "", line)
+        unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
+        label = re.sub(r"^\s*\d+(?:\.\d+)*\s*[\.、．）)]?\s*", "", line)
+        label = re.sub(r"\s*\d+(?:\.\d+)*(?:[\.、．）)])\s*$", "", label)
+        label = re.sub(
+            rf"\s+(?:￥|¥)?\s*\d[\d,]*(?:\.\d{{1,2}})?\s+\d+(?:\.\d+)?(?:\s*(?:{unit_pattern}))?\s+(?:￥|¥)?\s*\d[\d,]*(?:\.\d{{1,2}})?\s*$",
+            "",
+            label,
+        )
         label = re.sub(r"\s*(?:￥|¥)?\s*\d[\d,]*(?:\.\d{1,2})?\s*$", "", label)
         label = re.sub(r"(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡)\s*\d+(?:\.\d+)?\s.*$", "", label)
         label = re.sub(r"\s+", " ", label).strip()
         return label[:60] if label else f"第{index + 1}行"
 
     def _extract_row_arithmetic(self, line: str) -> dict | None:
-        matches = list(
+        money_pattern = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
+        unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
+        candidate_patterns = (
             re.finditer(
-                r"(?P<qty>\d+(?:\.\d+)?)\s+(?P<unit>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)\s+(?P<total>(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)",
+                rf"(?P<unit_price>{money_pattern})\s+(?P<qty>\d+(?:\.\d+)?)(?:\s*(?:{unit_pattern}))?\s+(?P<total>{money_pattern})",
                 line,
-            )
+            ),
+            re.finditer(
+                rf"(?P<qty>\d+(?:\.\d+)?)(?:\s*(?:{unit_pattern}))?\s+(?P<unit_price>{money_pattern})\s+(?P<total>{money_pattern})",
+                line,
+            ),
         )
-        for match in reversed(matches):
-            quantity = self._to_decimal(match.group("qty"))
-            unit_price = self._to_decimal(match.group("unit"))
-            line_total = self._to_decimal(match.group("total"))
-            if quantity is None or unit_price is None or line_total is None:
-                continue
-            if quantity <= 0 or quantity > Decimal("100000"):
-                continue
-            if not self._looks_like_money_value(unit_price) or not self._looks_like_money_value(line_total):
-                continue
-            return {
-                "quantity": quantity,
-                "unit_price": unit_price,
-                "line_total": line_total,
-            }
+        for matches in candidate_patterns:
+            for match in reversed(list(matches)):
+                quantity = self._to_decimal(match.group("qty"))
+                unit_price = self._to_decimal(match.group("unit_price"))
+                line_total = self._to_decimal(match.group("total"))
+                if quantity is None or unit_price is None or line_total is None:
+                    continue
+                if quantity <= 0 or quantity > Decimal("100000"):
+                    continue
+                if not self._looks_like_money_value(unit_price) or not self._looks_like_money_value(line_total):
+                    continue
+                return {
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "line_total": line_total,
+                }
         return None
 
     def _extract_money_candidates(self, line: str) -> list[Decimal]:
         candidates = []
-        for match in re.finditer(r"(?:￥|¥)?\s*((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)", line):
+        for match in re.finditer(r"(?:￥|¥)?\s*((?:\d+,\d{4,}|\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)", line):
             value = self._to_decimal(match.group(1))
             if value is None:
                 continue
-            around = line[max(0, match.start() - 3): min(len(line), match.end() + 3)]
+            around = line[max(0, match.start() - 3): min(len(line), match.end() + 4)]
+            suffix = line[match.end(): min(len(line), match.end() + 5)]
             if "%" in around or "％" in around:
+                continue
+            if re.match(r"\s*(?:℃|°C|mm|cm|kg|g|GHz|MHz|kW|dB)(?:\b|$)", suffix, re.IGNORECASE):
                 continue
             if not self._looks_like_money_value(value):
                 continue
@@ -817,6 +908,27 @@ class ItemizedPricingChecker:
                 continue
             candidates.append(value)
         return candidates
+
+    def _extract_zero_amount_candidate(self, line: str) -> Decimal | None:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if not normalized or not self._extract_row_serial(normalized):
+            return None
+        if not any(keyword in normalized for keyword in self.ZERO_AMOUNT_KEYWORDS):
+            return None
+
+        unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
+        if re.search(rf"(?:{unit_pattern})\s*\d+(?:\.\d+)?\s+0(?:\.\d{{1,2}})?(?:\s|$)", normalized, re.IGNORECASE):
+            return Decimal("0")
+        if "免费" in normalized:
+            return Decimal("0")
+        return None
+
+    def _extract_row_amounts(self, line: str) -> list[Decimal]:
+        amounts = self._extract_money_candidates(line)
+        if amounts:
+            return amounts
+        zero_amount = self._extract_zero_amount_candidate(line)
+        return [zero_amount] if zero_amount is not None else []
 
     def _looks_like_money_value(self, value: Decimal) -> bool:
         return value >= Decimal("100")
@@ -861,9 +973,9 @@ class ItemizedPricingChecker:
                 or bool(self._extract_money_candidates(line))
             ):
                 continue
-            match = re.match(r"^(\d+(?:\.\d+)?)", compact)
-            if match:
-                serials.append(match.group(1))
+            serial = self._extract_row_serial(line)
+            if serial:
+                serials.append(serial)
         return serials
 
     def _extract_serial_gap_hints(self, sections: list[dict]) -> list[str]:
@@ -932,11 +1044,11 @@ class ItemizedPricingChecker:
             if not re.search(r"[\u4e00-\u9fff]", compact):
                 continue
 
-            serial_match = re.match(r"^(\d+(?:\.\d+)?)", compact)
+            serial = self._extract_row_serial(line)
             has_rate = any(keyword in line for keyword in self.RATE_KEYWORDS) or "%" in line or "％" in line
-            if not (self._looks_like_item_row(line) or serial_match or has_rate):
+            if not (self._looks_like_item_row(line) or serial or has_rate):
                 continue
-            if rate_mode and not has_rate and not serial_match:
+            if rate_mode and not has_rate and not serial:
                 continue
 
             label = self._extract_comparison_label(line, idx, rate_mode=rate_mode)
@@ -944,7 +1056,7 @@ class ItemizedPricingChecker:
                 continue
             items.append(
                 {
-                    "serial": serial_match.group(1) if serial_match else None,
+                    "serial": serial,
                     "label": label,
                     "label_key": self._normalize_label_key(label),
                     "source": "rate_item" if rate_mode else "reference_item",
