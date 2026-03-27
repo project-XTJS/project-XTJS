@@ -291,6 +291,7 @@ class AnalysisService:
         ocr_used = False
         layout_used = False
         layout_sections: list[dict] = []
+        logical_tables: list[dict] = []
         seal_data = {"count": 0, "texts": [], "covered_texts": []}
         signature_data = {"count": 0, "texts": []}
 
@@ -323,6 +324,7 @@ class AnalysisService:
                 candidate_seals = ocr_result.get("seals") or seal_data
                 candidate_signatures = ocr_result.get("signatures") or signature_data
                 layout_sections = ocr_result.get("layout_sections") or ocr_result.get("layout_blocks") or []
+                logical_tables = ocr_result.get("logical_tables") or []
                 layout_used = bool(ocr_result.get("structure_used"))
                 ppstructure_enabled = bool(ocr_result.get("structure_enabled", ppstructure_enabled))
                 seal_recognition_enabled = bool(
@@ -348,6 +350,7 @@ class AnalysisService:
                 else:
                     layout_used = False
                     layout_sections = []
+                    logical_tables = []
             except Exception as exc:
                 print(f"调用 OCR 服务异常: {exc}")
 
@@ -367,6 +370,7 @@ class AnalysisService:
                 structure_layout_sections = structure_result.get("layout_sections") or []
                 if structure_layout_sections:
                     layout_sections = structure_layout_sections
+                logical_tables = structure_result.get("logical_tables") or logical_tables
                 layout_used = bool(structure_result.get("structure_used"))
                 ppstructure_enabled = bool(
                     structure_result.get("structure_enabled", ppstructure_enabled)
@@ -469,6 +473,8 @@ class AnalysisService:
             "layout_section_count": len(layout_sections),
             "table_sections": table_sections,
             "table_section_count": len(table_sections),
+            "logical_tables": logical_tables,
+            "logical_table_count": len(logical_tables),
             "seal_detected": seal_count > 0,
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),

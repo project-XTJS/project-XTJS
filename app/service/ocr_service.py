@@ -14,6 +14,7 @@ import numpy as np
 from tqdm import tqdm
 
 from app.config.settings import settings
+from app.service.table_parser import build_logical_tables, build_table_structure
 
 
 class OCRService:
@@ -802,6 +803,7 @@ class OCRService:
             "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
             "signatures": {"count": 0, "texts": [], "locations": []},
             "layout_sections": [],
+            "logical_tables": [],
             "ocr_applied": False,
             "structure_used": False,
             "structure_enabled": False,
@@ -827,22 +829,27 @@ class OCRService:
             use_signature_recognition=use_signature_recognition,
         )
         if ext == "pdf":
-            return self._recognize_pdf(
+            return self._attach_table_outputs(
+                self._recognize_pdf(
+                    file_path,
+                    structure_enabled=structure_enabled,
+                    seal_enabled=seal_enabled,
+                    signature_enabled=signature_enabled,
+                )
+            )
+        return self._attach_table_outputs(
+            self._recognize_image(
                 file_path,
                 structure_enabled=structure_enabled,
                 seal_enabled=seal_enabled,
                 signature_enabled=signature_enabled,
             )
-        return self._recognize_image(
-            file_path,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
         )
 
     def _empty_layout_result(self) -> dict:
         return {
             "layout_sections": [],
+            "logical_tables": [],
             "structure_used": False,
             "structure_enabled": False,
             "layout_text": "",
@@ -903,12 +910,12 @@ class OCRService:
                 layout_sections.extend(page_sections)
             structure_used = page_structure_used
 
-        return {
+        return self._attach_table_outputs({
             "layout_sections": layout_sections,
             "structure_used": structure_used,
             "structure_enabled": structure_enabled,
             "layout_text": self._merge_text_parts(layout_text_parts),
-        }
+        })
 
     def _empty_marker_result(self) -> dict:
         return {
@@ -1460,7 +1467,11 @@ class OCRService:
             normalized = re.sub(r" *\t *", "\t", normalized)
             normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
             normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-            lines = [re.sub(r"[ \t]+", " ", line).strip() for line in normalized.splitlines()]
+            lines = []
+            for line in normalized.splitlines():
+                cells = [re.sub(r" {2,}", " ", cell).strip() for cell in line.split("\t")]
+                cleaned = "\t".join(cells).strip()
+                lines.append(cleaned)
             return "\n".join(line for line in lines if line)
 
         normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -1470,11 +1481,22 @@ class OCRService:
         normalized = re.sub(r"\s+", " ", normalized).strip()
         return normalized
 
+    def _attach_table_outputs(self, result: dict | None) -> dict:
+        payload = dict(result or {})
+        layout_sections = payload.get("layout_sections") or []
+        if not isinstance(layout_sections, list):
+            payload["logical_tables"] = []
+            return payload
+
+        payload["logical_tables"] = build_logical_tables(layout_sections)
+        return payload
+
     def _build_table_section(self, page_no: int, block: dict) -> dict | None:
         markdown_parts = self._dedupe_text_parts(block.get("table_markdown_parts") or [])
         html_parts = self._dedupe_text_parts(block.get("table_html_parts") or [])
         cell_texts = self._dedupe_text_parts(block.get("table_cell_texts") or [])
         raw_text = str(block.get("text") or "")
+        bbox = self._normalize_bbox(block.get("bbox"))
 
         full_text_candidates = [
             self._merge_text_parts(
@@ -1496,6 +1518,8 @@ class OCRService:
             return None
 
         section = {"page": page_no, "type": "table", "text": section_text}
+        if bbox is not None:
+            section["bbox"] = bbox
         normalized_raw_text = self._normalize_section_text(raw_text, preserve_lines=True)
         if normalized_raw_text:
             section["raw_text"] = normalized_raw_text
@@ -1505,6 +1529,14 @@ class OCRService:
             section["html"] = "\n\n".join(html_parts)
         if cell_texts:
             section["cell_texts"] = cell_texts
+        table_structure = build_table_structure(
+            html_parts=html_parts,
+            markdown_parts=markdown_parts,
+            cell_texts=cell_texts,
+            raw_text=normalized_raw_text or section_text,
+        )
+        if table_structure is not None:
+            section["table_structure"] = table_structure
         return section
 
     def _simplify_layout_sections(self, layout_blocks: list[dict]) -> list[dict]:
@@ -1546,8 +1578,11 @@ class OCRService:
                     "type": section_type,
                     "text": section_text,
                 }
+                bbox = self._normalize_bbox(block.get("bbox"))
+                if bbox is not None:
+                    section["bbox"] = bbox
 
-            signature = (page_no, section["type"], section["text"])
+            signature = (page_no, section["type"], section["text"], str(section.get("bbox")))
             if signature in seen:
                 continue
             seen.add(signature)

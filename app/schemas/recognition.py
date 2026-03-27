@@ -49,30 +49,9 @@ def build_analyze_file_metadata(
         },
         "recognition": {
             "route": recognition_route,
-            "reason": recognition_reason,
-            "pdf_mode": pdf_mode,
-            "parser_engine": parser_engine,
-            "ocr_engine": ocr_engine,
             "ocr_used": ocr_used,
             "layout_used": layout_used,
-            "layout_section_count": layout_section_count,
-            "source_mode": source_mode,
-            "ppstructure_v3_requested": ppstructure_v3_requested,
-            "ppstructure_v3_enabled": ppstructure_v3_enabled,
-            "seal_recognition_enabled": seal_recognition_enabled,
-            "signature_recognition_enabled": signature_recognition_enabled,
-        },
-        "runtime": {
-            "device": active_device,
-        },
-        "seal": {
-            "detected": seal_detected,
-            "count": seal_count,
-            "covered_text_count": seal_covered_text_count,
-        },
-        "signature": {
-            "detected": signature_detected,
-            "count": signature_count,
+            "parser_engine": parser_engine,
         },
     }
 
