@@ -12,18 +12,15 @@ redis>=7.2.1
 minio>=7.2.20
 
 # --- OCR 与图像处理 ---
-paddleocr[all]
+paddleocr[doc-parser]==3.4.0
 # 手动安装 GPU 框架命令: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/
 opencv-contrib-python==4.10.0.84
 numpy>=1.26.4,<3
 urllib3<2.0
 requests
+psutil>=5.9,<8
 
 # --- 文档处理与分析 ---
-pdfplumber==0.10.2
-pymupdf
-python-docx==0.8.11
-openpyxl>=3.1.5
 
 # --- 工具与异步任务 ---
 language-tool-python>=3.2.2
@@ -31,6 +28,3 @@ tqdm
 python-dotenv>=1.2.2
 celery>=5.6.2
 chardet<8
-
-# [可选] Windows 环境下用于 .doc 文件解析的 COM 依赖
-# pywin32>=306

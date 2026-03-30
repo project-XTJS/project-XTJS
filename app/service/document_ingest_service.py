@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from fastapi import HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
@@ -64,10 +64,6 @@ def _extract_recognition_content(
     file_bytes: bytes,
     file_name: str,
     analysis_service,
-    use_ppstructure_v3: Optional[bool] = None,
-    use_seal_recognition: Optional[bool] = None,
-    use_signature_recognition: Optional[bool] = None,
-    pdf_mode: Optional[Literal["auto", "text", "ocr", "hybrid"]] = None,
 ) -> dict:
     """对单文件执行识别，并输出用于存储的精简识别结果。"""
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
@@ -83,10 +79,6 @@ def _extract_recognition_content(
         recognition_result = analysis_service.extract_text_result(
             temp_file_path,
             file_extension,
-            use_ppstructure_v3=use_ppstructure_v3,
-            use_seal_recognition=use_seal_recognition,
-            use_signature_recognition=use_signature_recognition,
-            pdf_mode=pdf_mode,
         )
         # 去掉大字段，避免把完整文本和分页内容直接写入数据库。
         recognition_result.pop("content", None)
@@ -128,10 +120,6 @@ async def upload_extract_and_create_document(
     identifier_id: Optional[str] = None,
     document_name: Optional[str] = None,
     object_name: Optional[str] = None,
-    use_ppstructure_v3: Optional[bool] = None,
-    use_seal_recognition: Optional[bool] = None,
-    use_signature_recognition: Optional[bool] = None,
-    pdf_mode: Optional[Literal["auto", "text", "ocr", "hybrid"]] = None,
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
     """执行上传、识别、入库一体化流程。"""
@@ -158,10 +146,6 @@ async def upload_extract_and_create_document(
             file_bytes,
             (file.filename or resolved_file_name),
             analysis_service,
-            use_ppstructure_v3,
-            use_seal_recognition,
-            use_signature_recognition,
-            pdf_mode,
         )
 
         # 第三步：写入文档记录与识别内容。

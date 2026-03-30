@@ -1,452 +1,93 @@
 import html
 import os
-import queue
+from pathlib import Path
 import re
-import sys
 import threading
-import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any
 
-import cv2
-import fitz  # PyMuPDF
-import numpy as np
-from tqdm import tqdm
-
 from app.config.settings import settings
+from app.service.ocr_progress import OCRProgressMonitor
 from app.service.table_parser import build_logical_tables, build_table_structure
 
 
 class OCRService:
     def __init__(self, preferred_device: str | None = None):
         self.available = False
-        self.ocr = None
-        self.structure = None
-        # 印章识别单独走官方 SealRecognition，避免和正文 OCR 结果互相干扰。
-        self.seal_pipeline = None
-        self.structure_available = False
-        self.seal_pipeline_available = False
-        self._structure_init_attempted = False
-        self._seal_init_attempted = False
-        self._ocr_predictor_lock = threading.Lock()
-        self._structure_predictor_lock = threading.Lock()
-        self._seal_predictor_lock = threading.Lock()
-        self._predictor_fallback_lock = threading.Lock()
+        self.pipeline = None
         self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
-        self.seal_dir = "output_seals"
-        self.signature_dir = "output_signatures"
-        if not os.path.exists(self.seal_dir):
-            os.makedirs(self.seal_dir)
-        if not os.path.exists(self.signature_dir):
-            os.makedirs(self.signature_dir)
-        self.face_detector = self._load_face_detector()
+        self._predictor_lock = threading.Lock()
 
         self._prepare_runtime_dirs()
         self._prepare_runtime_env()
-        self._init_engines()
+        self._init_engine()
+
+    def _describe_document(self, file_path: str, file_type: str, total_pages: int) -> str:
+        file_name = Path(file_path).name
+        normalized_type = str(file_type or "").strip().lower().lstrip(".") or "unknown"
+        page_label = total_pages if total_pages > 0 else "unknown"
+        return f"file={file_name}, type={normalized_type}, estimated_pages={page_label}"
+
+    def _runtime_cache_dirs(self) -> tuple[str, ...]:
+        runtime_root = settings.OCR_STORAGE_ROOT
+        return (
+            str(runtime_root / ".cache"),
+            str(runtime_root / "hf-home"),
+            str(runtime_root / "hf-cache"),
+            str(runtime_root / "modelscope-cache"),
+            str(runtime_root / "aistudio-cache"),
+        )
 
     def _prepare_runtime_dirs(self) -> None:
         for path in (
             settings.OCR_STORAGE_ROOT,
             settings.PADDLE_PDX_CACHE_HOME,
             settings.OCR_RUNTIME_TEMP_DIR,
+            *self._runtime_cache_dirs(),
         ):
             os.makedirs(path, exist_ok=True)
 
     def _prepare_runtime_env(self) -> None:
-        os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(settings.PADDLE_PDX_CACHE_HOME))
-        os.environ.setdefault(
-            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK",
-            "1" if settings.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK else "0",
+        runtime_tmp = str(settings.OCR_RUNTIME_TEMP_DIR)
+        runtime_root = settings.OCR_STORAGE_ROOT
+
+        os.environ["PADDLE_PDX_CACHE_HOME"] = str(settings.PADDLE_PDX_CACHE_HOME)
+        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = (
+            "1" if settings.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK else "0"
         )
-        os.environ.setdefault("TMPDIR", str(settings.OCR_RUNTIME_TEMP_DIR))
+        os.environ["TMPDIR"] = runtime_tmp
+        os.environ["TMP"] = runtime_tmp
+        os.environ["TEMP"] = runtime_tmp
+        os.environ["XDG_CACHE_HOME"] = str(runtime_root / ".cache")
+        os.environ["HF_HOME"] = str(runtime_root / "hf-home")
+        os.environ["HUGGINGFACE_HUB_CACHE"] = str(runtime_root / "hf-cache")
+        os.environ["MODELSCOPE_CACHE"] = str(runtime_root / "modelscope-cache")
+        os.environ["AISTUDIO_CACHE_HOME"] = str(runtime_root / "aistudio-cache")
 
-    def _load_face_detector(self):
-        cv2_data = getattr(cv2, "data", None)
-        cascade_dir = getattr(cv2_data, "haarcascades", "") if cv2_data is not None else ""
-        cascade_path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-        if not cascade_path or not os.path.exists(cascade_path):
-            return None
-        detector = cv2.CascadeClassifier(cascade_path)
-        if detector is None or detector.empty():
-            return None
-        return detector
-
-    def _detect_faces(self, img_bgr: np.ndarray) -> list[list[int]]:
-        if self.face_detector is None or img_bgr is None or img_bgr.size == 0:
-            return []
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
-        min_side = max(24, int(min(gray.shape[:2]) * 0.05))
+    def _patch_paddle_tensor_int(self) -> None:
         try:
-            faces = self.face_detector.detectMultiScale(
-                gray,
-                scaleFactor=1.12,
-                minNeighbors=5,
-                minSize=(min_side, min_side),
-            )
+            import numpy as np
+            import paddle
         except Exception:
-            return []
+            return
 
-        results: list[list[int]] = []
-        for x, y, w, h in faces:
-            if w <= 0 or h <= 0:
-                continue
-            results.append([int(x), int(y), int(w), int(h)])
-        return results
+        tensor_type = type(paddle.to_tensor([0]))
+        current_int = getattr(tensor_type, "__int__", None)
+        if current_int is None or getattr(current_int, "_xtjs_len1_tensor_patch", False):
+            return
 
-    def _estimate_ring_contrast(self, red_mask: np.ndarray) -> float:
-        if red_mask is None or red_mask.size == 0:
-            return 0.0
-        h, w = red_mask.shape[:2]
-        min_side = min(h, w)
-        if min_side < 18:
-            return 0.0
+        # PaddleOCR-VL's processor may produce shape=[1] tensors before casting.
+        def _patched_tensor_int(value: Any) -> int:
+            try:
+                return current_int(value)
+            except TypeError:
+                array = np.asarray(value)
+                if getattr(array, "size", 0) == 1:
+                    return int(array.reshape(-1)[0].item())
+                raise
 
-        band = max(2, int(min_side * 0.12))
-        outer = np.zeros((h, w), dtype=np.uint8)
-        outer[:band, :] = 255
-        outer[h - band :, :] = 255
-        outer[:, :band] = 255
-        outer[:, w - band :] = 255
-        outer_area = float(max(cv2.countNonZero(outer), 1))
-        outer_red = float(cv2.countNonZero(cv2.bitwise_and(red_mask, outer))) / outer_area
-
-        if h <= (band * 2) or w <= (band * 2):
-            return outer_red
-
-        inner = np.zeros((h, w), dtype=np.uint8)
-        inner[band : h - band, band : w - band] = 255
-        inner_area = float(max(cv2.countNonZero(inner), 1))
-        inner_red = float(cv2.countNonZero(cv2.bitwise_and(red_mask, inner))) / inner_area
-        return outer_red - inner_red
-
-    def _build_candidate_profile(self, roi_bgr: np.ndarray, roi_red_mask: np.ndarray) -> dict[str, float]:
-        if roi_bgr is None or roi_bgr.size == 0 or roi_red_mask is None or roi_red_mask.size == 0:
-            return {
-                "red_ratio": 0.0,
-                "yellow_ratio": 0.0,
-                "green_ratio": 0.0,
-                "blue_ratio": 0.0,
-                "skin_ratio": 0.0,
-                "ring_contrast": 0.0,
-                "edge_ratio": 0.0,
-                "center_red_ratio": 0.0,
-            }
-
-        h, w = roi_red_mask.shape[:2]
-        area = float(max(h * w, 1))
-
-        hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
-        yellow_mask = cv2.inRange(hsv, np.array([15, 60, 60]), np.array([42, 255, 255]))
-        green_mask = cv2.inRange(hsv, np.array([35, 40, 40]), np.array([90, 255, 255]))
-        blue_mask = cv2.inRange(hsv, np.array([90, 40, 40]), np.array([130, 255, 255]))
-
-        ycrcb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2YCrCb)
-        skin_mask = cv2.inRange(ycrcb, np.array([0, 133, 77]), np.array([255, 173, 127]))
-
-        gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-        edge_mask = cv2.Canny(gray, 80, 180)
-        center_mask = np.zeros((h, w), dtype=np.uint8)
-        center_pad_x = max(1, int(w * 0.30))
-        center_pad_y = max(1, int(h * 0.30))
-        if (w - center_pad_x) > center_pad_x and (h - center_pad_y) > center_pad_y:
-            center_mask[center_pad_y : h - center_pad_y, center_pad_x : w - center_pad_x] = 255
-        else:
-            center_mask[:, :] = 255
-        center_area = float(max(cv2.countNonZero(center_mask), 1))
-        center_red_ratio = float(cv2.countNonZero(cv2.bitwise_and(roi_red_mask, center_mask))) / center_area
-
-        return {
-            "red_ratio": float(cv2.countNonZero(roi_red_mask)) / area,
-            "yellow_ratio": float(cv2.countNonZero(yellow_mask)) / area,
-            "green_ratio": float(cv2.countNonZero(green_mask)) / area,
-            "blue_ratio": float(cv2.countNonZero(blue_mask)) / area,
-            "skin_ratio": float(cv2.countNonZero(skin_mask)) / area,
-            "ring_contrast": self._estimate_ring_contrast(roi_red_mask),
-            "edge_ratio": float(cv2.countNonZero(edge_mask)) / area,
-            "center_red_ratio": center_red_ratio,
-        }
-
-    def _is_national_emblem_like(self, profile: dict[str, float]) -> bool:
-        red_ratio = float(profile.get("red_ratio", 0.0))
-        yellow_ratio = float(profile.get("yellow_ratio", 0.0))
-        ring_contrast = float(profile.get("ring_contrast", 0.0))
-        edge_ratio = float(profile.get("edge_ratio", 0.0))
-        return (
-            red_ratio >= 0.12
-            and yellow_ratio >= 0.08
-            and ring_contrast <= 0.08
-            and edge_ratio >= 0.02
-        )
-
-    def _has_round_star_stamp_evidence(
-        self,
-        profile: dict[str, float],
-        *,
-        merged_aspect: float,
-        merged_red_density: float,
-    ) -> bool:
-        ring_contrast = float(profile.get("ring_contrast", 0.0))
-        edge_ratio = float(profile.get("edge_ratio", 0.0))
-        center_red_ratio = float(profile.get("center_red_ratio", 0.0))
-        yellow_ratio = float(profile.get("yellow_ratio", 0.0))
-        green_ratio = float(profile.get("green_ratio", 0.0))
-        blue_ratio = float(profile.get("blue_ratio", 0.0))
-        return (
-            0.58 <= merged_aspect <= 1.74
-            and merged_red_density >= 0.026
-            and ring_contrast >= 0.055
-            and center_red_ratio >= 0.030
-            and edge_ratio <= 0.23
-            and yellow_ratio <= 0.22
-            and green_ratio <= 0.12
-            and blue_ratio <= 0.12
-        )
-
-    def _box_overlap_on_min_area(self, box_a: list[int], box_b: list[int]) -> float:
-        inter_area = self._box_intersection_area(box_a, box_b)
-        if inter_area <= 0:
-            return 0.0
-        area_a = max(int(box_a[2]) * int(box_a[3]), 1)
-        area_b = max(int(box_b[2]) * int(box_b[3]), 1)
-        return float(inter_area) / float(min(area_a, area_b))
-
-    def _is_face_like_candidate(self, box: list[int], profile: dict[str, float], face_boxes: list[list[int]]) -> bool:
-        for face_box in face_boxes:
-            if self._box_overlap_on_min_area(box, face_box) >= 0.30:
-                return True
-        skin_ratio = float(profile.get("skin_ratio", 0.0))
-        red_ratio = float(profile.get("red_ratio", 0.0))
-        ring_contrast = float(profile.get("ring_contrast", 0.0))
-        edge_ratio = float(profile.get("edge_ratio", 0.0))
-        if skin_ratio >= 0.22 and ring_contrast < 0.10 and edge_ratio < 0.16 and red_ratio <= 0.60:
-            return True
-        if skin_ratio >= 0.35 and ring_contrast < 0.14 and red_ratio <= 0.70:
-            return True
-        return False
-
-    def _side_red_density(self, roi_red_mask: np.ndarray) -> dict[str, float]:
-        if roi_red_mask is None or roi_red_mask.size == 0:
-            return {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
-        h, w = roi_red_mask.shape[:2]
-        if h <= 0 or w <= 0:
-            return {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
-        band = max(2, int(min(h, w) * 0.14))
-        max_band = max(1, min(h, w) // 2)
-        band = min(band, max_band)
-        top = roi_red_mask[:band, :]
-        bottom = roi_red_mask[h - band :, :]
-        left = roi_red_mask[:, :band]
-        right = roi_red_mask[:, w - band :]
-        top_area = float(max(top.shape[0] * top.shape[1], 1))
-        bottom_area = float(max(bottom.shape[0] * bottom.shape[1], 1))
-        left_area = float(max(left.shape[0] * left.shape[1], 1))
-        right_area = float(max(right.shape[0] * right.shape[1], 1))
-        return {
-            "top": float(cv2.countNonZero(top)) / top_area,
-            "bottom": float(cv2.countNonZero(bottom)) / bottom_area,
-            "left": float(cv2.countNonZero(left)) / left_area,
-            "right": float(cv2.countNonZero(right)) / right_area,
-        }
-
-    def _dominant_red_quadrant_ratio(self, roi_red_mask: np.ndarray) -> float:
-        if roi_red_mask is None or roi_red_mask.size == 0:
-            return 0.0
-        h, w = roi_red_mask.shape[:2]
-        if h <= 1 or w <= 1:
-            return 0.0
-        h_half = max(1, h // 2)
-        w_half = max(1, w // 2)
-        quadrants = (
-            roi_red_mask[:h_half, :w_half],
-            roi_red_mask[:h_half, w - w_half :],
-            roi_red_mask[h - h_half :, :w_half],
-            roi_red_mask[h - h_half :, w - w_half :],
-        )
-        total_red = float(max(cv2.countNonZero(roi_red_mask), 1))
-        return max(float(cv2.countNonZero(part)) / total_red for part in quadrants if part.size > 0)
-
-    def _is_decorative_border_like_candidate(
-        self,
-        box: list[int],
-        image_shape: tuple[int, ...],
-        roi_red_mask: np.ndarray,
-        profile: dict[str, float],
-    ) -> bool:
-        if not isinstance(box, list) or len(box) != 4:
-            return False
-        if roi_red_mask is None or roi_red_mask.size == 0:
-            return False
-        img_h, img_w = image_shape[:2]
-        if img_h <= 0 or img_w <= 0:
-            return False
-        x, y, w, h = [int(v) for v in box]
-        if w <= 0 or h <= 0:
-            return False
-
-        margin = max(3, int(min(img_h, img_w) * 0.006))
-        touches_left = x <= margin
-        touches_top = y <= margin
-        touches_right = (x + w) >= (img_w - margin)
-        touches_bottom = (y + h) >= (img_h - margin)
-        touched_count = int(touches_left) + int(touches_top) + int(touches_right) + int(touches_bottom)
-        if touched_count == 0:
-            return False
-
-        side_density = self._side_red_density(roi_red_mask)
-        side_values = list(side_density.values())
-        max_side_density = max(side_values) if side_values else 0.0
-        min_side_density = min(side_values) if side_values else 0.0
-        dense_side_count = sum(1 for value in side_values if value >= 0.14)
-        side_gap = max_side_density - min_side_density
-
-        center_red_ratio = float(profile.get("center_red_ratio", 0.0))
-        red_ratio = float(profile.get("red_ratio", 0.0))
-        ring_contrast = float(profile.get("ring_contrast", 0.0))
-        edge_ratio = float(profile.get("edge_ratio", 0.0))
-        dominant_quadrant_ratio = self._dominant_red_quadrant_ratio(roi_red_mask)
-        touching_corner = (
-            (touches_left and touches_top)
-            or (touches_left and touches_bottom)
-            or (touches_right and touches_top)
-            or (touches_right and touches_bottom)
-        )
-
-        corner_ornament_like = (
-            touching_corner
-            and dominant_quadrant_ratio >= 0.58
-            and center_red_ratio <= 0.065
-            and red_ratio <= 0.30
-            and ring_contrast >= 0.03
-        )
-        border_frame_like = (
-            touched_count >= 1
-            and dense_side_count <= 2
-            and side_gap >= 0.14
-            and center_red_ratio <= 0.06
-            and red_ratio <= 0.26
-            and ring_contrast >= 0.04
-        )
-        border_texture_like = (
-            touched_count >= 1
-            and edge_ratio >= 0.14
-            and max_side_density >= 0.22
-            and center_red_ratio <= 0.05
-            and red_ratio <= 0.20
-        )
-        return bool(corner_ornament_like or border_frame_like or border_texture_like)
-
-    def _is_reliable_marker_text(self, seal_text: str, covered_text: str) -> bool:
-        merged = self._merge_text_parts([seal_text, covered_text], join_char="")
-        if not merged:
-            return False
-        has_strong_hint = self._contains_strong_seal_hint_text(seal_text, covered_text)
-        identity_document_like = self._contains_identity_document_text(seal_text, covered_text)
-        if identity_document_like and not has_strong_hint:
-            return False
-        if has_strong_hint:
-            return True
-        chinese_chars = re.findall(r"[\u4e00-\u9fa5]", merged)
-        if len(chinese_chars) >= 4 and any(
-            token in merged
-            for token in ("\u516c\u53f8", "\u6709\u9650", "\u4e13\u7528", "\u5408\u540c", "\u8d22\u52a1", "\u76d6\u7ae0")
-        ):
-            return True
-        return False
-
-    def _contains_strong_seal_hint_text(self, seal_text: str, covered_text: str) -> bool:
-        merged = self._merge_text_parts([seal_text, covered_text], join_char="")
-        if not merged:
-            return False
-        strong_tokens = (
-            "\u516c\u7ae0",
-            "\u5370\u7ae0",
-            "\u4e13\u7528\u7ae0",
-            "\u5408\u540c\u7ae0",
-            "\u8d22\u52a1\u7ae0",
-            "\u53d1\u7968\u7ae0",
-            "\u9a91\u7f1d\u7ae0",
-            "\u76d6\u7ae0",
-            "\u7b7e\u7ae0",
-            "\u6cd5\u4eba\u7ae0",
-            "\u7535\u5b50\u7ae0",
-        )
-        if any(token in merged for token in strong_tokens):
-            return True
-        return bool(re.search(r"(\u4e13\u7528|\u5408\u540c|\u8d22\u52a1|\u53d1\u7968|\u6295\u6807).{0,2}\u7ae0", merged))
-
-    def _contains_seal_hint_text(self, seal_text: str, covered_text: str) -> bool:
-        merged = self._merge_text_parts([seal_text, covered_text], join_char="")
-        if not merged:
-            return False
-        if self._contains_strong_seal_hint_text(seal_text, covered_text):
-            return True
-        hint_tokens = (
-            "\u516c\u53f8",
-            "\u4e13\u7528",
-            "\u5408\u540c",
-            "\u8d22\u52a1",
-            "\u53d1\u7968",
-            "\u6295\u6807",
-        )
-        return any(token in merged for token in hint_tokens)
-
-    def _contains_identity_document_text(self, seal_text: str, covered_text: str) -> bool:
-        merged = self._merge_text_parts([seal_text, covered_text], join_char="")
-        if not merged:
-            return False
-        identity_tokens = (
-            "\u5c45\u6c11\u8eab\u4efd\u8bc1",
-            "\u8eab\u4efd\u8bc1",
-            "\u4e2d\u534e\u4eba\u6c11\u5171\u548c\u56fd",
-            "\u516c\u5b89\u5c40",
-            "\u7b7e\u53d1\u673a\u5173",
-            "\u6709\u6548\u671f\u9650",
-            "\u516c\u6c11\u8eab\u4efd\u53f7\u7801",
-            "\u673a\u52a8\u8f66\u9a7e\u9a76\u8bc1",
-            "\u9a7e\u9a76\u8bc1",
-            "\u884c\u9a76\u8bc1",
-            "\u62a4\u7167",
-            "\u6e2f\u6fb3\u901a\u884c\u8bc1",
-            "\u5f80\u6765\u6e2f\u6fb3\u901a\u884c\u8bc1",
-            "\u5c45\u4f4f\u8bc1",
-            "\u793e\u4fdd\u5361",
-            "\u5b9e\u4e60\u671f",
-            "\u8bc1\u4ef6\u53f7",
-            "\u53d1\u8bc1\u673a\u5173",
-        )
-        if any(token in merged for token in identity_tokens):
-            return True
-        if "\u8bc1" in merged and any(
-            token in merged
-            for token in ("\u8eab\u4efd", "\u9a7e\u9a76", "\u884c\u9a76", "\u516c\u5b89", "\u53d1\u8bc1", "\u6709\u6548\u671f")
-        ):
-            return True
-        return False
-
-    def _is_certificate_title_text(self, seal_text: str, covered_text: str) -> bool:
-        merged = self._merge_text_parts([seal_text, covered_text], join_char="")
-        if not merged:
-            return False
-        certificate_tokens = (
-            "\u6bd5\u4e1a\u8bc1\u4e66",
-            "\u5b66\u4f4d\u8bc1\u4e66",
-            "\u8363\u8a89\u8bc1\u4e66",
-            "\u83b7\u5956\u8bc1\u4e66",
-            "\u8d44\u683c\u8bc1\u4e66",
-            "\u8bc1\u4e66",
-            "\u5c45\u6c11\u8eab\u4efd\u8bc1",
-            "\u8eab\u4efd\u8bc1",
-            "\u9a7e\u9a76\u8bc1",
-            "\u884c\u9a76\u8bc1",
-            "\u62a4\u7167",
-            "\u6e2f\u6fb3\u901a\u884c\u8bc1",
-            "\u5c45\u4f4f\u8bc1",
-            "\u793e\u4fdd\u5361",
-        )
-        return any(token in merged for token in certificate_tokens)
+        _patched_tensor_int._xtjs_len1_tensor_patch = True
+        tensor_type.__int__ = _patched_tensor_int
 
     def _candidate_devices(self) -> list[str]:
         primary_device = self.preferred_device or settings.PADDLE_OCR_DEVICE
@@ -458,963 +99,230 @@ class OCRService:
 
         unique_candidates: list[str] = []
         for device in candidates:
-            if device and device not in unique_candidates:
-                unique_candidates.append(device)
+            token = str(device or "").strip()
+            if token and token not in unique_candidates:
+                unique_candidates.append(token)
         return unique_candidates
 
-    def _build_ocr_kwargs(self, device: str) -> dict[str, Any]:
-        return {
-            "lang": settings.PADDLE_OCR_LANG,
-            "device": device,
-            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
-            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
-            "use_textline_orientation": settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
-        }
-
-    def _build_structure_kwargs(self, device: str) -> dict[str, Any]:
+    def _build_pipeline_kwargs(self, device: str) -> dict[str, Any]:
         return {
             "device": device,
+            "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
             "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
             "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
-            "use_textline_orientation": settings.PADDLE_OCR_USE_TEXTLINE_ORIENTATION,
+            "use_layout_detection": settings.PADDLE_VL_USE_LAYOUT_DETECTION,
+            "use_chart_recognition": settings.PADDLE_VL_USE_CHART_RECOGNITION,
+            "use_seal_recognition": settings.PADDLE_VL_USE_SEAL_RECOGNITION,
+            "use_ocr_for_image_block": settings.PADDLE_VL_USE_OCR_FOR_IMAGE_BLOCK,
+            "format_block_content": settings.PADDLE_VL_FORMAT_BLOCK_CONTENT,
+            "merge_layout_blocks": settings.PADDLE_VL_MERGE_LAYOUT_BLOCKS,
+            "use_queues": settings.PADDLE_VL_USE_QUEUES,
         }
 
-    def _iter_ocr_kwargs_candidates(self, device: str) -> list[dict[str, Any]]:
-        base_kwargs = self._build_ocr_kwargs(device)
-        candidates = [
-            {
-                **base_kwargs,
-                "ocr_version": settings.PADDLE_OCR_VERSION,
-                "enable_hpi": settings.PADDLE_OCR_ENABLE_HPI,
-            },
-            {
-                **base_kwargs,
-                "ocr_version": settings.PADDLE_OCR_VERSION,
-            },
-            base_kwargs,
-        ]
-
-        deduped: list[dict[str, Any]] = []
-        seen = set()
-        for kwargs in candidates:
-            signature = tuple(sorted(kwargs.items()))
-            if signature not in seen:
-                deduped.append(kwargs)
-                seen.add(signature)
-        return deduped
-
-    def _iter_structure_kwargs_candidates(self, device: str) -> list[dict[str, Any]]:
-        base_kwargs = self._build_structure_kwargs(device)
-        candidates = [
-            {
-                **base_kwargs,
-                "use_table_recognition": settings.PADDLE_STRUCTURE_USE_TABLE,
-                "use_formula_recognition": settings.PADDLE_STRUCTURE_USE_FORMULA,
-            },
-            base_kwargs,
-        ]
-
-        deduped: list[dict[str, Any]] = []
-        seen = set()
-        for kwargs in candidates:
-            signature = tuple(sorted(kwargs.items()))
-            if signature not in seen:
-                deduped.append(kwargs)
-                seen.add(signature)
-        return deduped
-
-    def _init_engines(self) -> None:
+    def _init_engine(self) -> None:
         try:
-            from paddleocr import PaddleOCR, SealRecognition
+            self._patch_paddle_tensor_int()
+            from paddleocr import PaddleOCRVL
         except Exception as exc:
-            print(f"OCRService bootstrap failed: {exc}")
+            print(f"OCRService bootstrap failed: {exc}", flush=True)
             return
 
         last_error: Exception | None = None
         for device in self._candidate_devices():
-            for kwargs in self._iter_ocr_kwargs_candidates(device):
-                try:
-                    self.ocr = PaddleOCR(**kwargs)
-                    self.available = True
-                    self.active_device = device
-                    print(
-                        "OCRService: PaddleOCR initialized "
-                        f"(device={self.active_device}, lang={settings.PADDLE_OCR_LANG}, version={settings.PADDLE_OCR_VERSION})"
-                    )
-                    print(f"OCRService: seal crops will be saved to {self.seal_dir}")
-                    break
-                except Exception as exc:
-                    last_error = exc
-            if self.available:
-                break
-            print(f"OCRService: PaddleOCR init failed (device={device}): {last_error}")
-
-        if not self.available:
-            print(f"OCRService bootstrap failed: {last_error}")
-            return
-
-        if settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION:
-            self._init_seal_pipeline(SealRecognition)
-        if settings.PADDLE_OCR_ENABLE_STRUCTURE:
-            self._init_structure_engine()
-
-    def _init_seal_pipeline(self, seal_pipeline_cls) -> None:
-        self._seal_init_attempted = True
-        # 这里统一复用当前选中的设备，保证印章识别和主 OCR 的部署方式一致。
-        kwargs: dict[str, Any] = {
-            "device": self.active_device,
-            "use_layout_detection": True,
-            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
-            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
-        }
-        seal_rec_model_name = getattr(settings, "PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_NAME", None)
-        seal_rec_model_dir = getattr(settings, "PADDLE_OCR_SEAL_TEXT_RECOGNITION_MODEL_DIR", None)
-        seal_det_box_thresh = getattr(settings, "PADDLE_OCR_SEAL_DET_BOX_THRESH", None)
-        seal_det_unclip_ratio = getattr(settings, "PADDLE_OCR_SEAL_DET_UNCLIP_RATIO", None)
-        seal_rec_score_thresh = getattr(settings, "PADDLE_OCR_SEAL_REC_SCORE_THRESH", None)
-        if seal_rec_model_name:
-            kwargs["text_recognition_model_name"] = str(seal_rec_model_name).strip()
-        if seal_rec_model_dir:
-            kwargs["text_recognition_model_dir"] = str(seal_rec_model_dir)
-        if seal_det_box_thresh is not None:
-            kwargs["seal_det_box_thresh"] = float(seal_det_box_thresh)
-        if seal_det_unclip_ratio is not None:
-            kwargs["seal_det_unclip_ratio"] = float(seal_det_unclip_ratio)
-        if seal_rec_score_thresh is not None:
-            kwargs["seal_rec_score_thresh"] = float(seal_rec_score_thresh)
-        if settings.PADDLE_OCR_ENABLE_HPI:
-            kwargs["enable_hpi"] = True
-
-        try:
-            self.seal_pipeline = seal_pipeline_cls(**kwargs)
-            self.seal_pipeline_available = True
-            print(
-                "OCRService: SealRecognition initialized "
-                f"(device={self.active_device}, rec_model={kwargs.get('text_recognition_model_name', 'default')}, "
-                f"det_box_thresh={kwargs.get('seal_det_box_thresh', 'default')}, "
-                f"det_unclip_ratio={kwargs.get('seal_det_unclip_ratio', 'default')}, "
-                f"rec_score_thresh={kwargs.get('seal_rec_score_thresh', 'default')})"
-            )
-        except Exception as exc:
-            self.seal_pipeline = None
-            self.seal_pipeline_available = False
-            print(f"OCRService: SealRecognition disabled: {exc}")
-
-    def _init_structure_engine(self) -> None:
-        self._structure_init_attempted = True
-        try:
-            from paddleocr import PPStructureV3
-        except Exception as exc:
-            self.structure = None
-            self.structure_available = False
-            print(f"OCRService: PPStructureV3 disabled, fallback to OCR-only pipeline: {exc}")
-            return
-
-        last_error: Exception | None = None
-        for kwargs in self._iter_structure_kwargs_candidates(self.active_device):
             try:
-                self.structure = PPStructureV3(**kwargs)
-                self.structure_available = True
-                print(f"OCRService: PPStructureV3 initialized (device={self.active_device})")
+                print(
+                    "OCRService: model loading started "
+                    f"(device={device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})",
+                    flush=True,
+                )
+                self.pipeline = PaddleOCRVL(**self._build_pipeline_kwargs(device))
+                self.available = True
+                self.active_device = device
+                print(
+                    "OCRService: model loading completed "
+                    f"(device={self.active_device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})",
+                    flush=True,
+                )
                 return
             except Exception as exc:
                 last_error = exc
+                print(f"OCRService: model loading failed (device={device}): {exc}", flush=True)
 
-        self.structure = None
-        self.structure_available = False
-        print(f"OCRService: PPStructureV3 disabled, fallback to OCR-only pipeline: {last_error}")
+        self.pipeline = None
+        self.available = False
+        print(f"OCRService bootstrap failed: {last_error}", flush=True)
 
-    def _resolve_structure_enabled(self, use_structure: bool | None = None) -> bool:
-        desired = bool(settings.PADDLE_OCR_ENABLE_STRUCTURE if use_structure is None else use_structure)
-        if not desired:
-            return False
+    def _estimate_total_pages(self, file_path: str, file_type: str) -> int:
+        normalized_type = str(file_type or "").strip().lower().lstrip(".")
+        if normalized_type in {"jpg", "jpeg", "png", "bmp", "tif", "tiff"}:
+            return 1
+        if normalized_type != "pdf":
+            return 0
 
-        if (not self.structure_available or self.structure is None) and not self._structure_init_attempted:
-            self._init_structure_engine()
-
-        return bool(self.structure_available and self.structure is not None)
-
-    def _resolve_marker_enabled(
-        self,
-        use_seal_recognition: bool | None = None,
-        use_signature_recognition: bool | None = None,
-    ) -> tuple[bool, bool]:
-        seal_enabled = bool(
-            settings.PADDLE_OCR_ENABLE_SEAL_RECOGNITION
-            if use_seal_recognition is None
-            else use_seal_recognition
-        )
-        signature_enabled = bool(
-            getattr(settings, "PADDLE_OCR_ENABLE_SIGNATURE_RECOGNITION", True)
-            if use_signature_recognition is None
-            else use_signature_recognition
-        )
-        return seal_enabled, signature_enabled
-
-    def _resolve_pipeline_enabled(self, total_pages: int) -> bool:
-        if total_pages < 1:
-            return False
-        enabled = bool(getattr(settings, "PADDLE_OCR_ENABLE_PIPELINE_PARALLEL", True))
         try:
-            min_pages = int(getattr(settings, "PADDLE_OCR_PIPELINE_MIN_PAGES", 2))
+            import pypdfium2 as pdfium
+
+            document = pdfium.PdfDocument(file_path)
+            try:
+                return len(document)
+            finally:
+                close_method = getattr(document, "close", None)
+                if callable(close_method):
+                    close_method()
         except Exception:
-            min_pages = 2
-        return enabled and total_pages >= max(2, min_pages)
+            return 0
 
-    def _resolve_pipeline_queue_size(self) -> int:
-        try:
-            queue_size = int(getattr(settings, "PADDLE_OCR_PIPELINE_QUEUE_SIZE", 4))
-        except Exception:
-            queue_size = 4
-        return max(1, min(queue_size, 64))
-
-    def _resolve_pipeline_infer_batch_size(self, total_pages: int) -> int:
-        try:
-            batch_size = int(getattr(settings, "PADDLE_OCR_PIPELINE_INFER_BATCH_SIZE", 2))
-        except Exception:
-            batch_size = 2
-        return max(1, min(batch_size, total_pages, 8))
-
-    def _resolve_pipeline_render_workers(self, total_pages: int) -> int:
-        try:
-            workers = int(getattr(settings, "PADDLE_OCR_PIPELINE_RENDER_WORKERS", 2))
-        except Exception:
-            workers = 2
-        cpu_cap = max(1, (os.cpu_count() or 4) // 2)
-        return max(1, min(workers, total_pages, cpu_cap))
-
-    def _resolve_pipeline_post_workers(self, total_pages: int) -> int:
-        try:
-            workers = int(getattr(settings, "PADDLE_OCR_PIPELINE_POST_WORKERS", 2))
-        except Exception:
-            workers = 2
-        cpu_cap = max(1, os.cpu_count() or 4)
-        return max(1, min(workers, total_pages, cpu_cap))
-
-    def _should_log_pipeline_metrics(self) -> bool:
-        return bool(getattr(settings, "PADDLE_OCR_PIPELINE_LOG_METRICS", True))
-
-    def _should_log_progress(self) -> bool:
-        return bool(getattr(settings, "PADDLE_OCR_LOG_PROGRESS", True))
-
-    def _resolve_progress_log_interval_seconds(self) -> float:
-        raw_value = getattr(settings, "PADDLE_OCR_PROGRESS_LOG_INTERVAL_SECONDS", 2.0)
-        try:
-            return max(0.2, float(raw_value))
-        except (TypeError, ValueError):
-            return 2.0
-
-    def _should_use_tqdm_progress(self) -> bool:
-        stream = getattr(sys, "stderr", None)
-        return bool(stream is not None and hasattr(stream, "isatty") and stream.isatty())
-
-    def _format_progress_eta(self, eta_seconds: float | None) -> str:
-        if eta_seconds is None or eta_seconds < 0:
-            return "n/a"
-
-        if eta_seconds < 60:
-            return f"{eta_seconds:.1f}s"
-
-        total_seconds = int(round(eta_seconds))
-        minutes, seconds = divmod(total_seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours > 0:
-            return f"{hours:d}h{minutes:02d}m{seconds:02d}s"
-        return f"{minutes:d}m{seconds:02d}s"
-
-    def _start_pdf_progress(
+    def _build_progress_monitor(
         self,
         *,
-        pdf_path: str,
-        mode: str,
-        total_pages: int,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-        enabled: bool,
-    ) -> dict[str, Any]:
-        started_at = time.perf_counter()
-        state = {
-            "enabled": enabled,
-            "mode": mode,
-            "file_label": os.path.basename(pdf_path) or pdf_path,
-            "started_at": started_at,
-            "last_logged_at": started_at - self._resolve_progress_log_interval_seconds(),
-            "last_logged_completed_pages": 0,
-        }
-        if enabled:
-            print(
-                "OCRService: progress start "
-                f"file={state['file_label']}, mode={mode}, pages={total_pages}, "
-                f"device={self.active_device}, structure={structure_enabled}, "
-                f"seal={seal_enabled}, signature={signature_enabled}"
-            )
-        return state
-
-    def _log_pdf_progress(
-        self,
-        *,
-        progress_state: dict[str, Any],
-        completed_pages: int,
-        total_pages: int,
-        running_seal_count: int,
-        running_signature_count: int,
-        force: bool = False,
-    ) -> None:
-        if not progress_state.get("enabled"):
-            return
-
-        if not force and completed_pages <= 0:
-            return
-
-        now = time.perf_counter()
-        last_completed_pages = int(progress_state.get("last_logged_completed_pages", 0))
-        if force and completed_pages == last_completed_pages:
-            return
-        if not force:
-            if completed_pages == last_completed_pages:
-                return
-            elapsed_since_last_log = now - float(progress_state.get("last_logged_at", 0.0))
-            if elapsed_since_last_log < self._resolve_progress_log_interval_seconds() and completed_pages < total_pages:
-                return
-
-        started_at = float(progress_state.get("started_at", now))
-        elapsed = max(now - started_at, 1e-6)
-        speed = completed_pages / elapsed if completed_pages > 0 else 0.0
-        eta_seconds = None
-        if 0 < completed_pages < total_pages and speed > 0:
-            eta_seconds = (total_pages - completed_pages) / speed
-
-        percent = (completed_pages / total_pages * 100.0) if total_pages else 100.0
-        print(
-            "OCRService: progress "
-            f"file={progress_state['file_label']}, mode={progress_state['mode']}, "
-            f"done={completed_pages}/{total_pages} ({percent:.1f}%), "
-            f"speed={speed:.2f} page/s, eta={self._format_progress_eta(eta_seconds)}, "
-            f"seal_count={running_seal_count}, signature_count={running_signature_count}"
-        )
-        progress_state["last_logged_at"] = now
-        progress_state["last_logged_completed_pages"] = completed_pages
-
-    def _empty_result(self) -> dict:
-        return {
-            "text": "",
-            "pages": [],
-            "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
-            "signatures": {"count": 0, "texts": [], "locations": []},
-            "layout_sections": [],
-            "logical_tables": [],
-            "ocr_applied": False,
-            "structure_used": False,
-            "structure_enabled": False,
-            "seal_recognition_enabled": False,
-            "signature_recognition_enabled": False,
-        }
-
-    def extract_all(
-        self,
         file_path: str,
-        file_type: str = "pdf",
-        use_structure: bool | None = None,
-        use_seal_recognition: bool | None = None,
-        use_signature_recognition: bool | None = None,
-    ) -> dict:
-        if not self.available:
-            return self._empty_result()
-
-        ext = file_type.lower().lstrip(".")
-        structure_enabled = self._resolve_structure_enabled(use_structure=use_structure)
-        seal_enabled, signature_enabled = self._resolve_marker_enabled(
-            use_seal_recognition=use_seal_recognition,
-            use_signature_recognition=use_signature_recognition,
+        file_type: str,
+        total_pages: int,
+    ) -> OCRProgressMonitor:
+        return OCRProgressMonitor(
+            file_path=file_path,
+            file_type=file_type,
+            device=self.active_device,
+            total_pages=total_pages,
+            enabled=bool(getattr(settings, "OCR_PROGRESS_ENABLED", True)),
+            bar_width=int(getattr(settings, "OCR_PROGRESS_BAR_WIDTH", 24)),
+            keep_recent_updates=int(getattr(settings, "OCR_PROGRESS_KEEP_RECENT_UPDATES", 12)),
         )
-        if ext == "pdf":
-            return self._attach_table_outputs(
-                self._recognize_pdf(
-                    file_path,
-                    structure_enabled=structure_enabled,
-                    seal_enabled=seal_enabled,
-                    signature_enabled=signature_enabled,
+
+    def _run_pipeline(
+        self,
+        input_path: str,
+        *,
+        progress_monitor: OCRProgressMonitor | None = None,
+        total_pages: int = 0,
+    ) -> list[Any]:
+        if not self.available or self.pipeline is None:
+            raise RuntimeError("PaddleOCR-VL-1.5 is unavailable.")
+
+        with self._predictor_lock:
+            if progress_monitor is not None:
+                progress_monitor.update(
+                    stage="predict",
+                    current=0,
+                    total=max(total_pages, 1),
+                    detail="starting pipeline.predict_iter",
+                    emit=False,
                 )
-            )
-        return self._attach_table_outputs(
-            self._recognize_image(
-                file_path,
-                structure_enabled=structure_enabled,
-                seal_enabled=seal_enabled,
-                signature_enabled=signature_enabled,
-            )
-        )
 
-    def _empty_layout_result(self) -> dict:
-        return {
-            "layout_sections": [],
-            "logical_tables": [],
-            "structure_used": False,
-            "structure_enabled": False,
-            "layout_text": "",
-        }
-
-    def extract_structure_layout(
-        self,
-        file_path: str,
-        file_type: str = "pdf",
-        use_structure: bool | None = None,
-    ) -> dict:
-        if not self.available:
-            return self._empty_layout_result()
-
-        structure_enabled = self._resolve_structure_enabled(use_structure=use_structure)
-        if not structure_enabled:
-            return self._empty_layout_result()
-
-        ext = file_type.lower().lstrip(".")
-        layout_sections: list[dict] = []
-        layout_text_parts: list[str] = []
-        structure_used = False
-
-        if ext == "pdf":
-            doc = fitz.open(file_path)
-            try:
-                total_pages = len(doc)
-                for page_index in range(total_pages):
-                    page_no = page_index + 1
-                    image = self._render_pdf_page(doc[page_index])
-                    page_text, page_sections, page_structure_used = self._run_structure_layout(
-                        image,
-                        page_no,
-                        structure_enabled=structure_enabled,
-                    )
-                    if page_text.strip():
-                        layout_text_parts.append(page_text)
-                    if page_sections:
-                        layout_sections.extend(page_sections)
-                    structure_used = structure_used or page_structure_used
-            finally:
-                doc.close()
-        else:
-            image = cv2.imread(file_path)
-            if image is None:
-                empty_result = self._empty_layout_result()
-                empty_result["structure_enabled"] = structure_enabled
-                return empty_result
-
-            page_text, page_sections, page_structure_used = self._run_structure_layout(
-                image,
-                page_no=1,
-                structure_enabled=structure_enabled,
-            )
-            if page_text.strip():
-                layout_text_parts.append(page_text)
-            if page_sections:
-                layout_sections.extend(page_sections)
-            structure_used = page_structure_used
-
-        return self._attach_table_outputs({
-            "layout_sections": layout_sections,
-            "structure_used": structure_used,
-            "structure_enabled": structure_enabled,
-            "layout_text": self._merge_text_parts(layout_text_parts),
-        })
-
-    def _empty_marker_result(self) -> dict:
-        return {
-            "seals": {"count": 0, "texts": [], "locations": [], "covered_texts": []},
-            "signatures": {"count": 0, "texts": [], "locations": []},
-            "marker_applied": False,
-        }
-
-    def _finalize_marker_result(self, seals: dict, signatures: dict) -> tuple[dict, dict]:
-        seals["texts"] = list(dict.fromkeys(seals.get("texts", [])))
-        dedup_covered_texts: list[dict] = []
-        covered_seen = set()
-        for item in seals.get("covered_texts", []):
-            signature = (item.get("page"), str(item.get("box")), item.get("text"))
-            if signature in covered_seen or not item.get("text"):
-                continue
-            covered_seen.add(signature)
-            dedup_covered_texts.append(item)
-        seals["covered_texts"] = dedup_covered_texts
-        signatures["texts"] = list(dict.fromkeys(signatures.get("texts", [])))
-        return seals, signatures
-
-    def extract_visual_markers(
-        self,
-        file_path: str,
-        file_type: str = "pdf",
-        use_seal_recognition: bool | None = None,
-        use_signature_recognition: bool | None = None,
-    ) -> dict:
-        if not self.available:
-            return self._empty_marker_result()
-
-        seal_enabled, signature_enabled = self._resolve_marker_enabled(
-            use_seal_recognition=use_seal_recognition,
-            use_signature_recognition=use_signature_recognition,
-        )
-        ext = file_type.lower().lstrip(".")
-        all_seals = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-        all_signatures = {"count": 0, "texts": [], "locations": []}
-        marker_applied = False
-
-        if ext == "pdf":
-            doc = fitz.open(file_path)
-            try:
-                total_pages = len(doc)
-                for page_index in range(total_pages):
-                    page_no = page_index + 1
-                    image = self._render_pdf_page(doc[page_index])
-                    seal_result = self._detect_seals(image, page_no=page_no, enabled=seal_enabled)
-                    signature_result = self._detect_handwritten_signatures(
-                        image,
-                        page_no=page_no,
-                        enabled=signature_enabled,
+            results: list[Any] = []
+            for index, item in enumerate(self.pipeline.predict_iter(input_path), start=1):
+                results.append(item)
+                if progress_monitor is not None:
+                    progress_monitor.update(
+                        stage="predict",
+                        current=index,
+                        total=max(total_pages, index, 1),
+                        detail=f"page/batch {index} completed",
+                        emit=True,
                     )
 
-                    if seal_result["count"] > 0:
-                        all_seals["count"] += seal_result["count"]
-                        all_seals["texts"].extend(seal_result["texts"])
-                        for box in seal_result["locations"]:
-                            all_seals["locations"].append({"page": page_no, "box": box})
-                        for covered in seal_result.get("covered_texts", []):
-                            if not isinstance(covered, dict):
-                                continue
-                            all_seals["covered_texts"].append(
-                                {
-                                    "page": int(covered.get("page", page_no)),
-                                    "box": covered.get("box", []),
-                                    "text": str(covered.get("text") or "").strip(),
-                                }
-                            )
-
-                    if signature_result["count"] > 0:
-                        all_signatures["count"] += signature_result["count"]
-                        all_signatures["texts"].extend(signature_result["texts"])
-                        for box in signature_result["locations"]:
-                            all_signatures["locations"].append({"page": page_no, "box": box})
-
-                    marker_applied = marker_applied or bool(
-                        seal_result["count"] or seal_result.get("covered_texts") or signature_result["count"]
+            if settings.PADDLE_VL_RESTRUCTURE_PAGES and len(results) > 1:
+                if progress_monitor is not None:
+                    progress_monitor.update(
+                        stage="restructure",
+                        current=0,
+                        total=1,
+                        detail="restructure pages",
+                        emit=False,
                     )
-            finally:
-                doc.close()
-        else:
-            image = cv2.imread(file_path)
-            if image is None:
-                return self._empty_marker_result()
+                results = list(
+                    self.pipeline.restructure_pages(
+                        results,
+                        merge_tables=True,
+                        relevel_titles=True,
+                        concatenate_pages=False,
+                    )
+                )
+                if progress_monitor is not None:
+                    progress_monitor.update(
+                        stage="restructure",
+                        current=1,
+                        total=1,
+                        detail="restructure completed",
+                        emit=False,
+                    )
+            return results
 
-            seal_result = self._detect_seals(image, page_no=1, enabled=seal_enabled)
-            signature_result = self._detect_handwritten_signatures(
-                image,
-                page_no=1,
-                enabled=signature_enabled,
-            )
-
-            all_seals["count"] = seal_result["count"]
-            all_seals["texts"] = seal_result["texts"]
-            all_seals["locations"] = [{"page": 1, "box": box} for box in seal_result["locations"]]
-            all_seals["covered_texts"] = seal_result.get("covered_texts", [])
-
-            all_signatures["count"] = signature_result["count"]
-            all_signatures["texts"] = signature_result["texts"]
-            all_signatures["locations"] = [{"page": 1, "box": box} for box in signature_result["locations"]]
-
-            marker_applied = bool(
-                seal_result["count"] or seal_result.get("covered_texts") or signature_result["count"]
-            )
-
-        finalized_seals, finalized_signatures = self._finalize_marker_result(all_seals, all_signatures)
-        return {
-            "seals": finalized_seals,
-            "signatures": finalized_signatures,
-            "marker_applied": marker_applied,
-        }
-
-    def _run_predictor(self, predictor: Any, image: Any, predictor_name: str) -> list:
-        if predictor is None:
-            return []
-        try:
-            with self._select_predictor_lock(predictor):
-                return list(predictor.predict(image))
-        except Exception as exc:
-            print(f"{predictor_name} inference failed: {exc}")
-            return []
-
-    def _select_predictor_lock(self, predictor: Any):
-        if predictor is self.ocr:
-            return self._ocr_predictor_lock
-        if predictor is self.structure:
-            return self._structure_predictor_lock
-        if predictor is self.seal_pipeline:
-            return self._seal_predictor_lock
-        return self._predictor_fallback_lock
-
-    def _split_predict_result_batches(self, predictor_result: list, expected_size: int) -> list[list]:
-        if expected_size <= 1:
-            return [list(predictor_result or [])]
-
-        raw_items = list(predictor_result or [])
-        if not raw_items:
-            return [[] for _ in range(expected_size)]
-
-        if len(raw_items) == expected_size:
-            return [item if isinstance(item, list) else [item] for item in raw_items]
-
-        batches = [item if isinstance(item, list) else [item] for item in raw_items[:expected_size]]
-        if len(batches) < expected_size:
-            batches.extend([[] for _ in range(expected_size - len(batches))])
-        return batches
-
-    def _extract_text_from_result(self, ocr_res: list, join_char: str = "\n") -> str:
-        if not ocr_res:
-            return ""
-
-        texts: list[str] = []
-        try:
-            for item in ocr_res:
-                if isinstance(item, dict) and "rec_texts" in item:
-                    texts.extend(str(text).strip() for text in item["rec_texts"] if str(text).strip())
-                elif hasattr(item, "rec_texts"):
-                    texts.extend(str(text).strip() for text in getattr(item, "rec_texts") if str(text).strip())
-                elif isinstance(item, list):
-                    for line in item:
-                        if isinstance(line, list) and len(line) == 2 and isinstance(line[1], tuple):
-                            text = str(line[1][0]).strip()
-                            if text:
-                                texts.append(text)
-        except Exception as exc:
-            print(f"OCR result parsing warning: {exc}")
-
-        return join_char.join(texts)
-
-    def _to_builtin(self, value: Any, depth: int = 0) -> Any:
-        if depth > 6:
-            return None
+    def _to_builtin(self, value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
+
+        json_value = getattr(value, "json", None)
+        if json_value is not None:
+            try:
+                payload = value.json
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and "res" in payload:
+                return self._to_builtin(payload["res"])
+
         if isinstance(value, dict):
-            return {str(key): self._to_builtin(item, depth + 1) for key, item in value.items()}
+            return {key: self._to_builtin(item) for key, item in value.items()}
         if isinstance(value, (list, tuple, set)):
-            return [self._to_builtin(item, depth + 1) for item in value]
+            return [self._to_builtin(item) for item in value]
         if hasattr(value, "tolist"):
             try:
                 return value.tolist()
             except Exception:
                 pass
-        if hasattr(value, "__dict__"):
-            return {
-                key: self._to_builtin(item, depth + 1)
-                for key, item in vars(value).items()
-                if not key.startswith("_")
-            }
-        return str(value)
-
-    def _bbox_to_rect(self, bbox: Any) -> list[int] | None:
-        # Paddle 各模型返回的框格式不完全一致，这里统一转成 [x, y, w, h]。
-        builtin_bbox = self._to_builtin(bbox)
-        if builtin_bbox is None:
-            return None
-
-        if isinstance(builtin_bbox, dict):
-            if all(key in builtin_bbox for key in ("x", "y", "w", "h")):
-                x = int(round(float(builtin_bbox.get("x", 0))))
-                y = int(round(float(builtin_bbox.get("y", 0))))
-                w = int(round(float(builtin_bbox.get("w", 0))))
-                h = int(round(float(builtin_bbox.get("h", 0))))
-                if w > 0 and h > 0:
-                    return [x, y, w, h]
-            if all(key in builtin_bbox for key in ("left", "top", "right", "bottom")):
-                x1 = int(round(float(builtin_bbox.get("left", 0))))
-                y1 = int(round(float(builtin_bbox.get("top", 0))))
-                x2 = int(round(float(builtin_bbox.get("right", 0))))
-                y2 = int(round(float(builtin_bbox.get("bottom", 0))))
-                if x2 > x1 and y2 > y1:
-                    return [x1, y1, x2 - x1, y2 - y1]
-
-        if isinstance(builtin_bbox, (list, tuple)):
-            if len(builtin_bbox) >= 4 and all(isinstance(item, (int, float)) for item in builtin_bbox[:4]):
-                x1 = float(builtin_bbox[0])
-                y1 = float(builtin_bbox[1])
-                x3 = float(builtin_bbox[2])
-                y3 = float(builtin_bbox[3])
-                if x3 > x1 and y3 > y1:
-                    return [int(round(x1)), int(round(y1)), int(round(x3 - x1)), int(round(y3 - y1))]
-                w = int(round(x3))
-                h = int(round(y3))
-                if w > 0 and h > 0:
-                    return [int(round(x1)), int(round(y1)), w, h]
-
-            if builtin_bbox and all(
-                isinstance(item, (list, tuple))
-                and len(item) >= 2
-                and isinstance(item[0], (int, float))
-                and isinstance(item[1], (int, float))
-                for item in builtin_bbox
-            ):
-                x_values = [float(item[0]) for item in builtin_bbox]
-                y_values = [float(item[1]) for item in builtin_bbox]
-                x1 = int(round(min(x_values)))
-                y1 = int(round(min(y_values)))
-                x2 = int(round(max(x_values)))
-                y2 = int(round(max(y_values)))
-                if x2 > x1 and y2 > y1:
-                    return [x1, y1, x2 - x1, y2 - y1]
-        return None
-
-    def _clip_box_to_image(self, box: list[int], img_shape: tuple[int, int, int]) -> list[int] | None:
-        if not isinstance(box, list) or len(box) != 4:
-            return None
-        img_h, img_w = img_shape[:2]
-        x, y, w, h = [int(v) for v in box]
-        x1 = max(0, x)
-        y1 = max(0, y)
-        x2 = min(img_w, x + w)
-        y2 = min(img_h, y + h)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return [x1, y1, x2 - x1, y2 - y1]
-
-    def _extract_official_seal_layout_boxes(self, layout_det_res: Any) -> list[list[int]]:
-        built_layout = self._to_builtin(layout_det_res)
-        if not built_layout:
-            return []
-
-        boxes: list[list[int]] = []
-
-        def walk(node: Any) -> None:
-            if isinstance(node, list):
-                for item in node:
-                    walk(item)
-                return
-            if not isinstance(node, dict):
-                return
-
-            label = str(node.get("label") or node.get("type") or node.get("category") or "").strip().lower()
-            if label == "seal":
-                # 官方结果里可能混着多种字段名，逐个兜底取出印章框。
-                for key in ("coordinate", "bbox", "box", "region_box", "points", "polygon", "poly"):
-                    if key in node:
-                        rect = self._bbox_to_rect(node.get(key))
-                        if rect is not None:
-                            boxes.append(rect)
-                            break
-
-            for value in node.values():
-                if isinstance(value, (list, dict)):
-                    walk(value)
-
-        walk(built_layout)
-        return boxes
-
-    def _extract_official_seal_result(
-        self,
-        predictor_result: list,
-        *,
-        image: np.ndarray,
-        page_no: int,
-    ) -> dict:
-        seal_info = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-        built_result = self._to_builtin(predictor_result)
-        if not built_result:
-            return seal_info
-
-        # SealRecognition 会同时返回版面定位和印章识别结果，这里把两部分重新拼起来。
-        result_payload = built_result[0] if isinstance(built_result, list) and built_result else built_result
-        if not isinstance(result_payload, dict):
-            return seal_info
-
-        layout_boxes = self._extract_official_seal_layout_boxes(result_payload.get("layout_det_res"))
-        seal_res_list = result_payload.get("seal_res_list") or []
-        if not isinstance(seal_res_list, list):
-            return seal_info
-
-        for index, seal_res in enumerate(seal_res_list, start=1):
-            if not isinstance(seal_res, dict):
-                continue
-            box = layout_boxes[index - 1] if index - 1 < len(layout_boxes) else None
-            if box is None:
-                continue
-            clipped_box = self._clip_box_to_image(box, image.shape)
-            if clipped_box is None:
-                continue
-
-            x, y, w, h = clipped_box
-            seal_crop = image[y : y + h, x : x + w]
-            if seal_crop.size == 0:
-                continue
-
-            # 保留印章裁图，便于后续排查识别误差。
-            save_path = os.path.join(self.seal_dir, f"seal_P{page_no}_{index}.png")
-            cv2.imwrite(save_path, seal_crop)
-
-            rec_texts = seal_res.get("rec_texts") or []
-            cleaned_texts: list[str] = []
-            for text in rec_texts:
-                normalized_text = self._sanitize_recognized_text(self._extract_text_value(text), min_len=2, max_len=64)
-                if normalized_text and normalized_text not in cleaned_texts:
-                    cleaned_texts.append(normalized_text)
-
-            merged_text = self._merge_text_parts(cleaned_texts, join_char=" ")
-            if merged_text:
-                seal_info["texts"].append(merged_text)
-            seal_info["locations"].append(clipped_box)
-            seal_info["count"] += 1
-
-        seal_info["texts"] = list(dict.fromkeys(seal_info["texts"]))
-        return seal_info
-
-    def _build_seal_removal_mask(
-        self,
-        img_bgr: np.ndarray,
-        seal_boxes: list[list[int]],
-    ) -> np.ndarray:
-        img_h, img_w = img_bgr.shape[:2]
-        full_mask = np.zeros((img_h, img_w), dtype=np.uint8)
-        if not seal_boxes:
-            return full_mask
-
-        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        lower_red1, upper_red1 = np.array([0, 28, 28]), np.array([12, 255, 255])
-        lower_red2, upper_red2 = np.array([150, 28, 28]), np.array([180, 255, 255])
-
-        for seal_box in seal_boxes:
-            clipped_box = self._clip_box_to_image(seal_box, img_bgr.shape)
-            if clipped_box is None:
-                continue
-            x, y, w, h = clipped_box
-            roi_hsv = hsv[y : y + h, x : x + w]
-            if roi_hsv.size == 0:
-                continue
-
-            roi_mask = cv2.add(
-                cv2.inRange(roi_hsv, lower_red1, upper_red1),
-                cv2.inRange(roi_hsv, lower_red2, upper_red2),
-            )
-            roi_mask = cv2.medianBlur(roi_mask, 3)
-            roi_mask = cv2.morphologyEx(
-                roi_mask,
-                cv2.MORPH_CLOSE,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-                iterations=1,
-            )
-            roi_mask = cv2.dilate(
-                roi_mask,
-                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-                iterations=1,
-            )
-            if cv2.countNonZero(roi_mask) <= 0:
-                continue
-            # 只在印章框内提取红色区域，尽量少伤到正文。
-            full_mask[y : y + h, x : x + w] = cv2.bitwise_or(full_mask[y : y + h, x : x + w], roi_mask)
-
-        return full_mask
-
-    def _build_destamped_image_for_ocr(
-        self,
-        img_bgr: np.ndarray,
-        seal_boxes: list[list[int]],
-    ) -> np.ndarray:
-        if img_bgr is None or img_bgr.size == 0 or not seal_boxes:
-            return img_bgr
-
-        seal_mask = self._build_seal_removal_mask(img_bgr, seal_boxes)
-        if seal_mask.size == 0 or cv2.countNonZero(seal_mask) <= 0:
-            return img_bgr
-
-        # 正文 OCR 改在去章图上跑，减少红章把正文和章文一起识别进去。
-        return cv2.inpaint(img_bgr, seal_mask, 3, cv2.INPAINT_TELEA)
-
-    def _append_seal_texts(self, page_text: str, seal_texts: list[str]) -> str:
-        if not seal_texts:
-            return page_text
-
-        # 印章文本单独识别后再补回最终文本，避免去章图把章文一起抹掉。
-        merged_parts = [page_text]
-        base_text = str(page_text or "")
-        for seal_text in seal_texts:
-            normalized = str(seal_text or "").strip()
-            if not normalized:
-                continue
-            if normalized in base_text:
-                continue
-            merged_parts.append(normalized)
-        return self._merge_text_parts(merged_parts)
-
-    def _merge_text_parts(self, parts: list[str], join_char: str = "\n") -> str:
-        merged: list[str] = []
-        seen = set()
-        for part in parts:
-            normalized = re.sub(r"\n{3,}", "\n\n", str(part or "").strip())
-            if normalized and normalized not in seen:
-                merged.append(normalized)
-                seen.add(normalized)
-        return join_char.join(merged)
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                pass
+        return value
 
     def _dedupe_text_parts(self, parts: list[str]) -> list[str]:
         deduped: list[str] = []
         seen = set()
-        for part in parts:
-            normalized = str(part or "").strip()
-            if normalized and normalized not in seen:
+        for item in parts:
+            normalized = str(item or "").strip()
+            if not normalized:
+                continue
+            key = re.sub(r"\s+", " ", normalized)
+            if key not in seen:
+                seen.add(key)
                 deduped.append(normalized)
-                seen.add(normalized)
         return deduped
 
-    def _extract_text_value(self, value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, dict):
-            text_parts: list[str] = []
-            for key in ("block_content", "markdown", "text", "html", "content", "caption"):
-                candidate = self._extract_text_value(value.get(key))
-                if candidate:
-                    text_parts.append(candidate)
-            if "rec_texts" in value:
-                text_parts.append(
-                    self._merge_text_parts([str(item).strip() for item in value["rec_texts"] if str(item).strip()])
-                )
-            if "texts" in value:
-                text_parts.append(self._extract_text_value(value["texts"]))
-            return self._merge_text_parts(text_parts)
-        if isinstance(value, (list, tuple, set)):
-            return self._merge_text_parts([self._extract_text_value(item) for item in value])
-        builtin_value = self._to_builtin(value)
-        if builtin_value is value:
-            return ""
-        return self._extract_text_value(builtin_value)
+    def _merge_text_parts(self, parts: list[str], *, join_char: str = "\n") -> str:
+        filtered = self._dedupe_text_parts(parts)
+        return join_char.join(filtered).strip()
 
-    def _collect_nested_field_values(
-        self,
-        value: Any,
-        field_names: tuple[str, ...],
-        *,
-        keep_markup: bool = False,
-    ) -> list[str]:
-        collected: list[str] = []
+    def _normalize_section_text(self, text: Any, *, preserve_lines: bool = False) -> str:
+        normalized = html.unescape(str(text or ""))
+        if preserve_lines:
+            normalized = re.sub(r"\r\n?", "\n", normalized)
+            normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(
+                r"</?(table|thead|tbody|tfoot|tr|p|div|section|article)[^>]*>",
+                "\n",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            normalized = re.sub(r"</?(td|th)[^>]*>", "\t", normalized, flags=re.IGNORECASE)
+            normalized = re.sub(r"<[^>]+>", " ", normalized)
+            normalized = re.sub(r"[^\S\n\t]+", " ", normalized)
+            normalized = re.sub(r" *\t *", "\t", normalized)
+            normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
+            normalized = re.sub(r"\n{3,}", "\n\n", normalized)
 
-        def walk(node: Any, depth: int = 0) -> None:
-            if node is None or depth > 6:
-                return
-            if isinstance(node, dict):
-                for key, item in node.items():
-                    if key in field_names:
-                        if keep_markup and isinstance(item, str):
-                            candidate = item.strip()
-                        else:
-                            candidate = self._extract_text_value(item)
-                        if candidate:
-                            collected.append(candidate)
-                    if isinstance(item, (dict, list, tuple, set)):
-                        walk(item, depth + 1)
-                return
-            if isinstance(node, (list, tuple, set)):
-                for item in node:
-                    walk(item, depth + 1)
+            lines: list[str] = []
+            for line in normalized.splitlines():
+                cells = [re.sub(r" {2,}", " ", cell).strip() for cell in line.split("\t")]
+                cleaned = "\t".join(cells).strip()
+                if cleaned:
+                    lines.append(cleaned)
+            return "\n".join(lines)
 
-        walk(self._to_builtin(value))
-        return self._dedupe_text_parts(collected)
+        normalized = re.sub(r"<[^>]+>", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
 
     def _normalize_bbox(self, value: Any) -> Any:
         builtin_value = self._to_builtin(value)
@@ -1427,10 +335,8 @@ class OCRService:
         if builtin_bbox is None:
             return (1e9, 1e9)
         if isinstance(builtin_bbox, (list, tuple)):
-            # [x1, y1, x2, y2]
             if len(builtin_bbox) >= 2 and all(isinstance(item, (int, float)) for item in builtin_bbox[:2]):
                 return (float(builtin_bbox[0]), float(builtin_bbox[1]))
-            # [[x, y], ...]
             if builtin_bbox and all(
                 isinstance(item, (list, tuple))
                 and len(item) >= 2
@@ -1443,103 +349,147 @@ class OCRService:
                 return (min(x_values), min(y_values))
         return (1e9, 1e9)
 
+    def _bbox_to_xywh(self, bbox: Any) -> list[int] | None:
+        builtin_bbox = self._to_builtin(bbox)
+        if builtin_bbox is None:
+            return None
+
+        if (
+            isinstance(builtin_bbox, (list, tuple))
+            and len(builtin_bbox) >= 4
+            and all(isinstance(item, (int, float)) for item in builtin_bbox[:4])
+        ):
+            x1, y1, x2, y2 = [int(round(float(item))) for item in builtin_bbox[:4]]
+            width = max(1, x2 - x1)
+            height = max(1, y2 - y1)
+            return [x1, y1, width, height]
+
+        if (
+            isinstance(builtin_bbox, (list, tuple))
+            and builtin_bbox
+            and all(
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+                and isinstance(item[0], (int, float))
+                and isinstance(item[1], (int, float))
+                for item in builtin_bbox
+            )
+        ):
+            xs = [float(item[0]) for item in builtin_bbox]
+            ys = [float(item[1]) for item in builtin_bbox]
+            x1 = int(round(min(xs)))
+            y1 = int(round(min(ys)))
+            x2 = int(round(max(xs)))
+            y2 = int(round(max(ys)))
+            return [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
+
+        return None
+
     def _normalize_layout_type(self, value: str) -> str:
         normalized = str(value or "").strip().lower()
         if not normalized:
             return "text"
-        if any(token in normalized for token in ("title", "header", "heading")):
-            return "heading"
+        if "seal" in normalized:
+            return "seal"
         if "table" in normalized:
             return "table"
+        if any(token in normalized for token in ("title", "header", "heading")):
+            return "heading"
         if any(token in normalized for token in ("figure", "image", "chart", "photo")):
             return "figure"
         return "text"
 
-    def _normalize_section_text(self, text: str, *, preserve_lines: bool = False) -> str:
-        normalized = html.unescape(str(text or ""))
-        if preserve_lines:
-            normalized = re.sub(r"\r\n?", "\n", normalized)
-            normalized = re.sub(r"<br\s*/?>", "\n", normalized, flags=re.IGNORECASE)
-            normalized = re.sub(r"</?(table|thead|tbody|tfoot|tr|p|div|section|article)[^>]*>", "\n", normalized, flags=re.IGNORECASE)
-            normalized = re.sub(r"</?(td|th)[^>]*>", "\t", normalized, flags=re.IGNORECASE)
-            normalized = re.sub(r"<[^>]+>", " ", normalized)
-            normalized = re.sub(r"[^\S\n\t]+", " ", normalized)
-            normalized = re.sub(r" *\t *", "\t", normalized)
-            normalized = re.sub(r"[ \t]*\n[ \t]*", "\n", normalized)
-            normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-            lines = []
-            for line in normalized.splitlines():
-                cells = [re.sub(r" {2,}", " ", cell).strip() for cell in line.split("\t")]
-                cleaned = "\t".join(cells).strip()
-                lines.append(cleaned)
-            return "\n".join(line for line in lines if line)
-
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        if not normalized:
-            return ""
-        normalized = re.sub(r"<[^>]+>", " ", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        return normalized
-
-    def _attach_table_outputs(self, result: dict | None) -> dict:
-        payload = dict(result or {})
-        layout_sections = payload.get("layout_sections") or []
-        if not isinstance(layout_sections, list):
-            payload["logical_tables"] = []
-            return payload
-
-        payload["logical_tables"] = build_logical_tables(layout_sections)
-        return payload
-
-    def _build_table_section(self, page_no: int, block: dict) -> dict | None:
-        markdown_parts = self._dedupe_text_parts(block.get("table_markdown_parts") or [])
-        html_parts = self._dedupe_text_parts(block.get("table_html_parts") or [])
-        cell_texts = self._dedupe_text_parts(block.get("table_cell_texts") or [])
-        raw_text = str(block.get("text") or "")
-        bbox = self._normalize_bbox(block.get("bbox"))
-
-        full_text_candidates = [
-            self._merge_text_parts(
-                [self._normalize_section_text(item, preserve_lines=True) for item in markdown_parts],
-                join_char="\n\n",
-            ),
-            self._merge_text_parts(
-                [self._normalize_section_text(item, preserve_lines=True) for item in html_parts],
-                join_char="\n\n",
-            ),
-            self._normalize_section_text(raw_text, preserve_lines=True),
-            self._merge_text_parts(
-                [self._normalize_section_text(item, preserve_lines=True) for item in cell_texts],
+    def _extract_text_value(self, value: Any) -> str:
+        builtin_value = self._to_builtin(value)
+        if isinstance(builtin_value, str):
+            return self._normalize_section_text(builtin_value, preserve_lines=True)
+        if isinstance(builtin_value, list):
+            return self._merge_text_parts(
+                [self._extract_text_value(item) for item in builtin_value],
                 join_char="\n",
-            ),
-        ]
-        section_text = next((candidate for candidate in full_text_candidates if candidate), "")
-        if len(section_text) < 2:
+            )
+        if isinstance(builtin_value, dict):
+            parts: list[str] = []
+            for key in ("block_content", "markdown", "text", "html", "content", "caption"):
+                candidate = builtin_value.get(key)
+                if candidate:
+                    parts.append(self._extract_text_value(candidate))
+            return self._merge_text_parts(parts, join_char="\n")
+        return ""
+
+    def _page_number_from_payload(self, payload: dict[str, Any], fallback_page_no: int) -> int:
+        raw_page_index = payload.get("page_index")
+        if isinstance(raw_page_index, int):
+            return raw_page_index + 1 if raw_page_index >= 0 else fallback_page_no
+        return fallback_page_no
+
+    def _build_table_section(self, page_no: int, block: dict[str, Any]) -> dict[str, Any] | None:
+        raw_text = str(block.get("text") or "")
+        normalized_raw_text = self._normalize_section_text(raw_text, preserve_lines=True)
+        if len(normalized_raw_text) < 2:
             return None
 
-        section = {"page": page_no, "type": "table", "text": section_text}
+        html_parts = [raw_text] if "<table" in raw_text.lower() else []
+        section: dict[str, Any] = {
+            "page": page_no,
+            "type": "table",
+            "text": normalized_raw_text,
+        }
+
+        bbox = self._normalize_bbox(block.get("bbox"))
         if bbox is not None:
             section["bbox"] = bbox
-        normalized_raw_text = self._normalize_section_text(raw_text, preserve_lines=True)
         if normalized_raw_text:
             section["raw_text"] = normalized_raw_text
-        if markdown_parts:
-            section["markdown"] = "\n\n".join(markdown_parts)
         if html_parts:
             section["html"] = "\n\n".join(html_parts)
-        if cell_texts:
-            section["cell_texts"] = cell_texts
+
         table_structure = build_table_structure(
             html_parts=html_parts,
-            markdown_parts=markdown_parts,
-            cell_texts=cell_texts,
-            raw_text=normalized_raw_text or section_text,
+            raw_text=normalized_raw_text,
         )
         if table_structure is not None:
             section["table_structure"] = table_structure
         return section
 
-    def _simplify_layout_sections(self, layout_blocks: list[dict]) -> list[dict]:
+    def _extract_layout_blocks(self, page_payload: dict[str, Any], page_no: int) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        parsing_res_list = page_payload.get("parsing_res_list") or []
+        for item_index, item in enumerate(parsing_res_list):
+            built_item = self._to_builtin(item)
+            if not isinstance(built_item, dict):
+                continue
+
+            label = str(
+                built_item.get("block_label")
+                or built_item.get("label")
+                or built_item.get("type")
+                or "text"
+            ).strip()
+            block_order = built_item.get("block_order")
+            try:
+                order = int(block_order) if block_order is not None else item_index + 1
+            except (TypeError, ValueError):
+                order = item_index + 1
+
+            blocks.append(
+                {
+                    "page": page_no,
+                    "label": label,
+                    "type": self._normalize_layout_type(label),
+                    "text": self._extract_text_value(built_item),
+                    "bbox": self._normalize_bbox(
+                        built_item.get("block_bbox")
+                        or built_item.get("bbox")
+                        or built_item.get("box")
+                    ),
+                    "_order": order,
+                    "_raw": built_item,
+                }
+            )
+        return blocks
+
+    def _simplify_layout_sections(self, layout_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not layout_blocks:
             return []
 
@@ -1547,24 +497,23 @@ class OCRService:
             layout_blocks,
             key=lambda item: (
                 int(item.get("page", 0) or 0),
-                float(item.get("_order_y", 1e9) or 1e9),
-                float(item.get("_order_x", 1e9) or 1e9),
+                int(item.get("_order", 0) or 0),
+                self._bbox_anchor(item.get("bbox"))[1],
+                self._bbox_anchor(item.get("bbox"))[0],
             ),
         )
 
-        sections: list[dict] = []
+        sections: list[dict[str, Any]] = []
         seen = set()
-        page_section_count: dict[int, int] = {}
-        max_sections_per_page = 60
-
         for block in sorted_blocks:
+            section_type = str(block.get("type") or "text")
+            if section_type not in {"heading", "text", "table", "seal"}:
+                continue
+
             page_no = int(block.get("page", 0) or 0)
             if page_no <= 0:
                 continue
-            if page_section_count.get(page_no, 0) >= max_sections_per_page:
-                continue
 
-            section_type = self._normalize_layout_type(str(block.get("type") or "text"))
             if section_type == "table":
                 section = self._build_table_section(page_no, block)
                 if section is None:
@@ -1582,1384 +531,206 @@ class OCRService:
                 if bbox is not None:
                     section["bbox"] = bbox
 
-            signature = (page_no, section["type"], section["text"], str(section.get("bbox")))
-            if signature in seen:
+            section_signature = (
+                page_no,
+                section["type"],
+                section["text"],
+                str(section.get("bbox")),
+            )
+            if section_signature in seen:
                 continue
-            seen.add(signature)
+            seen.add(section_signature)
             sections.append(section)
-            page_section_count[page_no] = page_section_count.get(page_no, 0) + 1
 
         return sections
 
-    def _extract_layout_blocks(self, structure_result: list, page_no: int) -> list[dict]:
-        built_result = self._to_builtin(structure_result)
-        if not built_result:
-            return []
-
-        blocks: list[dict] = []
-        seen = set()
-        label_keys = ("block_label", "label", "type", "category")
-        bbox_keys = ("coordinate", "bbox", "box", "region_box", "points")
-        child_keys = (
-            "parsing_res_list",
-            "table_res_list",
-            "layout_det_res",
-            "overall_ocr_res",
-            "blocks",
-            "items",
-            "regions",
-            "sub_blocks",
-            "children",
-            "tables",
-            "res",
-        )
-
-        def walk(node: Any) -> None:
-            if isinstance(node, list):
-                for item in node:
-                    walk(item)
-                return
-            if not isinstance(node, dict):
-                return
-
-            label = ""
-            for key in label_keys:
-                candidate = node.get(key)
-                if isinstance(candidate, str) and candidate.strip():
-                    label = candidate.strip()
-                    break
-
-            section_type = self._normalize_layout_type(label or "text")
-            text = self._extract_text_value(node)
-            bbox = None
-            for key in bbox_keys:
-                if key in node:
-                    bbox = self._normalize_bbox(node.get(key))
-                    if bbox is not None:
-                        break
-
-            table_markdown_parts: list[str] = []
-            table_html_parts: list[str] = []
-            table_cell_texts: list[str] = []
-            if section_type == "table":
-                table_markdown_parts = self._collect_nested_field_values(node, ("markdown",), keep_markup=True)
-                table_html_parts = self._collect_nested_field_values(node, ("html", "pred_html"), keep_markup=True)
-                table_cell_texts = self._collect_nested_field_values(node, ("rec_texts",))
-
-            has_table_content = bool(table_markdown_parts or table_html_parts or table_cell_texts)
-            is_layout_block = bool(label or bbox is not None or "block_content" in node)
-            if is_layout_block and (text or has_table_content):
-                signature_text = (
-                    text
-                    or "\n".join(table_cell_texts)
-                    or "\n\n".join(table_markdown_parts)
-                    or "\n\n".join(table_html_parts)
-                )
-                signature = (label or section_type, signature_text, str(bbox))
-                if signature not in seen:
-                    x_anchor, y_anchor = self._bbox_anchor(bbox)
-                    block = {
-                        "page": page_no,
-                        "type": label or section_type or "text",
-                        "text": text,
-                        "bbox": bbox,
-                        "_order_x": x_anchor,
-                        "_order_y": y_anchor,
-                    }
-                    if table_markdown_parts:
-                        block["table_markdown_parts"] = table_markdown_parts
-                    if table_html_parts:
-                        block["table_html_parts"] = table_html_parts
-                    if table_cell_texts:
-                        block["table_cell_texts"] = table_cell_texts
-                    blocks.append(block)
-                    seen.add(signature)
-
-            for key in child_keys:
-                if key in node:
-                    walk(node.get(key))
-
-            for key, value in node.items():
-                if key in child_keys or key in label_keys or key in bbox_keys:
-                    continue
-                if key in {"block_content", "markdown", "text", "html", "pred_html", "content", "caption", "rec_texts", "texts"}:
-                    continue
-                if isinstance(value, (dict, list)):
-                    walk(value)
-
-        walk(built_result)
-        return blocks
-
-    def _extract_structure_text(self, structure_result: list) -> str:
-        return self._extract_text_value(self._to_builtin(structure_result))
-
-    def _combine_page_text(self, layout_text: str, ocr_text: str) -> str:
-        return self._merge_text_parts([layout_text, ocr_text])
-
-    def _run_structure_layout(
-        self,
-        image: np.ndarray,
-        page_no: int,
-        *,
-        structure_enabled: bool,
-    ) -> tuple[str, list[dict], bool]:
-        if not structure_enabled or not self.structure_available or self.structure is None:
-            return "", [], False
-
-        structure_result = self._run_predictor(self.structure, image, "PPStructureV3")
-        return self._extract_structure_layout_from_result(
-            structure_result,
-            page_no,
-            structure_enabled=structure_enabled,
-        )
-
-    def _extract_structure_layout_from_result(
-        self,
-        structure_result: list,
-        page_no: int,
-        *,
-        structure_enabled: bool,
-    ) -> tuple[str, list[dict], bool]:
-        if not structure_enabled:
-            return "", [], False
-        if not structure_result:
-            return "", [], False
-
-        layout_blocks = self._extract_layout_blocks(structure_result, page_no)
-        layout_sections = self._simplify_layout_sections(layout_blocks)
-        layout_text = self._merge_text_parts([section["text"] for section in layout_sections])
-        if not layout_text:
-            layout_text = self._extract_structure_text(structure_result)
-
-        return layout_text, layout_sections, bool(layout_text or layout_sections)
-
-    def _should_attempt_seal_text_recovery(
-        self,
-        *,
-        clean_text: str,
-        merged_red_density: float,
-        merged_aspect: float,
-        candidate_profile: dict[str, float],
-    ) -> bool:
-        if not clean_text:
-            return True
-        if not self._is_reliable_marker_text(clean_text, ""):
-            return True
-
-        ring_contrast = float(candidate_profile.get("ring_contrast", 0.0))
-        center_red_ratio = float(candidate_profile.get("center_red_ratio", 0.0))
-        return (
-            merged_red_density >= 0.14
-            and 0.62 <= merged_aspect <= 1.62
-            and ring_contrast >= 0.08
-            and center_red_ratio >= 0.035
-        )
-
-    def _remove_seal_texts(self, text: str, seal_texts: list[str]) -> str:
-        if not text or not seal_texts or not settings.PADDLE_OCR_EXCLUDE_SEAL_TEXT:
-            return text
-
-        cleaned_text = text
-        seal_hint_tokens = ("公章", "印章", "专用章", "财务章", "合同章", "发票章", "签章", "签字")
-        for seal_text in seal_texts:
-            normalized = str(seal_text or "").strip()
-            if len(normalized) < 2:
+    def _extract_page_seals(self, page_payload: dict[str, Any], page_no: int) -> dict[str, Any]:
+        seal_info = {"count": 0, "texts": [], "locations": []}
+        parsing_res_list = page_payload.get("parsing_res_list") or []
+        for item in parsing_res_list:
+            built_item = self._to_builtin(item)
+            if not isinstance(built_item, dict):
                 continue
-            # Only strip short and stamp-like snippets to avoid deleting real body text.
-            if len(normalized) > 14:
+
+            label = str(
+                built_item.get("block_label")
+                or built_item.get("label")
+                or built_item.get("type")
+                or ""
+            ).strip().lower()
+            if "seal" not in label:
                 continue
-            if any(company_token in normalized for company_token in ("有限公司", "有限责任公司", "股份有限公司", "集团有限公司")):
-                continue
-            if not any(token in normalized for token in seal_hint_tokens):
-                continue
-            cleaned_text = cleaned_text.replace(normalized, "")
-        return re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
 
-    def _sanitize_recognized_text(self, text: str, *, min_len: int = 2, max_len: int = 80) -> str:
-        normalized = re.sub(r"\s+", "", str(text or ""))
-        normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]", "", normalized)
-        if len(normalized) < min_len:
-            return ""
-        if len(normalized) > max_len:
-            return normalized[:max_len]
-        return normalized
-
-    def _expand_box(self, box: list[int], img_shape: tuple[int, int, int], pad: int = 12) -> tuple[int, int, int, int]:
-        x, y, w, h = box
-        img_h, img_w = img_shape[:2]
-        x1 = max(0, x - pad)
-        y1 = max(0, y - pad)
-        x2 = min(img_w, x + w + pad)
-        y2 = min(img_h, y + h + pad)
-        return x1, y1, x2, y2
-
-    def _build_seal_recovery_boxes(
-        self,
-        seal_box: list[int],
-        img_shape: tuple[int, int, int],
-    ) -> list[tuple[int, int, int, int]]:
-        x, y, w, h = seal_box
-        img_h, img_w = img_shape[:2]
-        if w <= 0 or h <= 0:
-            return []
-
-        boxes: list[tuple[int, int, int, int]] = []
-        boxes.append(self._expand_box(seal_box, img_shape, pad=14))
-
-        context_x_pad = max(24, int(w * 0.85))
-        context_y_pad = max(16, int(h * 0.35))
-        boxes.append(
-            (
-                max(0, x - context_x_pad),
-                max(0, y - context_y_pad),
-                min(img_w, x + w + context_x_pad),
-                min(img_h, y + h + context_y_pad),
+            text = self._normalize_section_text(
+                built_item.get("block_content") or built_item.get("content") or ""
             )
-        )
+            bbox = self._bbox_to_xywh(
+                built_item.get("block_bbox")
+                or built_item.get("bbox")
+                or built_item.get("box")
+            )
 
-        deduped: list[tuple[int, int, int, int]] = []
-        seen = set()
-        for box in boxes:
-            if box[2] <= box[0] or box[3] <= box[1]:
-                continue
-            if box in seen:
-                continue
-            seen.add(box)
-            deduped.append(box)
-        return deduped
+            seal_info["count"] += 1
+            if text:
+                seal_info["texts"].append(text)
+            if bbox is not None:
+                seal_info["locations"].append({"page": page_no, "box": bbox})
 
-    def _recover_text_from_seal_region(
+        seal_info["texts"] = self._dedupe_text_parts(seal_info["texts"])
+        return seal_info
+
+    def _extract_page_text(
         self,
-        img_bgr: np.ndarray,
-        seal_box: list[int],
-        full_seal_mask: np.ndarray,
+        page_sections: list[dict[str, Any]],
+        page_payload: dict[str, Any],
     ) -> str:
-        if img_bgr is None or self.ocr is None:
-            return ""
-
-        scored_candidates: list[tuple[float, str]] = []
-        recovery_boxes = self._build_seal_recovery_boxes(seal_box, img_bgr.shape)
-        if not recovery_boxes:
-            return ""
-
-        for x1, y1, x2, y2 in recovery_boxes:
-            roi = img_bgr[y1:y2, x1:x2]
-            roi_mask = full_seal_mask[y1:y2, x1:x2]
-            if roi.size == 0 or roi_mask.size == 0:
-                continue
-
-            inpainted = cv2.inpaint(roi, roi_mask, 3, cv2.INPAINT_TELEA)
-
-            b_channel, g_channel, _ = cv2.split(roi)
-            red_suppressed_gray = cv2.max(b_channel, g_channel)
-            red_suppressed = cv2.cvtColor(red_suppressed_gray, cv2.COLOR_GRAY2BGR)
-
-            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
-            contrast_gray = clahe.apply(red_suppressed_gray)
-            contrast_bgr = cv2.cvtColor(contrast_gray, cv2.COLOR_GRAY2BGR)
-
-            min_side = max(3, min(int(contrast_gray.shape[0]), int(contrast_gray.shape[1])))
-            adaptive_block = max(15, min(41, (min_side // 2) * 2 - 1))
-            if adaptive_block % 2 == 0:
-                adaptive_block += 1
-            if adaptive_block <= 1:
-                adaptive_block = 3
-
-            enhanced_binary = cv2.adaptiveThreshold(
-                contrast_gray,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY,
-                adaptive_block,
-                11,
-            )
-            _, otsu_binary = cv2.threshold(
-                contrast_gray,
-                0,
-                255,
-                cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-            )
-            enhanced = cv2.cvtColor(enhanced_binary, cv2.COLOR_GRAY2BGR)
-            otsu = cv2.cvtColor(otsu_binary, cv2.COLOR_GRAY2BGR)
-
-            for candidate in (inpainted, red_suppressed, contrast_bgr, enhanced, otsu):
-                scale = 2.0 if max(candidate.shape[:2]) > 220 else 2.6
-                resized = cv2.resize(candidate, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-                candidate_result = self._run_predictor(self.ocr, resized, "Seal Covered OCR")
-                raw_text = self._extract_text_from_result(candidate_result, join_char="")
-                cleaned = self._sanitize_recognized_text(raw_text, min_len=2, max_len=48)
-                if not cleaned:
-                    continue
-
-                chinese_count = len(re.findall(r"[\u4e00-\u9fa5]", cleaned))
-                digit_count = len(re.findall(r"\d", cleaned))
-                if len(cleaned) > 42 and chinese_count < 4:
-                    continue
-                if chinese_count == 0 and len(cleaned) >= 12:
-                    continue
-
-                score = float(chinese_count * 4 + min(len(cleaned), 30) - max(0, len(cleaned) - 36))
-                if digit_count >= 10 and chinese_count <= 2:
-                    score -= 8.0
-                if any(
-                    token in cleaned
-                    for token in ("公司", "盖章", "日期", "签字", "代表", "电话", "地址", "传真", "投标", "授权")
-                ):
-                    score += 10.0
-                scored_candidates.append((score, cleaned))
-
-        if not scored_candidates:
-            return ""
-
-        recovered_candidates: list[str] = []
-        for _, text_value in sorted(scored_candidates, key=lambda item: item[0], reverse=True):
-            if any(text_value == existing or text_value in existing or existing in text_value for existing in recovered_candidates):
-                continue
-            recovered_candidates.append(text_value)
-            if len(recovered_candidates) >= 1:
-                break
-
-        return self._merge_text_parts(recovered_candidates, join_char=" ")
-
-    def _is_box_close(self, box_a: list[int], box_b: list[int], x_gap: int, y_gap: int) -> bool:
-        ax1, ay1, aw, ah = box_a
-        bx1, by1, bw, bh = box_b
-        ax2, ay2 = ax1 + aw, ay1 + ah
-        bx2, by2 = bx1 + bw, by1 + bh
-        return not (
-            ax2 + x_gap < bx1
-            or bx2 + x_gap < ax1
-            or ay2 + y_gap < by1
-            or by2 + y_gap < ay1
-        )
-
-    def _merge_nearby_boxes(self, boxes: list[list[int]], x_gap: int = 24, y_gap: int = 20) -> list[list[int]]:
-        if not boxes:
-            return []
-        merged: list[list[int]] = []
-        for box in sorted(boxes, key=lambda item: (item[1], item[0])):
-            merged_into_existing = False
-            for current in merged:
-                if self._is_box_close(current, box, x_gap=x_gap, y_gap=y_gap):
-                    cx, cy, cw, ch = current
-                    bx, by, bw, bh = box
-                    x1 = min(cx, bx)
-                    y1 = min(cy, by)
-                    x2 = max(cx + cw, bx + bw)
-                    y2 = max(cy + ch, by + bh)
-                    current[0] = x1
-                    current[1] = y1
-                    current[2] = x2 - x1
-                    current[3] = y2 - y1
-                    merged_into_existing = True
-                    break
-            if not merged_into_existing:
-                merged.append(box.copy())
-        return merged
-
-    def _merge_box_pair(self, box_a: list[int], box_b: list[int]) -> list[int]:
-        ax, ay, aw, ah = box_a
-        bx, by, bw, bh = box_b
-        x1 = min(ax, bx)
-        y1 = min(ay, by)
-        x2 = max(ax + aw, bx + bw)
-        y2 = max(ay + ah, by + bh)
-        return [int(x1), int(y1), int(x2 - x1), int(y2 - y1)]
-
-    def _box_intersection_area(self, box_a: list[int], box_b: list[int]) -> int:
-        ax, ay, aw, ah = box_a
-        bx, by, bw, bh = box_b
-        x_left = max(ax, bx)
-        y_top = max(ay, by)
-        x_right = min(ax + aw, bx + bw)
-        y_bottom = min(ay + ah, by + bh)
-        if x_right <= x_left or y_bottom <= y_top:
-            return 0
-        return int((x_right - x_left) * (y_bottom - y_top))
-
-    def _should_merge_seal_boxes(self, box_a: list[int], box_b: list[int]) -> bool:
-        inter_area = self._box_intersection_area(box_a, box_b)
-        if inter_area > 0:
-            return True
-
-        aw, ah = box_a[2], box_a[3]
-        bw, bh = box_b[2], box_b[3]
-        min_dim = max(8, int(min(aw, ah, bw, bh)))
-        adaptive_gap = min(72, max(12, int(min_dim * 0.85)))
-        if not self._is_box_close(box_a, box_b, x_gap=adaptive_gap, y_gap=adaptive_gap):
-            return False
-
-        acx, acy = box_a[0] + aw / 2.0, box_a[1] + ah / 2.0
-        bcx, bcy = box_b[0] + bw / 2.0, box_b[1] + bh / 2.0
-        center_distance = float(np.hypot(acx - bcx, acy - bcy))
-        center_threshold = 0.95 * (max(aw, ah) + max(bw, bh))
-        if center_distance > center_threshold:
-            return False
-
-        merged = self._merge_box_pair(box_a, box_b)
-        merged_area = merged[2] * merged[3]
-        area_sum = max(aw * ah + bw * bh, 1)
-        # Prevent merging clearly separated seals.
-        if merged_area > area_sum * 4.2:
-            return False
-        return True
-
-    def _merge_fragmented_seal_boxes(self, boxes: list[list[int]]) -> list[list[int]]:
-        if not boxes:
-            return []
-
-        merged = self._merge_nearby_boxes(boxes, x_gap=16, y_gap=16)
-        changed = True
-        while changed:
-            changed = False
-            next_boxes: list[list[int]] = []
-            consumed = [False] * len(merged)
-            for i, base in enumerate(merged):
-                if consumed[i]:
-                    continue
-                current = base.copy()
-                for j in range(i + 1, len(merged)):
-                    if consumed[j]:
-                        continue
-                    if self._should_merge_seal_boxes(current, merged[j]):
-                        current = self._merge_box_pair(current, merged[j])
-                        consumed[j] = True
-                        changed = True
-                next_boxes.append(current)
-            merged = next_boxes
-
-        deduped: list[list[int]] = []
-        seen = set()
-        for box in merged:
-            signature = tuple(int(v) for v in box)
-            if signature in seen:
-                continue
-            seen.add(signature)
-            deduped.append([int(v) for v in box])
-        return deduped
-
-    def _merge_many_boxes(self, boxes: list[list[int]]) -> list[int]:
-        if not boxes:
-            return [0, 0, 0, 0]
-        x1 = min(int(box[0]) for box in boxes)
-        y1 = min(int(box[1]) for box in boxes)
-        x2 = max(int(box[0] + box[2]) for box in boxes)
-        y2 = max(int(box[1] + box[3]) for box in boxes)
-        return [x1, y1, max(0, x2 - x1), max(0, y2 - y1)]
-
-    def _box_center(self, box: list[int]) -> tuple[float, float]:
-        return (float(box[0]) + float(box[2]) / 2.0, float(box[1]) + float(box[3]) / 2.0)
-
-    def _refine_seal_box_with_mask(
-        self,
-        box: list[int],
-        full_mask: np.ndarray,
-        img_shape: tuple[int, int, int],
-    ) -> list[int]:
-        if full_mask is None or full_mask.size == 0:
-            return [int(v) for v in box]
-
-        refined = [int(v) for v in box]
-        img_h, img_w = img_shape[:2]
-        if refined[2] <= 0 or refined[3] <= 0:
-            return refined
-
-        for _ in range(2):
-            max_side = max(refined[2], refined[3])
-            pad = max(16, min(int(max_side * 1.15), int(min(img_h, img_w) * 0.14)))
-            x1, y1, x2, y2 = self._expand_box(refined, img_shape, pad=pad)
-            roi = full_mask[y1:y2, x1:x2]
-            if roi.size == 0:
-                break
-
-            binary = (roi > 0).astype(np.uint8)
-            num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-            if num_labels <= 1:
-                break
-
-            merge_candidates: list[list[int]] = [refined]
-            proximity_gap = max(10, int(max_side * 0.75))
-            base_center_x, base_center_y = self._box_center(refined)
-            min_component_area = max(18, int(max_side * 0.10))
-
-            for label in range(1, num_labels):
-                area = int(stats[label, cv2.CC_STAT_AREA])
-                if area < min_component_area:
-                    continue
-
-                cx = int(stats[label, cv2.CC_STAT_LEFT])
-                cy = int(stats[label, cv2.CC_STAT_TOP])
-                cw = int(stats[label, cv2.CC_STAT_WIDTH])
-                ch = int(stats[label, cv2.CC_STAT_HEIGHT])
-                if cw <= 0 or ch <= 0:
-                    continue
-                component_box = [x1 + cx, y1 + cy, cw, ch]
-                if component_box[2] >= int(img_w * 0.95) or component_box[3] >= int(img_h * 0.95):
-                    continue
-
-                if self._box_intersection_area(refined, component_box) > 0 or self._is_box_close(
-                    refined,
-                    component_box,
-                    x_gap=proximity_gap,
-                    y_gap=proximity_gap,
-                ):
-                    merge_candidates.append(component_box)
-                    continue
-
-                comp_center_x, comp_center_y = self._box_center(component_box)
-                center_distance = float(np.hypot(base_center_x - comp_center_x, base_center_y - comp_center_y))
-                center_threshold = 1.05 * (max_side + max(component_box[2], component_box[3]))
-                if center_distance <= center_threshold:
-                    merge_candidates.append(component_box)
-
-            if len(merge_candidates) <= 1:
-                break
-
-            merged_box = self._merge_many_boxes(merge_candidates)
-            merged_w, merged_h = int(merged_box[2]), int(merged_box[3])
-            if merged_w <= 0 or merged_h <= 0:
-                break
-
-            merged_area = float(merged_w * merged_h)
-            current_area = float(max(refined[2] * refined[3], 1))
-            growth_ratio = merged_area / current_area
-            merged_aspect = float(merged_w) / float(max(merged_h, 1))
-
-            if growth_ratio <= 1.08:
-                break
-            if growth_ratio > 8.5 and max_side >= 48:
-                break
-            if not 0.30 <= merged_aspect <= 3.20 and growth_ratio > 2.0:
-                break
-
-            refined = merged_box
-
-        return [int(v) for v in refined]
-
-    def _detect_handwritten_signatures(self, img_bgr: np.ndarray, page_no: int = 1, *, enabled: bool) -> dict:
-        signature_info = {"count": 0, "texts": [], "locations": []}
-        if img_bgr is None or not enabled:
-            return signature_info
-
-        img_h, img_w = img_bgr.shape[:2]
-        if img_h < 20 or img_w < 20:
-            return signature_info
-
-        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-        blue_mask = cv2.inRange(hsv, np.array([90, 40, 20]), np.array([140, 255, 255]))
-        dark_mask = cv2.inRange(gray, 0, 110)
-        stroke_mask = cv2.bitwise_or(blue_mask, dark_mask)
-
-        roi_top = int(img_h * 0.50)
-        bottom_mask = stroke_mask[roi_top:, :]
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
-        bottom_mask = cv2.morphologyEx(bottom_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-        bottom_mask = cv2.erode(bottom_mask, np.ones((2, 2), np.uint8), iterations=1)
-
-        contours, _ = cv2.findContours(bottom_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        candidate_boxes: list[list[int]] = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 450 or area > 18000:
-                continue
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = float(w) / max(float(h), 1.0)
-            fill_ratio = float(area) / max(float(w * h), 1.0)
-            if w < 60 or h < 14:
-                continue
-            if not 1.1 < aspect_ratio < 15.0:
-                continue
-            if not 0.018 < fill_ratio < 0.68:
-                continue
-
-            candidate_boxes.append([int(x), int(y + roi_top), int(w), int(h)])
-
-        merged_boxes = self._merge_nearby_boxes(candidate_boxes, x_gap=16, y_gap=12)
-        merged_boxes = sorted(merged_boxes, key=lambda item: item[1], reverse=True)[:4]
-
-        signature_idx = 0
-        for box in merged_boxes:
-            x, y, w, h = box
-            signature_idx += 1
-            x1, y1, x2, y2 = self._expand_box(box, img_bgr.shape, pad=10)
-            signature_crop = img_bgr[y1:y2, x1:x2]
-            if signature_crop.size == 0:
-                continue
-
-            save_path = os.path.join(self.signature_dir, f"signature_P{page_no}_{signature_idx}.png")
-            cv2.imwrite(save_path, signature_crop)
-
-            gray_crop = cv2.cvtColor(signature_crop, cv2.COLOR_BGR2GRAY)
-            signature_text_candidates: list[str] = []
-            resized = cv2.resize(signature_crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            candidate_result = self._run_predictor(self.ocr, resized, "Signature OCR")
-            raw_text = self._extract_text_from_result(candidate_result, join_char="")
-            clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=20)
-            if clean_text:
-                signature_text_candidates.append(clean_text)
-
-            if not clean_text or len(clean_text) < 3:
-                binary_crop = cv2.adaptiveThreshold(
-                    gray_crop,
-                    255,
-                    cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                    cv2.THRESH_BINARY,
-                    35,
-                    15,
-                )
-                binary_bgr = cv2.cvtColor(binary_crop, cv2.COLOR_GRAY2BGR)
-                resized = cv2.resize(binary_bgr, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                candidate_result = self._run_predictor(self.ocr, resized, "Signature OCR")
-                raw_text = self._extract_text_from_result(candidate_result, join_char="")
-                clean_text = self._sanitize_recognized_text(raw_text, min_len=2, max_len=20)
-                if clean_text:
-                    signature_text_candidates.append(clean_text)
-
-            merged_text = self._merge_text_parts(signature_text_candidates, join_char=" ")
-            if merged_text:
-                signature_info["texts"].append(merged_text)
-
-            signature_info["count"] += 1
-            signature_info["locations"].append([x, y, w, h])
-
-        signature_info["texts"] = list(dict.fromkeys(signature_info["texts"]))
-        return signature_info
-
-    def _append_recovered_texts(self, page_text: str, recovered_items: list[dict]) -> str:
-        recovered_text = self._merge_text_parts(
-            [str(item.get("text") or "").strip() for item in recovered_items if isinstance(item, dict)],
+        section_text = self._merge_text_parts(
+            [
+                str(section.get("text") or "")
+                for section in page_sections
+                if str(section.get("type") or "") in {"heading", "text", "table", "seal"}
+            ],
             join_char="\n",
         )
-        if not recovered_text:
-            return page_text
-        return self._merge_text_parts([page_text, recovered_text], join_char="\n")
+        if section_text:
+            return section_text
 
-    def _detect_seals(self, img_bgr: np.ndarray, page_no: int = 1, *, enabled: bool) -> dict:
-        seal_info = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-        if img_bgr is None or not enabled:
-            return seal_info
-        if (not self.seal_pipeline_available or self.seal_pipeline is None) and not self._seal_init_attempted:
-            try:
-                from paddleocr import SealRecognition
-
-                self._init_seal_pipeline(SealRecognition)
-            except Exception as exc:
-                print(f"OCRService: SealRecognition lazy init failed: {exc}")
-                return seal_info
-
-        if not self.seal_pipeline_available or self.seal_pipeline is None:
-            return seal_info
-
-        # 当前主流程只保留官方印章识别，不再走旧的红章规则链。
-        predictor_result = self._run_predictor(self.seal_pipeline, img_bgr, "SealRecognition")
-        return self._extract_official_seal_result(
-            predictor_result,
-            image=img_bgr,
-            page_no=page_no,
-        )
-
-    def _render_pdf_page(self, page) -> np.ndarray:
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-        if pix.n == 4:
-            return cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
-        if pix.n == 3:
-            return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-
-    def _recognize_pdf(
-        self,
-        pdf_path: str,
-        *,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-    ) -> dict:
-        doc = fitz.open(pdf_path)
-        try:
-            total_pages = len(doc)
-        finally:
-            doc.close()
-
-        if self._resolve_pipeline_enabled(total_pages):
-            return self._recognize_pdf_pipeline(
-                pdf_path,
-                total_pages=total_pages,
-                structure_enabled=structure_enabled,
-                seal_enabled=seal_enabled,
-                signature_enabled=signature_enabled,
-            )
-
-        return self._recognize_pdf_serial(
-            pdf_path,
-            total_pages=total_pages,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
-        )
-
-    def _run_pdf_stage_b(
-        self,
-        image: np.ndarray,
-        page_no: int,
-        *,
-        structure_enabled: bool,
-        seal_enabled: bool,
-    ) -> dict:
-        return self._run_pdf_stage_b_batch(
-            [{"page_no": page_no, "image": image}],
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-        )[0]
-
-    def _run_pdf_stage_b_batch(
-        self,
-        render_items: list[dict],
-        *,
-        structure_enabled: bool,
-        seal_enabled: bool,
-    ) -> list[dict]:
-        if not render_items:
-            return []
-
-        cleaned_images: list[np.ndarray] = []
-        seal_results: list[dict] = []
-        seal_timings_ms: list[float] = []
-
-        for item in render_items:
-            page_no = int(item["page_no"])
-            original_image = item["image"]
-            start = time.perf_counter()
-            # 先在原图上找章，后面的去章和章文识别都依赖这一步。
-            seal_result = self._detect_seals(original_image, page_no=page_no, enabled=seal_enabled)
-            seal_ms = (time.perf_counter() - start) * 1000.0
-            cleaned_images.append(
-                self._build_destamped_image_for_ocr(original_image, seal_result.get("locations") or [])
-            )
-            seal_results.append(seal_result)
-            seal_timings_ms.append(seal_ms)
-
-        predictor_input = cleaned_images if len(cleaned_images) > 1 else cleaned_images[0]
-
-        start = time.perf_counter()
-        ocr_predict_result = self._run_predictor(self.ocr, predictor_input, "PaddleOCR")
-        total_ocr_ms = (time.perf_counter() - start) * 1000.0
-        ocr_batches = self._split_predict_result_batches(ocr_predict_result, len(render_items))
-
-        structure_batches = [[] for _ in render_items]
-        total_layout_ms = 0.0
-        if structure_enabled and self.structure_available and self.structure is not None:
-            start = time.perf_counter()
-            structure_predict_result = self._run_predictor(self.structure, predictor_input, "PPStructureV3")
-            total_layout_ms = (time.perf_counter() - start) * 1000.0
-            structure_batches = self._split_predict_result_batches(
-                structure_predict_result,
-                len(render_items),
-            )
-
-        per_page_ocr_ms = total_ocr_ms / max(len(render_items), 1)
-        per_page_layout_ms = total_layout_ms / max(len(render_items), 1)
-
-        payloads: list[dict] = []
-        for index, item in enumerate(render_items):
-            page_no = int(item["page_no"])
-            ocr_text = self._extract_text_from_result(ocr_batches[index], join_char="\n")
-            layout_text, layout_sections, structure_used = self._extract_structure_layout_from_result(
-                structure_batches[index],
-                page_no,
-                structure_enabled=structure_enabled,
-            )
-            payloads.append(
-                {
-                    "page_no": page_no,
-                    "image": item["image"],
-                    # Stage C 仍然需要原图做签字检测，所以这里保留原图和印章结果。
-                    "seal_result": seal_results[index],
-                    "ocr_text": ocr_text,
-                    "layout_text": layout_text,
-                    "layout_sections": layout_sections,
-                    "structure_used": structure_used,
-                    "text_signal": bool(ocr_text.strip() or layout_text.strip()),
-                    "timings_ms": {
-                        "seal_ms": seal_timings_ms[index],
-                        "ocr_ms": per_page_ocr_ms,
-                        "layout_ms": per_page_layout_ms,
-                    },
-                }
-            )
-        return payloads
-
-    def _run_pdf_stage_c(
-        self,
-        stage_b_payload: dict,
-        *,
-        signature_enabled: bool,
-    ) -> dict:
-        page_no = int(stage_b_payload.get("page_no", 0))
-        image = stage_b_payload.get("image")
-        seal_result = stage_b_payload.get("seal_result") or {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-        ocr_text = str(stage_b_payload.get("ocr_text") or "")
-        layout_text = str(stage_b_payload.get("layout_text") or "")
-        layout_sections = stage_b_payload.get("layout_sections") or []
-        structure_used = bool(stage_b_payload.get("structure_used"))
-
-        timings_ms = {
-            "seal_ms": float((stage_b_payload.get("timings_ms") or {}).get("seal_ms", 0.0)),
-            "signature_ms": 0.0,
-            "merge_ms": 0.0,
-        }
-
-        start = time.perf_counter()
-        signature_result = self._detect_handwritten_signatures(
-            image,
-            page_no=page_no,
-            enabled=signature_enabled,
-        )
-        timings_ms["signature_ms"] = (time.perf_counter() - start) * 1000.0
-
-        start = time.perf_counter()
-        # 最终文本按“正文结果优先，印章文本补回”的方式合并。
-        page_text = self._combine_page_text(layout_text, ocr_text)
-        page_text = self._remove_seal_texts(page_text, seal_result["texts"])
-        page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
-        page_text = self._append_seal_texts(page_text, seal_result["texts"])
-        timings_ms["merge_ms"] = (time.perf_counter() - start) * 1000.0
-
-        text_signal = bool(stage_b_payload.get("text_signal"))
-        return {
-            "page_no": page_no,
-            "page_text": page_text,
-            "layout_sections": layout_sections,
-            "seal_result": seal_result,
-            "signature_result": signature_result,
-            "structure_used": structure_used,
-            "ocr_applied": bool(
-                text_signal
-                or seal_result["count"]
-                or seal_result.get("covered_texts")
-                or signature_result["count"]
-            ),
-            "timings_ms": timings_ms,
-        }
-
-    def _build_pdf_result_from_page_results(
-        self,
-        page_results: list[dict],
-        *,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-    ) -> dict:
-        pages_data: list[dict] = []
-        full_text: list[str] = []
-        layout_sections: list[dict] = []
-        all_seals = {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-        all_signatures = {"count": 0, "texts": [], "locations": []}
-        ocr_applied = False
-        structure_used = False
-
-        ordered_results = sorted(page_results, key=lambda item: int(item.get("page_no", 0)))
-        for page_result in ordered_results:
-            page_no = int(page_result.get("page_no", 0))
-            if page_no <= 0:
+        fallback_parts: list[str] = []
+        for item in page_payload.get("parsing_res_list") or []:
+            built_item = self._to_builtin(item)
+            if not isinstance(built_item, dict):
                 continue
-
-            page_text = str(page_result.get("page_text") or "")
-            page_layout_sections = page_result.get("layout_sections") or []
-            seal_result = page_result.get("seal_result") or {"count": 0, "texts": [], "locations": [], "covered_texts": []}
-            signature_result = page_result.get("signature_result") or {"count": 0, "texts": [], "locations": []}
-
-            if page_layout_sections:
-                layout_sections.extend(page_layout_sections)
-
-            if seal_result["count"] > 0:
-                all_seals["count"] += seal_result["count"]
-                all_seals["texts"].extend(seal_result["texts"])
-                for box in seal_result["locations"]:
-                    all_seals["locations"].append({"page": page_no, "box": box})
-                for covered in seal_result.get("covered_texts", []):
-                    if not isinstance(covered, dict):
-                        continue
-                    all_seals["covered_texts"].append(
-                        {
-                            "page": int(covered.get("page", page_no)),
-                            "box": covered.get("box", []),
-                            "text": str(covered.get("text") or "").strip(),
-                        }
-                    )
-
-            if signature_result["count"] > 0:
-                all_signatures["count"] += signature_result["count"]
-                all_signatures["texts"].extend(signature_result["texts"])
-                for box in signature_result["locations"]:
-                    all_signatures["locations"].append({"page": page_no, "box": box})
-
-            pages_data.append({"page": page_no, "text": page_text})
-            full_text.append(page_text)
-            ocr_applied = ocr_applied or bool(page_result.get("ocr_applied"))
-            structure_used = structure_used or bool(page_result.get("structure_used"))
-
-        all_seals["texts"] = list(dict.fromkeys(all_seals["texts"]))
-        dedup_covered_texts: list[dict] = []
-        covered_seen = set()
-        for item in all_seals["covered_texts"]:
-            signature = (item.get("page"), str(item.get("box")), item.get("text"))
-            if signature in covered_seen or not item.get("text"):
+            label = str(
+                built_item.get("block_label")
+                or built_item.get("label")
+                or built_item.get("type")
+                or ""
+            ).strip().lower()
+            if label in {"image", "chart"}:
                 continue
-            covered_seen.add(signature)
-            dedup_covered_texts.append(item)
-        all_seals["covered_texts"] = dedup_covered_texts
-        all_signatures["texts"] = list(dict.fromkeys(all_signatures["texts"]))
+            candidate = self._normalize_section_text(
+                built_item.get("block_content") or built_item.get("content") or "",
+                preserve_lines=True,
+            )
+            if candidate:
+                fallback_parts.append(candidate)
+        return self._merge_text_parts(fallback_parts, join_char="\n")
 
-        return {
-            "text": self._merge_text_parts(full_text),
-            "pages": pages_data,
-            "seals": all_seals,
-            "signatures": all_signatures,
-            "layout_sections": layout_sections,
-            "ocr_applied": ocr_applied,
-            "structure_used": structure_used,
-            "structure_enabled": structure_enabled,
-            "seal_recognition_enabled": seal_enabled,
-            "signature_recognition_enabled": signature_enabled,
-        }
+    def _attach_table_outputs(self, result: dict[str, Any] | None) -> dict[str, Any]:
+        payload = dict(result or {})
+        layout_sections = payload.get("layout_sections") or []
+        if not isinstance(layout_sections, list):
+            payload["logical_tables"] = []
+            return payload
 
-    def _log_pdf_stage_metrics(
-        self,
-        *,
-        mode: str,
-        total_pages: int,
-        total_ms: float,
-        stage_metrics: dict[str, float],
-        infer_batch_size: int | None = None,
-        render_workers: int | None = None,
-        post_workers: int | None = None,
-        queue_size: int | None = None,
-    ) -> None:
-        if not self._should_log_pipeline_metrics():
-            return
+        payload["logical_tables"] = build_logical_tables(layout_sections)
+        return payload
 
-        avg_ms = total_ms / max(total_pages, 1)
-        extra = ""
-        if render_workers is not None and post_workers is not None and queue_size is not None:
-            extra = f", render_workers={render_workers}, post_workers={post_workers}, queue={queue_size}"
-            if infer_batch_size is not None:
-                extra += f", infer_batch={infer_batch_size}"
+    def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
+        total_pages = self._estimate_total_pages(file_path, file_type)
         print(
-            "OCRService: PDF OCR "
-            f"mode={mode}, pages={total_pages}{extra}, total={total_ms:.1f}ms, "
-            f"render={stage_metrics.get('render_ms', 0.0):.1f}ms, "
-            f"ocr={stage_metrics.get('ocr_ms', 0.0):.1f}ms, "
-            f"layout={stage_metrics.get('layout_ms', 0.0):.1f}ms, "
-            f"seal={stage_metrics.get('seal_ms', 0.0):.1f}ms, "
-            f"signature={stage_metrics.get('signature_ms', 0.0):.1f}ms, "
-            f"merge={stage_metrics.get('merge_ms', 0.0):.1f}ms, "
-            f"avg={avg_ms:.1f}ms/page"
+            "OCRService: OCR inference started "
+            f"({self._describe_document(file_path, file_type, total_pages)}, device={self.active_device})",
+            flush=True,
         )
-
-    def _recognize_pdf_serial(
-        self,
-        pdf_path: str,
-        *,
-        total_pages: int,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-    ) -> dict:
-        stage_metrics = {
-            "render_ms": 0.0,
-            "ocr_ms": 0.0,
-            "layout_ms": 0.0,
-            "seal_ms": 0.0,
-            "signature_ms": 0.0,
-            "merge_ms": 0.0,
-        }
-        page_results: list[dict] = []
-        running_seal_count = 0
-        running_signature_count = 0
-        started_all = time.perf_counter()
-
-        use_tqdm = self._should_use_tqdm_progress()
-        progress_state = self._start_pdf_progress(
-            pdf_path=pdf_path,
-            mode="serial",
+        progress_monitor = self._build_progress_monitor(
+            file_path=file_path,
+            file_type=file_type,
             total_pages=total_pages,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
-            enabled=self._should_log_progress() and not use_tqdm,
         )
-
-        doc = fitz.open(pdf_path)
-        pbar = tqdm(range(total_pages), desc="OCR processing", unit="page") if use_tqdm else None
-        try:
-            page_iter = pbar if pbar is not None else range(total_pages)
-            for page_index in page_iter:
-                page_no = page_index + 1
-                start = time.perf_counter()
-                image = self._render_pdf_page(doc[page_index])
-                stage_metrics["render_ms"] += (time.perf_counter() - start) * 1000.0
-
-                stage_b_payload = self._run_pdf_stage_b(
-                    image,
-                    page_no,
-                    structure_enabled=structure_enabled,
-                    seal_enabled=seal_enabled,
-                )
-                stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
-                stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
-
-                page_result = self._run_pdf_stage_c(
-                    stage_b_payload,
-                    signature_enabled=signature_enabled,
-                )
-                page_results.append(page_result)
-
-                stage_metrics["seal_ms"] += float(page_result["timings_ms"].get("seal_ms", 0.0))
-                stage_metrics["signature_ms"] += float(page_result["timings_ms"].get("signature_ms", 0.0))
-                stage_metrics["merge_ms"] += float(page_result["timings_ms"].get("merge_ms", 0.0))
-
-                running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
-                running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
-                if pbar is not None:
-                    pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
-                self._log_pdf_progress(
-                    progress_state=progress_state,
-                    completed_pages=len(page_results),
-                    total_pages=total_pages,
-                    running_seal_count=running_seal_count,
-                    running_signature_count=running_signature_count,
-                )
-        finally:
-            doc.close()
-            if pbar is not None:
-                pbar.close()
-
-        self._log_pdf_progress(
-            progress_state=progress_state,
-            completed_pages=len(page_results),
-            total_pages=total_pages,
-            running_seal_count=running_seal_count,
-            running_signature_count=running_signature_count,
-            force=True,
-        )
-
-        result = self._build_pdf_result_from_page_results(
-            page_results,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
-        )
-        self._log_pdf_stage_metrics(
-            mode="serial",
-            total_pages=total_pages,
-            total_ms=(time.perf_counter() - started_all) * 1000.0,
-            stage_metrics=stage_metrics,
-        )
-        return result
-
-    def _recognize_pdf_pipeline(
-        self,
-        pdf_path: str,
-        *,
-        total_pages: int,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-    ) -> dict:
-        queue_size = self._resolve_pipeline_queue_size()
-        infer_batch_size = self._resolve_pipeline_infer_batch_size(total_pages)
-        render_workers = self._resolve_pipeline_render_workers(total_pages)
-        post_workers = self._resolve_pipeline_post_workers(total_pages)
-
-        stage_metrics = {
-            "render_ms": 0.0,
-            "ocr_ms": 0.0,
-            "layout_ms": 0.0,
-            "seal_ms": 0.0,
-            "signature_ms": 0.0,
-            "merge_ms": 0.0,
-        }
-        page_results: list[dict] = []
-        running_seal_count = 0
-        running_signature_count = 0
-
-        render_queue: queue.Queue = queue.Queue(maxsize=queue_size)
-        page_index_queue: queue.Queue = queue.Queue()
-        for page_index in range(total_pages):
-            page_index_queue.put(page_index)
-
-        render_error: dict[str, Exception | None] = {"error": None}
-        render_error_lock = threading.Lock()
-        stop_event = threading.Event()
-
-        def render_worker() -> None:
-            local_doc = None
-            try:
-                local_doc = fitz.open(pdf_path)
-                while not stop_event.is_set():
-                    try:
-                        page_index = page_index_queue.get_nowait()
-                    except queue.Empty:
-                        break
-
-                    start = time.perf_counter()
-                    image = self._render_pdf_page(local_doc[page_index])
-                    render_ms = (time.perf_counter() - start) * 1000.0
-                    # 渲染线程只负责把 PDF 页转成图片，推理放到后续阶段集中处理。
-                    item = {"page_index": page_index, "image": image, "render_ms": render_ms}
-
-                    while not stop_event.is_set():
-                        try:
-                            render_queue.put(item, timeout=0.2)
-                            break
-                        except queue.Full:
-                            continue
-            except Exception as exc:
-                with render_error_lock:
-                    if render_error["error"] is None:
-                        render_error["error"] = exc
-                stop_event.set()
-            finally:
-                if local_doc is not None:
-                    try:
-                        local_doc.close()
-                    except Exception:
-                        pass
-                while not stop_event.is_set():
-                    try:
-                        render_queue.put({"_render_done": True}, timeout=0.2)
-                        break
-                    except queue.Full:
-                        continue
-
-        render_threads = [
-            threading.Thread(target=render_worker, name=f"ocr-render-{idx + 1}", daemon=True)
-            for idx in range(render_workers)
-        ]
-        for thread in render_threads:
-            thread.start()
-
-        started_all = time.perf_counter()
-        pending_futures: set[Any] = set()
-        completed_pages = 0
-        processed_stage_b = 0
-        render_done_count = 0
-
-        use_tqdm = self._should_use_tqdm_progress()
-        progress_state = self._start_pdf_progress(
-            pdf_path=pdf_path,
-            mode="pipeline",
-            total_pages=total_pages,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
-            enabled=self._should_log_progress() and not use_tqdm,
-        )
-        pbar = tqdm(total=total_pages, desc="OCR processing", unit="page") if use_tqdm else None
-
-        def collect_completed_futures(*, block: bool) -> None:
-            nonlocal completed_pages, running_seal_count, running_signature_count
-            if not pending_futures:
-                return
-            timeout = None if block else 0
-            done, _ = wait(pending_futures, timeout=timeout, return_when=FIRST_COMPLETED)
-            for future in done:
-                pending_futures.remove(future)
-                page_result = future.result()
-                page_results.append(page_result)
-                stage_metrics["seal_ms"] += float(page_result["timings_ms"].get("seal_ms", 0.0))
-                stage_metrics["signature_ms"] += float(page_result["timings_ms"].get("signature_ms", 0.0))
-                stage_metrics["merge_ms"] += float(page_result["timings_ms"].get("merge_ms", 0.0))
-                running_seal_count += int(page_result.get("seal_result", {}).get("count", 0))
-                running_signature_count += int(page_result.get("signature_result", {}).get("count", 0))
-                completed_pages += 1
-                if pbar is not None:
-                    pbar.update(1)
-                    pbar.set_postfix({"seal_count": running_seal_count, "signature_count": running_signature_count})
-                self._log_pdf_progress(
-                    progress_state=progress_state,
-                    completed_pages=completed_pages,
-                    total_pages=total_pages,
-                    running_seal_count=running_seal_count,
-                    running_signature_count=running_signature_count,
-                )
+        progress_monitor.start()
 
         try:
-            with ThreadPoolExecutor(max_workers=post_workers, thread_name_prefix="ocr-post") as post_pool:
-                while processed_stage_b < total_pages:
-                    collect_completed_futures(block=False)
+            results = self._run_pipeline(
+                file_path,
+                progress_monitor=progress_monitor,
+                total_pages=total_pages,
+            )
+            if not results:
+                raise RuntimeError("PaddleOCR-VL-1.5 returned no results.")
 
-                    with render_error_lock:
-                        render_exc = render_error["error"]
-                    if render_exc is not None and render_done_count >= render_workers:
-                        raise RuntimeError(f"PDF render pipeline failed: {render_exc}") from render_exc
+            total_result_pages = max(total_pages, len(results))
+            pages: list[dict[str, Any]] = []
+            layout_sections: list[dict[str, Any]] = []
+            all_seal_texts: list[str] = []
+            all_seal_locations: list[dict[str, Any]] = []
 
-                    try:
-                        item = render_queue.get(timeout=0.2)
-                    except queue.Empty:
-                        if render_done_count >= render_workers and processed_stage_b < total_pages:
-                            raise RuntimeError(
-                                "PDF render pipeline ended early "
-                                f"(processed={processed_stage_b}, total={total_pages})"
-                            )
-                        continue
-
-                    if item.get("_render_done"):
-                        render_done_count += 1
-                        continue
-
-                    batch_items = [item]
-                    stage_metrics["render_ms"] += float(item.get("render_ms", 0.0))
-
-                    while len(batch_items) < infer_batch_size:
-                        try:
-                            buffered_item = render_queue.get_nowait()
-                        except queue.Empty:
-                            break
-
-                        if buffered_item.get("_render_done"):
-                            render_done_count += 1
-                            continue
-
-                        batch_items.append(buffered_item)
-                        stage_metrics["render_ms"] += float(buffered_item.get("render_ms", 0.0))
-
-                    batch_render_items = [
-                        {
-                            "page_no": int(render_item["page_index"]) + 1,
-                            "image": render_item["image"],
-                        }
-                        for render_item in batch_items
-                    ]
-                    stage_b_payloads = self._run_pdf_stage_b_batch(
-                        batch_render_items,
-                        structure_enabled=structure_enabled,
-                        seal_enabled=seal_enabled,
-                    )
-                    for stage_b_payload in stage_b_payloads:
-                        stage_metrics["ocr_ms"] += float(stage_b_payload["timings_ms"].get("ocr_ms", 0.0))
-                        stage_metrics["layout_ms"] += float(stage_b_payload["timings_ms"].get("layout_ms", 0.0))
-                    processed_stage_b += len(stage_b_payloads)
-
-                    max_pending = max(queue_size, post_workers)
-                    for stage_b_payload in stage_b_payloads:
-                        while len(pending_futures) >= max_pending:
-                            collect_completed_futures(block=True)
-
-                        future = post_pool.submit(
-                            self._run_pdf_stage_c,
-                            stage_b_payload,
-                            signature_enabled=signature_enabled,
-                        )
-                        pending_futures.add(future)
-
-                while pending_futures:
-                    collect_completed_futures(block=True)
-        finally:
-            stop_event.set()
-            for thread in render_threads:
-                thread.join(timeout=5.0)
-            if pbar is not None:
-                pbar.close()
-
-        self._log_pdf_progress(
-            progress_state=progress_state,
-            completed_pages=completed_pages,
-            total_pages=total_pages,
-            running_seal_count=running_seal_count,
-            running_signature_count=running_signature_count,
-            force=True,
-        )
-
-        if completed_pages != total_pages:
-            raise RuntimeError(
-                "PDF post-processing pipeline ended early "
-                f"(completed={completed_pages}, total={total_pages})"
+            progress_monitor.update(
+                stage="postprocess",
+                current=0,
+                total=max(total_result_pages, 1),
+                detail="normalizing OCR results",
+                emit=False,
             )
 
-        result = self._build_pdf_result_from_page_results(
-            page_results,
-            structure_enabled=structure_enabled,
-            seal_enabled=seal_enabled,
-            signature_enabled=signature_enabled,
-        )
-        self._log_pdf_stage_metrics(
-            mode="pipeline",
-            total_pages=total_pages,
-            total_ms=(time.perf_counter() - started_all) * 1000.0,
-            stage_metrics=stage_metrics,
-            render_workers=render_workers,
-            post_workers=post_workers,
-            queue_size=queue_size,
-            infer_batch_size=infer_batch_size,
-        )
-        return result
+            for fallback_page_no, result in enumerate(results, start=1):
+                page_payload = self._to_builtin(result)
+                if not isinstance(page_payload, dict):
+                    continue
 
-    def _recognize_image(
-        self,
-        img_path: str,
-        *,
-        structure_enabled: bool,
-        seal_enabled: bool,
-        signature_enabled: bool,
-    ) -> dict:
-        image = cv2.imread(img_path)
-        if image is None:
-            return self._empty_result()
+                page_no = self._page_number_from_payload(page_payload, fallback_page_no)
+                page_blocks = self._extract_layout_blocks(page_payload, page_no)
+                page_sections = self._simplify_layout_sections(page_blocks)
+                page_text = self._extract_page_text(page_sections, page_payload)
+                page_seals = self._extract_page_seals(page_payload, page_no)
 
-        # 图片主链路和 PDF 一致：先找章，再去章，再做正文 OCR。
-        seal_result = self._detect_seals(image, page_no=1, enabled=seal_enabled)
-        ocr_image = self._build_destamped_image_for_ocr(image, seal_result.get("locations") or [])
+                pages.append({"page": page_no, "text": page_text})
+                layout_sections.extend(page_sections)
+                all_seal_texts.extend(page_seals["texts"])
+                all_seal_locations.extend(page_seals["locations"])
 
-        ocr_result = self._run_predictor(self.ocr, ocr_image, "PaddleOCR")
-        ocr_text = self._extract_text_from_result(ocr_result, join_char="\n")
-        layout_text, layout_sections, structure_used = self._run_structure_layout(
-            ocr_image,
-            page_no=1,
-            structure_enabled=structure_enabled,
-        )
-        signature_result = self._detect_handwritten_signatures(
-            image,
-            page_no=1,
-            enabled=signature_enabled,
-        )
+                progress_monitor.update(
+                    stage="postprocess",
+                    current=fallback_page_no,
+                    total=max(total_result_pages, fallback_page_no, 1),
+                    detail=f"parsed page {page_no}",
+                    emit=False,
+                )
 
-        # 签字仍然在原图上找，避免去章过程把细笔迹一并抹掉。
-        page_text = self._combine_page_text(layout_text, ocr_text)
-        page_text = self._remove_seal_texts(page_text, seal_result["texts"])
-        page_text = self._append_recovered_texts(page_text, seal_result.get("covered_texts", []))
-        page_text = self._append_seal_texts(page_text, seal_result["texts"])
-        formatted_locations = [{"page": 1, "box": box} for box in seal_result["locations"]]
-        formatted_signature_locations = [{"page": 1, "box": box} for box in signature_result["locations"]]
+            full_text = self._merge_text_parts(
+                [str(page.get("text") or "") for page in pages],
+                join_char="\n",
+            )
 
-        return {
-            "text": page_text,
-            "pages": [{"page": 1, "text": page_text}],
-            "seals": {
-                "count": seal_result["count"],
-                "texts": seal_result["texts"],
-                "locations": formatted_locations,
-                "covered_texts": seal_result.get("covered_texts", []),
-            },
-            "signatures": {
-                "count": signature_result["count"],
-                "texts": list(dict.fromkeys(signature_result["texts"])),
-                "locations": formatted_signature_locations,
-            },
-            "layout_sections": layout_sections,
-            "ocr_applied": bool(
-                ocr_text.strip()
-                or layout_text.strip()
-                or seal_result["count"]
-                or seal_result.get("covered_texts")
-                or signature_result["count"]
-            ),
-            "structure_used": structure_used,
-            "structure_enabled": structure_enabled,
-            "seal_recognition_enabled": seal_enabled,
-            "signature_recognition_enabled": signature_enabled,
-        }
+            payload = {
+                "text": full_text,
+                "pages": pages,
+                "seals": {
+                    "count": len(all_seal_locations),
+                    "texts": self._dedupe_text_parts(all_seal_texts),
+                    "locations": all_seal_locations,
+                },
+                "layout_sections": layout_sections,
+                "logical_tables": [],
+                "ocr_applied": True,
+                "structure_used": bool(layout_sections),
+                "structure_enabled": bool(settings.PADDLE_VL_USE_LAYOUT_DETECTION),
+                "seal_recognition_enabled": bool(settings.PADDLE_VL_USE_SEAL_RECOGNITION),
+                "engine": "PaddleOCR-VL-1.5",
+            }
+
+            progress_monitor.update(
+                stage="tables",
+                current=0,
+                total=1,
+                detail="building logical tables",
+                emit=False,
+            )
+            payload = self._attach_table_outputs(payload)
+            progress_monitor.update(
+                stage="tables",
+                current=1,
+                total=1,
+                detail="logical tables ready",
+                emit=False,
+            )
+
+            progress_monitor.finish(success=True)
+            return payload
+        except Exception as exc:
+            progress_summary = progress_monitor.finish(success=False, error_message=str(exc))
+            if isinstance(exc, RuntimeError) and str(exc):
+                raise
+            raise RuntimeError(
+                f"OCR failed after {progress_summary.get('total_elapsed_seconds', 0)}s: {exc}"
+            ) from exc

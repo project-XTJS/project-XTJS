@@ -9,8 +9,6 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.router.dependencies import (
-    RecognitionOptions,
-    get_query_recognition_options,
     get_text_analysis_service,
 )
 from app.schemas.analysis import TextAnalysisRequest
@@ -129,7 +127,6 @@ def _build_public_logical_tables(logical_tables: list[dict] | None) -> list[dict
 @router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(
     file: UploadFile = File(...),
-    recognition_options: RecognitionOptions = Depends(get_query_recognition_options),
     analysis_service=Depends(get_text_analysis_service),
 ):
     """上传单个文件并返回识别结果。"""
@@ -155,10 +152,6 @@ async def analyze_file(
             analysis_service.extract_text_result,
             temp_file_path,
             file_extension,
-            recognition_options.use_ppstructure_v3,
-            recognition_options.use_seal_recognition,
-            recognition_options.use_signature_recognition,
-            recognition_options.pdf_mode,
         )
         metadata = build_analyze_file_metadata(
             filename=file.filename,
@@ -179,13 +172,9 @@ async def analyze_file(
             active_device=extraction_result["active_device"],
             seal_detected=extraction_result["seal_detected"],
             seal_count=extraction_result["seal_count"],
-            seal_covered_text_count=extraction_result["seal_covered_text_count"],
-            signature_detected=extraction_result["signature_detected"],
-            signature_count=extraction_result["signature_count"],
             ppstructure_v3_requested=extraction_result["ppstructure_v3_requested"],
             ppstructure_v3_enabled=extraction_result["ppstructure_v3_enabled"],
             seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
-            signature_recognition_enabled=extraction_result["signature_recognition_enabled"],
         )
         public_layout_sections = _build_public_sections(extraction_result["layout_sections"])
         public_table_sections = [
@@ -213,12 +202,6 @@ async def analyze_file(
                 "detected": extraction_result["seal_detected"],
                 "count": extraction_result["seal_count"],
                 "texts": extraction_result["seal_texts"],
-                "covered_texts": extraction_result["seal_covered_texts"],
-            },
-            "signature": {
-                "detected": extraction_result["signature_detected"],
-                "count": extraction_result["signature_count"],
-                "texts": extraction_result["signature_texts"],
             },
             "metadata": metadata,
         }

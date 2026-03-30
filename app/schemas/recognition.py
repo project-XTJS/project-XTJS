@@ -29,13 +29,9 @@ def build_analyze_file_metadata(
     active_device: str = "",
     seal_detected: bool = False,
     seal_count: int = 0,
-    seal_covered_text_count: int = 0,
-    signature_detected: bool = False,
-    signature_count: int = 0,
     ppstructure_v3_requested: bool | None = None,
     ppstructure_v3_enabled: bool = False,
     seal_recognition_enabled: bool = False,
-    signature_recognition_enabled: bool = False,
 ) -> Dict[str, Any]:
     return {
         "schema_version": "analyze_file_v3",
