@@ -1,7 +1,7 @@
 services:
   # 主应用服务
   app:
-    image: project-xtjs:release-b47cd41
+    image: project-xtjs:release-557640b
     container_name: project-xtjs
     ports:
       - "8080:8080"
