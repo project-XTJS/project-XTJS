@@ -77,7 +77,7 @@ class OCRProgressMonitor:
                 psutil.cpu_percent(interval=None)
             except Exception:
                 pass
-        self.update(stage="prepare", current=0, total=max(self.total_pages, 1), detail="preparing", emit=True)
+        self.update(stage="prepare", current=0, total=max(self.total_pages, 1), detail="preparing", emit=False)
         self._start_heartbeat()
 
     def update(
@@ -105,10 +105,10 @@ class OCRProgressMonitor:
 
             stage_total = int(total) if total else max(self.total_pages, int(current), 1)
             self._progress = max(self._progress, self._compute_progress(stage, int(current), stage_total))
-            snapshot = self._collect_snapshot()
-            self._latest_snapshot = snapshot
-            self._record_snapshot_locked(snapshot)
             if emit:
+                snapshot = self._collect_snapshot()
+                self._latest_snapshot = snapshot
+                self._record_snapshot_locked(snapshot)
                 line = self._emit_locked()
 
         if line:
@@ -208,7 +208,6 @@ class OCRProgressMonitor:
             "gpu_memory_percent": None,
             "gpu_memory_used_mb": None,
             "gpu_memory_total_mb": None,
-            "gpu_temperature_c": None,
         }
 
         if psutil:
@@ -239,7 +238,7 @@ class OCRProgressMonitor:
             "nvidia-smi",
             "-i",
             str(self._gpu_index),
-            "--query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu",
+            "--query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total",
             "--format=csv,noheader,nounits",
         ]
 
@@ -268,7 +267,7 @@ class OCRProgressMonitor:
 
         row = completed.stdout.strip().splitlines()[0]
         parts = [part.strip() for part in row.split(",")]
-        if len(parts) < 6:
+        if len(parts) < 5:
             return {}
 
         gpu_memory_used = self._to_float(parts[3])
@@ -282,7 +281,6 @@ class OCRProgressMonitor:
             "gpu_memory_percent": gpu_memory_percent,
             "gpu_memory_used_mb": gpu_memory_used,
             "gpu_memory_total_mb": gpu_memory_total,
-            "gpu_temperature_c": self._to_float(parts[5]),
         }
 
     def _record_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
@@ -332,7 +330,6 @@ class OCRProgressMonitor:
                 "gpu_memory_percent": self._round(latest.get("gpu_memory_percent")),
                 "gpu_memory_used_mb": self._round(latest.get("gpu_memory_used_mb")),
                 "gpu_memory_total_mb": self._round(latest.get("gpu_memory_total_mb")),
-                "gpu_temperature_c": self._round(latest.get("gpu_temperature_c")),
             }
         )
         return event
@@ -369,8 +366,6 @@ class OCRProgressMonitor:
             parts.append(
                 f"gpu_mem={event['gpu_memory_used_mb']:.0f}/{event['gpu_memory_total_mb']:.0f}MB"
             )
-        if event.get("gpu_temperature_c") is not None:
-            parts.append(f"gpu_temp={event['gpu_temperature_c']:.0f}C")
 
         parts.append(f"elapsed={event.get('elapsed_seconds', 0.0):.1f}s")
         if event.get("detail"):

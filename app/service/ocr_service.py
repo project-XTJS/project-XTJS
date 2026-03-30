@@ -11,43 +11,6 @@ from app.service.table_parser import build_logical_tables, build_table_structure
 
 
 class OCRService:
-    SIGNATURE_TRACE_ANCHORS = (
-        "法定代表人或授权代表签字或盖章",
-        "法定代表人签字或盖章",
-        "被授权人签字或盖章",
-        "授权代表签字或盖章",
-        "委托代理人签字或盖章",
-        "法定代表人签字",
-        "被授权人签字",
-        "授权代表签字",
-        "委托代理人签字",
-        "签字或盖章",
-        "签名",
-        "手签",
-    )
-    SIGNATURE_TRACE_STOP_TOKENS = (
-        "法定代表人",
-        "授权代表",
-        "被授权人",
-        "委托代理人",
-        "投标人名称",
-        "投标人",
-        "参选人名称",
-        "参选人",
-        "供应商名称",
-        "供应商",
-        "单位名称",
-        "公司名称",
-        "企业名称",
-        "签字",
-        "签章",
-        "盖章",
-        "签名",
-        "手签",
-        "公章",
-        "日期",
-    )
-
     def __init__(self, preferred_device: str | None = None):
         self.available = False
         self.pipeline = None
@@ -244,7 +207,7 @@ class OCRService:
                     current=0,
                     total=max(total_pages, 1),
                     detail="starting pipeline.predict_iter",
-                    emit=True,
+                    emit=False,
                 )
 
             results: list[Any] = []
@@ -256,7 +219,7 @@ class OCRService:
                         current=index,
                         total=max(total_pages, index, 1),
                         detail=f"page/batch {index} completed",
-                        emit=True,
+                        emit=False,
                     )
 
             if settings.PADDLE_VL_RESTRUCTURE_PAGES and len(results) > 1:
@@ -266,7 +229,7 @@ class OCRService:
                         current=0,
                         total=1,
                         detail="restructure pages",
-                        emit=True,
+                        emit=False,
                     )
                 results = list(
                     self.pipeline.restructure_pages(
@@ -282,7 +245,7 @@ class OCRService:
                         current=1,
                         total=1,
                         detail="restructure completed",
-                        emit=True,
+                        emit=False,
                     )
             return results
 
@@ -422,107 +385,6 @@ class OCRService:
             return [x1, y1, max(1, x2 - x1), max(1, y2 - y1)]
 
         return None
-
-    def _bbox_to_rect(self, bbox: Any) -> tuple[int, int, int, int] | None:
-        xywh = self._bbox_to_xywh(bbox)
-        if xywh is None:
-            return None
-        x, y, width, height = xywh
-        return (x, y, x + width, y + height)
-
-    def _snippet_has_signature_trace(self, snippet: str) -> bool:
-        compact = re.sub(r"\s+", "", str(snippet or ""))
-        if not compact:
-            return False
-
-        compact = re.sub(r"20\d{2}年\d{1,2}月\d{1,2}日?", "", compact)
-        compact = re.sub(r"20\d{6}", "", compact)
-        compact = re.sub(r"\d+", "", compact)
-        for token in self.SIGNATURE_TRACE_STOP_TOKENS:
-            compact = compact.replace(token, "")
-        compact = re.sub(r"[\[\]：:（）()【】{}，,。.;；、/\\|_-]", "", compact)
-        compact = compact.strip()
-        if not compact:
-            return False
-        return len(compact) <= 8
-
-    def _block_has_signature_trace(self, text: str) -> bool:
-        normalized = self._normalize_section_text(text, preserve_lines=True)
-        if not normalized:
-            return False
-
-        for raw_line in normalized.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            compact_line = re.sub(r"\s+", "", line)
-            if not compact_line:
-                continue
-
-            matched_anchors = [
-                (compact_line.find(anchor), anchor)
-                for anchor in self.SIGNATURE_TRACE_ANCHORS
-                if compact_line.find(anchor) >= 0
-            ]
-            if not matched_anchors:
-                continue
-
-            anchor_index, anchor = max(
-                matched_anchors,
-                key=lambda item: (len(item[1]), -item[0]),
-            )
-            left = compact_line[max(0, anchor_index - 12):anchor_index]
-            right_start = anchor_index + len(anchor)
-            right = compact_line[right_start:right_start + 12]
-            if self._snippet_has_signature_trace(left) or self._snippet_has_signature_trace(right):
-                return True
-
-        return False
-
-    def _boxes_are_close(
-        self,
-        anchor_rect: tuple[int, int, int, int],
-        candidate_rect: tuple[int, int, int, int],
-    ) -> bool:
-        ax1, ay1, ax2, ay2 = anchor_rect
-        bx1, by1, bx2, by2 = candidate_rect
-
-        horizontal_gap = max(0, bx1 - ax2, ax1 - bx2)
-        vertical_gap = max(0, by1 - ay2, ay1 - by2)
-        anchor_width = max(1, ax2 - ax1)
-        anchor_height = max(1, ay2 - ay1)
-
-        return (
-            horizontal_gap <= max(40, int(anchor_width * 2.5))
-            and vertical_gap <= max(24, int(anchor_height * 1.5))
-        )
-
-    def _detect_signature_trace(self, page_blocks: list[dict[str, Any]]) -> bool:
-        anchor_rects: list[tuple[int, int, int, int]] = []
-        figure_rects: list[tuple[int, int, int, int]] = []
-
-        for block in page_blocks:
-            block_type = str(block.get("type") or "")
-            block_text = str(block.get("text") or "")
-            block_rect = self._bbox_to_rect(block.get("bbox"))
-
-            if self._block_has_signature_trace(block_text):
-                return True
-
-            normalized_text = re.sub(r"\s+", "", block_text)
-            if any(anchor in normalized_text for anchor in self.SIGNATURE_TRACE_ANCHORS):
-                if block_rect is not None:
-                    anchor_rects.append(block_rect)
-
-            if block_type == "figure" and block_rect is not None:
-                figure_rects.append(block_rect)
-
-        for anchor_rect in anchor_rects:
-            for figure_rect in figure_rects:
-                if self._boxes_are_close(anchor_rect, figure_rect):
-                    return True
-
-        return False
 
     def _normalize_layout_type(self, value: str) -> str:
         normalized = str(value or "").strip().lower()
@@ -793,14 +655,12 @@ class OCRService:
             layout_sections: list[dict[str, Any]] = []
             all_seal_texts: list[str] = []
             all_seal_locations: list[dict[str, Any]] = []
-            signature_trace_present = False
-
             progress_monitor.update(
                 stage="postprocess",
                 current=0,
                 total=max(total_result_pages, 1),
                 detail="normalizing OCR results",
-                emit=True,
+                emit=False,
             )
 
             for fallback_page_no, result in enumerate(results, start=1):
@@ -810,7 +670,6 @@ class OCRService:
 
                 page_no = self._page_number_from_payload(page_payload, fallback_page_no)
                 page_blocks = self._extract_layout_blocks(page_payload, page_no)
-                signature_trace_present = signature_trace_present or self._detect_signature_trace(page_blocks)
                 page_sections = self._simplify_layout_sections(page_blocks)
                 page_text = self._extract_page_text(page_sections, page_payload)
                 page_seals = self._extract_page_seals(page_payload, page_no)
@@ -847,7 +706,6 @@ class OCRService:
                 "structure_used": bool(layout_sections),
                 "structure_enabled": bool(settings.PADDLE_VL_USE_LAYOUT_DETECTION),
                 "seal_recognition_enabled": bool(settings.PADDLE_VL_USE_SEAL_RECOGNITION),
-                "signature_trace_present": signature_trace_present,
                 "engine": "PaddleOCR-VL-1.5",
             }
 
@@ -856,7 +714,7 @@ class OCRService:
                 current=0,
                 total=1,
                 detail="building logical tables",
-                emit=True,
+                emit=False,
             )
             payload = self._attach_table_outputs(payload)
             progress_monitor.update(
@@ -864,7 +722,7 @@ class OCRService:
                 current=1,
                 total=1,
                 detail="logical tables ready",
-                emit=True,
+                emit=False,
             )
 
             progress_monitor.finish(success=True)

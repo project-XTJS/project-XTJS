@@ -188,7 +188,6 @@ async def analyze_file(
             "file_size": len(content),
             "text_length": extraction_result["text_length"],
             "page_count": extraction_result["page_count"],
-            "signature_trace_present": extraction_result["signature_trace_present"],
             "layout_sections": public_layout_sections,
             "table_sections": public_table_sections,
             "logical_tables": public_logical_tables,

@@ -81,7 +81,6 @@ class AnalysisService:
             "seal_detected": seal_count > 0,
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),
-            "signature_trace_present": bool(ocr_result.get("signature_trace_present", False)),
             "recognition_route": "paddleocr_vl",
             "recognition_reason": "vl_only_pipeline",
             "pdf_mode": "vl_only",
