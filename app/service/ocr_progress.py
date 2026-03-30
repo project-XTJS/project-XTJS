@@ -32,6 +32,7 @@ class OCRProgressMonitor:
         enabled: bool,
         bar_width: int,
         keep_recent_updates: int,
+        heartbeat_seconds: float,
     ) -> None:
         self.file_path = file_path
         self.file_type = file_type
@@ -39,12 +40,15 @@ class OCRProgressMonitor:
         self.total_pages = max(0, int(total_pages or 0))
         self.enabled = bool(enabled)
         self.bar_width = max(12, int(bar_width or 24))
+        self.heartbeat_seconds = max(0.5, float(heartbeat_seconds or 2.0))
         self._recent_updates = deque(maxlen=max(1, int(keep_recent_updates or 12)))
 
         self._job_name = f"{Path(file_path).name}@{self.device}"
         self._gpu_index = self._parse_gpu_index(self.device)
         self._process = psutil.Process(os.getpid()) if psutil else None
         self._lock = threading.Lock()
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
 
         self._started_at = 0.0
         self._finished_at = 0.0
@@ -59,6 +63,7 @@ class OCRProgressMonitor:
         self._error_message = ""
         self._latest_snapshot: dict[str, Any] = {}
         self._aggregates: dict[str, dict[str, float]] = {}
+        self._last_emitted_at = 0.0
 
     def start(self) -> None:
         if self._started_at:
@@ -72,7 +77,8 @@ class OCRProgressMonitor:
                 psutil.cpu_percent(interval=None)
             except Exception:
                 pass
-        self.update(stage="prepare", current=0, total=max(self.total_pages, 1), detail="preparing", emit=False)
+        self.update(stage="prepare", current=0, total=max(self.total_pages, 1), detail="preparing", emit=True)
+        self._start_heartbeat()
 
     def update(
         self,
@@ -121,9 +127,44 @@ class OCRProgressMonitor:
             self._finished_at = time.perf_counter()
             line = self._emit_locked()
 
+        self._stop_heartbeat()
         if line:
             print(line, flush=True)
         return self.build_summary()
+
+    def _start_heartbeat(self) -> None:
+        if not self.enabled or self._heartbeat_thread is not None:
+            return
+
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"ocr-progress-{self._job_name}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
+            line: str | None = None
+            with self._lock:
+                if self._status != "running" or not self._started_at:
+                    continue
+                now = time.perf_counter()
+                if now - self._last_emitted_at < self.heartbeat_seconds * 0.9:
+                    continue
+                self._latest_snapshot = self._collect_snapshot()
+                self._record_snapshot_locked(self._latest_snapshot)
+                line = self._emit_locked()
+            if line:
+                print(line, flush=True)
 
     def build_summary(self) -> dict[str, Any]:
         with self._lock:
@@ -262,6 +303,7 @@ class OCRProgressMonitor:
             return None
         event = self._build_event_locked()
         self._recent_updates.append(event)
+        self._last_emitted_at = time.perf_counter()
         return self._format_line(event)
 
     def _build_event_locked(self) -> dict[str, Any]:

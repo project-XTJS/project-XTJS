@@ -1,5 +1,7 @@
 # app/service/analysis_service.py
 from functools import lru_cache
+import os
+import subprocess
 import threading
 
 from app.config.settings import settings
@@ -79,6 +81,7 @@ class AnalysisService:
             "seal_detected": seal_count > 0,
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),
+            "signature_trace_present": bool(ocr_result.get("signature_trace_present", False)),
             "recognition_route": "paddleocr_vl",
             "recognition_reason": "vl_only_pipeline",
             "pdf_mode": "vl_only",
@@ -182,22 +185,89 @@ class AnalysisServiceDispatcher:
             self._release_slot(idx)
 
 
+def _normalize_device_token(raw_value: str) -> str:
+    token = str(raw_value or "").strip()
+    if not token:
+        return ""
+    if token.isdigit():
+        return f"gpu:{token}"
+    return token
+
+
+def _discover_visible_gpu_devices() -> list[str]:
+    for env_name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        raw_value = str(os.environ.get(env_name, "") or "").strip()
+        if not raw_value:
+            continue
+
+        lowered = raw_value.lower()
+        if lowered in {"none", "void", "no", "false"}:
+            return []
+        if lowered not in {"all", "auto"}:
+            entries = [
+                entry.strip()
+                for entry in raw_value.replace(";", ",").replace("|", ",").split(",")
+                if entry.strip()
+            ]
+            if entries:
+                return [f"gpu:{idx}" for idx in range(len(entries))]
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode == 0:
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if lines:
+                return [f"gpu:{idx}" for idx in range(len(lines))]
+    except Exception:
+        pass
+
+    try:
+        import paddle
+
+        cuda_module = getattr(getattr(paddle, "device", None), "cuda", None)
+        if cuda_module is not None:
+            device_count = getattr(cuda_module, "device_count", None)
+            if callable(device_count):
+                count = int(device_count() or 0)
+                if count > 0:
+                    return [f"gpu:{idx}" for idx in range(count)]
+    except Exception:
+        pass
+
+    return []
+
+
 def _resolve_ocr_device_pool() -> list[str]:
     raw_pool = str(getattr(settings, "PADDLE_OCR_DEVICE_POOL", "") or "").strip()
     if not raw_pool:
-        return [str(settings.PADDLE_OCR_DEVICE).strip()]
+        return [_normalize_device_token(settings.PADDLE_OCR_DEVICE)]
+
+    if raw_pool.lower() in {"auto", "all", "visible", "visible_gpus"}:
+        devices = _discover_visible_gpu_devices()
+        if devices:
+            return devices
+        fallback_device = _normalize_device_token(settings.PADDLE_OCR_DEVICE)
+        return [fallback_device] if fallback_device else ["cpu"]
 
     normalized = raw_pool.replace(";", ",").replace("|", ",")
     devices: list[str] = []
     for item in normalized.split(","):
-        token = item.strip()
+        token = _normalize_device_token(item)
         if not token:
             continue
-        if token.isdigit():
-            token = f"gpu:{token}"
         if token not in devices:
             devices.append(token)
-    return devices or [str(settings.PADDLE_OCR_DEVICE).strip()]
+    if devices:
+        return devices
+
+    fallback_device = _normalize_device_token(settings.PADDLE_OCR_DEVICE)
+    return [fallback_device] if fallback_device else ["cpu"]
 
 
 @lru_cache(maxsize=1)
