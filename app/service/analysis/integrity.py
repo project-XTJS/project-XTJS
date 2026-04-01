@@ -2,145 +2,139 @@ import re
 from .template_extractor import TemplateExtractor
 
 class IntegrityChecker:
-    """投标文件完整性检查器"""
+    """针对结构化标题、逻辑依赖及特殊业务规则的投标文件完整性检查器"""
 
     def __init__(self):
-        pass
-
-    @classmethod
-    def extract_text(cls, raw_json_data: dict) -> str:
-        """提取 PDF 转化后的全文本"""
-        data_node = raw_json_data.get('data', raw_json_data)
-        parts = []
-        if 'layout_sections' in data_node:
-            for sec in data_node['layout_sections']:
-                if isinstance(sec, dict):
-                    text_val = sec.get('text') or sec.get('content') or ''
-                    parts.append(str(text_val))
-        return "\n".join(parts)
+        # 附件标题前缀正则
+        self.ATTACHMENT_PREFIX = re.compile(r'^\s*附件')
 
     def _normalize_target_name(self, item_name: str) -> str:
-        """核心词提取与强映射"""
-        # 1. 强映射
-        if "基本情况" in item_name:
-            return "基本情况"
-        if "类似项目业绩清单" in item_name:
-            return "类似项目业绩清单"
-        if "财务状况" in item_name and "社会保障" in item_name:
-            return "社会保障资金缴纳情况声明函"
+        """提炼核心词，用于标题匹配"""
+        if "基本情况" in item_name: return "基本情况"
+        if "类似项目业绩清单" in item_name: return "类似项目业绩清单"
+        if "财务状况" in item_name and "社会保障" in item_name: return "社会保障资金缴纳情况声明函"
+        if "营业执照" in item_name: return "营业执照"
             
-        # 2. 清洗无用主语
+        # 清洗冗余词汇，保留核心书名
         item_name = re.sub(r'^(参选人的|投标人的|应答人的|参选人认为|投标人认为|应答人认为|参选人|投标人|应答人)', '', item_name)
-        
-        # 3. 清洗补充说明
         item_name = re.sub(r'(可另外再附.*|后附.*材料)$', '', item_name)
-        
-        # 4. 清洗括号内的格式要求
         item_name = re.sub(r'[（\(].*?(公章|原件|复印件|如有|格式).*?[）\)]', '', item_name)
-        
-        # 5. 清除首尾标点
-        item_name = item_name.strip('。，；;,. ')
-        
-        return item_name
+        return item_name.strip('。，；;,. ')
 
-    def _check_items(self, text: str, items_list: list, category_name: str, header_prefix: str) -> tuple:
-        """在长文本中搜索清单项"""
-        found, missing, details = [], [], {}
-        
-        for original_item in items_list:
-            search_target = self._normalize_target_name(original_item)
+    def _find_heading(self, sections: list, target_keyword: str) -> str:
+        """在 headings 中寻找核心关键词，除营业执照外必须带‘附件’前缀"""
+        is_license = "营业执照" in target_keyword
+        for sec in sections:
+            if not isinstance(sec, dict) or sec.get('type') != 'heading':
+                continue
+            text = str(sec.get('text') or '').strip()
             
-            # 取清洗后核心词的前4个字作为模糊匹配的雷达特征
-            fuzzy_core = ".*?".join(list(search_target[:4]))
-            
-            strict_pattern = re.compile(rf'^{header_prefix}.*?{fuzzy_core}.*?$', re.MULTILINE)
-            loose_pattern = re.compile(rf'^\s*.*?{fuzzy_core}.*?\s*$', re.MULTILINE)
-
-            strict_matches = strict_pattern.findall(text)
-            loose_matches = loose_pattern.findall(text)
-
-            if strict_matches or loose_matches:
-                found.append(original_item)
-                details[original_item] = {
-                    "status": "已找到", 
-                    "preview": (strict_matches + loose_matches)[0].strip(), 
-                    "category": category_name,
-                    "search_target_used": search_target 
-                }
+            if is_license:
+                # 营业执照是证件名，不强制要求带“附件”前缀
+                if target_keyword in text: return text
             else:
-                missing.append(original_item)
-                details[original_item] = {
-                    "status": "缺失", 
-                    "category": category_name,
-                    "search_target_used": search_target
-                }
-                
-        return found, missing, details
+                # 其它商务文件必须是 heading 且以“附件”开头，并包含核心词
+                if self.ATTACHMENT_PREFIX.search(text) and target_keyword in text:
+                    return text
+        return None
 
-    def check_integrity(self, model_raw_json: dict, test_raw_data) -> dict:
+    def check_integrity(self, model_raw_json: dict, test_raw_json: dict) -> dict:
         """执行完整性检查的主入口"""
-        # 1. 独立调用提取器：只提取“应交清单”（雷达A）
+        # 1. 提取招标文件要求的清单 (1, 2, 7... 及 A, B, C...)
         reqs = TemplateExtractor.extract_requirements(model_raw_json)
-        dynamic_main_sections = reqs['main']
-        dynamic_sub_sections = reqs['sub']
+        test_data = test_raw_json.get('data', {})
+        sections = test_data.get('layout_sections', [])
 
-        # 2. 获取投标人文件的全文本
-        text = self.extract_text(test_raw_data) if isinstance(test_raw_data, dict) else test_raw_data
+        sub_details = {}
         
-        # 定义可能出现的标题序号正则
-        header_prefix = r'(?:第[一二三四五六七八九十百]+[章部分]|附件[一二三四五六七八九十]+|[一二三四五六七八九十]、|\d{1,2}\.[\d\.]*|[A-G]\.|[（\(][一二三四五六七八九十][）\)]|\([A-G]\))\s*'
-
-        # 3. 基础审查
-        main_found, main_missing, main_details = self._check_items(
-            text, dynamic_main_sections, "商务标主项文件", header_prefix
-        )
-        sub_found, sub_missing, sub_details = self._check_items(
-            text, dynamic_sub_sections, "资格证明子项材料", header_prefix
-        )
-
-        # 只要找到了任何一个资格证明子项 (A. B. C.)，父项就自动算作“已找到”
-        qualification_parents = [m for m in main_missing if "资格" in m or "证明文件" in m]
-        for qp in qualification_parents:
-            if len(sub_found) > 0:
-                main_missing.remove(qp)
-                main_found.append(qp)
-                main_details[qp]["status"] = "已找到 (因子项存在至少一个证明材料)"
-
-        # 包含这些关键字的项目，如果没有找到，不计入缺失，也不扣分
-        optional_keywords = ["其他内容"]
-        actual_main_missing = []
-        
-        for m in main_missing:
-            is_optional = any(kw in m for kw in optional_keywords)
-            if is_optional:
-                main_details[m]["status"] = "未提供 (可选附加项，不影响完整性)"
-            else:
-                actual_main_missing.append(m)
+        # --- 1. 先处理子项材料 (A, B, C...) ---
+        for sub_item in reqs['sub']:
+            clean_name = self._normalize_target_name(sub_item)
+            
+            # 【特殊规则】：包含“法定代表人”则必须同时包含“授权委托书”和“资格证明书”
+            if "法定代表人" in sub_item:
+                targets = ["法定代表人授权委托书", "法定代表人资格证明书"]
+                found_parts = []
+                missing_parts = []
+                for t in targets:
+                    match = self._find_heading(sections, t)
+                    if match: found_parts.append(match)
+                    else: missing_parts.append(t)
                 
-        main_missing = actual_main_missing
+                if not missing_parts:
+                    sub_details[sub_item] = {"status": "已找到", "preview": " + ".join(found_parts), "is_passed": True}
+                else:
+                    # 明确指出缺失哪一个
+                    missing_desc = f"部分缺失 (缺: {', '.join(missing_parts)})" if found_parts else "缺失"
+                    sub_details[sub_item] = {
+                        "status": missing_desc, 
+                        "preview": " + ".join(found_parts) if found_parts else "-",
+                        "is_passed": False
+                    }
+            else:
+                # 普通子项匹配
+                match = self._find_heading(sections, clean_name)
+                if match:
+                    sub_details[sub_item] = {"status": "已找到", "preview": match, "is_passed": True}
+                else:
+                    sub_details[sub_item] = {"status": "缺失", "preview": "-", "is_passed": False}
 
-        # 4. 组装最终结果
-        found_sections = main_found + [f"子项: {s}" for s in sub_found]
-        missing_sections = main_missing + [f"子项: {s}" for s in sub_missing]
-        
-        details = {**main_details}
-        for k, v in sub_details.items():
-            details[f"子项: {k}"] = v
+        # --- 2. 处理主项材料 (1, 2, 7...) ---
+        main_details = {}
+        for main_item in reqs['main']:
+            # 【特殊规则】：父项（如资格证明文件）需体现子项的完整性
+            if "资格" in main_item or "证明文件" in main_item:
+                # 检查关联的所有子项
+                missing_subs = [self._normalize_target_name(s) for s, d in sub_details.items() if not d['is_passed']]
+                if not missing_subs:
+                    main_details[main_item] = {"status": "已找到", "preview": "所有子项均已通过校验", "is_passed": True}
+                else:
+                    # 父项状态体现具体缺哪个子项
+                    main_details[main_item] = {
+                        "status": f"不全 (缺: {', '.join(missing_subs)})", 
+                        "preview": "部分子项缺失或内容不合规",
+                        "is_passed": False
+                    }
+            else:
+                clean_name = self._normalize_target_name(main_item)
+                match = self._find_heading(sections, clean_name)
+                if match:
+                    main_details[main_item] = {"status": "已找到", "preview": match, "is_passed": True}
+                else:
+                    # 可选项目豁免
+                    if any(kw in main_item for kw in ["其他内容", "如有"]):
+                        main_details[main_item] = {"status": "未提供 (可选附加项)", "preview": "-", "is_passed": True}
+                    else:
+                        main_details[main_item] = {"status": "缺失", "preview": "-", "is_passed": False}
 
-        # 5. 计算动态得分（剔除选填项对满分分母的干扰）
-        total_required = len(dynamic_main_sections) + len(dynamic_sub_sections)
-        optional_count = len([m for m in dynamic_main_sections if any(kw in m for kw in optional_keywords)])
-        effective_required = max(1, total_required - optional_count)
-        
-        total_found = len(main_found) + len(sub_found)
-        score = min(100.0, (total_found / effective_required) * 100) if effective_required > 0 else 100.0
+        # --- 3. 组装最终结果 ---
+        all_details = {}
+        found_sections = []
+        missing_sections = []
+
+        # 合并主项报告
+        for name, info in main_details.items():
+            all_details[name] = {**info, "category": "商务标主项文件"}
+            if info['is_passed']: found_sections.append(name)
+            else: missing_sections.append(name)
+
+        # 合并子项报告
+        for name, info in sub_details.items():
+            key = f"子项: {name}"
+            all_details[key] = {**info, "category": "资格证明子项材料"}
+            if info['is_passed']: found_sections.append(key)
+            else: missing_sections.append(key)
+
+        # 计算得分
+        total_items = len(reqs['main']) + len(reqs['sub'])
+        passed_items = len([v for v in all_details.values() if v.get('is_passed')])
+        score = round((passed_items / total_items) * 100, 2) if total_items > 0 else 100.0
 
         return {
-            "integrity_score": round(score, 2),
-            "found_count": total_found,
+            "integrity_score": score,
+            "found_count": passed_items,
             "missing_count": len(missing_sections),
-            # 这里的 found_sections 可以传给 ConsistencyChecker 充当免查白名单
             "found_sections": found_sections, 
             "missing_sections": missing_sections,
-            "details": details,
+            "details": all_details,
         }

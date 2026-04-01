@@ -56,7 +56,7 @@
             "search_target_used": "类似项目业绩清单"
         },
         "参选人的资格证明文件": {
-            "status": "已找到 (因子项存在而自动确认)",
+            "status": "已找到 (因子项存在至少一个证明材料)",
             "category": "商务标主项文件",
             "search_target_used": "资格证明文件"
         },

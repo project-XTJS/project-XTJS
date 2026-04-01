@@ -1,0 +1,336 @@
+
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>标书合规性智能审查报告</title>
+            <style>
+                body { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; background-color: #f5f7fa; padding: 40px; color: #333; }
+                .report-wrapper { max-width: 1100px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+                h1 { text-align: center; color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 20px; }
+                .summary-box { background: #f0f9eb; border: 1px solid #e1f3d8; padding: 20px; border-radius: 4px; margin-bottom: 30px; text-align: center; }
+                .score { font-size: 32px; color: #67c23a; font-weight: bold; }
+                
+                h2 { color: #409eff; border-left: 4px solid #409eff; padding-left: 10px; margin-top: 40px; }
+                
+                /* 完整性表格 */
+                .it-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+                .it-table th, .it-table td { border: 1px solid #ebeef5; padding: 12px; text-align: left; }
+                .it-table th { background: #fafafa; }
+                .tag-green { color: #67c23a; font-weight: bold; }
+                .tag-red { color: #f56c6c; font-weight: bold; }
+
+                /* 一致性展示区 */
+                .consistency-section { margin-top: 30px; border: 1px solid #ebeef5; border-radius: 4px; padding: 20px; }
+                .section-head { font-size: 18px; font-weight: bold; color: #303133; margin-bottom: 15px; background: #f5f7fa; padding: 10px; border-radius: 4px; }
+                .bidder-content { 
+                    background: #ffffff; border: 1px solid #dcdfe6; padding: 20px; border-radius: 4px; 
+                    white-space: pre-wrap; font-size: 15px; line-height: 1.8; color: #000; 
+                }
+                
+                .template-match { color: #27ae60; font-weight: bold; } /* 绿色：模版匹配上的内容 */
+                .bidder-data { color: #000; } /* 黑色：投标人填写的具体数据 */
+                
+                .missing-box { 
+                    margin-top: 15px; background: #fef0f0; border: 1px solid #fde2e2; 
+                    padding: 15px; border-radius: 4px; color: #f56c6c; 
+                }
+                .missing-title { font-weight: bold; margin-bottom: 5px; }
+                .missing-item { display: inline-block; background: #fff; padding: 2px 8px; border: 1px solid #fde2e2; margin: 3px; border-radius: 3px; font-size: 13px; text-decoration: line-through; }
+            </style>
+        </head>
+        <body>
+            <div class="report-wrapper">
+                <h1>标书合规性全方位审查报告</h1>
+                
+                <div class="summary-box">
+                    <div style="font-size: 16px;">完整性核验总分</div>
+                    <div class="score">100.0</div>
+                </div>
+
+                <h2>一、完整性核验结果 (是否存在该章节)</h2>
+                <table class="it-table">
+                    <thead>
+                        <tr><th>审查项目</th><th>核验状态</th><th>预览内容</th></tr>
+                    </thead>
+                    <tbody>
+        <tr><td>比选保证书</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件1比选保证书</td></tr><tr><td>报价一览表</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件2报价一览表</td></tr><tr><td>分项报价表</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件3分项报价表</td></tr><tr><td>响应文件偏离表</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件4响应文件偏离表</td></tr><tr><td>参选人基本情况介绍可另外再附公司简介（如有）</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件5参选人基本情况表</td></tr><tr><td>近三年以来类似项目业绩清单后附证明材料</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件6近三年完成的类似项目业绩清单</td></tr><tr><td>参选人的资格证明文件</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>所有子项均已通过校验</td></tr><tr><td>保证金缴纳凭证</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件12保证金缴纳凭证（格式）（如有）</td></tr><tr><td>参选人认为需加以说明的其他内容</td><td class='tag-red'>未提供 (可选附加项)</td><td style='font-size:12px;color:#666'>-</td></tr><tr><td>子项: 营业执照</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>营业执照</td></tr><tr><td>子项: 法定代表人/单位负责人直接参加比选的应提供法定代表人/单位负责人证明书及身份</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件7-2法定代表人授权委托书（须加盖公章） + 附件7-1法定代表人资格证明书（须加盖公章）</td></tr><tr><td>子项: 参选人承诺声明函（须加盖公章）</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件8参选人承诺声明函（须加盖公章）</td></tr><tr><td>子项: 不参与围标串标承诺书（须加盖公章）</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件9不参与围标串标承诺书（须加盖公章）</td></tr><tr><td>子项: 财务状况，依法缴纳税收和社会保障资金的声明函。（须加盖公章）</td><td class='tag-green'>已找到</td><td style='font-size:12px;color:#666'>附件11财务状况及税收、社会保障资金缴纳情况声明函</td></tr>
+                    </tbody>
+                </table>
+
+                <h2>二、一致性比对 (投标文件正文细节核对)</h2>
+                <div style="margin-bottom: 20px; font-size: 14px; color: #666;">
+                    <strong>图例：</strong>
+                    <span class="template-match">绿色</span> = 匹配成功的模版文字 | 
+                    <span class="bidder-data">黑色</span> = 投标人填写的业务内容 | 
+                    <span class="tag-red">红色删除线</span> = 缺失的模版要求
+                </div>
+        
+                <div class="consistency-section">
+                    <div class="section-head">附件1比选保证书（格式）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件1比选保证书</span><span class='bidder-data'>
+致（国家药品监督管理局药品审评检查长三角分中心）：
+</span><span class='template-match'>根据贵方为</span><span class='bidder-data'>（药品长三角分中心信息技术支持服务）</span><span class='template-match'>项目</span><span class='bidder-data'>（项目编号：XTJS2025-427）</span><span class='template-match'>的比选公告</span><span class='bidder-data'>，</span><span class='template-match'>签字代表</span><span class='bidder-data'>（郭文博总</span><span class='template-match'>经理）经正式授权并代表参选人</span><span class='bidder-data'>（上海舒源信息技术有限公司、上海市杨浦区长阳路1687号东1225幢（A楼）A509、A510）</span><span class='template-match'>提交下述文件</span><span class='bidder-data'>：</span><span class='template-match'>响应文件纸质版正本壹份</span><span class='bidder-data'>、</span><span class='template-match'>副本贰份</span><span class='bidder-data'>、</span><span class='template-match'>电子版壹份</span><span class='bidder-data'>（U盘）。
+</span><span class='template-match'>权代表宣布如下</span><span class='bidder-data'>：
+（1）</span><span class='template-match'>参选总价为人民币大写</span><span class='bidder-data'>：叁拾捌万捌仟捌佰柒拾伍元；</span><span class='template-match'>小写</span><span class='bidder-data'>：388，875.00元。
+（2）</span><span class='template-match'>我方已详细研究了全部比选文件</span><span class='bidder-data'>，</span><span class='template-match'>包括比选文件的澄清和修改文件</span><span class='bidder-data'>（如有）、</span><span class='template-match'>参考资料及有关附件</span><span class='bidder-data'>，</span><span class='template-match'>我们已完全理解并接受比选文件的各项规定和要求</span><span class='bidder-data'>，</span><span class='template-match'>对比选文件的合理性</span><span class='bidder-data'>、</span><span class='template-match'>合法性不再有异议</span><span class='bidder-data'>。
+（3）</span><span class='template-match'>我方同意提供按照贵方可能要求的与比选有关的一切数据或资料</span><span class='bidder-data'>，</span><span class='template-match'>完全理解贵方不一定要接受最低价的参选或收到的任何参选</span><span class='bidder-data'>。
+（4）</span><span class='template-match'>响应有效期为</span><span class='bidder-data'>：</span><span class='template-match'>自响应文件提交截止之日起90个日历日</span><span class='bidder-data'>。
+（5）</span><span class='template-match'>如我方中选</span><span class='bidder-data'>，</span><span class='template-match'>响应文件将作为本</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>合同的组成部分</span><span class='bidder-data'>，</span><span class='template-match'>直至合同履行完毕均保持有效</span><span class='bidder-data'>，</span><span class='template-match'>我方将按比选文件及相关法律</span><span class='bidder-data'>、</span><span class='template-match'>法规的规定</span><span class='bidder-data'>，</span><span class='template-match'>承担完成合同的全部责任和义务</span><span class='bidder-data'>。
+（6）</span><span class='template-match'>为便于贵方公正</span><span class='bidder-data'>、</span><span class='template-match'>择优地确定中选人及其货物和相关服务</span><span class='bidder-data'>，</span><span class='template-match'>我方就本次比选有关事项郑重声明如下</span><span class='bidder-data'>：</span><span class='template-match'>我方向贵方提交的所有响应文件</span><span class='bidder-data'>、</span><span class='template-match'>资料都是准确的和真实的</span><span class='bidder-data'>。</span><span class='template-match'>以上事项如有虚假或隐瞒</span><span class='bidder-data'>，</span><span class='template-match'>我方愿意承担一切后果</span><span class='bidder-data'>，</span><span class='template-match'>并不再寻求任何旨在减轻或免除法律责任的辩解</span><span class='bidder-data'>。
+（7）</span><span class='template-match'>与本</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>有关的一切正式往来通讯请寄</span><span class='bidder-data'>：
+</span><span class='template-match'>地址</span><span class='bidder-data'>：上海市长宁区淞虹路207号A幢4楼0432室</span><span class='template-match'>邮编</span><span class='bidder-data'>：200335 法定代表人</span><span class='template-match'>电话</span><span class='bidder-data'>：17721408226信源后息博郭 时印文 </span><span class='template-match'>参选人名称</span><span class='bidder-data'></span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>传真</span><span class='missing-item'>法定代表人</span><span class='missing-item'>签字或盖章</span><span class='missing-item'>日期</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件2报价一览表（格式）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件2报价一览表</span><span class='bidder-data'>
+</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'>：药品长三角分中心信息技术支持服务</span><span class='template-match'>项目</span><span class='bidder-data'>项目</span><span class='template-match'>编号</span><span class='bidder-data'>：XTJS2025-427
+</span><span class='template-match'>参选总价/元</span><span class='bidder-data'> （包含所有采购内容） </span><span class='template-match'>小写</span><span class='bidder-data'>：388,875.00 </span><span class='template-match'>大写</span><span class='bidder-data'>：叁拾捌万捌仟捌佰柒拾伍元整
+</span><span class='template-match'>服务期限</span><span class='bidder-data'> 自合同签订之日起一年
+注：
+1、</span><span class='template-match'>参选总价包含达到服务使用和验收要求及完成所有相关服务的所有费用</span><span class='bidder-data'>。</span><span class='template-match'>参选人若有漏项则自行承担相关风险</span><span class='bidder-data'>；</span><span class='template-match'>若报价有虚增</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>或数量</span><span class='bidder-data'>，</span><span class='template-match'>合同结算时相应扣除该部分费用</span><span class='bidder-data'>。
+2、</span><span class='template-match'>所有价格均用人民币表示</span><span class='bidder-data'>，</span><span class='template-match'>单位为元</span><span class='bidder-data'>，</span><span class='template-match'>精确到小数点后两位</span><span class='bidder-data'>。
+</span><span class='template-match'>参选人法定代表人</span><span class='bidder-data'>或授权代表</span><span class='template-match'>签字或盖章</span><span class='bidder-data'>：参选人名</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>参选人名称</span><span class='missing-item'>日期</span><span class='missing-item'>年月</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件3分项报价表（格式自拟）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件3分项报价表</span><span class='bidder-data'>
+</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'>：药品长三角分中心信息技术支持服务</span><span class='template-match'>项目</span><span class='bidder-data'>
+项目</span><span class='template-match'>编号</span><span class='bidder-data'>：XTJS2025-427
+</span><span class='template-match'>货币单位</span><span class='bidder-data'>：</span><span class='template-match'>元/人民币</span><span class='bidder-data'>
+</span><span class='template-match'>序号</span><span class='bidder-data'> </span><span class='template-match'>服务内容/人员类型</span><span class='bidder-data'> </span><span class='template-match'>单价</span><span class='bidder-data'> </span><span class='template-match'>数量</span><span class='bidder-data'> </span><span class='template-match'>总价</span><span class='bidder-data'> </span><span class='template-match'>备注</span><span class='bidder-data'>
+1. 项目经理 1,250.00 53.5 66,875.00
+2. 运维工程师 1,000.00 267.5 267,500.00
+3. 支持工程师 1,000.00 54.5 54,500.00
+4.
+</span><span class='template-match'>合计</span><span class='bidder-data'> （小写）：388,875.00 （大写）： 叁拾捌万捌仟捌佰柒拾伍元整
+注：
+1．</span><span class='template-match'>所有价格均系用人民币表示</span><span class='bidder-data'>，</span><span class='template-match'>单位为元</span><span class='bidder-data'>，</span><span class='template-match'>精确到小数点后两位</span><span class='bidder-data'>；
+2．</span><span class='template-match'>按采购内容进行分项报价</span><span class='bidder-data'>。</span><span class='template-match'>表格行数参选人自行增加</span><span class='bidder-data'>；
+3．</span><span class='template-match'>此表合计总价须与附件2报价一览表参选总价一致</span><span class='bidder-data'>。
+</span><span class='template-match'>参选人法定代表人</span><span class='bidder-data'>（或授权表</span><span class='template-match'>签字或盖章</span><span class='bidder-data'>：
+参选人名
+2025年12月17日</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>参选人名称</span><span class='missing-item'>日期</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件4响应文件偏离表（格式)</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件4响应文件偏离表</span><span class='bidder-data'>
+</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'>：药品长三角分中心信息技术支持服务</span><span class='template-match'>项目</span><span class='bidder-data'>项目</span><span class='template-match'>编号</span><span class='bidder-data'>：XTJS2025-427
+</span><span class='template-match'>序号</span><span class='bidder-data'> </span><span class='template-match'>比选文件的</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>需求</span><span class='bidder-data'> </span><span class='template-match'>响应文件的响应</span><span class='bidder-data'> </span><span class='template-match'>偏离说明</span><span class='bidder-data'> </span><span class='template-match'>对应响应文件所在页</span><span class='bidder-data'>
+1-1 整体服务方案-策划 方案 满足要求 无偏离 P25
+1-2 整体服务方案-现场 管理方案 满足要求 无偏离 P25
+1-3 整体服务方案-应急 处置措施 满足要求 无偏离 P26
+1-4 整体服务方案-核心 工作内容 满足要求 无偏离 P27
+1-5 整体服务方案-硬件 投入 满足要求 无偏离 P28
+1-6 整体服务方案-服务 验收 满足要求 无偏离 P28
+2 工作进度及时间安排 满足要求 无偏离 P30
+3 重点、难点分析及</span><span class='template-match'>对 应措施 满足要求 无偏离 P32
+4 合理化建议及特色服 务承诺 满足要求 无偏离 P33
+5 项目人员情况 满足要求 无偏离 P35
+注：对不满足比选文件要求的部分</span><span class='bidder-data'>，</span><span class='template-match'>必须明确如实填写并说明原因</span><span class='bidder-data'>。
+</span><span class='template-match'>参选人名称</span><span class='bidder-data'></span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>参选人法定代表人</span><span class='missing-item'>签字或盖章</span><span class='missing-item'>日期</span><span class='missing-item'>年月</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件5参选人基本情况表（格式)</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件5参选人基本情况表</span><span class='bidder-data'>
+（一）</span><span class='template-match'>基本情况</span><span class='bidder-data'>：
+1．</span><span class='template-match'>单位名称</span><span class='bidder-data'>：上海舒源信息技术有限公司
+2.</span><span class='template-match'>地址</span><span class='bidder-data'>：上海市杨浦区长阳路1687号东1225幢（A楼）A509、A510
+3.</span><span class='template-match'>邮编</span><span class='bidder-data'>：200433
+4.</span><span class='template-match'>电话/传真</span><span class='bidder-data'>：17721408226
+5．</span><span class='template-match'>成立日期或注册日期</span><span class='bidder-data'>：2020年04月09日
+6．</span><span class='template-match'>行业类型</span><span class='bidder-data'>：软件和信息技术服务业
+（二）</span><span class='template-match'>基本经济指标</span><span class='bidder-data'>（到上年度12月31日止）：
+1．</span><span class='template-match'>实收资本</span><span class='bidder-data'>：173万元
+2.</span><span class='template-match'>资产总额</span><span class='bidder-data'>：151万元
+3.</span><span class='template-match'>负债总额</span><span class='bidder-data'>：73万元
+4.</span><span class='template-match'>营业收入</span><span class='bidder-data'>：403万元
+5.</span><span class='template-match'>净利润</span><span class='bidder-data'>：73万元
+6.</span><span class='template-match'>上交税收</span><span class='bidder-data'>：29万元
+7.</span><span class='template-match'>在册人数</span><span class='bidder-data'>：10人
+（三）</span><span class='template-match'>其他情况</span><span class='bidder-data'>：
+1．</span><span class='template-match'>专业人员分类及人数</span><span class='bidder-data'>：PMP证书-3人
+2.</span><span class='template-match'>企业资质证书情况</span><span class='bidder-data'>：无
+3．</span><span class='template-match'>近三年内因违法违规受到行业及相关机构通报批评以上处理的情况</span><span class='bidder-data'>：无
+4．</span><span class='template-match'>其他需要说明的情况</span><span class='bidder-data'>：无
+</span><span class='template-match'>我方承诺上述情况是真实</span><span class='bidder-data'>、</span><span class='template-match'>准确的</span><span class='bidder-data'>，</span><span class='template-match'>我方同意根据采购人进一步要求出示有关资料予以证实</span><span class='bidder-data'>。
+参选人法定代表参选人名</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>参选人法定代表人</span><span class='missing-item'>签字或盖章</span><span class='missing-item'>参选人名称</span><span class='missing-item'>日期</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件6近三年完成的类似项目业绩清单（格式）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件6近三年完成的类似</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>业绩清单</span><span class='bidder-data'>
+</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'>：药品长三角分中心信息技术支持服务</span><span class='template-match'>项目</span><span class='bidder-data'>项目</span><span class='template-match'>编号</span><span class='bidder-data'>：XTJS2025-427
+</span><span class='template-match'>序号</span><span class='bidder-data'> </span><span class='template-match'>年份</span><span class='bidder-data'> </span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'> </span><span class='template-match'>合同金额</span><span class='bidder-data'> </span><span class='template-match'>委托内容</span><span class='bidder-data'> </span><span class='template-match'>委托单位</span><span class='bidder-data'> </span><span class='template-match'>所附证明材料在本响</span><span class='bidder-data'> </span><span class='template-match'>应文件的所在页码</span><span class='bidder-data'>
+1. 2025 Digital Commerce 驻场 运维服务 1,566,000. 00 人员驻场 信华信（大 连）软件服 务股份有限 公司 P10
+2. 2025 MUFJ数据库服务 器运维服务 540,000.00 人员驻场 日铁软件 （上海）有 限公司 P11
+3. 2024 必优信息技术支 持 80,850.00 人员驻场 上海必优信 息系统有限 公司 P12
+… 6
+注：
+1．</span><span class='template-match'>本表后应附合同复印件或影印件</span><span class='bidder-data'>。
+2．</span><span class='template-match'>类似程度</span><span class='bidder-data'>，</span><span class='template-match'>分为与本</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>完全相同</span><span class='bidder-data'>、</span><span class='template-match'>近似相同</span><span class='bidder-data'>、</span><span class='template-match'>同一行业</span><span class='bidder-data'>、</span><span class='template-match'>基本无关</span><span class='bidder-data'>，</span><span class='template-match'>具体判别由评审委员会决定</span><span class='bidder-data'>。
+3．</span><span class='template-match'>成功案例</span><span class='bidder-data'>，</span><span class='template-match'>以合同签订日期为准</span><span class='bidder-data'>，</span><span class='template-match'>须提供合同首页</span><span class='bidder-data'>（显示项目名称或项目内容页）</span><span class='template-match'>和签字盖章页复印件或影印件</span><span class='bidder-data'>。</span><span class='template-match'>提供合同或中标通知书复印件</span><span class='bidder-data'>、</span><span class='template-match'>用户证明和业绩清单</span><span class='bidder-data'>，</span><span class='template-match'>内容包括合同名称</span><span class='bidder-data'>、</span><span class='template-match'>数量</span><span class='bidder-data'>、</span><span class='template-match'>金额</span><span class='bidder-data'>、</span><span class='template-match'>用户信息等</span><span class='bidder-data'>，</span><span class='template-match'>不提供复印件的不得分</span><span class='bidder-data'>。
+4．</span><span class='template-match'>已承揽尚在履约期合同</span><span class='bidder-data'>，</span><span class='template-match'>以合同签订日期为准</span><span class='bidder-data'>，</span><span class='template-match'>须提供合同首页</span><span class='bidder-data'>（显示项目名称或项目内容页）</span><span class='template-match'>和签字盖章页的复印件或影印件</span><span class='bidder-data'>。
+印文 </span><span class='template-match'>参选人法定代表人</span><span class='bidder-data'>（或授权代表）</span><span class='template-match'>签字或盖章</span><span class='bidder-data'>：总技 </span><span class='template-match'>参选人名称</span><span class='bidder-data'>上海舒源信息技术有限公司（盖章） 上海舒
+项日支持服务协议
+员为最终客户提供本协议项下的所有服务，具体服务内容以本协议附件《项目支持服务》的约定为准，
+有术有限公公乙方应指定乙方服务人员为最终客户提供本协议项下的所有服务，并根据本协议的约定，向最终客户F提供服务报告，最终客户确认乙方提供的服务不符合本协议约定的服务要求的，乙方除应在收到最终客户FR通知后【5】日内改正或采取补我措施以满足本协议约定外，还应按照约定承担违约责任。
+甲方：信华信（大连）软件服务股份有限公司乙方：上海舒源信息技术有限公司
+行过程中，甲方和最终客户R有权随时对限务内容中的任何一项或几项进行调整，乙方无正当理由不得色配合，如因甲方和最终客户FR调整导致服务费增减的，由双方另行协商签订书面补充协议。
+甲乙双方于2025年9月1日案订了《服务采购框架协议》（以下简称“原合同”）（甲方合同编号：2502B01589）现甲乙双方本者平等、公平的原则，经友好协商，就原合同未尽事宜，进行如下补充：</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>日期</span><span class='missing-item'>年月</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件7-1法定代表人资格证明书（须加盖公章）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件7-1法定代表人资格证明书</span><span class='bidder-data'>（须加盖公章）
+致（国家药品监督管理局药品审评检查长三角分中心）：
+</span><span class='template-match'>兹证明</span><span class='bidder-data'>（郭文博），</span><span class='template-match'>性别</span><span class='bidder-data'>男，</span><span class='template-match'>年龄</span><span class='bidder-data'>45，身份证号码310110198008040419，现任我单位（上海舒源信息技术有限公司总经理）），</span><span class='template-match'>系本公司法定代表人</span><span class='bidder-data'>（负责人）。
+名郭文博
+中华人民共和国居民身份证
+性别男民族汉
+出生1980年8月4日
+签发机关上海市公安局杨浦分局有效期限2016.05.11-2036.05.11
+公民身份号码310110198008040419
+</span><span class='template-match'>参选人名称</span><span class='bidder-data'>：</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>身份证号码现任我单位</span><span class='missing-item'>日期</span><span class='missing-item'>年月日</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件7-2法定代表人授权委托书（须加盖公章）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件7-2法定代表人授权委托书</span><span class='bidder-data'>（须加盖公章）
+</span><span class='template-match'>本授权书声明</span><span class='bidder-data'>：</span><span class='template-match'>注册于</span><span class='bidder-data'>（上海市杨浦区长阳路1687号东1225幢（A楼）A509、A510）</span><span class='template-match'>的（上海舒源信息技术有限公司）的下面签字的</span><span class='bidder-data'>（郭文博、总经理）</span><span class='template-match'>代表本公司授权下面签字的</span><span class='bidder-data'>（郭文博、总经理）</span><span class='template-match'>为本公司的合法代理人</span><span class='bidder-data'>，</span><span class='template-match'>以我方的名义参加</span><span class='bidder-data'>（药品长三角分中心信息技术支持服务项目、XTJS2025-427）</span><span class='template-match'>的报价活动</span><span class='bidder-data'>，</span><span class='template-match'>并代表我方全权办理针对上述</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>的比选</span><span class='bidder-data'>、</span><span class='template-match'>响应文件澄清</span><span class='bidder-data'>、</span><span class='template-match'>签约等一切具体事务和签署相关文件</span><span class='bidder-data'>。</span><span class='template-match'>我方对被授权人的签名事项负全部责任</span><span class='bidder-data'>。
+本授权书于2025年12月01日至2025年12月31日有效，</span><span class='template-match'>代理人无转委托权</span><span class='bidder-data'>。</span><span class='template-match'>特此声明</span><span class='bidder-data'>。
+</span><span class='template-match'>法定代表人签字或盖章</span><span class='bidder-data'>：
+</span><span class='template-match'>被授权人签字或盖章</span><span class='bidder-data'>：博郭博郭印印文
+</span><span class='template-match'>职务</span><span class='bidder-data'>：总经理
+</span><span class='template-match'>单位名称</span><span class='bidder-data'>（盖
+</span><span class='template-match'>地址</span><span class='bidder-data'>：上海市长家区淞虹路207号A幢4楼0432室
+中华人民共和国居民身份证
+之郭文博 民汉 41980年8月4日 上海市杨浦区贵阳路121 弄49号
+签发机关上海市公安局杨浦分局有效期限2016.05.11-2036.05.11
+310110198008040419</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>本授权书于年月</span><span class='missing-item'>日至年月日有效</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件8参选人承诺声明函（须加盖公章）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件8参选人承诺声明函</span><span class='bidder-data'>（须加盖公章）
+致（国家药品监督管理局药品审评检查长三角分中心）：
+</span><span class='template-match'>我公司承诺已自查</span><span class='bidder-data'>，</span><span class='template-match'>在参加本</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>招投标活动中未违反《中华人民共和国招标投标法实施条例》第三十四条</span><span class='bidder-data'>“</span><span class='template-match'>与采购人存在利害关系可能影响招标公正性的法人</span><span class='bidder-data'>、</span><span class='template-match'>其他组织或者个人</span><span class='bidder-data'>，</span><span class='template-match'>不得参加投标</span><span class='bidder-data'>。</span><span class='template-match'>单位负责人为同一人或者存在控股</span><span class='bidder-data'>、</span><span class='template-match'>管理关系的不同单位</span><span class='bidder-data'>，</span><span class='template-match'>不得参加同一标段投标或者未划分标段的同一采购</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>投标</span><span class='bidder-data'>。</span><span class='template-match'>违反前两款规定的</span><span class='bidder-data'>，</span><span class='template-match'>相关投标均无效</span><span class='bidder-data'>。”</span><span class='template-match'>之规定</span><span class='bidder-data'>。
+</span><span class='template-match'>我公司承诺在参加本</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>招投标活动前三年内</span><span class='bidder-data'>，</span><span class='template-match'>在经营活动中没有重大违法记录</span><span class='bidder-data'>，</span><span class='template-match'>遵守国家其他有关的法律</span><span class='bidder-data'>、</span><span class='template-match'>法规和管理办法</span><span class='bidder-data'>。
+</span><span class='template-match'>特此声明</span><span class='bidder-data'>。
+</span><span class='template-match'>参选人</span><span class='bidder-data'>（加盖公章
+博郭印文
+法定代表人或授权委托人（签字或盖章）：
+</span><span class='template-match'>日期</span><span class='bidder-data'>：2025年12月17日
+</span><span class='template-match'>后附</span><span class='bidder-data'>：</span><span class='template-match'>信用报告</span><span class='bidder-data'>。
+</span><span class='template-match'>查询打印网址</span><span class='bidder-data'>：</span><span class='template-match'>https</span><span class='bidder-data'>://</span><span class='template-match'>www</span><span class='bidder-data'>.</span><span class='template-match'>creditchina</span><span class='bidder-data'>.</span><span class='template-match'>gov</span><span class='bidder-data'>.</span><span class='template-match'>cn</span><span class='bidder-data'>/
+扫一扫核验码
+信用中国
+信用中国WWW.C.RFDITCHINA.GOV.CN
+报告编号：202512150140433555474V 生成间：2025年12月15日01:40:43
+扫一扫验码
+公共信用信息概览
+上海舒源信息技术有限公司
+法人和非法人组织 公共信用信息报告
+登记注册基本信息基础信息
+法定代表人负责 统一社会信用代码91310110MA1G952W05人执行事务合伙郭文博 人
+版本号V2.0
+企业类型有限责任公司（自然人投资或控股）成立日期2020-04-09
+住所上海市杨浦区长阳路1687号东1225幢（A楼）A509A510（集中墅记地）
+机构名称：上海舒源信息技术有限公司统一社会信用代码：91310110MA1G952W05报告编号：202512150140433655474Y
+海关注册登记信息
+2025-09-08
+所在地海关
+杨浦海关
+备案日期
+海关注销标志正常
+报告生成日期2025年12月15日
+国家公共信用和地理空间信息中心
+报告出具单位
+2025年12月15日
+报告生成日期
+报告出具单位国家公共信用和地理空间信息中心
+信用报告
+第1页共5页
+信用中国
+售编号：202512150140433655474Y 生成间：2025年12月15日01:403
+报售编号：202512150240433655474Y 生成时间：2025年12月15日01:40:43
+扫一扫 1
+扫一扫 核验码
+报告说明
+正文
+核验码
+上海舒源信息技术有限公司</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>法定代表人或授权委托人</span><span class='missing-item'>年月日</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件9不参与围标串标承诺书（须加盖公章）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件9不参与围标串标承诺书</span><span class='bidder-data'>（须加盖公章）
+致（国家药品监督管理局药品审评检查长三角分中心、上海信投建设有限公司）：
+目编号：XTJS2025-427）的投标。就本次投标，</span><span class='template-match'>我公司郑重承诺如下：我公司自觉遵守有关法律法规</span><span class='bidder-data'>，</span><span class='template-match'>作为参选人参与</span><span class='bidder-data'>药品长三角分中心信息技术支持服务项目（项
+（一）不组织、不参与任何串标投标</span><span class='template-match'>的行为；
+（二）绝不以他人名义投标</span><span class='bidder-data'>，不组织、不参与其他弄虚作假的方式参加投标的行为；
+（三）绝不出让或出租资格、资质证书参加投标，不组织、不参与类似违法违规行为；
+（四）主动积极地协助、接受相关部门调查串标投标等违法违规行为；
+我公司对以上承诺内容的真实性和履约性负责，如有违诺。将自愿接受行政主管部门对此做出的行政处罚，并且无条件承担由此带来的一切后果和责任。在接受违规行为调查期间，同意暂停我公司在上海参与依法必须进行比选项目的投标资格。
+</span><span class='template-match'>特此承诺</span><span class='bidder-data'>！
+</span><span class='template-match'>参选人</span><span class='bidder-data'>
+</span><span class='template-match'>日期</span><span class='bidder-data'>：2025年12月17日</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>就本次投标</span><span class='missing-item'>我公司郑重承诺如下</span><span class='missing-item'>不组织</span><span class='missing-item'>不参与任何串标投标的行为</span><span class='missing-item'>绝不以他人名义投标</span><span class='missing-item'>不组织</span><span class='missing-item'>不参与其他弄虚作假的方式参加投标的行为</span><span class='missing-item'>绝不出让或出租资格</span><span class='missing-item'>资质证书参加投标</span><span class='missing-item'>不组织</span><span class='missing-item'>不参与类似违法违规行为</span><span class='missing-item'>主动积极地协助</span><span class='missing-item'>接受相关部门调查串标投标等违法违规行为</span><span class='missing-item'>我公司对以上承诺内容的真实性和履约性负责</span><span class='missing-item'>如有违诺</span><span class='missing-item'>将自愿接受行政主管部门对此做出的行政处罚</span><span class='missing-item'>并且无条件承担由此带来的一切后果和责任</span><span class='missing-item'>在接受违规行为调查期间</span><span class='missing-item'>同意暂停我公司在上海参与依法必须进行比选</span><span class='missing-item'>项目</span><span class='missing-item'>的投标资格</span><span class='missing-item'>授权委托人</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件10项目人员配置表（格式）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件10</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>人员配置表</span><span class='bidder-data'>
+</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>名称</span><span class='bidder-data'>：药品长三角分中心信息技术支持服务</span><span class='template-match'>项目</span><span class='bidder-data'>
+项目</span><span class='template-match'>编号</span><span class='bidder-data'>：XTJS2025-427
+</span><span class='template-match'>序号</span><span class='bidder-data'> </span><span class='template-match'>姓名</span><span class='bidder-data'> </span><span class='template-match'>年龄</span><span class='bidder-data'> </span><span class='template-match'>性别</span><span class='bidder-data'> </span><span class='template-match'>职务</span><span class='bidder-data'>/ </span><span class='template-match'>职称</span><span class='bidder-data'> </span><span class='template-match'>履历和</span><span class='bidder-data'> </span><span class='template-match'>业绩</span><span class='bidder-data'> </span><span class='template-match'>所附业绩</span><span class='bidder-data'> </span><span class='template-match'>证明材料</span><span class='bidder-data'> </span><span class='template-match'>页码</span><span class='bidder-data'> </span><span class='template-match'>所获荣誉</span><span class='bidder-data'> /</span><span class='template-match'>证书</span><span class='bidder-data'> 本</span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>承担</span><span class='bidder-data'> </span><span class='template-match'>任务和角色</span><span class='bidder-data'> </span><span class='template-match'>备注</span><span class='bidder-data'>
+一、服务小组组长
+1. 董容丰 49 男 项目 经理 项目管理
+二、拟投入服务小组成员
+1. 黄枭 36 男 运维 工程师 驻场技术支 持
+2. 周斌 39 男 支持 工程师 远程技术支 持
+3.
+4.
+5.
+6.
+注：
+1.</span><span class='template-match'>提供拟投入</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'></span><span class='template-match'>人员的职称证</span><span class='bidder-data'>（如有）、</span><span class='template-match'>执业资格证书</span><span class='bidder-data'>（如有）</span><span class='template-match'>等相关资料的复印件或影印件</span><span class='bidder-data'>。2.</span><span class='template-match'>在服务期限内</span><span class='bidder-data'>，</span><span class='template-match'>服务小组成员应保持稳定</span><span class='bidder-data'>，</span><span class='template-match'>以保证服务工作的正常进行</span><span class='bidder-data'>。</span><span class='template-match'>供应商可根据</span><span class='bidder-data'></span><span class='template-match'>项目</span><span class='bidder-data'>实际时须经采购人备案同意后方可更换。有限公司</span></div>
+                        <div class="missing-box">
+                            <div class="missing-title">⚠️ 缺失的模版锚点内容（请核实）：</div>
+                    <span class='missing-item'>实际需求和业务需要对成员作出合理调整</span><span class='missing-item'>若更换服务小组组长</span><span class='missing-item'>应以相当资格与技能的人员替换</span><span class='missing-item'>同时须经采购人备案同意后方可更换</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件11财务状况及税收、社会保障资金缴纳情况声明函</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件11财务状况及税收</span><span class='bidder-data'>、</span><span class='template-match'>社会保障资金缴纳情况声明函</span><span class='bidder-data'>
+</span><span class='template-match'>财务状况及税收</span><span class='bidder-data'>、</span><span class='template-match'>社会保障资金 缴纳情况声明函</span><span class='bidder-data'>
+</span><span class='template-match'>我方</span><span class='bidder-data'>（上海舒源信息技术有限公司）</span><span class='template-match'>符合下述条件</span><span class='bidder-data'>：
+1．</span><span class='template-match'>具有健全的财务会计制度</span><span class='bidder-data'>；
+2．</span><span class='template-match'>有依法缴纳税收和社会保障资金的良好记录</span><span class='bidder-data'>。
+</span><span class='template-match'>特此声明</span><span class='bidder-data'>。
+</span><span class='template-match'>我方对上述声明的真实性负责</span><span class='bidder-data'>。</span><span class='template-match'>如有虚假</span><span class='bidder-data'>，</span><span class='template-match'>将依法承担相应责任</span><span class='bidder-data'>。
+供应商名称（公章）：
+</span><span class='template-match'>日期</span><span class='bidder-data'>：</span></div></div>
+                <div class="consistency-section">
+                    <div class="section-head">附件12 保证金缴纳凭证（格式）（如有）</div>
+            <div class='bidder-content'><span class='bidder-data'></span><span class='template-match'>附件12</span><span class='bidder-data'></span><span class='template-match'>保证金缴纳凭证</span><span class='bidder-data'>（格式）（如有）
+招商银行CHMHASTS%K
+出账回单
+交易日期：2025年12月1511业务类型：支付 业务编号：70S127B1000008328068交易流水：C0547BC001KPE2Z 相关编号：客户编号： 付款账号：121981367010000付款人：上海舒源信息技术有限公司 付款开户行：招商银行上海分行上海联洋支行 收款账号：8110201012401801745收款人：上海信投建设有限公司 收款开户行：中信银行股份有限公司上海卢湾支行 交易金额（小写）：CNY6.000.00 交易金额（大）：人民币陆仟元整 交易摘要：427项目保证金 业务参考号：20251215132813
+经办：复核：授权：回单编号
+202512 AOY</span></div></div>
+            </div>
+        </body>
+        </html>
+        

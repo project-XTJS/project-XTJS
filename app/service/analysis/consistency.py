@@ -1,90 +1,62 @@
 import re
 
 class DocumentProcessor:
-    """利用 Model 模板锚点精准切分投标人文件（支持页码剔除与章节刹车）"""
+    """利用 Model 模板锚点精准切分投标人文件"""
 
     @classmethod
     def segment_document(cls, raw_json: dict, templates: list) -> list:
         data_node = raw_json.get('data', raw_json)
         sections = data_node.get('layout_sections', [])
         
-        # 1. 预处理正则：保留数字，去除高频干扰词
         for temp in templates:
-            title = temp['title']
-            # 保留数字以区分附件5和附件8
-            clean_title = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', title)
-            core_keyword = clean_title[:5] # 取前5个字符做特征
-            temp['pattern'] = re.compile(f'.*?'.join(list(core_keyword)))
+            clean_title = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', temp['title'])
+            temp['pattern'] = re.compile(f'.*?'.join(list(clean_title[:5])))
             temp['extracted_text'] = ""
 
-        results = []
-        current_temp_idx = -1
-        captured = []
-
-        # 2. 单次顺序遍历，状态机式模板匹配与内容捕获
+        current_idx, captured = -1, []
         for sec in sections:
             text = str(sec.get('text', '')).strip()
             sec_type = sec.get('type', '')
             if not text: continue
             
-            # 识别附件标题特征
-            is_attachment_heading = (sec_type == 'heading' and re.search(r'^(附件|格式|附表)', text))
+            # 终止条件，可自定义刹车点
+            is_break_text = (
+                re.match(r'^第[一二三四五六七八九十百]+[章节部分]', text) or 
+                re.match(r'^[一二三四五六七八九十]+[、.]', text) or
+                "营业执照" in text or
+                "技术文件" in text
+            )
             
-            # 章节刹车特征：识别大章节标题作为终止符号
-            is_chapter_break = (sec_type == 'heading' and re.match(r'^第[一二三四五六七八九十百]+[章节部分]', text))
+            if sec_type == 'heading' and is_break_text:
+                if current_idx != -1:
+                    templates[current_idx]['extracted_text'] = "\n".join(captured)
+                    current_idx, captured = -1, []
+                continue
 
-            # --- 逻辑处理 ---
-            
-            # 如果遇到了下一章，立刻结算并彻底关闭录制
-            if is_chapter_break:
-                if current_temp_idx != -1:
-                    templates[current_temp_idx]['extracted_text'] = "\n".join(captured)
-                    current_temp_idx = -1
-                    captured = []
-                continue 
-
-            if is_attachment_heading:
+            # 附件标题识别保持不变
+            if sec_type == 'heading' and re.search(r'^(附件|格式|附表)', text):
                 matched_idx = -1
-                for i in range(current_temp_idx + 1, len(templates)):
+                for i in range(current_idx + 1, len(templates)):
                     if templates[i]['pattern'].search(text):
-                        matched_idx = i
-                        break
+                        matched_idx = i; break
                 
                 if matched_idx != -1:
-                    # 匹配成功：结算上一个
-                    if current_temp_idx != -1:
-                        templates[current_temp_idx]['extracted_text'] = "\n".join(captured)
-                    
-                    # 开启新的录制
-                    current_temp_idx = matched_idx
-                    captured = [text]
+                    if current_idx != -1: templates[current_idx]['extracted_text'] = "\n".join(captured)
+                    current_idx, captured = matched_idx, [text]
                     continue
-                else:
-                    # 遇到了陌生附件 Heading，刹车结算
-                    if current_temp_idx != -1:
-                        templates[current_temp_idx]['extracted_text'] = "\n".join(captured)
-                        current_temp_idx = -1
-                        captured = []
+                elif current_idx != -1:
+                    templates[current_idx]['extracted_text'] = "\n".join(captured)
+                    current_idx, captured = -1, []
                     continue
 
-            # 正在录制状态下吸入内容
-            if current_temp_idx != -1:
-                captured.append(text)
+            if current_idx != -1: captured.append(text)
 
-        # 文档结束结算最后一个
-        if current_temp_idx != -1:
-            templates[current_temp_idx]['extracted_text'] = "\n".join(captured)
+        if current_idx != -1: templates[current_idx]['extracted_text'] = "\n".join(captured)
 
-        # 组装返回并剔除末尾页码
+        results = []
         for temp in templates:
-            final_text = temp['extracted_text'].strip()
-            # 规则：如果整段文字末尾出现“换行+数字”或“空格+数字”，则判定为页码并删除
-            final_text = re.sub(r'[\s\n]+\d+$', '', final_text)
-            results.append({
-                "title": temp['title'],
-                "text": final_text
-            })
-            
+            final_text = re.sub(r'[\s\n]+\d+$', '', temp['extracted_text'].strip())
+            results.append({"title": temp['title'], "text": final_text})
         return results
 
 
@@ -146,7 +118,8 @@ class ConsistencyChecker:
             # 如果片段中出现“粘贴”，则跳过该锚点
             if "粘贴" in s:
                 continue
-                
+            if "供应商名称" == s:
+                continue
             norm_s = self._normalize(s)
             if len(norm_s) >= 2:
                 anchors.append(norm_s)

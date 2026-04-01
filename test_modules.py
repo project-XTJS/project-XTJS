@@ -1,104 +1,52 @@
-import json
-import os
-
-# 导入改造后的三大模块
+import json, os
 from app.service.analysis.template_extractor import TemplateExtractor
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
+from app.service.analysis.visualizer import ReportVisualizer
 
 def main():
-    # 替换为你实际的文件路径（请根据你的本地环境调整）
-    model_path = "./ocr_results/427/427-model.json"
-    test_path = "./ocr_results/427/427-hongyin.json"
-
-    if not os.path.exists(model_path) or not os.path.exists(test_path):
-        print(f"找不到指定的 JSON 文件，请检查路径。")
+    # 1. 加载文件
+    m_path, t_path = "./ocr_results/427/427-model.json", "./ocr_results/427/427-shuyuan.json"
+    
+    if not os.path.exists(m_path) or not os.path.exists(t_path):
+        print(f"错误: 找不到文件 {m_path} 或 {t_path}")
         return
 
-    print("正在加载 JSON 数据...")
-    with open(model_path, 'r', encoding='utf-8') as f:
-        model_raw_json = json.load(f)
-    with open(test_path, 'r', encoding='utf-8') as f:
-        test_raw_json = json.load(f)
+    with open(m_path, 'r', encoding='utf-8') as f: m_json = json.load(f)
+    with open(t_path, 'r', encoding='utf-8') as f: t_json = json.load(f)
 
-    # ========================================================
-    # 测试 1：动态白名单提取 (雷达 A：完整性清单)
-    # ========================================================
-    print("\n" + "="*50)
-    print(" 1. 测试动态白名单提取 (用于完整性检查)")
-    print("="*50)
-    reqs = TemplateExtractor.extract_requirements(model_raw_json)
-    print("✅ 提取的主项目录 (Main):")
-    for item in reqs['main']: print(f"  - {item}")
-    print("\n✅ 提取的子项材料 (Sub):")
-    for item in reqs['sub']: print(f"  - {item}")
+    print("正在执行合规性审查...")
 
-    # ========================================================
-    # 测试 2：完整性检查服务
-    # ========================================================
-    print("\n" + "="*50)
-    print(" 2. 测试完整性检查服务 (Integrity Checker)")
-    print("="*50)
+    # 2. 完整性检查：核对清单是否缺失
+    integrity_report = IntegrityChecker().check_integrity(m_json, t_json)
     
-    integrity_checker = IntegrityChecker() 
-    integrity_report = integrity_checker.check_integrity(model_raw_json, test_raw_json)
+    # 3. 一致性检查：比对模板锚点
+    consistency_report = ConsistencyChecker().compare_raw_data(m_json, t_json)
     
-    print(f"📊 完整性合规得分: {integrity_report['integrity_score']} 分")
-    print(f"🔍 找到的项目数: {integrity_report['found_count']} 项")
-    print(f"❌ 缺失的项目数: {integrity_report['missing_count']} 项")
+    # 4. 获取用于可视化的分段数据
+    # 先从招标文件提取标准模板信息
+    templates = TemplateExtractor.extract_consistency_templates(m_json)
     
-    with open("result_integrity.json", "w", encoding="utf-8") as f:
-        json.dump(integrity_report, f, ensure_ascii=False, indent=4)
-    print("💾 -> 完整性详细报告已保存至: result_integrity.json")
+    # 分别切分“招标文件模板”和“投标文件正文”
+    m_segs = DocumentProcessor.segment_document(m_json, templates)  # 模板段落（用于计算锚点）
+    b_segs = DocumentProcessor.segment_document(t_json, templates)  # 投标人段落（用于 HTML 展示主体）
 
-    # ========================================================
-    # 测试 3：一致性模板提取 & 切分导出 (雷达 B：标准模板)
-    # ========================================================
-    print("\n" + "="*50)
-    print(" 3. 测试模板提取与文档切分 (用于一致性检查)")
-    print("="*50)
-    
-    # 独立提取 Model 的真实模板（带内容的附件）
-    templates = TemplateExtractor.extract_consistency_templates(model_raw_json)
-    print(f"✅ 共提取到 {len(templates)} 个标准附件模板")
-    for temp in templates:
-        print(f"  - {temp['title']} (模板长度: {len(''.join(temp['content']))} 字符)")
-    
-    print("\n正在根据真实模板切分文档...")
-    m_segs = DocumentProcessor.segment_document(model_raw_json, templates)
-    b_segs = DocumentProcessor.segment_document(test_raw_json, templates)
-
-    with open("extracted_model_segments.json", "w", encoding="utf-8") as f:
-        json.dump(m_segs, f, ensure_ascii=False, indent=4)
-    with open("extracted_test_segments.json", "w", encoding="utf-8") as f:
-        json.dump(b_segs, f, ensure_ascii=False, indent=4)
-        
-    print("💾 -> Model 用于比对的切分段落已保存至: extracted_model_segments.json")
-    print("💾 -> Test(投标人) 用于比对的切分段落已保存至: extracted_test_segments.json")
-
-    # ========================================================
-    # 测试 4：一致性检查服务
-    # ========================================================
-    print("\n" + "="*50)
-    print(" 4. 测试一致性比对服务 (Consistency Checker)")
-    print("="*50)
-
-    consistency_checker = ConsistencyChecker()
-    consistency_report = consistency_checker.compare_raw_data(
-        model_raw_json, 
-        test_raw_json, 
-        integrity_report.get('found_sections', []) # 灵魂联动：传入完整性结果
+    # 5. 生成可视化报告
+    print("正在生成基于投标文件内容的可视化报告...")
+    # 🌟 关键修改：同时传入 b_segs 和 m_segs
+    # 报告将以 b_segs (投标文件) 为底色进行渲染
+    html = ReportVisualizer().generate_html(
+        integrity_report, 
+        consistency_report, 
+        b_segs, 
+        m_segs
     )
     
-    passed_count = sum(1 for r in consistency_report if r['is_passed'])
-    print(f"📊 一致性检查完成: 共对比了 {len(consistency_report)} 个模块")
-    print(f"✅ 完全一致/免审通过: {passed_count} 个")
-    print(f"❌ 存在缺失/篡改: {len(consistency_report) - passed_count} 个")
+    with open("final_report.html", "w", encoding="utf-8") as f: 
+        f.write(html)
+        
+    print("✨ 报告已成功生成: final_report.html")
+    print("提示: 现在报告主体展示的是投标人的实际内容，绿色代表匹配成功的固定格式，黑色代表填写的业务数据。")
 
-    with open("result_consistency.json", "w", encoding="utf-8") as f:
-        json.dump(consistency_report, f, ensure_ascii=False, indent=4)
-    print("💾 -> 一致性检查详细报告已保存至: result_consistency.json")
-    print("\n测试执行完毕！✨")
-
-if __name__ == "__main__":
+if __name__ == "__main__": 
     main()
