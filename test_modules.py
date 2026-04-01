@@ -1,100 +1,104 @@
-# test_modules.py
-import sys
-import os
 import json
+import os
 
-# 确保项目根目录在系统路径中，解决跨文件夹导入问题
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
-
-# 引入各业务模块
+# 导入改造后的三大模块
+from app.service.analysis.template_extractor import TemplateExtractor
 from app.service.analysis.integrity import IntegrityChecker
-from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
-from app.service.analysis.itemized_pricing import ItemizedPricingChecker
-from app.service.analysis.deviation import DeviationChecker
-from app.service.analysis.verification import VerificationChecker
+from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
 
+def main():
+    # 替换为你实际的文件路径（请根据你的本地环境调整）
+    model_path = "./ocr_results/427/427-model.json"
+    test_path = "./ocr_results/427/427-hongyin.json"
 
-def extract_text_from_json(res_data: dict) -> str:
-    """
-    从当前 OCR/解析 JSON 中提取文本
-
-    这里专门保持 layout_sections 的原始顺序，
-    不再手动重排 layout_sections / table_sections，
-    以免破坏原始阅读顺序，影响开标一览表截取逻辑。
-    """
-    data = res_data.get("data", {})
-    layout_sections = data.get("layout_sections", [])
-
-    text_parts = []
-
-    if isinstance(layout_sections, list):
-        for sec in layout_sections:
-            if not isinstance(sec, dict):
-                continue
-
-            txt = sec.get("text", "")
-            if txt and str(txt).strip():
-                text_parts.append(str(txt).strip())
-
-    return "\n".join(text_parts).strip()
-
-
-def run_business_tests_with_ocr(json_path: str):
-    """
-    使用真实 OCR 识别 JSON 结果进行业务模块全量测试
-    这里只输出最终业务结果
-    """
-    if not os.path.exists(json_path):
-        print(f"错误：找不到文件 '{json_path}'，请确认文件是否在项目根目录下。")
+    if not os.path.exists(model_path) or not os.path.exists(test_path):
+        print(f"找不到指定的 JSON 文件，请检查路径。")
         return
 
-    try:
-        # 读取 JSON
-        with open(json_path, 'r', encoding='utf-8') as f:
-            res_data = json.load(f)
+    print("正在加载 JSON 数据...")
+    with open(model_path, 'r', encoding='utf-8') as f:
+        model_raw_json = json.load(f)
+    with open(test_path, 'r', encoding='utf-8') as f:
+        test_raw_json = json.load(f)
 
-        data = res_data.get("data", {})
+    # ========================================================
+    # 测试 1：动态白名单提取 (雷达 A：完整性清单)
+    # ========================================================
+    print("\n" + "="*50)
+    print(" 1. 测试动态白名单提取 (用于完整性检查)")
+    print("="*50)
+    reqs = TemplateExtractor.extract_requirements(model_raw_json)
+    print("✅ 提取的主项目录 (Main):")
+    for item in reqs['main']: print(f"  - {item}")
+    print("\n✅ 提取的子项材料 (Sub):")
+    for item in reqs['sub']: print(f"  - {item}")
 
-        # 1. 提取核心文本
-        raw_text = extract_text_from_json(res_data)
+    # ========================================================
+    # 测试 2：完整性检查服务
+    # ========================================================
+    print("\n" + "="*50)
+    print(" 2. 测试完整性检查服务 (Integrity Checker)")
+    print("="*50)
+    
+    integrity_checker = IntegrityChecker() 
+    integrity_report = integrity_checker.check_integrity(model_raw_json, test_raw_json)
+    
+    print(f"📊 完整性合规得分: {integrity_report['integrity_score']} 分")
+    print(f"🔍 找到的项目数: {integrity_report['found_count']} 项")
+    print(f"❌ 缺失的项目数: {integrity_report['missing_count']} 项")
+    
+    with open("result_integrity.json", "w", encoding="utf-8") as f:
+        json.dump(integrity_report, f, ensure_ascii=False, indent=4)
+    print("💾 -> 完整性详细报告已保存至: result_integrity.json")
 
-        # 2. 提取真实的印章与元数据
-        real_meta = {
-            "seal_count": data.get("seal_count", 0),
-            "seal_texts": data.get("seal_texts", []),
-            "ocr_used": data.get("ocr_used", True)
-        }
+    # ========================================================
+    # 测试 3：一致性模板提取 & 切分导出 (雷达 B：标准模板)
+    # ========================================================
+    print("\n" + "="*50)
+    print(" 3. 测试模板提取与文档切分 (用于一致性检查)")
+    print("="*50)
+    
+    # 独立提取 Model 的真实模板（带内容的附件）
+    templates = TemplateExtractor.extract_consistency_templates(model_raw_json)
+    print(f"✅ 共提取到 {len(templates)} 个标准附件模板")
+    for temp in templates:
+        print(f"  - {temp['title']} (模板长度: {len(''.join(temp['content']))} 字符)")
+    
+    print("\n正在根据真实模板切分文档...")
+    m_segs = DocumentProcessor.segment_document(model_raw_json, templates)
+    b_segs = DocumentProcessor.segment_document(test_raw_json, templates)
 
-    except Exception as e:
-        print(f"解析 JSON 失败: {str(e)}")
-        return
+    with open("extracted_model_segments.json", "w", encoding="utf-8") as f:
+        json.dump(m_segs, f, ensure_ascii=False, indent=4)
+    with open("extracted_test_segments.json", "w", encoding="utf-8") as f:
+        json.dump(b_segs, f, ensure_ascii=False, indent=4)
+        
+    print("💾 -> Model 用于比对的切分段落已保存至: extracted_model_segments.json")
+    print("💾 -> Test(投标人) 用于比对的切分段落已保存至: extracted_test_segments.json")
 
-    if not raw_text or len(raw_text.strip()) < 5:
-        print("警告：提取到的文本几乎为空，检查 JSON 结构。")
-        return
+    # ========================================================
+    # 测试 4：一致性检查服务
+    # ========================================================
+    print("\n" + "="*50)
+    print(" 4. 测试一致性比对服务 (Consistency Checker)")
+    print("="*50)
 
-    # 1. 虞光勇、陶明宇 - 完整性与格式审查
-    # integrity_res = IntegrityChecker().check_integrity(raw_text)
-    # print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
+    consistency_checker = ConsistencyChecker()
+    consistency_report = consistency_checker.compare_raw_data(
+        model_raw_json, 
+        test_raw_json, 
+        integrity_report.get('found_sections', []) # 灵魂联动：传入完整性结果
+    )
+    
+    passed_count = sum(1 for r in consistency_report if r['is_passed'])
+    print(f"📊 一致性检查完成: 共对比了 {len(consistency_report)} 个模块")
+    print(f"✅ 完全一致/免审通过: {passed_count} 个")
+    print(f"❌ 存在缺失/篡改: {len(consistency_report) - passed_count} 个")
 
-    # 2. 曾俊、滑鹏鹏 -
-    result = ReasonablenessChecker().check_price_reasonableness(raw_text)
-    print(result)
-
-    # 3. 江宇 - 分项报价
-    # print(ItemizedPricingChecker().check_itemized_logic(raw_text))
-
-    # 4. 高海斌 - 偏离项
-    # print(DeviationChecker().check_technical_deviation(raw_text))
-
-    # 5. 镇昊天、张化飞 - 印章日期
-    # print(VerificationChecker(ocr_service=None).check_seal_and_date(real_meta))
-
+    with open("result_consistency.json", "w", encoding="utf-8") as f:
+        json.dump(consistency_report, f, ensure_ascii=False, indent=4)
+    print("💾 -> 一致性检查详细报告已保存至: result_consistency.json")
+    print("\n测试执行完毕！✨")
 
 if __name__ == "__main__":
-    # 按你的实际文件名修改
-    SAMPLE_JSON = "3.json"
-    run_business_tests_with_ocr(SAMPLE_JSON)
-
+    main()

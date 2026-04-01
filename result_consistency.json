@@ -1,0 +1,136 @@
+[
+    {
+        "name": "附件1比选保证书（格式）",
+        "is_passed": true,
+        "missing_segments_count": 0,
+        "missing_anchors": []
+    },
+    {
+        "name": "附件2报价一览表（格式）",
+        "is_passed": false,
+        "missing_segments_count": 2,
+        "missing_anchors": [
+            "日期",
+            "年月"
+        ]
+    },
+    {
+        "name": "附件3分项报价表（格式自拟）",
+        "is_passed": false,
+        "missing_segments_count": 1,
+        "missing_anchors": [
+            "日期"
+        ]
+    },
+    {
+        "name": "附件4响应文件偏离表（格式)",
+        "is_passed": false,
+        "missing_segments_count": 3,
+        "missing_anchors": [
+            "参选人名称",
+            "日期",
+            "年月"
+        ]
+    },
+    {
+        "name": "附件5参选人基本情况表（格式)",
+        "is_passed": false,
+        "missing_segments_count": 1,
+        "missing_anchors": [
+            "日期"
+        ]
+    },
+    {
+        "name": "附件6近三年完成的类似项目业绩清单（格式）",
+        "is_passed": false,
+        "missing_segments_count": 1,
+        "missing_anchors": [
+            "年月"
+        ]
+    },
+    {
+        "name": "附件7-1法定代表人资格证明书（须加盖公章）",
+        "is_passed": false,
+        "missing_segments_count": 9,
+        "missing_anchors": [
+            "附件71法定代表人资格证明书",
+            "兹证明",
+            "性别",
+            "年龄",
+            "身份证号码现任我单位",
+            "系本公司法定代表人",
+            "参选人名称",
+            "日期",
+            "年月日"
+        ]
+    },
+    {
+        "name": "附件7-2法定代表人授权委托书（须加盖公章）",
+        "is_passed": false,
+        "missing_segments_count": 2,
+        "missing_anchors": [
+            "本授权书于年月",
+            "日至年月日有效"
+        ]
+    },
+    {
+        "name": "附件8参选人承诺声明函（须加盖公章）",
+        "is_passed": false,
+        "missing_segments_count": 1,
+        "missing_anchors": [
+            "年月日"
+        ]
+    },
+    {
+        "name": "附件9不参与围标串标承诺书（须加盖公章）",
+        "is_passed": false,
+        "missing_segments_count": 1,
+        "missing_anchors": [
+            "授权委托人"
+        ]
+    },
+    {
+        "name": "附件10项目人员配置表（格式）",
+        "is_passed": false,
+        "missing_segments_count": 22,
+        "missing_anchors": [
+            "年龄",
+            "性别",
+            "职务",
+            "履历和",
+            "业绩",
+            "所附业绩",
+            "证明材料",
+            "页码",
+            "所获荣誉",
+            "承担",
+            "任务和角色",
+            "备注",
+            "提供拟投入",
+            "项目",
+            "人员的职称证",
+            "执业资格证书",
+            "等相关资料的复印件或影印件",
+            "在服务期限内",
+            "服务小组成员应保持稳定",
+            "以保证服务工作的正常进行",
+            "供应商可根据",
+            "项目"
+        ]
+    },
+    {
+        "name": "附件11财务状况及税收、社会保障资金缴纳情况声明函",
+        "is_passed": false,
+        "missing_segments_count": 2,
+        "missing_anchors": [
+            "供应商名称",
+            "日期"
+        ]
+    },
+    {
+        "name": "附件12 保证金缴纳凭证（格式）（如有）",
+        "is_passed": true,
+        "missing_segments_count": 0,
+        "missing_anchors": []
+    }
+]
