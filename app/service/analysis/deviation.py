@@ -14,10 +14,40 @@ from typing import Any
 class DeviationChecker:
     # 仅识别真正星标，不识别 * 乘号
     STAR_RE = re.compile(r"★")
+    ITEM_MARKER_RE = re.compile(
+        r"(?:★\s*)?[（(]\d{1,2}[)）]|(?:(?<=^)|(?<=\s))\d{1,2}[、.．](?!\d)"
+    )
 
     BUSINESS_TITLES = ("商务条款偏离表", "商务偏离表", "商务条款响应表", "商务偏离")
     TECH_TITLES = ("技术条款偏离表", "技术偏离表", "技术条款响应表", "技术偏离")
     STOP_HINTS = ("投标人基本情况", "资格证明", "报价", "开标一览", "承诺", "目录", "附录", "类似项目", "法定代表人")
+    REQUIREMENT_CHAPTER_STRONG_HINTS = (
+        "项目需求书",
+        "服务需求书",
+        "项目需求",
+        "服务需求",
+        "技术标准和要求",
+        "技术标准及要求",
+        "工程总承包任务书及技术要求",
+        "任务书及技术要求",
+        "技术要求",
+        "标准和要求",
+        "标准及要求",
+    )
+    REQUIREMENT_CHAPTER_WEAK_HINTS = ("需求", "要求", "标准", "技术", "任务书")
+    REQUIREMENT_CHAPTER_EXCLUDE_HINTS = (
+        "投标人须知",
+        "评标",
+        "合同",
+        "报价",
+        "资格",
+        "格式",
+        "附录",
+        "目录",
+        "清单",
+        "招标公告",
+        "投标文件组成",
+    )
 
     NO_DEV_PATTERNS = (
         r"无偏离",
@@ -27,8 +57,8 @@ class DeviationChecker:
         r"全部响应",
         r"完全响应",
     )
-    POS_DEV_PATTERNS = (r"正偏离", r"优于", r"高于", r"更优", r"超出", r"提升")
-    NEG_DEV_PATTERNS = (r"负偏离", r"不满足", r"不响应", r"不符合", r"无法", r"未提供", r"低于", r"缺失", r"不支持", r"有偏离")
+    POS_DEV_PATTERNS = (r"正偏离", r"优于", r"(?<!不)(?<!不得)高于", r"更优", r"超出", r"提升")
+    NEG_DEV_PATTERNS = (r"负偏离", r"不满足", r"不响应", r"不符合", r"无法", r"未提供", r"(?<!不)(?<!不得)低于", r"缺失", r"不支持", r"有偏离")
 
     def check_technical_deviation(self, tender_document: Any, bid_document: Any | None = None) -> dict:
         """
@@ -84,6 +114,7 @@ class DeviationChecker:
                     "negative_deviation_count": 0,
                     "positive_deviation_count": 0,
                     "no_deviation_count": 0,
+                    "listed_response_count": 0,
                     "unclear_deviation_count": 0,
                     "explicit_response_count": 0,
                     "covered_by_global_statement_count": 0,
@@ -102,6 +133,7 @@ class DeviationChecker:
         responded = 0
         positive = 0
         no_dev = 0
+        listed = 0
 
         for item in matches:
             dev_type = str(item.get("deviation_type") or "unclear")
@@ -130,6 +162,10 @@ class DeviationChecker:
                 no_dev += 1
                 item["response_status"] = "no_deviation"
                 item["risk_level"] = "low"
+            elif dev_type == "listed_response":
+                listed += 1
+                item["response_status"] = "listed_response"
+                item["risk_level"] = "low"
             else:
                 unclear_items.append(
                     {
@@ -148,7 +184,7 @@ class DeviationChecker:
         status, deviation_status, summary = self._overall_status(total, missing, negative, unclear)
         findings = [f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。"]
         findings.append(f"已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
-        findings.append(f"合规响应数量（无偏离/正偏离）：{no_dev + positive} 条。")
+        findings.append(f"合规响应数量（无偏离/正偏离/列明未负响应）：{no_dev + positive + listed} 条。")
 
         return {
             "mode": "tender_technical_bid_json",
@@ -177,6 +213,7 @@ class DeviationChecker:
                 "negative_deviation_count": negative,
                 "positive_deviation_count": positive,
                 "no_deviation_count": no_dev,
+                "listed_response_count": listed,
                 "unclear_deviation_count": unclear,
                 "explicit_response_count": responded,
                 "covered_by_global_statement_count": 0,
@@ -192,7 +229,7 @@ class DeviationChecker:
         sections = self._extract_bid_deviation_sections(payload)
         return {
             "mode": "single_document",
-            "summary": "要求响应校验需要同时提供招标 JSON 和技术标 JSON。",
+            "summary": "要求响应校验需要同时提供招标 JSON 和商务标 JSON。",
             "compliance_status": "manual_review",
             "deviation_status": "insufficient_input",
             "requirement_extraction_mode": "star",
@@ -214,6 +251,7 @@ class DeviationChecker:
                 "negative_deviation_count": 0,
                 "positive_deviation_count": 0,
                 "no_deviation_count": 0,
+                "listed_response_count": 0,
                 "unclear_deviation_count": 0,
                 "explicit_response_count": 0,
                 "covered_by_global_statement_count": 0,
@@ -222,41 +260,44 @@ class DeviationChecker:
             "key_findings": ["输入不足：当前仅提供了单份文档。"],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
+
     def _extract_star_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
         lines = self._page_lines(tender_payload)
-        start_idx, end_idx = self._chapter_scope_for_star(lines)
         out: list[dict[str, Any]] = []
         seen = set()
-        for i in range(start_idx, end_idx + 1):
-            item = lines[i]
-            line = item["text"]
-            if not self._has_star_marker(line):
-                continue
-            req = self._clean_req(self._merge_req_line(lines, i, max_idx=end_idx))
-            req_norm = self._norm(req)
-            if len(req_norm) < 4 or req_norm in seen:
-                continue
-            seen.add(req_norm)
-            section_type = self._infer_section(lines, i)
-            out.append(
-                {
-                    "requirement_id": f"STAR-{len(out)+1:03d}",
-                    "requirement": req,
-                    "section_type": section_type,
-                    "page": item["page"],
-                    "line_number": item["line_number"],
-                    "normalized_requirement": req_norm,
-                    "fragments": self._fragments(req),
-                }
-            )
+        scopes = self._chapter_scopes_for_star(lines)
+        for start_idx, end_idx, chapter_title in scopes:
+            for entry in self._iter_star_requirement_entries(
+                lines,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                chapter_title=chapter_title,
+            ):
+                req = self._clean_req(entry["text"])
+                req_norm = self._norm(req)
+                if len(req_norm) < 4 or req_norm in seen:
+                    continue
+                seen.add(req_norm)
+                out.append(
+                    {
+                        "requirement_id": f"STAR-{len(out)+1:03d}",
+                        "requirement": req,
+                        "section_type": entry["section_type"],
+                        "page": entry["page"],
+                        "line_number": entry["line_number"],
+                        "normalized_requirement": req_norm,
+                        "fragments": self._fragments(req),
+                        "chapter_title": entry["chapter_title"],
+                    }
+                )
         return out
 
-    def _chapter_scope_for_star(self, lines: list[dict[str, Any]]) -> tuple[int, int]:
+    def _chapter_scopes_for_star(self, lines: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
         """
-        仅在 “第三章 项目需求书” 到 “第四章 合同条款（结束）” 的范围内提取星标。
+        在“需求/要求/标准/任务书”类章节中提取星标条款，不限定必须是第三章。
         """
         if not lines:
-            return 0, -1
+            return []
 
         def compact(text: str) -> str:
             return re.sub(r"\s+", "", str(text or "")).replace("：", "").replace(":", "")
@@ -269,51 +310,53 @@ class DeviationChecker:
                 return False
             return len(t) <= 36
 
-        def is_chapter3_title(text: str) -> bool:
-            t = compact(text)
-            if not (t.startswith("第三章") or t.startswith("第3章")):
-                return False
-            if "项目需求" not in t:
-                return False
-            if len(re.findall(r"第[一二三四五六七八九十百0-9]+章", t)) > 1:
-                return False
-            return len(t) <= 36
+        def chapter_score(text: str) -> int:
+            title = compact(text)
+            if not title or not is_chapter_heading(title):
+                return 0
+            if any(token in title for token in self.REQUIREMENT_CHAPTER_EXCLUDE_HINTS):
+                return 0
 
-        def is_chapter4_title(text: str) -> bool:
-            t = compact(text)
-            if not (t.startswith("第四章") or t.startswith("第4章")):
-                return False
-            if "合同" not in t:
-                return False
-            if len(re.findall(r"第[一二三四五六七八九十百0-9]+章", t)) > 1:
-                return False
-            return len(t) <= 36
+            score = 0
+            for token in self.REQUIREMENT_CHAPTER_STRONG_HINTS:
+                if token in title:
+                    score += 6
+            for token in self.REQUIREMENT_CHAPTER_WEAK_HINTS:
+                if token in title:
+                    score += 2
+            if "技术" in title:
+                score += 2
+            return score
 
-        start_idx: int | None = None
-        chapter4_idx: int | None = None
+        chapter_starts = [
+            idx for idx, item in enumerate(lines) if is_chapter_heading(str(item.get("text", "")))
+        ]
+        if not chapter_starts:
+            return [(0, len(lines) - 1, "full_document")]
 
-        for idx, item in enumerate(lines):
-            raw_text = str(item.get("text", ""))
-            if start_idx is None and is_chapter3_title(raw_text):
-                start_idx = idx
+        scopes: list[tuple[int, int, str, int]] = []
+        for position, start_idx in enumerate(chapter_starts):
+            end_idx = (
+                chapter_starts[position + 1] - 1
+                if position + 1 < len(chapter_starts)
+                else len(lines) - 1
+            )
+            title = str(lines[start_idx].get("text", ""))
+            score = chapter_score(title)
+            if score <= 0:
                 continue
-            if start_idx is not None and chapter4_idx is None and is_chapter4_title(raw_text):
-                chapter4_idx = idx
-                break
+            scopes.append((start_idx, end_idx, title, score))
 
-        if start_idx is None:
-            return 0, len(lines) - 1
-        if chapter4_idx is None:
-            return start_idx, len(lines) - 1
+        if not scopes:
+            return [(0, len(lines) - 1, "full_document")]
 
-        end_idx = len(lines) - 1
-        for idx in range(chapter4_idx + 1, len(lines)):
-            if is_chapter_heading(lines[idx].get("text", "")):
-                end_idx = idx - 1
-                break
-        if end_idx < start_idx:
-            end_idx = len(lines) - 1
-        return start_idx, end_idx
+        best_score = max(score for _, _, _, score in scopes)
+        selected = [
+            (start_idx, end_idx, title)
+            for start_idx, end_idx, title, score in scopes
+            if score >= max(2, best_score - 2)
+        ]
+        return selected
 
     def _extract_bid_deviation_sections(self, bid_payload: dict) -> dict[str, Any]:
         lines = [x["text"] for x in self._page_lines(bid_payload)]
@@ -441,12 +484,14 @@ class DeviationChecker:
         merged_candidates = "\n".join(candidate_texts)
         if matched and self._match_patterns(merged_candidates, self.NEG_DEV_PATTERNS):
             dev_type = "negative_deviation"
-        elif matched and self._match_patterns(merged_candidates, self.NO_DEV_PATTERNS):
-            dev_type = "no_deviation"
         elif matched and self._match_patterns(merged_candidates, self.POS_DEV_PATTERNS):
             dev_type = "positive_deviation"
+        elif matched and self._match_patterns(merged_candidates, self.NO_DEV_PATTERNS):
+            dev_type = "no_deviation"
+        elif matched:
+            dev_type = "listed_response"
         else:
-            dev_type = self._dev_type(best["line"]) if matched else "unclear"
+            dev_type = "missing"
 
         return {
             "requirement_id": requirement["requirement_id"],
@@ -460,7 +505,7 @@ class DeviationChecker:
             "response_section_title": best["title"],
             "match_score": round(float(best["score"]), 4),
             "deviation_type": dev_type,
-            "risk_level": "high" if (not matched or dev_type == "negative_deviation") else ("medium" if dev_type == "unclear" else "low"),
+            "risk_level": "high" if (not matched or dev_type == "negative_deviation") else "low",
         }
 
     def _dev_type(self, text: str) -> str:
@@ -475,23 +520,24 @@ class DeviationChecker:
     def _overall_status(self, total: int, missing: int, negative: int, unclear: int) -> tuple[str, str, str]:
         if total == 0:
             return "pass", "no_star_requirements", "未发现带 ★ 的强制性要求，已跳过比对。"
-        if missing > 0 or negative > 0 or unclear > 0:
+        if missing > 0 or negative > 0:
             return (
                 "fail",
                 "fail",
-                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}，不明确={unclear}。",
+                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
             )
-        return "pass", "pass", "所有带 ★ 的强制性要求均已响应，且结论为无偏离或正偏离。"
+        return "pass", "pass", "商务标偏离部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"
+
     def _extract_pair(self, payload: dict) -> tuple[dict, dict] | None:
         keys = (
-            ("tender_document", "technical_bid_document"),
-            ("tender", "technical_bid"),
-            ("tender_json", "technical_bid_json"),
-            ("招标文件", "技术标文件"),
             ("tender_document", "business_bid_document"),
             ("tender", "business_bid"),
             ("tender_json", "business_bid_json"),
             ("招标文件", "商务标文件"),
+            ("tender_document", "technical_bid_document"),
+            ("tender", "technical_bid"),
+            ("tender_json", "technical_bid_json"),
+            ("招标文件", "技术标文件"),
             ("tender_document", "bid_document"),
             ("tender", "bid"),
             ("tender_json", "bid_json"),
@@ -731,12 +777,122 @@ class DeviationChecker:
             if c > upper:
                 break
             nxt = lines[c]["text"]
+            if self._has_star_marker(nxt):
+                break
             if self._is_boundary(nxt):
                 break
             parts.append(nxt)
             if len(self._norm(" ".join(parts))) >= 24:
                 break
         return " ".join(parts).strip()
+
+    def _iter_star_requirement_entries(
+        self,
+        lines: list[dict[str, Any]],
+        *,
+        start_idx: int,
+        end_idx: int,
+        chapter_title: str,
+    ) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+
+        def flush_current() -> None:
+            nonlocal current
+            if not current:
+                return
+            merged = " ".join(str(part or "").strip() for part in current["parts"] if str(part or "").strip())
+            merged = re.sub(r"\s+", " ", merged).strip()
+            if merged and self._has_star_marker(merged):
+                entries.append(
+                    {
+                        "text": merged,
+                        "page": current["page"],
+                        "line_number": current["line_number"],
+                        "section_type": current["section_type"],
+                        "chapter_title": current["chapter_title"],
+                    }
+                )
+            current = None
+
+        for idx in range(start_idx, end_idx + 1):
+            item = lines[idx]
+            line = str(item.get("text") or "").strip()
+            if not line:
+                continue
+
+            prefix, segments = self._split_numbered_segments(line)
+            if segments:
+                if prefix and current is not None:
+                    current["parts"].append(prefix)
+                elif prefix and current is None and self._has_star_marker(prefix):
+                    segments[0] = f"{prefix} {segments[0]}".strip()
+
+                is_boundary_line = self._is_boundary(line)
+                for segment in segments:
+                    flush_current()
+                    if is_boundary_line and not self._has_star_marker(segment):
+                        continue
+                    current = {
+                        "page": item["page"],
+                        "line_number": item["line_number"],
+                        "section_type": self._infer_section(lines, idx),
+                        "chapter_title": chapter_title,
+                        "parts": [segment],
+                    }
+                continue
+
+            if current is not None and self._can_append_requirement_line(current, line, item["page"]):
+                current["parts"].append(line)
+                continue
+
+            flush_current()
+            if self._has_star_marker(line):
+                current = {
+                    "page": item["page"],
+                    "line_number": item["line_number"],
+                    "section_type": self._infer_section(lines, idx),
+                    "chapter_title": chapter_title,
+                    "parts": [line],
+                }
+
+        flush_current()
+        return entries
+
+    def _split_numbered_segments(self, text: str) -> tuple[str, list[str]]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", []
+
+        matches = list(self.ITEM_MARKER_RE.finditer(raw))
+        if not matches:
+            return raw, []
+
+        prefix = raw[: matches[0].start()].strip()
+        segments: list[str] = []
+        for idx, match in enumerate(matches):
+            start = match.start()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+            segment = raw[start:end].strip()
+            if segment:
+                segments.append(segment)
+        return prefix, segments
+
+    def _can_append_requirement_line(
+        self,
+        current: dict[str, Any],
+        line: str,
+        page_no: int | None,
+    ) -> bool:
+        if self._is_boundary(line):
+            return False
+        merged = " ".join(str(part or "").strip() for part in current.get("parts", []) if str(part or "").strip())
+        merged = re.sub(r"\s+", " ", merged).strip()
+        if merged and re.search(r"[。！？!?]\s*$", merged):
+            return False
+        if current.get("page") != page_no and merged and re.search(r"[；;]\s*$", merged):
+            return False
+        return True
 
     def _infer_section(self, lines: list[dict[str, Any]], idx: int) -> str:
         ctx = "\n".join(x["text"] for x in lines[max(0, idx - 6) : idx + 1])
@@ -783,7 +939,11 @@ class DeviationChecker:
 
     def _clean_req(self, text: str) -> str:
         t = self.STAR_RE.sub("", str(text or ""))
-        t = re.sub(r"^\s*(第[一二三四五六七八九十百]+[条章节项点]|[一二三四五六七八九十]+[、.．]|[0-9]+[、.．)])\s*", "", t)
+        t = re.sub(
+            r"^\s*(?:第[一二三四五六七八九十百]+[条章节项点]|[一二三四五六七八九十]+[、.．]|[0-9]+[、.．)]|[（(]\d{1,2}[)）])\s*",
+            "",
+            t,
+        )
         return re.sub(r"\s+", " ", t).strip("，,；; ")
 
     def _norm(self, text: str) -> str:

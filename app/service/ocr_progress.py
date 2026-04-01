@@ -172,6 +172,8 @@ class OCRProgressMonitor:
             total_pages = max(self.total_pages, self._postprocess_pages, self._predict_pages)
             predict_duration = self._stage_duration_locked("predict")
             postprocess_duration = self._stage_duration_locked("postprocess")
+            estimated_total = self._estimate_total_seconds_locked()
+            estimated_remaining = self._estimate_remaining_seconds_locked()
             summary = {
                 "enabled": self.enabled,
                 "job_name": self._job_name,
@@ -185,6 +187,8 @@ class OCRProgressMonitor:
                 "total_elapsed_seconds": self._round(elapsed),
                 "predict_elapsed_seconds": self._round(predict_duration),
                 "postprocess_elapsed_seconds": self._round(postprocess_duration),
+                "estimated_total_seconds": self._round(estimated_total),
+                "estimated_remaining_seconds": self._round(estimated_remaining),
                 "ocr_speed_pages_per_second": self._rate(total_pages, elapsed),
                 "predict_speed_pages_per_second": self._rate(self._predict_pages, predict_duration),
                 "progress_percent": round(self._progress * 100.0, 1),
@@ -306,30 +310,42 @@ class OCRProgressMonitor:
 
     def _build_event_locked(self) -> dict[str, Any]:
         total_pages = max(self.total_pages, self._predict_pages, self._postprocess_pages)
-        latest = dict(self._latest_snapshot)
+        eta_seconds = self._estimate_remaining_seconds_locked()
         event = {
             "elapsed_seconds": self._round(self._elapsed_locked()),
             "stage": self._stage,
             "detail": self._detail,
             "progress_percent": round(self._progress * 100.0, 1),
             "total_pages": total_pages,
-            "pages_completed": max(self._predict_pages, self._postprocess_pages),
             "predict_pages": self._predict_pages,
             "processed_pages": self._postprocess_pages,
             "ocr_speed_pages_per_second": self._rate(
                 max(self._predict_pages, self._postprocess_pages),
                 self._elapsed_locked(),
             ),
+            "estimated_remaining_seconds": self._round(eta_seconds),
         }
         event.update(
             {
-                "cpu_percent": self._round(latest.get("cpu_percent")),
-                "memory_percent": self._round(latest.get("memory_percent")),
-                "process_rss_mb": self._round(latest.get("process_rss_mb")),
-                "gpu_util_percent": self._round(latest.get("gpu_util_percent")),
-                "gpu_memory_percent": self._round(latest.get("gpu_memory_percent")),
-                "gpu_memory_used_mb": self._round(latest.get("gpu_memory_used_mb")),
-                "gpu_memory_total_mb": self._round(latest.get("gpu_memory_total_mb")),
+                "cpu_percent_avg": self._round(self._aggregate_avg_locked("cpu_percent")),
+                "memory_percent_avg": self._round(
+                    self._aggregate_avg_locked("memory_percent")
+                ),
+                "process_rss_mb_avg": self._round(
+                    self._aggregate_avg_locked("process_rss_mb")
+                ),
+                "gpu_util_percent_avg": self._round(
+                    self._aggregate_avg_locked("gpu_util_percent")
+                ),
+                "gpu_memory_percent_avg": self._round(
+                    self._aggregate_avg_locked("gpu_memory_percent")
+                ),
+                "gpu_memory_used_mb_avg": self._round(
+                    self._aggregate_avg_locked("gpu_memory_used_mb")
+                ),
+                "gpu_memory_total_mb": self._round(
+                    self._aggregate_avg_locked("gpu_memory_total_mb")
+                ),
             }
         )
         return event
@@ -346,25 +362,26 @@ class OCRProgressMonitor:
             f"stage={event.get('stage')}",
         ]
 
-        if event.get("total_pages"):
-            parts.append(
-                f"pages={event.get('pages_completed')}/{event.get('total_pages')}"
-            )
-
         if event.get("ocr_speed_pages_per_second") is not None:
             parts.append(f"speed={event['ocr_speed_pages_per_second']:.2f} p/s")
 
-        if event.get("cpu_percent") is not None:
-            parts.append(f"cpu={event['cpu_percent']:.1f}%")
-        if event.get("memory_percent") is not None:
-            parts.append(f"mem={event['memory_percent']:.1f}%")
-        if event.get("process_rss_mb") is not None:
-            parts.append(f"rss={event['process_rss_mb']:.0f}MB")
-        if event.get("gpu_util_percent") is not None:
-            parts.append(f"gpu={event['gpu_util_percent']:.1f}%")
-        if event.get("gpu_memory_used_mb") is not None and event.get("gpu_memory_total_mb") is not None:
+        eta_seconds = event.get("estimated_remaining_seconds")
+        if eta_seconds is not None:
+            parts.append(f"eta={self._format_duration(eta_seconds)}")
+        else:
+            parts.append("eta=estimating")
+
+        if event.get("cpu_percent_avg") is not None:
+            parts.append(f"cpu_avg={event['cpu_percent_avg']:.1f}%")
+        if event.get("memory_percent_avg") is not None:
+            parts.append(f"mem_avg={event['memory_percent_avg']:.1f}%")
+        if event.get("process_rss_mb_avg") is not None:
+            parts.append(f"rss_avg={event['process_rss_mb_avg']:.0f}MB")
+        if event.get("gpu_util_percent_avg") is not None:
+            parts.append(f"gpu_avg={event['gpu_util_percent_avg']:.1f}%")
+        if event.get("gpu_memory_used_mb_avg") is not None and event.get("gpu_memory_total_mb") is not None:
             parts.append(
-                f"gpu_mem={event['gpu_memory_used_mb']:.0f}/{event['gpu_memory_total_mb']:.0f}MB"
+                f"gpu_mem_avg={event['gpu_memory_used_mb_avg']:.0f}/{event['gpu_memory_total_mb']:.0f}MB"
             )
 
         parts.append(f"elapsed={event.get('elapsed_seconds', 0.0):.1f}s")
@@ -403,6 +420,15 @@ class OCRProgressMonitor:
     def _stage_duration_locked(self, stage: str) -> float:
         return self._resolved_stage_durations_locked().get(stage, 0.0)
 
+    def _aggregate_avg_locked(self, key: str) -> float | None:
+        aggregate = self._aggregates.get(key)
+        if not aggregate:
+            return None
+        count = float(aggregate.get("count", 0.0))
+        if count <= 0:
+            return None
+        return float(aggregate.get("sum", 0.0)) / count
+
     def _build_system_summary_locked(self) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         for key, aggregate in self._aggregates.items():
@@ -431,6 +457,25 @@ class OCRProgressMonitor:
         if not self._started_at:
             return 0.0
         return max(0.0, time.perf_counter() - self._started_at)
+
+    def _estimate_total_seconds_locked(self) -> float | None:
+        elapsed = self._elapsed_locked()
+        progress = max(0.0, min(1.0, float(self._progress)))
+        if elapsed < 5.0 or progress < 0.12 or progress >= 1.0:
+            return None
+        estimated_total = elapsed / progress
+        if estimated_total <= elapsed:
+            return None
+        return estimated_total
+
+    def _estimate_remaining_seconds_locked(self) -> float | None:
+        estimated_total = self._estimate_total_seconds_locked()
+        if estimated_total is None:
+            return None
+        remaining = estimated_total - self._elapsed_locked()
+        if remaining <= 0:
+            return 0.0
+        return remaining
 
     @staticmethod
     def _parse_gpu_index(device: str) -> int | None:
@@ -466,3 +511,18 @@ class OCRProgressMonitor:
             return round(float(value), 3)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _format_duration(seconds: Any) -> str:
+        try:
+            total_seconds = max(0, int(round(float(seconds))))
+        except (TypeError, ValueError):
+            return "unknown"
+
+        minutes, secs = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}h{minutes:02d}m"
+        if minutes > 0:
+            return f"{minutes}m{secs:02d}s"
+        return f"{secs}s"

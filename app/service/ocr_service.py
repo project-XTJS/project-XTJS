@@ -218,8 +218,8 @@ class OCRService:
                         stage="predict",
                         current=index,
                         total=max(total_pages, index, 1),
-                        detail=f"page/batch {index} completed",
-                        emit=False,
+                        detail=f"page/batch {index} predicted",
+                        emit=True,
                     )
 
             if settings.PADDLE_VL_RESTRUCTURE_PAGES and len(results) > 1:
@@ -660,7 +660,7 @@ class OCRService:
                 current=0,
                 total=max(total_result_pages, 1),
                 detail="normalizing OCR results",
-                emit=False,
+                emit=True,
             )
 
             for fallback_page_no, result in enumerate(results, start=1):
@@ -684,7 +684,7 @@ class OCRService:
                     current=fallback_page_no,
                     total=max(total_result_pages, fallback_page_no, 1),
                     detail=f"parsed page {page_no}",
-                    emit=False,
+                    emit=True,
                 )
 
             full_text = self._merge_text_parts(
