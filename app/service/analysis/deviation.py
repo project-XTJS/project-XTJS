@@ -17,6 +17,9 @@ class DeviationChecker:
     ITEM_MARKER_RE = re.compile(
         r"(?:★\s*)?[（(]\d{1,2}[)）]|(?:(?<=^)|(?<=\s))\d{1,2}[、.．](?!\d)"
     )
+    TABLE_ROW_MARKER_RE = re.compile(
+        r"(?:(?<=^)|(?<=\s))\d{1,3}(?:(?:[、.．)](?!\d))|\s+)"
+    )
 
     BUSINESS_TITLES = ("商务条款偏离表", "商务偏离表", "商务条款响应表", "商务偏离")
     TECH_TITLES = ("技术条款偏离表", "技术偏离表", "技术条款响应表", "技术偏离")
@@ -376,8 +379,9 @@ class DeviationChecker:
 
         business = self._dedupe_sections(business)
         technical = self._dedupe_sections(technical)
+        rows = self._extract_deviation_rows(bid_payload, business, technical)
         combined = "\n\n".join(x["text"] for x in business + technical if x.get("text"))
-        return {"business": business, "technical": technical, "combined_text": combined}
+        return {"business": business, "technical": technical, "combined_text": combined, "rows": rows}
 
     def _is_table_row_start(self, line: str) -> bool:
         return bool(re.match(r"^\s*\d{1,3}(?:\s*[.,)\u3001\uff0e\uff09]|\s+)", str(line or "")))
@@ -423,7 +427,376 @@ class DeviationChecker:
             coverage[group] = best
         return coverage
 
+    def _extract_deviation_rows(
+        self,
+        bid_payload: dict,
+        business_sections: list[dict[str, Any]],
+        technical_sections: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        doc = self._doc_container(bid_payload)
+
+        logical_tables = doc.get("logical_tables")
+        if isinstance(logical_tables, list):
+            for table in logical_tables:
+                if isinstance(table, dict):
+                    rows.extend(self._extract_rows_from_logical_table(table))
+
+        for section in technical_sections:
+            rows.extend(self._extract_rows_from_section(section, "technical"))
+        for section in business_sections:
+            rows.extend(self._extract_rows_from_section(section, "business"))
+
+        out: list[dict[str, Any]] = []
+        seen = set()
+        for row in rows:
+            joined_key = self._norm(row.get("joined_text", ""))[:260]
+            if not joined_key or joined_key in seen:
+                continue
+            seen.add(joined_key)
+            out.append(row)
+        return out
+
+    def _extract_rows_from_logical_table(self, table: dict[str, Any]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        headers = [str(x or "").strip() for x in (table.get("headers") or [])]
+        pages = [x for x in (table.get("pages") or []) if isinstance(x, int)]
+        page_no = pages[0] if pages else None
+        title = str(table.get("id") or "logical_table")
+
+        records = table.get("records")
+        if isinstance(records, list):
+            for record in records:
+                if isinstance(record, dict):
+                    row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
+                    if row:
+                        out.append(row)
+        if out:
+            return out
+
+        rows = table.get("rows")
+        if not isinstance(rows, list):
+            return out
+
+        for values in rows:
+            if not isinstance(values, list):
+                continue
+            record = {}
+            for idx, value in enumerate(values):
+                key = headers[idx] if idx < len(headers) else f"col_{idx + 1}"
+                record[str(key)] = value
+            row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
+            if row:
+                out.append(row)
+        return out
+
+    def _build_row_from_record(
+        self,
+        record: dict[str, Any],
+        *,
+        headers: list[str],
+        page_no: int | None,
+        title: str,
+    ) -> dict[str, Any] | None:
+        ordered_keys = list(record.keys())
+        if headers and all(str(h or "").strip() in record for h in headers):
+            ordered_keys = [str(h or "").strip() for h in headers]
+
+        requirement_parts: list[str] = []
+        response_parts: list[str] = []
+        deviation_parts: list[str] = []
+        ordered_cells: list[tuple[str, str]] = []
+
+        for key in ordered_keys:
+            value = str(record.get(key) or "").strip()
+            if not value:
+                continue
+            ordered_cells.append((str(key or "").strip(), value))
+            role = self._column_role(key)
+            if role == "requirement":
+                requirement_parts.append(value)
+            elif role == "response":
+                response_parts.append(value)
+            elif role == "deviation":
+                deviation_parts.append(value)
+
+        if not ordered_cells:
+            return None
+
+        if not requirement_parts:
+            inferred = self._infer_generic_row_columns(ordered_cells)
+            if inferred is None:
+                return None
+            requirement, response, deviation = inferred
+        else:
+            requirement = " ".join(requirement_parts).strip()
+            response = " ".join(response_parts).strip()
+            deviation = " ".join(deviation_parts).strip()
+
+        joined_text = " ".join(part for part in (requirement, response, deviation) if part).strip()
+        if len(self._norm(requirement or joined_text)) < 4:
+            return None
+
+        return {
+            "group": self._guess_row_group(title, joined_text),
+            "source": "logical_table",
+            "page": page_no,
+            "title": title,
+            "requirement_text": requirement,
+            "response_text": response,
+            "deviation_text": deviation,
+            "joined_text": joined_text,
+            "requirement_norm": self._norm(requirement),
+            "response_norm": self._norm(response),
+            "deviation_norm": self._norm(deviation),
+            "joined_norm": self._norm(joined_text),
+        }
+
+    def _infer_generic_row_columns(self, ordered_cells: list[tuple[str, str]]) -> tuple[str, str, str] | None:
+        values = [value for _, value in ordered_cells if value]
+        if len(values) < 2:
+            return None
+
+        dev_idx: int | None = None
+        page_idx: int | None = None
+        req_idx: int | None = None
+
+        for idx, value in enumerate(values):
+            if dev_idx is None and self._match_patterns(value, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS):
+                dev_idx = idx
+            if page_idx is None and re.search(r"\bP?\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", value, re.IGNORECASE):
+                page_idx = idx
+            if req_idx is None and ("★" in value or len(self._norm(value)) >= 10):
+                req_idx = idx
+
+        if req_idx is None:
+            return None
+
+        search_limit = dev_idx if dev_idx is not None else (page_idx if page_idx is not None else len(values))
+        if req_idx >= search_limit:
+            return None
+
+        requirement = values[req_idx]
+        response = ""
+        for idx in range(req_idx + 1, search_limit):
+            candidate = values[idx]
+            if candidate and candidate != requirement:
+                response = candidate
+                break
+
+        deviation = values[dev_idx] if dev_idx is not None else ""
+        if not response and not deviation:
+            return None
+        return requirement, response, deviation
+
+    def _column_role(self, label: str) -> str | None:
+        text = str(label or "").strip().lower()
+        if not text:
+            return None
+        if any(token in text for token in ("招标文件的招标需求", "招标需求", "招标文件需求", "需求", "要求", "条款")):
+            return "requirement"
+        if any(token in text for token in ("投标文件的响应", "投标响应", "响应内容", "响应", "应答", "回复")):
+            return "response"
+        if any(token in text for token in ("偏离说明", "偏离", "说明", "备注")):
+            return "deviation"
+        return None
+
+    def _extract_rows_from_section(self, section: dict[str, Any], group: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        title = str(section.get("title") or "")
+        raw_text = re.sub(r"\s+", " ", str(section.get("text") or "")).strip()
+        for segment in self._split_table_row_segments(raw_text):
+            normalized = self._norm(segment)
+            if len(normalized) < 8:
+                continue
+            has_response_marker = bool(
+                "响应" in segment
+                or self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS)
+                or re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", segment, re.IGNORECASE)
+            )
+            if not ("★" in segment or has_response_marker):
+                continue
+            out.append(
+                {
+                    "group": group,
+                    "source": "section_text",
+                    "page": None,
+                    "title": title,
+                    "requirement_text": segment,
+                    "response_text": segment if has_response_marker else "",
+                    "deviation_text": segment if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
+                    "joined_text": segment,
+                    "requirement_norm": normalized,
+                    "response_norm": self._norm(segment) if has_response_marker else "",
+                    "deviation_norm": self._norm(segment) if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
+                    "joined_norm": normalized,
+                }
+            )
+        return out
+
+    def _split_table_row_segments(self, text: str) -> list[str]:
+        raw = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not raw:
+            return []
+
+        segments: list[str] = []
+        _, numbered_segments = self._split_numbered_segments(raw)
+        if numbered_segments:
+            segments.extend(numbered_segments)
+
+        if not segments:
+            matches = list(self.TABLE_ROW_MARKER_RE.finditer(raw))
+            if len(matches) >= 2:
+                for idx, match in enumerate(matches):
+                    start = match.start()
+                    end = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw)
+                    segment = raw[start:end].strip()
+                    if segment:
+                        segments.append(segment)
+
+        if not segments and ("★" in raw or "偏离" in raw or "响应" in raw):
+            segments = [raw]
+
+        merged_segments: list[str] = []
+        idx = 0
+        while idx < len(segments):
+            segment = segments[idx]
+            if re.match(r"^\s*\d{1,3}(?:[、.．)]?)\s*$", segment) and idx + 1 < len(segments):
+                segment = f"{segment} {segments[idx + 1]}".strip()
+                idx += 1
+            if idx + 1 < len(segments):
+                current_sub = re.search(r"[（(]\d{1,2}[)）]", segment)
+                next_sub = re.match(r"^\s*[（(]\d{1,2}[)）]", segments[idx + 1])
+                if (
+                    current_sub
+                    and next_sub
+                    and current_sub.group(0).replace("(", "（").replace(")", "）")
+                    == next_sub.group(0).strip().replace("(", "（").replace(")", "）")
+                    and "响应" not in segment
+                    and not self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS)
+                    and not re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", segment, re.IGNORECASE)
+                ):
+                    segment = f"{segment} {segments[idx + 1]}".strip()
+                    idx += 1
+            merged_segments.append(segment)
+            idx += 1
+
+        out: list[str] = []
+        seen = set()
+        for segment in merged_segments:
+            key = self._norm(segment)[:220]
+            if key and key not in seen:
+                seen.add(key)
+                out.append(segment)
+        return out
+
+    def _guess_row_group(self, title: str, text: str) -> str:
+        joined = f"{title}\n{text}"
+        if any(token in joined for token in ("商务", "合同", "付款", "交货", "质保", "资质", "售后", "工期")):
+            return "business"
+        if any(token in joined for token in ("技术", "指标", "参数", "性能", "功能", "配置", "温度", "增益", "频率")):
+            return "technical"
+        return "unknown"
+
+    def _match_one_star_from_rows(self, requirement: dict[str, Any], rows: list[dict[str, Any]]) -> dict | None:
+        req_norm = requirement["normalized_requirement"]
+        frags = requirement["fragments"]
+        best_row: dict[str, Any] | None = None
+        best_rank = (-1, -1, -1.0)
+        best_score = 0.0
+        best_hits = 0
+        best_long_hit = False
+
+        for row in rows:
+            candidates = [row.get("requirement_norm", ""), row.get("joined_norm", "")]
+            row_score = 0.0
+            row_hits = 0
+            row_long_hit = False
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                compare_left = req_norm[:160]
+                compare_right = candidate[: max(160, min(len(candidate), len(req_norm) + 40))]
+                ratio = SequenceMatcher(None, compare_left, compare_right).ratio()
+                hits = sum(1 for frag in frags if frag and frag in candidate)
+                long_hit = any(len(frag) >= 6 and frag in candidate for frag in frags)
+                contains = req_norm in candidate or candidate in req_norm
+                score = ratio + min(hits, 3) * 0.22 + (0.45 if contains else 0.0)
+                if score > row_score:
+                    row_score = score
+                    row_hits = hits
+                    row_long_hit = long_hit
+
+            matched = bool(row_score >= 0.68 or (row_hits >= 2 and row_score >= 0.48) or row_long_hit)
+            if not matched:
+                continue
+
+            row_has_response = self._row_has_response(row)
+            rank = (
+                1 if row_has_response else 0,
+                1 if row.get("source") == "logical_table" else 0,
+                row_score,
+            )
+            if rank > best_rank:
+                best_rank = rank
+                best_score = row_score
+                best_hits = row_hits
+                best_long_hit = row_long_hit
+                best_row = row
+
+        if best_row is None:
+            return None
+
+        analysis_text = "\n".join(
+            part for part in (best_row.get("response_text", ""), best_row.get("deviation_text", ""), best_row.get("joined_text", "")) if part
+        )
+        responded = self._row_has_response(best_row)
+        if not responded:
+            dev_type = "missing"
+        elif self._match_patterns(analysis_text, self.NEG_DEV_PATTERNS):
+            dev_type = "negative_deviation"
+        elif self._match_patterns(analysis_text, self.POS_DEV_PATTERNS):
+            dev_type = "positive_deviation"
+        elif self._match_patterns(analysis_text, self.NO_DEV_PATTERNS):
+            dev_type = "no_deviation"
+        else:
+            dev_type = "listed_response"
+
+        evidence = best_row.get("response_text") or best_row.get("deviation_text") or best_row.get("joined_text", "")
+        return {
+            "requirement_id": requirement["requirement_id"],
+            "requirement": requirement["requirement"],
+            "section_type": requirement["section_type"],
+            "responded": responded,
+            "explicit_response": responded,
+            "response_status": "responded" if responded else "missing",
+            "response_evidence": self._clip(evidence, 240) if responded else "",
+            "response_section": best_row.get("group", ""),
+            "response_section_title": best_row.get("title", ""),
+            "match_score": round(float(best_score), 4),
+            "deviation_type": dev_type,
+            "risk_level": "high" if (not responded or dev_type == "negative_deviation") else "low",
+            "_match_hits": best_hits,
+            "_match_long_hit": best_long_hit,
+        }
+
+    def _row_has_response(self, row: dict[str, Any]) -> bool:
+        if row.get("response_norm") or row.get("deviation_norm"):
+            return True
+        joined = str(row.get("joined_text") or "")
+        if "响应" in joined:
+            return True
+        if self._match_patterns(joined, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS):
+            return True
+        return bool(re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", joined, re.IGNORECASE))
+
     def _match_one_star(self, requirement: dict[str, Any], sections: dict[str, Any]) -> dict:
+        row_match = self._match_one_star_from_rows(requirement, sections.get("rows") or [])
+        if row_match is not None:
+            row_match.pop("_match_hits", None)
+            row_match.pop("_match_long_hit", None)
+            return row_match
+
         search_order = ("technical", "business") if requirement["section_type"] == "technical" else ("business", "technical")
         best = {"matched": False, "score": 0.0, "line": "", "section": "", "title": "", "hits": 0, "long_hit": False}
         req_norm = requirement["normalized_requirement"]
@@ -563,6 +936,10 @@ class DeviationChecker:
             if not anchor:
                 continue
             end = min(len(lines), i + window)
+            table_mode = any(
+                "招标文件" in probe and "投标文件" in probe and ("响应" in probe or "偏离" in probe)
+                for probe in lines[i : min(i + 12, len(lines))]
+            )
             for c in range(i + 1, end):
                 if c - i < 8:
                     continue
@@ -570,7 +947,12 @@ class DeviationChecker:
                 if any(t in now for t in self.BUSINESS_TITLES + self.TECH_TITLES):
                     end = c
                     break
-                if self._is_boundary(now):
+                if table_mode:
+                    now_compact = re.sub(r"\s+", "", now)
+                    if any(h in now for h in self.STOP_HINTS) and "偏离" not in now and len(now_compact) <= 40:
+                        end = c
+                        break
+                elif self._is_section_boundary(now):
                     end = c
                     break
             chunk = lines[i:end]
@@ -627,6 +1009,7 @@ class DeviationChecker:
                 "blocks",
                 "layout_sections",
                 "table_sections",
+                "logical_tables",
             )
         )
 
@@ -653,10 +1036,28 @@ class DeviationChecker:
             if isinstance(val, str) and val.strip():
                 parts.append(val.strip())
 
-        for key in ("cell_texts", "texts", "rec_texts"):
+        for key in ("cell_texts", "texts", "rec_texts", "headers"):
             val = section.get(key)
             if isinstance(val, list):
                 parts.extend(str(x or "").strip() for x in val if str(x or "").strip())
+
+        rows = section.get("rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, list):
+                    parts.append(" ".join(str(x or "").strip() for x in row if str(x or "").strip()))
+                elif isinstance(row, dict):
+                    parts.append(" ".join(str(x or "").strip() for x in row.values() if str(x or "").strip()))
+
+        records = section.get("records")
+        if isinstance(records, list):
+            for row in records:
+                if isinstance(row, dict):
+                    parts.append(" ".join(str(x or "").strip() for x in row.values() if str(x or "").strip()))
+
+        for key, val in section.items():
+            if key.startswith("col_") and isinstance(val, str) and val.strip():
+                parts.append(val.strip())
 
         return "\n".join(self._merge_unique_parts(parts)).strip()
 
@@ -664,18 +1065,23 @@ class DeviationChecker:
         sections: list[dict[str, Any]] = []
         seen = set()
 
-        for source_idx, key in enumerate(("layout_sections", "table_sections")):
+        for source_idx, key in enumerate(("layout_sections", "table_sections", "logical_tables")):
             raw_sections = doc.get(key)
             if not isinstance(raw_sections, list):
                 continue
             for item_idx, item in enumerate(raw_sections):
                 if isinstance(item, dict):
                     page_raw = item.get("page")
-                    section_type = str(item.get("type") or ("table" if key == "table_sections" else "text")).strip().lower() or "text"
+                    if page_raw is None and key == "logical_tables":
+                        pages = item.get("pages")
+                        if isinstance(pages, list) and pages:
+                            page_raw = pages[0]
+                    default_type = "table" if key in ("table_sections", "logical_tables") else "text"
+                    section_type = str(item.get("type") or default_type).strip().lower() or "text"
                     text = self._section_text(item)
                 else:
                     page_raw = None
-                    section_type = "table" if key == "table_sections" else "text"
+                    section_type = "table" if key in ("table_sections", "logical_tables") else "text"
                     text = str(item or "").strip()
 
                 if not text:
@@ -939,6 +1345,7 @@ class DeviationChecker:
 
     def _clean_req(self, text: str) -> str:
         t = self.STAR_RE.sub("", str(text or ""))
+        t = self._normalize_math_text(t)
         t = re.sub(
             r"^\s*(?:第[一二三四五六七八九十百]+[条章节项点]|[一二三四五六七八九十]+[、.．]|[0-9]+[、.．)]|[（(]\d{1,2}[)）])\s*",
             "",
@@ -948,9 +1355,33 @@ class DeviationChecker:
 
     def _norm(self, text: str) -> str:
         t = self.STAR_RE.sub("", str(text or ""))
+        t = self._normalize_math_text(t)
         t = re.sub(r"[\s\u3000\xa0]+", "", t)
+        t = t.replace("℃", "c").replace("°c", "c").replace("°C", "c").replace("°", "")
+        t = t.replace("×", "x").replace("∗", "*")
         t = re.sub(r"[，,。；;：:！？!?（）()【】\[\]《》<>“”\"'‘’、\-_/\\]", "", t)
         return t.lower()
+
+    def _normalize_math_text(self, text: str) -> str:
+        t = str(text or "")
+        replacements = (
+            ("\\leq", "≤"),
+            ("\\geq", "≥"),
+            ("\\pm", "±"),
+            ("\\times", "×"),
+            ("\\sim", "~"),
+            ("\\cdot", "·"),
+            ("\\mu", "μ"),
+        )
+        for source, target in replacements:
+            t = t.replace(source, target)
+
+        t = re.sub(r"\\mathrm\s*\{\s*c\s*\}", "℃", t, flags=re.IGNORECASE)
+        t = re.sub(r"\^\s*\{\s*\\circ\s*\}", "°", t, flags=re.IGNORECASE)
+        t = re.sub(r"\^\s*\{\s*([0-9]+)\s*\}", r"\1", t)
+        t = re.sub(r"\\(?:text|mathrm|operatorname)\s*\{([^{}]*)\}", r"\1", t)
+        t = re.sub(r"[$^{}]", "", t)
+        return re.sub(r"\s+", " ", t).strip()
 
     def _is_boundary(self, line: str) -> bool:
         c = re.sub(r"\s+", "", str(line or ""))
@@ -959,6 +1390,14 @@ class DeviationChecker:
         if any(h in c for h in self.STOP_HINTS) and "偏离" not in c:
             return True
         return bool(re.match(r"^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.．]|[0-9]{1,2}[、.．])", c) and len(c) <= 40)
+
+    def _is_section_boundary(self, line: str) -> bool:
+        c = re.sub(r"\s+", "", str(line or ""))
+        if not c:
+            return False
+        if any(h in c for h in self.STOP_HINTS) and "偏离" not in c:
+            return True
+        return bool(re.match(r"^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.．])", c) and len(c) <= 40)
 
     def _match_patterns(self, text: str, patterns: tuple[str, ...]) -> bool:
         return any(re.search(p, text or "", re.IGNORECASE) for p in patterns)
