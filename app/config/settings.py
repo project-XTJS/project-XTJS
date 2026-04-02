@@ -52,7 +52,6 @@ class Settings(BaseSettings):
     PADDLE_VL_FORMAT_BLOCK_CONTENT: bool = False
     PADDLE_VL_MERGE_LAYOUT_BLOCKS: bool = False
     PADDLE_VL_USE_QUEUES: bool = False
-    PADDLE_VL_BATCH_SIZE: int = 32
     PADDLE_VL_RESTRUCTURE_PAGES: bool = True
 
     OCR_PROGRESS_ENABLED: bool = True

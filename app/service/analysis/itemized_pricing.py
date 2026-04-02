@@ -22,6 +22,11 @@ class ItemizedPricingChecker:
         "报价表",
         "投标价格表",
     )
+    PRIMARY_ITEM_SECTION_ANCHORS = (
+        "分项报价表",
+        "报价表",
+        "投标价格表",
+    )
     TOTAL_SECTION_ANCHORS = (
         "开标一览表",
         "报价一览表",
@@ -89,9 +94,13 @@ class ItemizedPricingChecker:
         normalized_text = self._normalize_text(source_text)
         lines = self._split_lines(normalized_text)
 
-        structured_item_sections = self._find_layout_table_sections(parsed_payload, self.ITEM_SECTION_ANCHORS)
+        structured_item_sections = self._prioritize_item_sections(
+            self._find_layout_table_sections(parsed_payload, self.ITEM_SECTION_ANCHORS)
+        )
         structured_total_sections = self._find_layout_table_sections(parsed_payload, self.TOTAL_SECTION_ANCHORS)
-        item_sections = structured_item_sections or self._find_sections(lines, self.ITEM_SECTION_ANCHORS)
+        item_sections = structured_item_sections or self._prioritize_item_sections(
+            self._find_sections(lines, self.ITEM_SECTION_ANCHORS)
+        )
         total_sections = structured_total_sections or self._find_sections(lines, self.TOTAL_SECTION_ANCHORS)
         candidate_sections = self._dedupe_sections(item_sections + total_sections)
         if not candidate_sections:
@@ -257,33 +266,56 @@ class ItemizedPricingChecker:
         sections.sort(key=lambda item: item.get("start", 0))
         return self._dedupe_sections(sections)
 
+    def _prioritize_item_sections(self, sections: list[dict]) -> list[dict]:
+        if not sections:
+            return sections
+        primary_sections = [
+            section
+            for section in sections
+            if str(section.get("anchor") or "") in self.PRIMARY_ITEM_SECTION_ANCHORS
+        ]
+        return primary_sections or sections
+
     def _get_layout_sections(self, payload: dict | None) -> list[dict]:
-        if not isinstance(payload, dict):
+        container = self._get_structured_container(payload)
+        if not isinstance(container, dict):
             return []
-        layout_sections = payload.get("layout_sections")
+        layout_sections = container.get("layout_sections")
         if not isinstance(layout_sections, list):
             return []
         return [section for section in layout_sections if isinstance(section, dict)]
 
     def _get_logical_tables(self, payload: dict | None) -> list[dict]:
-        if not isinstance(payload, dict):
+        container = self._get_structured_container(payload)
+        if not isinstance(container, dict):
             return []
-        logical_tables = payload.get("logical_tables")
+        logical_tables = container.get("logical_tables")
         if not isinstance(logical_tables, list):
             return []
         return [table for table in logical_tables if isinstance(table, dict)]
 
+    def _get_structured_container(self, payload: dict | None) -> dict | None:
+        if not isinstance(payload, dict):
+            return None
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data
+        return payload
+
     def _extract_layout_table_lines(self, section: dict, logical_tables: list[dict]) -> list[str]:
-        logical_table = self._match_logical_table(section, logical_tables)
-        if logical_table is not None:
-            logical_lines = self._logical_table_to_lines(logical_table)
+        logical_table_index = self._match_logical_table_index(section, logical_tables)
+        if logical_table_index is not None:
+            logical_lines = []
+            for idx, logical_table in enumerate(self._collect_logical_table_sequence(logical_tables, logical_table_index)):
+                logical_lines.extend(self._logical_table_to_lines(logical_table, include_headers=(idx == 0)))
             if logical_lines:
                 return logical_lines
 
         section_text = self._get_section_text(section)
         return self._split_lines(self._normalize_text(section_text))
 
-    def _match_logical_table(self, section: dict, logical_tables: list[dict]) -> dict | None:
+    def _match_logical_table_index(self, section: dict, logical_tables: list[dict]) -> int | None:
         if not logical_tables:
             return None
 
@@ -291,15 +323,19 @@ class ItemizedPricingChecker:
         section_text = self._get_section_text(section)
         compact_section_text = re.sub(r"\s+", "", section_text)
         page_candidates = []
-        for table in logical_tables:
+        for index, table in enumerate(logical_tables):
             pages = table.get("pages")
             if isinstance(pages, list) and section_page in pages:
-                page_candidates.append(table)
+                page_candidates.append((index, table))
 
         candidates = page_candidates or logical_tables
-        best_table = None
+        best_table_index = None
         best_score = -1
-        for table in candidates:
+        for candidate in candidates:
+            if isinstance(candidate, tuple):
+                table_index, table = candidate
+            else:
+                table_index, table = logical_tables.index(candidate), candidate
             score = 0
             headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
             header_text = "".join(headers)
@@ -319,14 +355,38 @@ class ItemizedPricingChecker:
 
             if score > best_score:
                 best_score = score
-                best_table = table
+                best_table_index = table_index
 
-        return best_table if best_score > 0 else None
+        return best_table_index if best_score > 0 else None
 
-    def _logical_table_to_lines(self, table: dict) -> list[str]:
+    def _collect_logical_table_sequence(self, logical_tables: list[dict], start_index: int) -> list[dict]:
+        collected = [logical_tables[start_index]]
+        current_table = logical_tables[start_index]
+        for next_table in logical_tables[start_index + 1:]:
+            if not self._is_logical_table_continuation(current_table, next_table):
+                break
+            collected.append(next_table)
+            current_table = next_table
+        return collected
+
+    def _is_logical_table_continuation(self, current_table: dict, next_table: dict) -> bool:
+        if not isinstance(next_table, dict):
+            return False
+        if self._is_spare_parts_marker_text(" ".join(str(header) for header in (next_table.get("headers") or []))):
+            return False
+        if not bool(next_table.get("continued")):
+            return False
+
+        current_pages = [page for page in (current_table.get("pages") or []) if isinstance(page, int)]
+        next_pages = [page for page in (next_table.get("pages") or []) if isinstance(page, int)]
+        if current_pages and next_pages and next_pages[0] - current_pages[-1] > 1:
+            return False
+        return True
+
+    def _logical_table_to_lines(self, table: dict, *, include_headers: bool = True) -> list[str]:
         lines = []
         headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
-        if headers:
+        if include_headers and headers and not all(re.fullmatch(r"col_\d+", header, re.IGNORECASE) for header in headers):
             lines.append(" ".join(headers))
 
         rows = table.get("rows") or []
@@ -694,6 +754,7 @@ class ItemizedPricingChecker:
         row_issues = []
         unresolved_rows = []
         row_blocks = self._build_table_row_blocks(lines)
+        parent_serials = self._collect_parent_serials(row_blocks)
 
         for idx, line in enumerate(lines):
             if self._should_skip_line(line):
@@ -717,6 +778,8 @@ class ItemizedPricingChecker:
             block_text = " ".join(block["lines"])
             amounts = self._extract_row_amounts(block_text)
             if not amounts:
+                if block.get("serial") in parent_serials:
+                    continue
                 if self._is_unresolved_item_block(block_text):
                     unresolved_rows.append(
                         {
@@ -758,6 +821,17 @@ class ItemizedPricingChecker:
         items.extend(table_items)
         totals.extend(table_totals)
         return items, totals, row_issues, unresolved_rows
+
+    def _collect_parent_serials(self, row_blocks: list[dict]) -> set[str]:
+        parent_serials: set[str] = set()
+        for block in row_blocks:
+            serial = str(block.get("serial") or "").strip()
+            if "." not in serial:
+                continue
+            parts = serial.split(".")
+            for index in range(1, len(parts)):
+                parent_serials.add(".".join(parts[:index]))
+        return parent_serials
 
     def _build_table_row_blocks(self, lines: list[str]) -> list[dict]:
         blocks = []
@@ -1381,7 +1455,9 @@ def _extract_text_from_payload(payload: object) -> str:
         return payload
 
     if isinstance(payload, dict):
-        layout_sections = payload.get("layout_sections")
+        container = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+
+        layout_sections = container.get("layout_sections")
         if isinstance(layout_sections, list):
             lines = []
             for section in layout_sections:
@@ -1393,12 +1469,17 @@ def _extract_text_from_payload(payload: object) -> str:
             if lines:
                 return "\n".join(lines)
 
-        recognition = payload.get("recognition")
+        recognition = container.get("recognition")
         if isinstance(recognition, dict):
             for key in ("content", "raw_text", "text", "full_text"):
                 value = recognition.get(key)
                 if isinstance(value, str) and value.strip():
                     return value
+
+        for key in ("content", "raw_text", "text", "full_text"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
 
         for key in ("content", "raw_text", "text", "full_text"):
             value = payload.get(key)

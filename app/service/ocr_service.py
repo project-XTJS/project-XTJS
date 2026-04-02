@@ -1,10 +1,9 @@
-from copy import deepcopy
-from functools import lru_cache
 import html
 import os
 from pathlib import Path
 import re
 import threading
+from collections import defaultdict
 from typing import Any
 
 from app.config.settings import settings
@@ -12,17 +11,11 @@ from app.service.ocr_progress import OCRProgressMonitor
 from app.service.table_parser import build_logical_tables, build_table_structure
 
 
-@lru_cache(maxsize=4)
-def _load_paddlex_pipeline_config(pipeline_version: str, batch_size: int):
-    from paddlex.inference import load_pipeline_config
-
-    pipeline_name = "PaddleOCR-VL-1.5" if pipeline_version == "v1.5" else "PaddleOCR-VL"
-    config = load_pipeline_config(pipeline_name)
-    config["batch_size"] = max(1, int(batch_size or 1))
-    return config
-
-
 class OCRService:
+    RUNNING_HEADER_HEADING_RE = re.compile(
+        r"^第[一二三四五六七八九十0-9]+章|^[一二三四五六七八九十]+、|^[（(][一二三四五六七八九十A-Za-z0-9]+[)）]|^\d+\s*[)）.．、]|^(附件|附表|附录)\s*\d+(?:-\d+)?"
+    )
+
     def __init__(self, preferred_device: str | None = None):
         self.available = False
         self.pipeline = None
@@ -120,12 +113,6 @@ class OCRService:
         return {
             "device": device,
             "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
-            "paddlex_config": deepcopy(
-                _load_paddlex_pipeline_config(
-                    settings.PADDLE_VL_PIPELINE_VERSION,
-                    int(getattr(settings, "PADDLE_VL_BATCH_SIZE", 32)),
-                )
-            ),
             "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
             "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
             "use_layout_detection": settings.PADDLE_VL_USE_LAYOUT_DETECTION,
@@ -436,17 +423,11 @@ class OCRService:
             return self._merge_text_parts(parts, join_char="\n")
         return ""
 
-    def _page_number_from_payload(
-        self,
-        payload: dict[str, Any],
-        fallback_page_no: int,
-        *,
-        page_offset: int = 0,
-    ) -> int:
+    def _page_number_from_payload(self, payload: dict[str, Any], fallback_page_no: int) -> int:
         raw_page_index = payload.get("page_index")
         if isinstance(raw_page_index, int):
-            return (page_offset + raw_page_index + 1) if raw_page_index >= 0 else (page_offset + fallback_page_no)
-        return page_offset + fallback_page_no
+            return raw_page_index + 1 if raw_page_index >= 0 else fallback_page_no
+        return fallback_page_no
 
     def _build_table_section(self, page_no: int, block: dict[str, Any]) -> dict[str, Any] | None:
         raw_text = str(block.get("text") or "")
@@ -569,6 +550,92 @@ class OCRService:
 
         return sections
 
+    def _normalize_running_header_signature(self, text: Any) -> str:
+        normalized = self._normalize_section_text(text)
+        normalized = re.sub(r"\s+", "", normalized)
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", normalized)
+
+    def _is_running_header_candidate(self, section: dict[str, Any], page_extents: dict[int, int]) -> bool:
+        if str(section.get("type") or "") != "heading":
+            return False
+
+        text = self._normalize_section_text(section.get("text") or "")
+        if not text or self.RUNNING_HEADER_HEADING_RE.match(text):
+            return False
+
+        signature = self._normalize_running_header_signature(text)
+        if not signature or len(signature) > 30:
+            return False
+
+        bbox = self._bbox_to_xywh(section.get("bbox"))
+        if bbox is not None:
+            page_no = int(section.get("page", 0) or 0)
+            page_extent = page_extents.get(page_no)
+            if page_extent:
+                top_ratio = bbox[1] / max(page_extent, 1)
+                if top_ratio <= 0.18:
+                    return True
+
+        return "招标文件" in text or "投标文件" in text
+
+    def _strip_running_headers(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not sections:
+            return []
+
+        page_extents: dict[int, int] = {}
+        for section in sections:
+            page_no = int(section.get("page", 0) or 0)
+            bbox = self._bbox_to_xywh(section.get("bbox"))
+            if page_no <= 0 or bbox is None:
+                continue
+            page_extents[page_no] = max(page_extents.get(page_no, 0), bbox[1] + bbox[3])
+
+        candidate_pages: dict[str, set[int]] = defaultdict(set)
+        for section in sections:
+            if not self._is_running_header_candidate(section, page_extents):
+                continue
+            signature = self._normalize_running_header_signature(section.get("text") or "")
+            page_no = int(section.get("page", 0) or 0)
+            if signature and page_no > 0:
+                candidate_pages[signature].add(page_no)
+
+        repeated_signatures = {
+            signature
+            for signature, pages in candidate_pages.items()
+            if len(pages) >= 3
+        }
+        if not repeated_signatures:
+            return sections
+
+        filtered: list[dict[str, Any]] = []
+        for section in sections:
+            signature = self._normalize_running_header_signature(section.get("text") or "")
+            if signature in repeated_signatures and self._is_running_header_candidate(section, page_extents):
+                continue
+            filtered.append(section)
+        return filtered
+
+    def _rebuild_pages_from_sections(self, sections: list[dict[str, Any]], page_numbers: list[int]) -> list[dict[str, Any]]:
+        by_page: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for section in sections:
+            page_no = int(section.get("page", 0) or 0)
+            if page_no > 0:
+                by_page[page_no].append(section)
+
+        pages: list[dict[str, Any]] = []
+        for page_no in page_numbers:
+            page_sections = by_page.get(page_no, [])
+            page_text = self._merge_text_parts(
+                [
+                    str(section.get("text") or "")
+                    for section in page_sections
+                    if str(section.get("type") or "") in {"heading", "text", "table", "seal"}
+                ],
+                join_char="\n",
+            )
+            pages.append({"page": page_no, "text": page_text})
+        return pages
+
     def _extract_page_seals(self, page_payload: dict[str, Any], page_no: int) -> dict[str, Any]:
         seal_info = {"count": 0, "texts": [], "locations": []}
         parsing_res_list = page_payload.get("parsing_res_list") or []
@@ -651,13 +718,7 @@ class OCRService:
         payload["logical_tables"] = build_logical_tables(layout_sections)
         return payload
 
-    def extract_all(
-        self,
-        file_path: str,
-        file_type: str = "pdf",
-        *,
-        page_offset: int = 0,
-    ) -> dict[str, Any]:
+    def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
         total_pages = self._estimate_total_pages(file_path, file_type)
         print(
             "OCRService: OCR inference started "
@@ -698,11 +759,7 @@ class OCRService:
                 if not isinstance(page_payload, dict):
                     continue
 
-                page_no = self._page_number_from_payload(
-                    page_payload,
-                    fallback_page_no,
-                    page_offset=page_offset,
-                )
+                page_no = self._page_number_from_payload(page_payload, fallback_page_no)
                 page_blocks = self._extract_layout_blocks(page_payload, page_no)
                 page_sections = self._simplify_layout_sections(page_blocks)
                 page_text = self._extract_page_text(page_sections, page_payload)
@@ -720,6 +777,10 @@ class OCRService:
                     detail=f"parsed page {page_no}",
                     emit=True,
                 )
+
+            layout_sections = self._strip_running_headers(layout_sections)
+            page_numbers = [int(page.get("page", 0) or 0) for page in pages if int(page.get("page", 0) or 0) > 0]
+            pages = self._rebuild_pages_from_sections(layout_sections, page_numbers)
 
             full_text = self._merge_text_parts(
                 [str(page.get("text") or "") for page in pages],

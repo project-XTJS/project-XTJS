@@ -1,16 +1,16 @@
-"""文本分析路由：负责文件解析与规则分析分发。"""
+"""Text analysis routes for OCR extraction and rule-based analysis."""
 
 import html
+import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
-from app.router.dependencies import (
-    get_text_analysis_service,
-)
+from app.router.dependencies import get_text_analysis_service
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
@@ -124,16 +124,197 @@ def _build_public_logical_tables(logical_tables: list[dict] | None) -> list[dict
     return public_tables
 
 
-@router.post("/analyze-file", summary="文档解析（抽取文本）")
-async def analyze_file(
-    file: UploadFile = File(...),
-    analysis_service=Depends(get_text_analysis_service),
-):
-    """上传单个文件并返回识别结果。"""
-    allowed_extensions = set(analysis_service.get_supported_extensions())
-    file_extension = os.path.splitext(file.filename)[1].lower().lstrip(".")
+def _build_analyze_file_response(
+    upload: UploadFile,
+    *,
+    content: bytes,
+    file_extension: str,
+    extraction_result: dict,
+) -> dict:
+    metadata = build_analyze_file_metadata(
+        filename=upload.filename,
+        file_type=file_extension,
+        file_size=len(content),
+        page_count=extraction_result["page_count"],
+        mime_type=upload.content_type or "",
+        text_length=extraction_result["text_length"],
+        parser_engine=extraction_result["parser_engine"],
+        source_mode=extraction_result["source_mode"],
+        ocr_engine=extraction_result["ocr_engine"],
+        ocr_used=extraction_result["ocr_used"],
+        layout_used=extraction_result["layout_used"],
+        layout_section_count=extraction_result["layout_section_count"],
+        recognition_route=extraction_result["recognition_route"],
+        recognition_reason=extraction_result["recognition_reason"],
+        pdf_mode=extraction_result["pdf_mode"],
+        active_device=extraction_result["active_device"],
+        seal_detected=extraction_result["seal_detected"],
+        seal_count=extraction_result["seal_count"],
+        ppstructure_v3_requested=extraction_result["ppstructure_v3_requested"],
+        ppstructure_v3_enabled=extraction_result["ppstructure_v3_enabled"],
+        seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
+    )
+    public_layout_sections = _build_public_sections(extraction_result["layout_sections"])
+    public_table_sections = [
+        section for section in public_layout_sections if section.get("type") == "table"
+    ]
+    public_logical_tables = _build_public_logical_tables(extraction_result["logical_tables"])
 
-    # 先做扩展名校验，避免无效文件进入耗时识别流程。
+    return {
+        "filename": upload.filename,
+        "file_type": file_extension,
+        "file_size": len(content),
+        "text_length": extraction_result["text_length"],
+        "page_count": extraction_result["page_count"],
+        "layout_sections": public_layout_sections,
+        "table_sections": public_table_sections,
+        "logical_tables": public_logical_tables,
+        "recognition": {
+            "route": extraction_result["recognition_route"],
+            "parser_engine": extraction_result["parser_engine"],
+            "ocr_engine": extraction_result["ocr_engine"],
+            "ocr_used": extraction_result["ocr_used"],
+            "layout_used": extraction_result["layout_used"],
+        },
+        "seal": {
+            "detected": extraction_result["seal_detected"],
+            "count": extraction_result["seal_count"],
+            "texts": extraction_result["seal_texts"],
+        },
+        "metadata": metadata,
+    }
+
+
+def _coerce_source_path(raw_value: Any) -> Path | None:
+    if raw_value is None:
+        return None
+
+    path_text = str(raw_value).strip().strip('"').strip("'")
+    if not path_text:
+        return None
+    if not os.path.isabs(path_text):
+        raise HTTPException(
+            status_code=400,
+            detail="source_paths_json must contain absolute file paths.",
+        )
+    return Path(path_text)
+
+
+def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list[Path | None]:
+    if expected_count <= 0:
+        return []
+
+    if raw_value is None or not str(raw_value).strip():
+        return [None] * expected_count
+
+    raw_text = str(raw_value).strip()
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        if expected_count == 1:
+            return [_coerce_source_path(raw_text)]
+        raise HTTPException(
+            status_code=400,
+            detail="source_paths_json must be a JSON array aligned with uploaded files.",
+        ) from None
+
+    if isinstance(parsed, list):
+        if len(parsed) != expected_count:
+            raise HTTPException(
+                status_code=400,
+                detail="source_paths_json length must match the number of uploaded files.",
+            )
+        return [_coerce_source_path(item) for item in parsed]
+
+    if expected_count == 1:
+        return [_coerce_source_path(parsed)]
+
+    raise HTTPException(
+        status_code=400,
+        detail="source_paths_json must be a JSON array when uploading multiple files.",
+    )
+
+
+def _resolve_source_path(upload: UploadFile, explicit_source_path: Path | None) -> Path | None:
+    if explicit_source_path is not None:
+        return explicit_source_path
+
+    filename = str(upload.filename or "").strip()
+    if not filename or "fakepath" in filename.lower():
+        return None
+    if not os.path.isabs(filename):
+        return None
+    return Path(filename)
+
+
+def _build_save_result(
+    status: str,
+    *,
+    json_path: Path | None = None,
+    message: str | None = None,
+) -> dict:
+    result = {
+        "status": status,
+        "json_path": str(json_path) if json_path is not None else None,
+    }
+    if message:
+        result["message"] = message
+    return result
+
+
+def _save_analyze_file_json(
+    payload: dict,
+    *,
+    source_path: Path | None,
+    enabled: bool,
+) -> dict:
+    if not enabled:
+        return _build_save_result(
+            "disabled",
+            message="JSON persistence is disabled for this request.",
+        )
+
+    if source_path is None:
+        return _build_save_result(
+            "skipped",
+            message="Source path is unavailable, so the analyzed JSON was not saved.",
+        )
+
+    target_path = source_path.with_suffix(".json")
+    save_result = _build_save_result(
+        "saved",
+        json_path=target_path,
+        message="Analyzed JSON saved beside the source file.",
+    )
+    serialized_payload = dict(payload)
+    serialized_payload["save_result"] = save_result
+
+    try:
+        target_path.write_text(
+            json.dumps(serialized_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        return _build_save_result(
+            "failed",
+            json_path=target_path,
+            message=str(exc),
+        )
+
+    return save_result
+
+
+async def _analyze_single_upload(
+    upload: UploadFile,
+    *,
+    analysis_service: Any,
+    explicit_source_path: Path | None,
+    save_json_to_source: bool,
+) -> dict:
+    allowed_extensions = set(analysis_service.get_supported_extensions())
+    filename = str(upload.filename or "")
+    file_extension = os.path.splitext(filename)[1].lower().lstrip(".")
+
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
@@ -143,75 +324,136 @@ async def analyze_file(
             ),
         )
 
-    content = await file.read()
+    content = await upload.read()
     temp_file_path = save_temp_file(content, f".{file_extension}")
 
     try:
-        # 识别调用放入线程池，避免阻塞事件循环。
         extraction_result = await run_in_threadpool(
             analysis_service.extract_text_result,
             temp_file_path,
             file_extension,
         )
-        metadata = build_analyze_file_metadata(
-            filename=file.filename,
-            file_type=file_extension,
-            file_size=len(content),
-            page_count=extraction_result["page_count"],
-            mime_type=file.content_type or "",
-            text_length=extraction_result["text_length"],
-            parser_engine=extraction_result["parser_engine"],
-            source_mode=extraction_result["source_mode"],
-            ocr_engine=extraction_result["ocr_engine"],
-            ocr_used=extraction_result["ocr_used"],
-            layout_used=extraction_result["layout_used"],
-            layout_section_count=extraction_result["layout_section_count"],
-            recognition_route=extraction_result["recognition_route"],
-            recognition_reason=extraction_result["recognition_reason"],
-            pdf_mode=extraction_result["pdf_mode"],
-            active_device=extraction_result["active_device"],
-            seal_detected=extraction_result["seal_detected"],
-            seal_count=extraction_result["seal_count"],
-            ppstructure_v3_requested=extraction_result["ppstructure_v3_requested"],
-            ppstructure_v3_enabled=extraction_result["ppstructure_v3_enabled"],
-            seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
+        payload = _build_analyze_file_response(
+            upload,
+            content=content,
+            file_extension=file_extension,
+            extraction_result=extraction_result,
         )
-        public_layout_sections = _build_public_sections(extraction_result["layout_sections"])
-        public_table_sections = [
-            section for section in public_layout_sections if section.get("type") == "table"
-        ]
-        public_logical_tables = _build_public_logical_tables(extraction_result["logical_tables"])
-
-        return {
-            "filename": file.filename,
-            "file_type": file_extension,
-            "file_size": len(content),
-            "text_length": extraction_result["text_length"],
-            "page_count": extraction_result["page_count"],
-            "layout_sections": public_layout_sections,
-            "table_sections": public_table_sections,
-            "logical_tables": public_logical_tables,
-            "recognition": {
-                "route": extraction_result["recognition_route"],
-                "parser_engine": extraction_result["parser_engine"],
-                "ocr_engine": extraction_result["ocr_engine"],
-                "ocr_used": extraction_result["ocr_used"],
-                "layout_used": extraction_result["layout_used"],
-            },
-            "seal": {
-                "detected": extraction_result["seal_detected"],
-                "count": extraction_result["seal_count"],
-                "texts": extraction_result["seal_texts"],
-            },
-            "metadata": metadata,
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        payload["save_result"] = _save_analyze_file_json(
+            payload,
+            source_path=_resolve_source_path(upload, explicit_source_path),
+            enabled=save_json_to_source,
+        )
+        return payload
     finally:
-        # 无论成功失败都清理临时文件。
         cleanup_temp_file(temp_file_path)
+
+
+@router.post("/analyze-file", summary="文档解析（抽取文本）")
+async def analyze_file(
+    file: list[UploadFile] = File(...),
+    source_paths_json: str | None = Form(
+        default=None,
+        description=(
+            "Optional JSON string or JSON array aligned with the uploaded files. "
+            "Each path is used to save the analyzed JSON beside the source file."
+        ),
+    ),
+    save_json_to_source: bool = Form(
+        default=True,
+        description=(
+            "Whether to save each analyzed JSON beside the source file when a source "
+            "path is available."
+        ),
+    ),
+    analysis_service=Depends(get_text_analysis_service),
+):
+    """Analyze one or more uploaded files and optionally save the JSON beside each source."""
+    uploads = [upload for upload in file if upload is not None]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No files were uploaded.")
+
+    source_paths = _parse_source_paths_json(source_paths_json, len(uploads))
+
+    if len(uploads) == 1:
+        try:
+            return await _analyze_single_upload(
+                uploads[0],
+                analysis_service=analysis_service,
+                explicit_source_path=source_paths[0],
+                save_json_to_source=save_json_to_source,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    items: list[dict] = []
+    success_count = 0
+
+    for upload, source_path in zip(uploads, source_paths):
+        try:
+            result = await _analyze_single_upload(
+                upload,
+                analysis_service=analysis_service,
+                explicit_source_path=source_path,
+                save_json_to_source=save_json_to_source,
+            )
+        except ValueError as exc:
+            items.append(
+                {
+                    "filename": str(upload.filename or ""),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            continue
+        except RuntimeError as exc:
+            items.append(
+                {
+                    "filename": str(upload.filename or ""),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            continue
+        except HTTPException as exc:
+            detail = exc.detail
+            if not isinstance(detail, str):
+                detail = json.dumps(detail, ensure_ascii=False)
+            items.append(
+                {
+                    "filename": str(upload.filename or ""),
+                    "status": "failed",
+                    "error": detail,
+                }
+            )
+            continue
+
+        items.append(
+            {
+                "filename": str(upload.filename or ""),
+                "status": "success",
+                "result": result,
+            }
+        )
+        success_count += 1
+
+    failed_count = len(items) - success_count
+    if failed_count == 0:
+        overall_status = "success"
+    elif success_count == 0:
+        overall_status = "failed"
+    else:
+        overall_status = "partial_success"
+
+    return {
+        "status": overall_status,
+        "total": len(uploads),
+        "success": success_count,
+        "failed": failed_count,
+        "items": items,
+    }
 
 
 @router.post("/run", summary="统一文本分析接口")
@@ -219,7 +461,7 @@ async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """按 task_type 分发到对应分析模块。"""
+    """Dispatch text to the requested rule-based analysis module."""
     raw_text = payload.text or ""
     text = preprocess_text(raw_text)
 
