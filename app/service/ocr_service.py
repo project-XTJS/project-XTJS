@@ -449,6 +449,9 @@ class OCRService:
             section["raw_text"] = normalized_raw_text
         if html_parts:
             section["html"] = "\n\n".join(html_parts)
+        native_table = self._extract_native_table_payload(block, page_no)
+        if native_table:
+            section["native_table"] = native_table
 
         table_structure = build_table_structure(
             html_parts=html_parts,
@@ -457,6 +460,40 @@ class OCRService:
         if table_structure is not None:
             section["table_structure"] = table_structure
         return section
+
+    def _extract_native_table_payload(self, block: dict[str, Any], page_no: int) -> dict[str, Any] | None:
+        raw_payload = self._to_builtin(block.get("_raw"))
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+
+        native_payload = dict(raw_payload)
+        if page_no > 0 and not isinstance(native_payload.get("page"), int):
+            native_payload["page"] = page_no
+
+        bbox = self._normalize_bbox(
+            native_payload.get("block_bbox")
+            or native_payload.get("bbox")
+            or native_payload.get("box")
+            or block.get("bbox")
+        )
+        if bbox is not None and not any(key in native_payload for key in ("block_bbox", "bbox", "box")):
+            native_payload["bbox"] = bbox
+
+        if not native_payload:
+            return None
+        return native_payload
+
+    def _collect_native_tables(self, layout_sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        native_tables: list[dict[str, Any]] = []
+        for section in layout_sections:
+            if not isinstance(section, dict):
+                continue
+            if str(section.get("type") or "").strip().lower() != "table":
+                continue
+            native_table = section.get("native_table")
+            if isinstance(native_table, dict):
+                native_tables.append(dict(native_table))
+        return native_tables
 
     def _extract_layout_blocks(self, page_payload: dict[str, Any], page_no: int) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
@@ -713,8 +750,10 @@ class OCRService:
         layout_sections = payload.get("layout_sections") or []
         if not isinstance(layout_sections, list):
             payload["logical_tables"] = []
+            payload["native_tables"] = []
             return payload
 
+        payload["native_tables"] = self._collect_native_tables(layout_sections)
         payload["logical_tables"] = build_logical_tables(layout_sections)
         return payload
 
@@ -796,6 +835,7 @@ class OCRService:
                     "locations": all_seal_locations,
                 },
                 "layout_sections": layout_sections,
+                "native_tables": [],
                 "logical_tables": [],
                 "ocr_applied": True,
                 "structure_used": bool(layout_sections),

@@ -47,6 +47,7 @@ class AnalysisService:
         pages = ocr_result.get("pages") or []
         page_count = len(pages) if isinstance(pages, list) else 0
         layout_sections = ocr_result.get("layout_sections") or []
+        native_tables = ocr_result.get("native_tables") or []
         logical_tables = ocr_result.get("logical_tables") or []
         seal_data = ocr_result.get("seals") or {"count": 0, "texts": []}
 
@@ -76,6 +77,8 @@ class AnalysisService:
             "layout_section_count": len(layout_sections),
             "table_sections": table_sections,
             "table_section_count": len(table_sections),
+            "native_tables": native_tables,
+            "native_table_count": len(native_tables),
             "logical_tables": logical_tables,
             "logical_table_count": len(logical_tables),
             "seal_detected": seal_count > 0,

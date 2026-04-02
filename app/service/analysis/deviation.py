@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 from difflib import SequenceMatcher
+from html import unescape
 from typing import Any
 
 
@@ -462,7 +463,13 @@ class DeviationChecker:
         headers = [str(x or "").strip() for x in (table.get("headers") or [])]
         pages = [x for x in (table.get("pages") or []) if isinstance(x, int)]
         page_no = pages[0] if pages else None
-        title = str(table.get("id") or "logical_table")
+        if page_no is None:
+            raw_page = table.get("page")
+            try:
+                page_no = int(raw_page) if raw_page is not None else None
+            except (TypeError, ValueError):
+                page_no = None
+        title = str(table.get("id") or table.get("block_id") or "logical_table")
 
         records = table.get("records")
         if isinstance(records, list):
@@ -476,6 +483,11 @@ class DeviationChecker:
 
         rows = table.get("rows")
         if not isinstance(rows, list):
+            native_headers, native_records = self._extract_native_table_records(table)
+            for record in native_records:
+                row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+                if row:
+                    out.append(row)
             return out
 
         for values in rows:
@@ -488,7 +500,67 @@ class DeviationChecker:
             row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
             if row:
                 out.append(row)
+
+        if out:
+            return out
+
+        native_headers, native_records = self._extract_native_table_records(table)
+        for record in native_records:
+            row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+            if row:
+                out.append(row)
         return out
+
+    def _extract_native_table_records(self, table: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        raw_html = table.get("block_content") or table.get("html") or table.get("text") or ""
+        if not isinstance(raw_html, str) or not raw_html.strip():
+            return [], []
+
+        html_rows = self._parse_html_table_rows(raw_html)
+        if not html_rows:
+            return [], []
+
+        header_like = self._looks_like_header_row(html_rows[0])
+        headers = html_rows[0] if header_like else [f"col_{idx + 1}" for idx in range(len(html_rows[0]))]
+        data_rows = html_rows[1:] if header_like else html_rows
+
+        records: list[dict[str, Any]] = []
+        for values in data_rows:
+            if not isinstance(values, list):
+                continue
+            record = {
+                headers[idx] if idx < len(headers) else f"col_{idx + 1}": str(value or "").strip()
+                for idx, value in enumerate(values)
+                if str(value or "").strip()
+            }
+            if record:
+                records.append(record)
+
+        return headers, records
+
+    def _parse_html_table_rows(self, raw_html: str) -> list[list[str]]:
+        html = str(raw_html or "")
+        if "<tr" not in html.lower() or ("<td" not in html.lower() and "<th" not in html.lower()):
+            return []
+
+        rows: list[list[str]] = []
+        for row_html in re.findall(r"(?is)<tr\b[^>]*>(.*?)</tr>", html):
+            cells: list[str] = []
+            for cell_html in re.findall(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", row_html):
+                cell_text = self._normalize_markup_text(cell_html, preserve_lines=False)
+                if cell_text:
+                    cells.append(cell_text)
+                else:
+                    cells.append("")
+            if any(cell.strip() for cell in cells):
+                rows.append(cells)
+        return rows
+
+    def _looks_like_header_row(self, values: list[str]) -> bool:
+        if not isinstance(values, list) or not values:
+            return False
+        joined = "".join(str(value or "").strip() for value in values)
+        return any(token in joined for token in ("需求", "要求", "条款", "响应", "应答", "偏离", "说明", "备注"))
 
     def _build_row_from_record(
         self,
@@ -1031,15 +1103,19 @@ class DeviationChecker:
             return ""
 
         parts: list[str] = []
-        for key in ("text", "raw_text", "markdown", "html", "pred_html", "content", "caption"):
+        for key in ("text", "raw_text", "markdown", "html", "pred_html", "content", "caption", "block_content"):
             val = section.get(key)
             if isinstance(val, str) and val.strip():
-                parts.append(val.strip())
+                parts.append(self._normalize_markup_text(val, preserve_lines=key in {"html", "pred_html", "block_content"}))
 
         for key in ("cell_texts", "texts", "rec_texts", "headers"):
             val = section.get(key)
             if isinstance(val, list):
-                parts.extend(str(x or "").strip() for x in val if str(x or "").strip())
+                parts.extend(
+                    self._normalize_markup_text(x, preserve_lines=False)
+                    for x in val
+                    if self._normalize_markup_text(x, preserve_lines=False)
+                )
 
         rows = section.get("rows")
         if isinstance(rows, list):
@@ -1057,9 +1133,41 @@ class DeviationChecker:
 
         for key, val in section.items():
             if key.startswith("col_") and isinstance(val, str) and val.strip():
-                parts.append(val.strip())
+                parts.append(self._normalize_markup_text(val, preserve_lines=False))
 
         return "\n".join(self._merge_unique_parts(parts)).strip()
+
+    def _normalize_markup_text(self, value: Any, *, preserve_lines: bool) -> str:
+        text = unescape(str(value or ""))
+        if not text.strip():
+            return ""
+
+        text = re.sub(r"(?is)<img\b[^>]*alt=['\"]([^'\"]*)['\"][^>]*>", r" \1 ", text)
+        text = re.sub(r"(?is)<img\b[^>]*>", " ", text)
+
+        if preserve_lines:
+            text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+            text = re.sub(r"(?i)</t[dh]>", "\t", text)
+            text = re.sub(r"(?i)</tr>", "\n", text)
+            text = re.sub(r"(?i)</?(table|thead|tbody|tfoot|tr|p|div|section|article)[^>]*>", "\n", text)
+            text = re.sub(r"(?i)</?(td|th)[^>]*>", " ", text)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = re.sub(r"[^\S\n\t]+", " ", text)
+            text = re.sub(r" *\t *", "\t", text)
+            text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            lines: list[str] = []
+            for raw_line in text.splitlines():
+                cells = [re.sub(r" {2,}", " ", cell).strip() for cell in raw_line.split("\t")]
+                cleaned = "\t".join(cell for cell in cells if cell).strip()
+                if cleaned:
+                    lines.append(cleaned)
+            return "\n".join(lines)
+
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     def _section_items(self, doc: dict) -> list[dict[str, Any]]:
         sections: list[dict[str, Any]] = []
