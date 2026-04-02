@@ -1,5 +1,3 @@
-from copy import deepcopy
-from functools import lru_cache
 import html
 import os
 from pathlib import Path
@@ -10,16 +8,6 @@ from typing import Any
 from app.config.settings import settings
 from app.service.ocr_progress import OCRProgressMonitor
 from app.service.table_parser import build_logical_tables, build_table_structure
-
-
-@lru_cache(maxsize=4)
-def _load_paddlex_pipeline_config(pipeline_version: str, batch_size: int):
-    from paddlex.inference import load_pipeline_config
-
-    pipeline_name = "PaddleOCR-VL-1.5" if pipeline_version == "v1.5" else "PaddleOCR-VL"
-    config = load_pipeline_config(pipeline_name)
-    config["batch_size"] = max(1, int(batch_size or 1))
-    return config
 
 
 class OCRService:
@@ -120,12 +108,6 @@ class OCRService:
         return {
             "device": device,
             "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
-            "paddlex_config": deepcopy(
-                _load_paddlex_pipeline_config(
-                    settings.PADDLE_VL_PIPELINE_VERSION,
-                    int(getattr(settings, "PADDLE_VL_BATCH_SIZE", 32)),
-                )
-            ),
             "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
             "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
             "use_layout_detection": settings.PADDLE_VL_USE_LAYOUT_DETECTION,
@@ -436,17 +418,11 @@ class OCRService:
             return self._merge_text_parts(parts, join_char="\n")
         return ""
 
-    def _page_number_from_payload(
-        self,
-        payload: dict[str, Any],
-        fallback_page_no: int,
-        *,
-        page_offset: int = 0,
-    ) -> int:
+    def _page_number_from_payload(self, payload: dict[str, Any], fallback_page_no: int) -> int:
         raw_page_index = payload.get("page_index")
         if isinstance(raw_page_index, int):
-            return (page_offset + raw_page_index + 1) if raw_page_index >= 0 else (page_offset + fallback_page_no)
-        return page_offset + fallback_page_no
+            return raw_page_index + 1 if raw_page_index >= 0 else fallback_page_no
+        return fallback_page_no
 
     def _build_table_section(self, page_no: int, block: dict[str, Any]) -> dict[str, Any] | None:
         raw_text = str(block.get("text") or "")
@@ -651,13 +627,7 @@ class OCRService:
         payload["logical_tables"] = build_logical_tables(layout_sections)
         return payload
 
-    def extract_all(
-        self,
-        file_path: str,
-        file_type: str = "pdf",
-        *,
-        page_offset: int = 0,
-    ) -> dict[str, Any]:
+    def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
         total_pages = self._estimate_total_pages(file_path, file_type)
         print(
             "OCRService: OCR inference started "
@@ -698,11 +668,7 @@ class OCRService:
                 if not isinstance(page_payload, dict):
                     continue
 
-                page_no = self._page_number_from_payload(
-                    page_payload,
-                    fallback_page_no,
-                    page_offset=page_offset,
-                )
+                page_no = self._page_number_from_payload(page_payload, fallback_page_no)
                 page_blocks = self._extract_layout_blocks(page_payload, page_no)
                 page_sections = self._simplify_layout_sections(page_blocks)
                 page_text = self._extract_page_text(page_sections, page_payload)
