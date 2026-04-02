@@ -384,7 +384,7 @@ class DeviationChecker:
         return {"business": business, "technical": technical, "combined_text": combined, "rows": rows}
 
     def _is_table_row_start(self, line: str) -> bool:
-        return bool(re.match(r"^\s*\d{1,3}(?:\s*[.,)\u3001\uff0e\uff09]|\s+)", str(line or "")))
+        return bool(re.match(r"^\s*\d{1,3}(?:\s*[.,)\u3001\uff0e\uff09]|\s+)", str(line or "")))  
 
     def _looks_like_response_row(self, line: str) -> bool:
         text = str(line or "")
