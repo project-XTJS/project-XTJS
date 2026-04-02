@@ -80,9 +80,9 @@ def run_business_tests_with_ocr(json_path: str):
     # print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
 
     # 2. 曾俊、滑鹏鹏 - 报价合理性
-    print("【报价合理性检查结果】")
-    result = ReasonablenessChecker().check_price_reasonableness(res_data)
-    print(json.dumps(result, indent=4, ensure_ascii=False))
+    # print("【报价合理性检查结果】")
+    # result = ReasonablenessChecker().check_price_reasonableness(res_data)
+    # print(json.dumps(result, indent=4, ensure_ascii=False))
 
     # 3. 江宇 - 分项报价
     # print("【分项报价检查结果】")
