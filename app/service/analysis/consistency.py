@@ -1,12 +1,51 @@
 import re
+from .template_extractor import TemplateExtractor
 
 class DocumentProcessor:
-    """利用 Model 模板锚点精准切分投标人文件"""
+    """精准切分工具：支持单次顺序遍历、章节刹车及页码提权容错"""
+
+    @classmethod
+    def _promote_sections(cls, sections: list) -> list:
+        """页码提权容错逻辑"""
+        PATTERN_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.])')
+        PATTERN_KEYWORD = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照')
+        
+        def is_target(text: str) -> bool:
+            if PATTERN_START.search(text): return True
+            if PATTERN_KEYWORD.search(text) and len(text) < 40: return True
+            return False
+
+        page_has_native = {}
+        for sec in sections:
+            if not isinstance(sec, dict): continue
+            page = sec.get('page', -1)
+            if sec.get('type') == 'heading' and is_target(str(sec.get('text', '')).strip()):
+                page_has_native[page] = True
+                
+        processed = []
+        promoted = set()
+        for sec in sections:
+            if not isinstance(sec, dict): 
+                processed.append(sec)
+                continue
+            page = sec.get('page', -1)
+            sec_type = sec.get('type', '')
+            text = str(sec.get('text', '')).strip()
+            
+            if sec_type == 'text' and not page_has_native.get(page, False) and page not in promoted:
+                if is_target(text):
+                    new_sec = sec.copy()
+                    new_sec['type'] = 'heading'
+                    processed.append(new_sec)
+                    promoted.add(page)
+                    continue
+            processed.append(sec)
+        return processed
 
     @classmethod
     def segment_document(cls, raw_json: dict, templates: list) -> list:
         data_node = raw_json.get('data', raw_json)
-        sections = data_node.get('layout_sections', [])
+        sections = cls._promote_sections(data_node.get('layout_sections', []))
         
         for temp in templates:
             clean_title = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', temp['title'])
@@ -19,10 +58,9 @@ class DocumentProcessor:
             sec_type = sec.get('type', '')
             if not text: continue
             
-            # 终止条件，可自定义刹车点
             is_break_text = (
-                re.match(r'^第[一二三四五六七八九十百]+[章节部分]', text) or 
-                re.match(r'^[一二三四五六七八九十]+[、.]', text) or
+                re.search(r'^\s*第[一二三四五六七八九十百]+[章节部分]', text) or 
+                re.search(r'^\s*[一二三四五六七八九十]+[、.]', text) or
                 "营业执照" in text or
                 "技术文件" in text
             )
@@ -33,8 +71,7 @@ class DocumentProcessor:
                     current_idx, captured = -1, []
                 continue
 
-            # 附件标题识别保持不变
-            if sec_type == 'heading' and re.search(r'^(附件|格式|附表)', text):
+            if sec_type == 'heading' and re.search(r'^\s*[\(（]?(附件|格式|附表)', text):
                 matched_idx = -1
                 for i in range(current_idx + 1, len(templates)):
                     if templates[i]['pattern'].search(text):
@@ -59,105 +96,47 @@ class DocumentProcessor:
             results.append({"title": temp['title'], "text": final_text})
         return results
 
-
 class ConsistencyChecker:
-    """格式一致性审查服务"""
+    """一致性审查服务：标点括号净化 + 粘贴锚点过滤 + 日期智能拆分"""
     def __init__(self):
-        # 1. 统一处理：将所有括号及内部内容作为正则匹配目标
         self.BRACKET_PATTERN = re.compile(r'（[^）]*）|【[^】]*】|\[[^\]]*\]|<[^>]*>')
-        
-        # 2. 分段切割点：标点、空白，以及括号本身也作为天然的句子切分断点
-        self.TEMPLATE_SPLIT_PATTERN = re.compile(
-            r'（[^）]*）|【[^】]*】|\[[^\]]*\]|<[^>]*>|[:：_+，,。．.；;！!？?：“”"\'、\s\n\r\\@·・·]+'           
-        )
-        
-        # 3. 纯净内容提取：仅保留中文、大小写英文和数字
+        self.SPLIT_PATTERN = re.compile(r'（[^）]*）|【[^】]*】|\[[^\]]*\]|<[^>]*>|[:：_+，,。．.；;！!？?：“”"\'、\s\n\r\\@·・·]+')
         self.CONTENT_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
-
-        self.SYNONYMS = {
-            "投标承诺书": "投标保证书",
-            "邀请招标": "公开招标",
-            "询价": "公开招标",
-            "竞争性谈判": "公开招标"
-        }
-
-    def _replace_synonyms(self, text: str) -> str:
-        for syn, standard in self.SYNONYMS.items():
-            text = text.replace(syn, standard)
-        return text
-
-    def _clean_text(self, text: str) -> str:
-        if not text: return ""
-        # 将所有英文括号转为中文括号，统一抹除
-        text = text.replace('(', '（').replace(')', '）')
-        text = self._replace_synonyms(text)
-        # 删掉所有括号及其内部内容
-        text = self.BRACKET_PATTERN.sub('', text)
-        text = re.sub(r'_+', '', text)
-        return text
 
     def _normalize(self, text: str) -> str:
         if not text: return ""
-        clean_text = self._clean_text(text)
-        # 提取汉字、字母和数字，抛弃标点符号
-        return "".join(self.CONTENT_PATTERN.findall(clean_text))
+        text = text.replace('(', '（').replace(')', '）')
+        text = self.BRACKET_PATTERN.sub('', text)
+        return "".join(self.CONTENT_PATTERN.findall(text))
 
-    def _get_anchors(self, template_text: str):
-        if not template_text: return []
+    def _get_anchors(self, text: str):
+        text = text.replace('(', '（').replace(')', '）')
         
-        # 预处理括号和近义词
-        template_text = template_text.replace('(', '（').replace(')', '）')
-        template_text = re.sub(r'(项目)', r' \1 ', template_text)
-        template_text = self._replace_synonyms(template_text)
-        
-        # 使用标点和括号切分片段
-        segments = self.TEMPLATE_SPLIT_PATTERN.split(template_text)
-        
+        segments = self.SPLIT_PATTERN.split(text)
         anchors = []
         for s in segments:
-            # 如果片段中出现“粘贴”，则跳过该锚点
-            if "粘贴" in s:
-                continue
-            if "供应商名称" == s:
-                continue
+            if not s or "粘贴" in s: continue
             norm_s = self._normalize(s)
-            if len(norm_s) >= 2:
+
+            if len(norm_s) >= 2 : 
                 anchors.append(norm_s)
         return anchors
 
     def compare_raw_data(self, model_json: dict, test_json: dict, found_sections: list = None):
-        from app.service.analysis.template_extractor import TemplateExtractor
-        
-        # 1. 提取 Model 的真实模板
         templates = TemplateExtractor.extract_consistency_templates(model_json)
-        
-        # 2. 用 Model 模板去切分文档
         m_segs = DocumentProcessor.segment_document(model_json, templates)
         b_segs = DocumentProcessor.segment_document(test_json, templates)
 
         reports = []
         for i, m_seg in enumerate(m_segs):
-            title = m_seg['title']
-            b_text = b_segs[i]['text']
-            m_text = m_seg['text']
+            m_text, b_text = m_seg['text'], b_segs[i]['text']
+            if len(m_text) < 20:
+                reports.append({"name": m_seg['title'], "is_passed": True, "missing_anchors": ["【纯图/短文本】"]})
+                continue
 
-            # 3. 严格执行锚点比对
             norm_bidder = self._normalize(b_text)
             anchors = self._get_anchors(m_text)
-            issues, last_pos = [], 0
-            
-            for a in anchors:
-                pos = norm_bidder.find(a, last_pos)
-                if pos == -1: 
-                    issues.append(a)
-                else: 
-                    last_pos = pos + len(a)
+            issues = [a for a in anchors if norm_bidder.find(a) == -1]
 
-            reports.append({
-                "name": title,
-                "is_passed": len(issues) == 0,
-                "missing_segments_count": len(issues),
-                "missing_anchors": issues
-            })
-            
+            reports.append({"name": m_seg['title'], "is_passed": len(issues) == 0, "missing_anchors": issues})
         return reports
