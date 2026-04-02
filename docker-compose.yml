@@ -1,7 +1,7 @@
 services:
   # 主应用服务
   app:
-    image: project-xtjs:release-7523a31
+    image: project-xtjs:release-13a1035
     container_name: project-xtjs
     ports:
       - "8080:8080"
@@ -32,6 +32,7 @@ services:
       - PADDLE_VL_FORMAT_BLOCK_CONTENT=${PADDLE_VL_FORMAT_BLOCK_CONTENT:-false}
       - PADDLE_VL_MERGE_LAYOUT_BLOCKS=${PADDLE_VL_MERGE_LAYOUT_BLOCKS:-false}
       - PADDLE_VL_USE_QUEUES=${PADDLE_VL_USE_QUEUES:-false}
+      - PADDLE_VL_BATCH_SIZE=${PADDLE_VL_BATCH_SIZE:-32}
       - PADDLE_VL_RESTRUCTURE_PAGES=${PADDLE_VL_RESTRUCTURE_PAGES:-true}
       - OCR_PROGRESS_ENABLED=${OCR_PROGRESS_ENABLED:-true}
       - OCR_PROGRESS_BAR_WIDTH=${OCR_PROGRESS_BAR_WIDTH:-24}
