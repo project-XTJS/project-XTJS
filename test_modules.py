@@ -6,7 +6,7 @@ from app.service.analysis.visualizer import ReportVisualizer
 
 def main():
     # 1. 加载文件
-    m_path, t_path = "./ocr_results/427/427-model.json", "./ocr_results/427/427-shuyuan.json"
+    m_path, t_path = "./ocr_results/427/427-model.json", "./ocr_results/427/427-rongyuan.json"
     
     if not os.path.exists(m_path) or not os.path.exists(t_path):
         print(f"错误: 找不到文件 {m_path} 或 {t_path}")
