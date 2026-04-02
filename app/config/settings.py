@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: bool = True
 
     PADDLE_OCR_DEVICE: str = "gpu:0"
-    PADDLE_OCR_DEVICE_POOL: str = " "
+    PADDLE_OCR_DEVICE_POOL: str = "auto"
     PADDLE_OCR_MAX_INFLIGHT_PER_DEVICE: int = 1
     PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING: bool = False
     PADDLE_OCR_FALLBACK_TO_CPU: bool = True

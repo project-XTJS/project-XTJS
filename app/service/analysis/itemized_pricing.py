@@ -186,6 +186,7 @@ class ItemizedPricingChecker:
 
     def _find_layout_table_sections(self, payload: dict | None, anchors: tuple[str, ...]) -> list[dict]:
         layout_sections = self._get_layout_sections(payload)
+        logical_tables = self._get_logical_tables(payload)
         if not layout_sections:
             return []
 
@@ -211,7 +212,7 @@ class ItemizedPricingChecker:
                 if not table_started:
                     if section_type == "table":
                         table_started = True
-                        lines.extend(self._split_lines(self._normalize_text(section_text)))
+                        lines.extend(self._extract_layout_table_lines(follower, logical_tables))
                         pages.append(follower.get("page"))
                         continue
                     if self._matches_other_anchor(section_text, anchors):
@@ -223,7 +224,7 @@ class ItemizedPricingChecker:
                 if section_type == "table":
                     if not self._should_attach_following_layout_table(section_text):
                         continue
-                    lines.extend(self._split_lines(self._normalize_text(section_text)))
+                    lines.extend(self._extract_layout_table_lines(follower, logical_tables))
                     pages.append(follower.get("page"))
                     continue
                 if self._is_layout_bridge_text(section_text):
@@ -259,13 +260,86 @@ class ItemizedPricingChecker:
     def _get_layout_sections(self, payload: dict | None) -> list[dict]:
         if not isinstance(payload, dict):
             return []
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            return []
-        layout_sections = data.get("layout_sections")
+        layout_sections = payload.get("layout_sections")
         if not isinstance(layout_sections, list):
             return []
         return [section for section in layout_sections if isinstance(section, dict)]
+
+    def _get_logical_tables(self, payload: dict | None) -> list[dict]:
+        if not isinstance(payload, dict):
+            return []
+        logical_tables = payload.get("logical_tables")
+        if not isinstance(logical_tables, list):
+            return []
+        return [table for table in logical_tables if isinstance(table, dict)]
+
+    def _extract_layout_table_lines(self, section: dict, logical_tables: list[dict]) -> list[str]:
+        logical_table = self._match_logical_table(section, logical_tables)
+        if logical_table is not None:
+            logical_lines = self._logical_table_to_lines(logical_table)
+            if logical_lines:
+                return logical_lines
+
+        section_text = self._get_section_text(section)
+        return self._split_lines(self._normalize_text(section_text))
+
+    def _match_logical_table(self, section: dict, logical_tables: list[dict]) -> dict | None:
+        if not logical_tables:
+            return None
+
+        section_page = section.get("page")
+        section_text = self._get_section_text(section)
+        compact_section_text = re.sub(r"\s+", "", section_text)
+        page_candidates = []
+        for table in logical_tables:
+            pages = table.get("pages")
+            if isinstance(pages, list) and section_page in pages:
+                page_candidates.append(table)
+
+        candidates = page_candidates or logical_tables
+        best_table = None
+        best_score = -1
+        for table in candidates:
+            score = 0
+            headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
+            header_text = "".join(headers)
+            if header_text:
+                compact_header_text = re.sub(r"\s+", "", header_text)
+                if compact_header_text and compact_header_text in compact_section_text:
+                    score += 5
+
+            rows = table.get("rows") or []
+            for row in rows[:3]:
+                if not isinstance(row, list):
+                    continue
+                for cell in row[:4]:
+                    cell_text = str(cell).strip()
+                    if len(cell_text) >= 2 and cell_text in section_text:
+                        score += 1
+
+            if score > best_score:
+                best_score = score
+                best_table = table
+
+        return best_table if best_score > 0 else None
+
+    def _logical_table_to_lines(self, table: dict) -> list[str]:
+        lines = []
+        headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
+        if headers:
+            lines.append(" ".join(headers))
+
+        rows = table.get("rows") or []
+        header_row_count = int(table.get("header_row_count") or 0)
+        start_index = min(len(rows), header_row_count)
+        for row in rows[start_index:]:
+            if not isinstance(row, list):
+                continue
+            cells = [str(cell).strip() for cell in row if str(cell).strip()]
+            if not cells:
+                continue
+            lines.append(" ".join(cells))
+        return lines
 
     def _get_section_text(self, section: dict) -> str:
         text = section.get("raw_text") or section.get("text")
@@ -1307,30 +1381,24 @@ def _extract_text_from_payload(payload: object) -> str:
         return payload
 
     if isinstance(payload, dict):
-        data = payload.get("data")
-        if isinstance(data, dict):
-            content = data.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
+        layout_sections = payload.get("layout_sections")
+        if isinstance(layout_sections, list):
+            lines = []
+            for section in layout_sections:
+                if not isinstance(section, dict):
+                    continue
+                text = section.get("raw_text") or section.get("text")
+                if isinstance(text, str) and text.strip():
+                    lines.append(text.strip())
+            if lines:
+                return "\n".join(lines)
 
-            layout_sections = data.get("layout_sections")
-            if isinstance(layout_sections, list):
-                lines = []
-                for section in layout_sections:
-                    if not isinstance(section, dict):
-                        continue
-                    text = section.get("raw_text") or section.get("text")
-                    if isinstance(text, str) and text.strip():
-                        lines.append(text.strip())
-                if lines:
-                    return "\n".join(lines)
-
-            recognition = data.get("recognition")
-            if isinstance(recognition, dict):
-                for key in ("content", "raw_text", "text", "full_text"):
-                    value = recognition.get(key)
-                    if isinstance(value, str) and value.strip():
-                        return value
+        recognition = payload.get("recognition")
+        if isinstance(recognition, dict):
+            for key in ("content", "raw_text", "text", "full_text"):
+                value = recognition.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
 
         for key in ("content", "raw_text", "text", "full_text"):
             value = payload.get(key)

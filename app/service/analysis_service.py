@@ -171,14 +171,14 @@ class AnalysisServiceDispatcher:
 
     def extract_text_result(self, file_path: str, file_extension: str) -> dict:
         idx = self._acquire_slot()
-        service = self._services[idx]
-        device = self._devices[idx]
-        if bool(getattr(settings, "PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING", False)):
-            print(
-                f"AnalysisServiceDispatcher: route request to worker={idx}, "
-                f"configured_device={device}, active_device={service.ocr_service.active_device}"
-            )
         try:
+            service = self._services[idx]
+            device = self._devices[idx]
+            if bool(getattr(settings, "PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING", False)):
+                print(
+                    f"AnalysisServiceDispatcher: route request to worker={idx}, "
+                    f"configured_device={device}, active_device={service.ocr_service.active_device}"
+                )
             return service.extract_text_result(file_path, file_extension)
         finally:
             self._release_slot(idx)
