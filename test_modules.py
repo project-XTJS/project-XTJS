@@ -1,64 +1,106 @@
-import json, os
-from app.service.analysis.template_extractor import TemplateExtractor
-from app.service.analysis.integrity import IntegrityChecker
-from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
-from app.service.analysis.visualizer import ReportVisualizer
+import sys
+import os
+import json
 
-def main():
-    # 1. 加载文件
-    # 🌟 恢复为您之前测试 427 标书稳定的文件路径
-    m_path, t_path = "./ocr_results/427/427-model.json", "./ocr_results/427/427-hongyin.json"
-    
-    if not os.path.exists(m_path) or not os.path.exists(t_path):
-        print(f"错误: 找不到文件 {m_path} 或 {t_path}")
+# 确保项目根目录在系统路径中，解决跨文件夹导入问题
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
+# 引入各业务模块
+from app.service.analysis.integrity import IntegrityChecker
+from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
+from app.service.analysis.itemized_pricing import ItemizedPricingChecker
+from app.service.analysis.deviation import DeviationChecker
+from app.service.analysis.verification import VerificationChecker
+
+
+def extract_text_from_json(res_data: dict) -> str:
+    """
+    从当前 OCR/解析 JSON 中提取文本。
+
+    这里专门保持 layout_sections 的原始顺序，
+    不再手动重排 layout_sections / table_sections，
+    以免破坏原始阅读顺序，影响开标一览表截取逻辑。
+    """
+    data = res_data.get("data", {})
+    layout_sections = data.get("layout_sections", [])
+
+    text_parts = []
+
+    if isinstance(layout_sections, list):
+        for sec in layout_sections:
+            if not isinstance(sec, dict):
+                continue
+
+            txt = sec.get("text", "")
+            if txt and str(txt).strip():
+                text_parts.append(str(txt).strip())
+
+    return "\n".join(text_parts).strip()
+
+
+def run_business_tests_with_ocr(json_path: str):
+    """
+    使用真实 OCR 识别 JSON 结果进行业务模块全量测试。
+    这里只输出最终业务结果。
+    """
+    if not os.path.exists(json_path):
+        print(f"错误：找不到文件 '{json_path}'，请确认文件是否在项目根目录下。")
         return
 
-    print("正在加载 JSON 数据...")
-    with open(m_path, 'r', encoding='utf-8') as f: m_json = json.load(f)
-    with open(t_path, 'r', encoding='utf-8') as f: t_json = json.load(f)
+    try:
+        # 读取 JSON
+        with open(json_path, "r", encoding="utf-8") as f:
+            res_data = json.load(f)
 
-    print("正在执行合规性审查...")
+        data = res_data.get("data", {})
 
-    # 2. 完整性检查：核对清单是否缺失
-    integrity_report = IntegrityChecker().check_integrity(m_json, t_json)
-    
-    # 3. 一致性检查：比对模板锚点
-    consistency_report = ConsistencyChecker().compare_raw_data(m_json, t_json)
-    
-    # 4. 获取用于可视化的分段数据
-    print("正在切分文档段落...")
-    templates = TemplateExtractor.extract_consistency_templates(m_json)
-    m_segs = DocumentProcessor.segment_document(m_json, templates) 
-    b_segs = DocumentProcessor.segment_document(t_json, templates) 
+        # 1. 提取核心文本
+        raw_text = extract_text_from_json(res_data)
 
-    # ========================================================
-    # 依然保留保存中间提取结果到本地的逻辑，方便人工审查
-    # ========================================================
-    print("正在保存中间提取结果到本地...")
-    
-    with open("extracted_model_segments.json", "w", encoding="utf-8") as f:
-        json.dump(m_segs, f, ensure_ascii=False, indent=4)
-    
-    with open("extracted_test_segments.json", "w", encoding="utf-8") as f:
-        json.dump(b_segs, f, ensure_ascii=False, indent=4)
-        
-    print(f"💾 已保存招标文件提取段落: extracted_model_segments.json")
-    print(f"💾 已保存投标文件提取段落: extracted_test_segments.json")
-    # ========================================================
+        # 2. 提取真实的印章与元数据
+        real_meta = {
+            "seal_count": data.get("seal_count", 0),
+            "seal_texts": data.get("seal_texts", []),
+            "ocr_used": data.get("ocr_used", True),
+        }
 
-    # 5. 生成可视化报告
-    print("正在生成基于投标文件内容的可视化报告...")
-    html = ReportVisualizer().generate_html(
-        integrity_report, 
-        consistency_report, 
-        b_segs, 
-        m_segs
-    )
-    
-    with open("final_report.html", "w", encoding="utf-8") as f: 
-        f.write(html)
-        
-    print("✨ 流程执行完毕！报告已成功生成: final_report.html")
+    except Exception as e:
+        print(f"解析 JSON 失败: {str(e)}")
+        return
 
-if __name__ == "__main__": 
-    main()
+    if not raw_text or len(raw_text.strip()) < 5:
+        print("警告：提取到的文本几乎为空，请检查 JSON 结构。")
+        return
+
+    # 1. 虞光勇、陶明宇 - 完整性与格式审查
+    # integrity_res = IntegrityChecker().check_integrity(raw_text)
+    # print("【完整性审查结果】")
+    # print(json.dumps(integrity_res, indent=4, ensure_ascii=False))
+
+    # 2. 曾俊、滑鹏鹏 - 报价合理性
+    print("【报价合理性检查结果】")
+    result = ReasonablenessChecker().check_price_reasonableness(res_data)
+    print(json.dumps(result, indent=4, ensure_ascii=False))
+
+    # 3. 江宇 - 分项报价
+    # print("【分项报价检查结果】")
+    # itemized_res = ItemizedPricingChecker().check_itemized_logic(raw_text)
+    # print(json.dumps(itemized_res, indent=4, ensure_ascii=False))
+
+    # 4. 高海斌 - 偏离项
+    # print("【偏离项检查结果】")
+    # deviation_res = DeviationChecker().check_technical_deviation(raw_text)
+    # print(json.dumps(deviation_res, indent=4, ensure_ascii=False))
+
+    # 5. 镇昊天、张化飞 - 印章日期
+    # print("【印章与日期检查结果】")
+    # verification_res = VerificationChecker(ocr_service=None).check_seal_and_date(real_meta)
+    # print(json.dumps(verification_res, indent=4, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    # 按你的实际文件名修改
+    SAMPLE_JSON = "ocr_results/price/1.json"
+    run_business_tests_with_ocr(SAMPLE_JSON)
