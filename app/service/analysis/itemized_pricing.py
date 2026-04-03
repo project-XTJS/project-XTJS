@@ -105,6 +105,7 @@ class ItemizedPricingChecker:
         "让利后",
         "下浮后",
     )
+    PREFERENTIAL_TOTAL_LINE_WINDOW = 5
     RATE_KEYWORDS = (
         "下浮率",
         "优惠率",
@@ -166,7 +167,14 @@ class ItemizedPricingChecker:
         total_sections = structured_total_sections or self._find_sections(lines, self.TOTAL_SECTION_ANCHORS)
         candidate_sections = self._dedupe_sections(item_sections + total_sections)
         if not candidate_sections:
-            candidate_sections = [{"anchor": "全文", "lines": lines, "source": "full_text"}]
+            candidate_sections = [
+                {
+                    "anchor": "全文",
+                    "lines": lines,
+                    "source": "full_text",
+                    "section_id": "full_text:0",
+                }
+            ]
 
         return {
             "payload": parsed_payload,
@@ -252,7 +260,16 @@ class ItemizedPricingChecker:
             if key in seen:
                 continue
             seen.add(key)
-            deduped.append({"anchor": section["anchor"], "lines": section["lines"]})
+            deduped.append(
+                {
+                    "anchor": section["anchor"],
+                    "lines": section["lines"],
+                    "start": section["start"],
+                    "end": section["end"],
+                    "source": "text_section",
+                    "section_id": f"text:{section['anchor']}:{section['start']}:{section['end']}",
+                }
+            )
         return deduped
 
     def _find_layout_table_sections(self, payload: dict | None, anchors: tuple[str, ...]) -> list[dict]:
@@ -322,6 +339,11 @@ class ItemizedPricingChecker:
                     "score": len(lines),
                     "source": "layout_table_sequence",
                     "pages": deduped_pages,
+                    "section_id": (
+                        f"layout:{matched_anchor}:{idx}:{'-'.join(str(page) for page in deduped_pages)}"
+                        if deduped_pages
+                        else f"layout:{matched_anchor}:{idx}"
+                    ),
                 }
             )
 
@@ -688,10 +710,6 @@ class ItemizedPricingChecker:
         lines = self._split_lines(self._normalize_text(text))
         return bool(lines) and all(self._should_skip_line(line) for line in lines)
 
-    def _is_spare_parts_marker_text(self, text: str) -> bool:
-        compact = re.sub(r"\s+", "", text)
-        return compact.startswith("随机备品备件") or ("备件名称" in compact and "规格型号" in compact)
-
     def _is_layout_bridge_text(self, text: str) -> bool:
         return (
             self._is_skippable_layout_text(text)
@@ -705,10 +723,6 @@ class ItemizedPricingChecker:
         if re.fullmatch(r"第\d+页", compact):
             return True
         return compact in {"投标文件-商务部分", "投标文件-技术部分", "商务部分", "技术部分"}
-
-    def _is_layout_seal_text(self, text: str) -> bool:
-        compact = re.sub(r"\s+", "", text)
-        return bool(compact) and ("鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
 
     def _should_attach_following_layout_table(self, text: str) -> bool:
         if self._is_spare_parts_marker_text(text):
@@ -725,72 +739,6 @@ class ItemizedPricingChecker:
             return False
         return True
 
-    # Override a few legacy mojibake-based matchers with explicit Chinese handling.
-    def _is_spare_parts_marker_text(self, text: str) -> bool:
-        compact = re.sub(r"\s+", "", text)
-        return (
-            compact.startswith("随机备品备件")
-            or ("备件名称" in compact and "规格型号" in compact)
-            or compact.startswith("闅忔満澶囧搧澶囦欢")
-            or ("澶囦欢鍚嶇О" in compact and "瑙勬牸鍨嬪彿" in compact)
-        )
-
-    def _is_layout_seal_text(self, text: str) -> bool:
-        compact = re.sub(r"\s+", "", text)
-        return bool(compact) and ("公司" in compact or "有限" in compact or "鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
-
-    def _extract_row_serial(self, line: str) -> str | None:
-        leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．])", line)
-        if leading_match:
-            serial = leading_match.group(1)
-            remain = line[leading_match.end() :].strip()
-            frequency_probe = f"{serial}{remain}"
-            if not re.match(r"^\d+(?:\.\d+)?\s*(?:GHz|Ghz|MHz|kHz|Hz|mm|cm|kg|g|dB)\b", frequency_probe, re.IGNORECASE):
-                return serial
-
-        trailing_match = re.search(r"(?:^|\s)(\d+(?:\.\d+)*)(?:[\.、．])\s*$", line)
-        if trailing_match and re.search(r"[\u4e00-\u9fff]", line):
-            return trailing_match.group(1)
-        return None
-
-    def _is_table_header_line(self, line: str) -> bool:
-        compact = re.sub(r"\s+", "", line)
-        return (
-            ("序号" in compact and "单价" in compact and "合计" in compact)
-            or ("序号" in compact and ("名称" in compact or "项目名称" in compact or "服务内容" in compact or "人员类型" in compact))
-            or ("规格型号" in compact and "单位" in compact and "数量" in compact)
-            or ("搴忓彿" in compact and "鍗曚环" in compact and "鎬讳环" in compact)
-            or ("搴忓彿" in compact and ("鍚嶇О" in compact or "椤圭洰鍚嶇О" in compact or "鏈嶅姟鍐呭" in compact or "浜哄憳绫诲瀷" in compact))
-            or ("瑙勬牸鍨嬪彿" in compact and "鍗曚綅" in compact and "鏁伴噺" in compact)
-        )
-
-    def _is_row_start_line(self, line: str) -> bool:
-        compact = re.sub(r"\s+", "", line)
-        if not re.search(r"[\u4e00-\u9fff]", compact):
-            return False
-        if self._looks_like_total_line(compact) or self._is_heading_line(line) or self._is_table_header_line(line):
-            return False
-        if self._extract_row_serial(line):
-            return True
-        if len(self._extract_money_candidates(line)) >= 2:
-            return True
-        if re.match(r"^\s*\d", line):
-            return False
-        return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
-
-    def _is_row_start_line(self, line: str) -> bool:
-        compact = re.sub(r"\s+", "", line)
-        if not re.search(r"[\u4e00-\u9fff]", compact):
-            return False
-        if self._looks_like_total_line(compact) or self._is_heading_line(line) or self._is_table_header_line(line):
-            return False
-        if self._extract_row_serial(line):
-            return True
-        if len(self._extract_money_candidates(line)) >= 2:
-            return True
-        if re.match(r"^\s*\d", line):
-            return False
-        return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
 
     def _dedupe_sections(self, sections: list[dict]) -> list[dict]:
         deduped = []
@@ -843,16 +791,6 @@ class ItemizedPricingChecker:
         if "目录" in text and amount_hits == 0:
             return 0
         return score
-
-    def _extract_row_serial(self, line: str) -> str | None:
-        leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．）)])", line)
-        if leading_match:
-            return leading_match.group(1)
-
-        trailing_match = re.search(r"(?:^|\s)(\d+(?:\.\d+)*)(?:[\.、．）)])\s*$", line)
-        if trailing_match and re.search(r"[\u4e00-\u9fff]", line):
-            return trailing_match.group(1)
-        return None
 
     def _contains_quantity_unit(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
@@ -914,7 +852,8 @@ class ItemizedPricingChecker:
 
         for section in item_source_sections:
             section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
-                section["lines"]
+                section["lines"],
+                section_context=section,
             )
             extracted_items.extend(section_items)
             extracted_totals.extend(section_totals)
@@ -924,7 +863,8 @@ class ItemizedPricingChecker:
         if not extracted_items and total_sections:
             for section in total_sections:
                 section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
-                    section["lines"]
+                    section["lines"],
+                    section_context=section,
                 )
                 extracted_items.extend(section_items)
                 extracted_totals.extend(section_totals)
@@ -936,7 +876,7 @@ class ItemizedPricingChecker:
 
         if not extracted_totals or all(entry.get("is_subtotal") for entry in extracted_totals):
             for section in total_sections or candidate_sections:
-                _, section_totals, _, _ = self._extract_section_entries(section["lines"])
+                _, section_totals, _, _ = self._extract_section_entries(section["lines"], section_context=section)
                 extracted_totals.extend(section_totals)
 
         extracted_items = self._dedupe_entries(extracted_items)
@@ -992,7 +932,9 @@ class ItemizedPricingChecker:
         if duplicate_items:
             details.append(f"发现 {len(duplicate_items)} 组疑似重项。")
         if serial_gap_hints:
-            details.append(f"发现疑似序号缺口：{', '.join(serial_gap_hints)}。")
+            details.append(
+                f"提示：检测到序号可能跳号：{', '.join(serial_gap_hints)}。该提示仅供人工复核，不影响当前金额校验结论。"
+            )
 
         return {
             "itemized_table_detected": table_detected,
@@ -1032,6 +974,7 @@ class ItemizedPricingChecker:
                     "missing_items": [],
                     "comparison_basis": None,
                     "hints": serial_gap_hints,
+                    "hint_level": "info" if serial_gap_hints else None,
                 },
             },
             "evidence": {
@@ -1054,7 +997,7 @@ class ItemizedPricingChecker:
         extracted_items = []
         for section in relevant_sections:
             serials.extend(self._extract_serials(section["lines"]))
-            extracted_items.extend(self._extract_rate_items(section["lines"]))
+            extracted_items.extend(self._extract_rate_items(section["lines"], section_context=section))
 
         extracted_items = self._dedupe_entries(extracted_items)
         serial_gap_hints = self._find_missing_serials(serials)
@@ -1083,7 +1026,9 @@ class ItemizedPricingChecker:
         else:
             details.append("已对比招标文件与投标文件列项，暂未发现明显删减项。")
         if serial_gap_hints:
-            details.append(f"投标文件内部还存在疑似序号缺口：{', '.join(serial_gap_hints)}。")
+            details.append(
+                f"提示：投标文件内部检测到序号可能跳号：{', '.join(serial_gap_hints)}。该提示仅供人工复核，不直接作为删减项判定依据。"
+            )
 
         return {
             "itemized_table_detected": bool(relevant_sections or extracted_items or comparison_items),
@@ -1114,6 +1059,7 @@ class ItemizedPricingChecker:
                     "missing_items": missing_items,
                     "comparison_basis": comparison_basis,
                     "hints": serial_gap_hints,
+                    "hint_level": "info" if serial_gap_hints else None,
                 },
             },
             "evidence": {
@@ -1131,16 +1077,26 @@ class ItemizedPricingChecker:
         if not document:
             return False
         lines = document.get("lines") or []
-        return any(
-            any(keyword in str(line) for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS)
-            and bool(self._extract_money_candidates(str(line)))
-            for line in lines
-        )
+        preferential_entries = self._extract_preferential_total_entries(lines)
+        if not preferential_entries:
+            return False
+
+        subtotal_entries = self._extract_document_subtotal_entries(lines)
+        if not subtotal_entries:
+            return False
+
+        for preferential_entry in preferential_entries:
+            for subtotal_entry in subtotal_entries:
+                if abs(preferential_entry["line_index"] - subtotal_entry["line_index"]) > self.PREFERENTIAL_TOTAL_LINE_WINDOW:
+                    continue
+                if preferential_entry["amount"] <= subtotal_entry["amount"] + self.MONEY_TOLERANCE:
+                    return True
+        return False
 
     def _extract_preferential_total_entries(self, lines: list[str]) -> list[dict]:
         entries = []
-        for line in lines:
-            if not any(keyword in line for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS):
+        for idx, line in enumerate(lines):
+            if not self._looks_like_preferential_total_line(line):
                 continue
             amounts = self._extract_money_candidates(line)
             if len(amounts) != 1:
@@ -1152,12 +1108,57 @@ class ItemizedPricingChecker:
                     "source": "preferential_total",
                     "is_total": True,
                     "is_preferential_total": True,
+                    "line_index": idx,
                 }
             )
         return entries
 
-    def _extract_section_entries(self, lines: list[str]) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
-        explicit_entries = self._extract_explicit_amount_entries(lines)
+    def _extract_document_subtotal_entries(self, lines: list[str]) -> list[dict]:
+        entries = []
+        for idx, line in enumerate(lines):
+            if not self._looks_like_subtotal_line(line):
+                continue
+            amounts = self._extract_money_candidates(line)
+            if not amounts:
+                continue
+            entries.append(
+                {
+                    "label": self._clean_label(line) or "小计",
+                    "amount": amounts[-1],
+                    "source": "document_subtotal",
+                    "is_total": True,
+                    "is_subtotal": True,
+                    "line_index": idx,
+                }
+            )
+        return entries
+
+    def _looks_like_preferential_total_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not compact or self._is_table_header_line(line):
+            return False
+        if len(self._extract_money_candidates(line)) != 1:
+            return False
+        if self._looks_like_item_row(line):
+            return False
+
+        strong_keywords = ("最终优惠价", "优惠价")
+        weak_keywords = tuple(keyword for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS if keyword not in strong_keywords)
+        has_strong_keyword = any(keyword in compact for keyword in strong_keywords)
+        has_weak_keyword = any(keyword in compact for keyword in weak_keywords)
+        if not (has_strong_keyword or has_weak_keyword):
+            return False
+        if has_strong_keyword:
+            return True
+        return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
+
+    def _extract_section_entries(
+        self,
+        lines: list[str],
+        *,
+        section_context: dict | None = None,
+    ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+        explicit_entries = self._extract_explicit_amount_entries(lines, section_context=section_context)
         table_items = []
         table_totals = []
         row_issues = []
@@ -1181,6 +1182,7 @@ class ItemizedPricingChecker:
                             "amount": amounts[-1],
                             "source": "table_subtotal" if is_subtotal else "table_total",
                             "is_subtotal": is_subtotal,
+                            **self._build_entry_context(section_context, line_index=idx),
                         }
                     )
                 break
@@ -1206,6 +1208,11 @@ class ItemizedPricingChecker:
                     "label": self._extract_block_label(block),
                     "amount": amounts[-1],
                     "source": "table_row",
+                    **self._build_entry_context(
+                        section_context,
+                        serial=block.get("serial"),
+                        line_index=block.get("start_index"),
+                    ),
                 }
             )
 
@@ -1303,14 +1310,6 @@ class ItemizedPricingChecker:
             return False
         return bool(current_block.get("serial"))
 
-    def _is_table_header_line(self, line: str) -> bool:
-        compact = re.sub(r"\s+", "", line)
-        return (
-            ("序号" in compact and "单价" in compact and "总价" in compact)
-            or ("序号" in compact and ("名称" in compact or "项目名称" in compact or "服务内容" in compact or "人员类型" in compact))
-            or ("规格型号" in compact and "单位" in compact and "数量" in compact)
-        )
-
     def _is_row_start_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not re.search(r"[\u4e00-\u9fff]", compact):
@@ -1346,7 +1345,7 @@ class ItemizedPricingChecker:
             return False
         return bool(re.search(r"(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡|设备|系统|服务|子系统)", compact))
 
-    def _extract_explicit_amount_entries(self, lines: list[str]) -> list[dict]:
+    def _extract_explicit_amount_entries(self, lines: list[str], *, section_context: dict | None = None) -> list[dict]:
         entries = []
         for idx, line in enumerate(lines):
             if "小写" not in line and "金额" not in line and "报价" not in line:
@@ -1369,6 +1368,11 @@ class ItemizedPricingChecker:
                     "amount": amounts[0],
                     "source": "explicit_amount",
                     "is_total": self._looks_like_total_line(label) or self._looks_like_total_line(line),
+                    **self._build_entry_context(
+                        section_context,
+                        serial=self._extract_row_serial(line),
+                        line_index=idx,
+                    ),
                 }
             )
         return entries
@@ -1612,7 +1616,7 @@ class ItemizedPricingChecker:
             serials.extend(self._extract_serials(section["lines"]))
         return self._find_missing_serials(serials)
 
-    def _extract_rate_items(self, lines: list[str]) -> list[dict]:
+    def _extract_rate_items(self, lines: list[str], *, section_context: dict | None = None) -> list[dict]:
         items = []
         for idx, line in enumerate(lines):
             if not any(keyword in line for keyword in self.RATE_KEYWORDS) and "%" not in line and "％" not in line:
@@ -1627,6 +1631,11 @@ class ItemizedPricingChecker:
                     "label": label,
                     "amount": None,
                     "source": "downward_rate",
+                    **self._build_entry_context(
+                        section_context,
+                        serial=self._extract_row_serial(line),
+                        line_index=idx,
+                    ),
                 }
             )
         return items
@@ -1743,18 +1752,25 @@ class ItemizedPricingChecker:
         return label or str(serial or "")
 
     def _extract_duplicate_items(self, entries: list[dict]) -> list[dict]:
-        normalized_labels = []
+        duplicate_keys = []
         for entry in entries:
-            label = self._normalize_label_key(entry.get("label"))
-            if not label:
+            key = self._entry_duplicate_key(entry)
+            if not key[0]:
                 continue
-            normalized_labels.append(label)
+            duplicate_keys.append(key)
 
         duplicates = []
-        for label, count in Counter(normalized_labels).items():
+        for duplicate_key, count in Counter(duplicate_keys).items():
             if count <= 1:
                 continue
-            duplicates.append({"label": label, "count": count})
+            duplicates.append(
+                {
+                    "label": duplicate_key[0],
+                    "amount": duplicate_key[1],
+                    "context": duplicate_key[2],
+                    "count": count,
+                }
+            )
         return duplicates
 
     def _find_missing_serials(self, serials: list[str]) -> list[str]:
@@ -1845,16 +1861,78 @@ class ItemizedPricingChecker:
             return "检测到下浮率模式，已完成招标列项与投标列项比对，暂未发现删减项。"
         return "检测到下浮率模式，但当前缺少足够参考信息，无法完成删减项比对。"
 
+    def _build_entry_context(
+        self,
+        section_context: dict | None,
+        *,
+        serial: str | None = None,
+        line_index: int | None = None,
+    ) -> dict:
+        context = {}
+        normalized_serial = str(serial or "").strip()
+        if normalized_serial:
+            context["serial"] = normalized_serial
+        if line_index is not None:
+            context["line_index"] = int(line_index)
+        if not isinstance(section_context, dict):
+            return context
+
+        section_id = section_context.get("section_id")
+        if section_id:
+            context["section_id"] = str(section_id)
+
+        anchor = section_context.get("anchor")
+        if anchor:
+            context["section_anchor"] = anchor
+
+        pages = section_context.get("pages")
+        if isinstance(pages, list):
+            normalized_pages = [page for page in pages if isinstance(page, int)]
+            if normalized_pages:
+                context["section_pages"] = normalized_pages
+        return context
+
+    def _entry_context_key(self, entry: dict) -> tuple | None:
+        serial = str(entry.get("serial") or "").strip()
+        section_id = str(entry.get("section_id") or "").strip()
+        section_anchor = self._normalize_label_key(entry.get("section_anchor"))
+        section_pages = tuple(page for page in (entry.get("section_pages") or []) if isinstance(page, int))
+        if serial:
+            return ("serial", serial, section_id, section_anchor, section_pages)
+
+        line_index = entry.get("line_index")
+        if line_index is not None:
+            return ("line", section_id, section_anchor, section_pages, int(line_index))
+
+        if section_id or section_anchor or section_pages:
+            return ("section", section_id, section_anchor, section_pages)
+        return None
+
+    def _entry_dedupe_key(self, entry: dict) -> tuple:
+        amount = entry.get("amount")
+        return (
+            self._normalize_label_key(entry.get("label")),
+            self._format_decimal(amount) if isinstance(amount, Decimal) else amount,
+            entry.get("source"),
+            bool(entry.get("is_total")),
+            bool(entry.get("is_subtotal")),
+            bool(entry.get("is_preferential_total")),
+            self._entry_context_key(entry),
+        )
+
+    def _entry_duplicate_key(self, entry: dict) -> tuple:
+        amount = entry.get("amount")
+        return (
+            self._normalize_label_key(entry.get("label")),
+            self._format_decimal(amount) if isinstance(amount, Decimal) else amount,
+            self._entry_context_key(entry),
+        )
+
     def _dedupe_entries(self, entries: list[dict]) -> list[dict]:
         deduped = []
         seen = set()
         for entry in entries:
-            amount = entry.get("amount")
-            key = (
-                self._normalize_label_key(entry.get("label")),
-                self._format_decimal(amount) if isinstance(amount, Decimal) else amount,
-                entry.get("source"),
-            )
+            key = self._entry_dedupe_key(entry)
             if key in seen:
                 continue
             seen.add(key)
@@ -1925,8 +2003,8 @@ class ItemizedPricingChecker:
         normalized = value.quantize(Decimal("0.01"))
         return format(normalized, "f")
 
-    # Final overrides for mixed OCR payloads that contain proper Chinese text
-    # and HTML logical tables.
+    # Canonical helper implementations used by both clean Chinese OCR output
+    # and legacy mojibake-style payloads.
     def _is_spare_parts_marker_text(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         return (
