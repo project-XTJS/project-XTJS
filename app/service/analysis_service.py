@@ -84,6 +84,7 @@ class AnalysisService:
             "seal_detected": seal_count > 0,
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),
+            "seal_locations": seal_data.get("locations", []),
             "recognition_route": "paddleocr_vl",
             "recognition_reason": "vl_only_pipeline",
             "pdf_mode": "vl_only",

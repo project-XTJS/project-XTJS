@@ -73,6 +73,9 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
         item = {"type": section_type, "text": text}
         if isinstance(page, int) and page > 0:
             item["page"] = page
+        bbox = section.get("bbox") or section.get("box")
+        if isinstance(bbox, (list, tuple)) and bbox:
+            item["bbox"] = _build_public_native_table_value(list(bbox))
         signature = (item.get("page"), section_type, text)
         if signature in seen:
             continue
@@ -164,6 +167,7 @@ def _build_analyze_file_response(
             "detected": extraction_result["seal_detected"],
             "count": extraction_result["seal_count"],
             "texts": extraction_result["seal_texts"],
+            "locations": _build_public_native_table_value(extraction_result.get("seal_locations") or []),
         },
         "metadata": metadata,
     }
