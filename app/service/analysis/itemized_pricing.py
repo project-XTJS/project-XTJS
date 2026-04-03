@@ -5,12 +5,65 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 import sys
 from collections import Counter
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from pathlib import Path
+
+
+class _TableHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[list[dict]] = []
+        self._current_row: list[dict] | None = None
+        self._current_cell: dict | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "tr":
+            self._current_row = []
+            return
+        if tag != "td" or self._current_row is None:
+            return
+
+        attr_map = {key: value for key, value in attrs}
+        self._current_cell = {
+            "text_parts": [],
+            "rowspan": self._safe_span(attr_map.get("rowspan")),
+            "colspan": self._safe_span(attr_map.get("colspan")),
+        }
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "td" and self._current_row is not None and self._current_cell is not None:
+            text = html.unescape("".join(self._current_cell["text_parts"]))
+            text = re.sub(r"\s+", " ", text).strip()
+            self._current_row.append(
+                {
+                    "text": text,
+                    "rowspan": self._current_cell["rowspan"],
+                    "colspan": self._current_cell["colspan"],
+                }
+            )
+            self._current_cell = None
+            return
+
+        if tag == "tr" and self._current_row is not None:
+            self.rows.append(self._current_row)
+            self._current_row = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_cell is not None:
+            self._current_cell["text_parts"].append(data)
+
+    @staticmethod
+    def _safe_span(value: str | None) -> int:
+        try:
+            return max(1, int(str(value or "1")))
+        except ValueError:
+            return 1
 
 
 class ItemizedPricingChecker:
@@ -42,6 +95,15 @@ class ItemizedPricingChecker:
         "单价合计",
         "金额合计",
         "报价合计",
+    )
+    SUBTOTAL_KEYWORDS = ("小计",)
+    PREFERENTIAL_TOTAL_KEYWORDS = (
+        "最终优惠价",
+        "优惠价",
+        "折后",
+        "优惠后",
+        "让利后",
+        "下浮后",
     )
     RATE_KEYWORDS = (
         "下浮率",
@@ -86,7 +148,7 @@ class ItemizedPricingChecker:
         if self._detect_downward_rate_mode(candidate_sections):
             tender_document = self._prepare_document(tender_text) if tender_text is not None else None
             return self._check_downward_rate_mode(candidate_sections, tender_document=tender_document)
-        return self._check_normal_mode(item_sections, total_sections, candidate_sections)
+        return self._check_normal_mode(item_sections, total_sections, candidate_sections, document=document)
 
     def _prepare_document(self, payload: object) -> dict:
         parsed_payload = self._parse_payload(payload)
@@ -324,8 +386,7 @@ class ItemizedPricingChecker:
         compact_section_text = re.sub(r"\s+", "", section_text)
         page_candidates = []
         for index, table in enumerate(logical_tables):
-            pages = table.get("pages")
-            if isinstance(pages, list) and section_page in pages:
+            if section_page in self._get_logical_table_pages(table):
                 page_candidates.append((index, table))
 
         candidates = page_candidates or logical_tables
@@ -337,19 +398,16 @@ class ItemizedPricingChecker:
             else:
                 table_index, table = logical_tables.index(candidate), candidate
             score = 0
-            headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
+            headers = self._get_logical_table_headers(table)
             header_text = "".join(headers)
             if header_text:
                 compact_header_text = re.sub(r"\s+", "", header_text)
                 if compact_header_text and compact_header_text in compact_section_text:
                     score += 5
 
-            rows = table.get("rows") or []
-            for row in rows[:3]:
-                if not isinstance(row, list):
-                    continue
-                for cell in row[:4]:
-                    cell_text = str(cell).strip()
+            for preview_line in self._logical_table_preview_lines(table)[:3]:
+                for cell_text in self._split_lines(preview_line):
+                    cell_text = str(cell_text).strip()
                     if len(cell_text) >= 2 and cell_text in section_text:
                         score += 1
 
@@ -372,20 +430,24 @@ class ItemizedPricingChecker:
     def _is_logical_table_continuation(self, current_table: dict, next_table: dict) -> bool:
         if not isinstance(next_table, dict):
             return False
-        if self._is_spare_parts_marker_text(" ".join(str(header) for header in (next_table.get("headers") or []))):
+        if self._is_spare_parts_marker_text(" ".join(self._get_logical_table_headers(next_table))):
             return False
-        if not bool(next_table.get("continued")):
+        if not bool(next_table.get("continued")) and not self._looks_like_html_table_continuation(current_table, next_table):
             return False
 
-        current_pages = [page for page in (current_table.get("pages") or []) if isinstance(page, int)]
-        next_pages = [page for page in (next_table.get("pages") or []) if isinstance(page, int)]
-        if current_pages and next_pages and next_pages[0] - current_pages[-1] > 1:
+        current_pages = self._get_logical_table_pages(current_table)
+        next_pages = self._get_logical_table_pages(next_table)
+        if current_pages and next_pages and next_pages[0] - current_pages[-1] > 3:
             return False
         return True
 
     def _logical_table_to_lines(self, table: dict, *, include_headers: bool = True) -> list[str]:
+        html_lines = self._logical_html_table_to_lines(table, include_headers=include_headers)
+        if html_lines:
+            return html_lines
+
         lines = []
-        headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
+        headers = self._get_logical_table_headers(table)
         if include_headers and headers and not all(re.fullmatch(r"col_\d+", header, re.IGNORECASE) for header in headers):
             lines.append(" ".join(headers))
 
@@ -400,6 +462,219 @@ class ItemizedPricingChecker:
                 continue
             lines.append(" ".join(cells))
         return lines
+
+    def _get_logical_table_pages(self, table: dict) -> list[int]:
+        pages = table.get("pages")
+        if isinstance(pages, list):
+            return [page for page in pages if isinstance(page, int)]
+        page = table.get("page")
+        return [page] if isinstance(page, int) else []
+
+    def _get_logical_table_headers(self, table: dict) -> list[str]:
+        headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
+        if headers:
+            return headers
+
+        html_rows = self._parse_html_table_rows(table)
+        if len(html_rows) < 2:
+            return []
+
+        header_row = self._extract_html_header_row(html_rows[1:])
+        return header_row or []
+
+    def _logical_table_preview_lines(self, table: dict) -> list[str]:
+        html_lines = self._logical_html_table_to_lines(table, include_headers=True)
+        if html_lines:
+            return html_lines
+
+        rows = table.get("rows") or []
+        preview = []
+        for row in rows[:3]:
+            if not isinstance(row, list):
+                continue
+            cells = [str(cell).strip() for cell in row if str(cell).strip()]
+            if cells:
+                preview.append(" ".join(cells))
+        return preview
+
+    def _looks_like_html_table_continuation(self, current_table: dict, next_table: dict) -> bool:
+        current_rows = self._parse_html_table_rows(current_table)
+        next_rows = self._parse_html_table_rows(next_table)
+        if not current_rows or not next_rows:
+            return False
+        if self._html_table_contains_spare_parts(next_rows):
+            return False
+        if self._extract_html_header_row(next_rows):
+            return False
+
+        next_first_data = self._first_html_data_row(next_rows)
+        if not next_first_data:
+            return False
+        next_text = " ".join(cell["text"] for cell in next_first_data if cell["text"])
+        return bool(self._extract_money_candidates(next_text))
+
+    def _logical_html_table_to_lines(self, table: dict, *, include_headers: bool = True) -> list[str]:
+        html_rows = self._parse_html_table_rows(table)
+        if not html_rows:
+            return []
+
+        lines: list[str] = []
+        data_start_index = 0
+
+        title_row = self._extract_html_title_row(html_rows)
+        if include_headers and title_row:
+            lines.append(title_row)
+            data_start_index = 1
+
+        header_row = self._extract_html_header_row(html_rows[data_start_index:])
+        if include_headers and header_row:
+            lines.append(" ".join(header_row))
+
+        header_offset = 1 if header_row else 0
+        data_rows = html_rows[data_start_index + header_offset :]
+        previous_line_index: int | None = None
+
+        for row in data_rows:
+            row_cells = [cell for cell in row if cell["text"]]
+            if not row_cells:
+                continue
+            if self._is_html_bridge_row(row):
+                continue
+
+            row_text = " ".join(cell["text"] for cell in row_cells)
+            if self._is_table_header_line(row_text):
+                continue
+
+            leading_placeholders = sum(
+                1 for cell in row[:2] if not cell["text"] or bool(cell.get("inherited"))
+            )
+            trailing_cell = next((cell for cell in reversed(row) if cell["text"]), None)
+            has_own_total = bool(
+                trailing_cell
+                and not trailing_cell.get("inherited")
+                and len(self._extract_money_candidates(trailing_cell["text"])) == 1
+            )
+
+            rendered_cells = []
+            for cell in row:
+                text = cell["text"]
+                if not text:
+                    continue
+                if cell.get("inherited") and len(rendered_cells) < 2:
+                    continue
+                rendered_cells.append(text)
+
+            if not rendered_cells:
+                continue
+
+            rendered_line = " ".join(rendered_cells)
+            if leading_placeholders >= 2 and not has_own_total and previous_line_index is not None:
+                lines[previous_line_index] = f"{lines[previous_line_index]} {rendered_line}".strip()
+                continue
+
+            lines.append(rendered_line)
+            previous_line_index = len(lines) - 1
+
+        return lines
+
+    def _parse_html_table_rows(self, table: dict) -> list[list[dict]]:
+        block_content = table.get("block_content")
+        if not isinstance(block_content, str) or "<table" not in block_content.lower():
+            return []
+
+        parser = _TableHTMLParser()
+        parser.feed(block_content)
+        raw_rows = parser.rows
+        if not raw_rows:
+            return []
+
+        active_spans: dict[int, dict] = {}
+        expanded_rows: list[list[dict]] = []
+        max_columns = 0
+
+        for raw_row in raw_rows:
+            row: list[dict] = []
+            column_index = 0
+
+            def extend_active_spans() -> None:
+                nonlocal column_index
+                while column_index in active_spans:
+                    span_info = active_spans[column_index]
+                    row.append({"text": span_info["text"], "inherited": True})
+                    span_info["remaining"] -= 1
+                    if span_info["remaining"] <= 0:
+                        del active_spans[column_index]
+                    column_index += 1
+
+            extend_active_spans()
+            for cell in raw_row:
+                extend_active_spans()
+                text = str(cell.get("text") or "").strip()
+                rowspan = max(1, int(cell.get("rowspan") or 1))
+                colspan = max(1, int(cell.get("colspan") or 1))
+                for offset in range(colspan):
+                    row.append({"text": text, "inherited": False})
+                    if rowspan > 1:
+                        active_spans[column_index + offset] = {"text": text, "remaining": rowspan - 1}
+                column_index += colspan
+
+            extend_active_spans()
+            max_columns = max(max_columns, len(row))
+            expanded_rows.append(row)
+
+        for row in expanded_rows:
+            while len(row) < max_columns:
+                row.append({"text": "", "inherited": False})
+        return expanded_rows
+
+    def _extract_html_title_row(self, rows: list[list[dict]]) -> str | None:
+        if not rows:
+            return None
+        values = [cell["text"] for cell in rows[0] if cell["text"]]
+        if len(values) == 1 and len(values[0]) >= 4:
+            return values[0]
+        return None
+
+    def _extract_html_header_row(self, rows: list[list[dict]]) -> list[str]:
+        for row in rows[:2]:
+            values = [cell["text"] for cell in row if cell["text"]]
+            compact_values = {re.sub(r"\s+", "", value) for value in values}
+            if {"序号", "单价", "合计"}.issubset(compact_values):
+                return values
+        return []
+
+    def _first_html_data_row(self, rows: list[list[dict]]) -> list[dict]:
+        start_index = 1 if self._extract_html_title_row(rows) else 0
+        if self._extract_html_header_row(rows[start_index:]):
+            start_index += 1
+        for row in rows[start_index:]:
+            if any(cell["text"] for cell in row):
+                if self._is_html_bridge_row(row):
+                    continue
+                return row
+        return []
+
+    def _html_table_contains_spare_parts(self, rows: list[list[dict]]) -> bool:
+        for row in rows[:3]:
+            row_text = "".join(cell["text"] for cell in row if cell["text"])
+            if self._is_spare_parts_marker_text(row_text):
+                return True
+        return False
+
+    def _is_html_bridge_row(self, row: list[dict]) -> bool:
+        values = [cell["text"] for cell in row if cell["text"]]
+        if not values:
+            return True
+        if len(values) > 1:
+            return False
+
+        value = values[0]
+        if self._extract_money_candidates(value):
+            return False
+        if self._extract_row_serial(value):
+            return False
+        compact = re.sub(r"\s+", "", value)
+        return bool(compact) and len(compact) <= 4
 
     def _get_section_text(self, section: dict) -> str:
         text = section.get("raw_text") or section.get("text")
@@ -422,6 +697,7 @@ class ItemizedPricingChecker:
             self._is_skippable_layout_text(text)
             or self._is_spare_parts_marker_text(text)
             or self._is_layout_page_marker_text(text)
+            or self._is_layout_seal_text(text)
         )
 
     def _is_layout_page_marker_text(self, text: str) -> bool:
@@ -429,6 +705,10 @@ class ItemizedPricingChecker:
         if re.fullmatch(r"第\d+页", compact):
             return True
         return compact in {"投标文件-商务部分", "投标文件-技术部分", "商务部分", "技术部分"}
+
+    def _is_layout_seal_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return bool(compact) and ("鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
 
     def _should_attach_following_layout_table(self, text: str) -> bool:
         if self._is_spare_parts_marker_text(text):
@@ -444,6 +724,73 @@ class ItemizedPricingChecker:
         if any(self._extract_row_serial(line) for line in lines) or any(self._looks_like_total_line(line) for line in lines):
             return False
         return True
+
+    # Override a few legacy mojibake-based matchers with explicit Chinese handling.
+    def _is_spare_parts_marker_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return (
+            compact.startswith("随机备品备件")
+            or ("备件名称" in compact and "规格型号" in compact)
+            or compact.startswith("闅忔満澶囧搧澶囦欢")
+            or ("澶囦欢鍚嶇О" in compact and "瑙勬牸鍨嬪彿" in compact)
+        )
+
+    def _is_layout_seal_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return bool(compact) and ("公司" in compact or "有限" in compact or "鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
+
+    def _extract_row_serial(self, line: str) -> str | None:
+        leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．])", line)
+        if leading_match:
+            serial = leading_match.group(1)
+            remain = line[leading_match.end() :].strip()
+            frequency_probe = f"{serial}{remain}"
+            if not re.match(r"^\d+(?:\.\d+)?\s*(?:GHz|Ghz|MHz|kHz|Hz|mm|cm|kg|g|dB)\b", frequency_probe, re.IGNORECASE):
+                return serial
+
+        trailing_match = re.search(r"(?:^|\s)(\d+(?:\.\d+)*)(?:[\.、．])\s*$", line)
+        if trailing_match and re.search(r"[\u4e00-\u9fff]", line):
+            return trailing_match.group(1)
+        return None
+
+    def _is_table_header_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        return (
+            ("序号" in compact and "单价" in compact and "合计" in compact)
+            or ("序号" in compact and ("名称" in compact or "项目名称" in compact or "服务内容" in compact or "人员类型" in compact))
+            or ("规格型号" in compact and "单位" in compact and "数量" in compact)
+            or ("搴忓彿" in compact and "鍗曚环" in compact and "鎬讳环" in compact)
+            or ("搴忓彿" in compact and ("鍚嶇О" in compact or "椤圭洰鍚嶇О" in compact or "鏈嶅姟鍐呭" in compact or "浜哄憳绫诲瀷" in compact))
+            or ("瑙勬牸鍨嬪彿" in compact and "鍗曚綅" in compact and "鏁伴噺" in compact)
+        )
+
+    def _is_row_start_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not re.search(r"[\u4e00-\u9fff]", compact):
+            return False
+        if self._looks_like_total_line(compact) or self._is_heading_line(line) or self._is_table_header_line(line):
+            return False
+        if self._extract_row_serial(line):
+            return True
+        if len(self._extract_money_candidates(line)) >= 2:
+            return True
+        if re.match(r"^\s*\d", line):
+            return False
+        return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
+
+    def _is_row_start_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        if not re.search(r"[\u4e00-\u9fff]", compact):
+            return False
+        if self._looks_like_total_line(compact) or self._is_heading_line(line) or self._is_table_header_line(line):
+            return False
+        if self._extract_row_serial(line):
+            return True
+        if len(self._extract_money_candidates(line)) >= 2:
+            return True
+        if re.match(r"^\s*\d", line):
+            return False
+        return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
 
     def _dedupe_sections(self, sections: list[dict]) -> list[dict]:
         deduped = []
@@ -523,8 +870,20 @@ class ItemizedPricingChecker:
         serial = self._extract_row_serial(line)
         if serial and (self._extract_money_candidates(line) or self._contains_quantity_unit(compact)):
             return False
+        if self._looks_like_frequency_range_line(line) and self._extract_money_candidates(line):
+            return False
         return bool(
             re.match(r"^(第[一二三四五六七八九十百]+章|[一二三四五六七八九十]+、|\d+\.[\d\.]*|（[一二三四五六七八九十]+）)", compact)
+        )
+
+    def _looks_like_frequency_range_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        return bool(
+            re.match(
+                r"^\d+(?:\.\d+)?(?:GHz|Ghz|MHz|kHz|Hz)[~～\-至]\d+(?:\.\d+)?(?:GHz|Ghz|MHz|kHz|Hz)?",
+                compact,
+                re.IGNORECASE,
+            )
         )
 
     def _detect_downward_rate_mode(self, sections: list[dict]) -> bool:
@@ -543,12 +902,15 @@ class ItemizedPricingChecker:
         item_sections: list[dict],
         total_sections: list[dict],
         candidate_sections: list[dict],
+        *,
+        document: dict | None = None,
     ) -> dict:
         item_source_sections = item_sections or total_sections or candidate_sections
         extracted_items = []
         extracted_totals = []
         row_issues = []
         unresolved_rows = []
+        preferential_mode = self._detect_preferential_total_mode(document)
 
         for section in item_source_sections:
             section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
@@ -569,7 +931,10 @@ class ItemizedPricingChecker:
                 row_issues.extend(section_row_issues)
                 unresolved_rows.extend(section_unresolved_rows)
 
-        if not extracted_totals:
+        if preferential_mode and document is not None:
+            extracted_totals.extend(self._extract_preferential_total_entries(document.get("lines") or []))
+
+        if not extracted_totals or all(entry.get("is_subtotal") for entry in extracted_totals):
             for section in total_sections or candidate_sections:
                 _, section_totals, _, _ = self._extract_section_entries(section["lines"])
                 extracted_totals.extend(section_totals)
@@ -582,7 +947,7 @@ class ItemizedPricingChecker:
         serial_gap_hints = self._extract_serial_gap_hints(item_sections) if item_sections else []
 
         table_detected = bool(item_sections or total_sections or extracted_items or extracted_totals)
-        sum_check = self._evaluate_sum_check(extracted_items, extracted_totals)
+        sum_check = self._evaluate_sum_check(extracted_items, extracted_totals, preferential_mode=preferential_mode)
         status = self._resolve_normal_status(
             table_detected,
             sum_check["status"],
@@ -598,11 +963,23 @@ class ItemizedPricingChecker:
         if extracted_totals:
             details.append(f"识别到 {len(extracted_totals)} 个合计/总价候选值。")
         if sum_check["status"] == "pass":
-            details.append("分项金额汇总与声明总价一致。")
+            if sum_check.get("total_mode") == "preferential_total":
+                details.append("检测到最终优惠价模式，分项金额汇总与分项小计一致。")
+                if sum_check.get("preferential_total") is not None:
+                    details.append(
+                        f"文档同时声明最终优惠价 {sum_check['preferential_total']}（{sum_check.get('preferential_total_label') or '最终优惠价'}）。"
+                    )
+            else:
+                details.append("分项金额汇总与声明总价一致。")
         elif sum_check["status"] == "fail":
-            details.append(
-                f"分项金额汇总与声明总价不一致：计算值 {sum_check['calculated_total']}，声明值 {sum_check['declared_total']}。"
-            )
+            if sum_check.get("total_mode") == "preferential_total":
+                details.append(
+                    f"检测到最终优惠价模式，但分项金额汇总与分项小计不一致：计算值 {sum_check['calculated_total']}，小计 {sum_check['declared_total']}。"
+                )
+            else:
+                details.append(
+                    f"分项金额汇总与声明总价不一致：计算值 {sum_check['calculated_total']}，声明值 {sum_check['declared_total']}。"
+                )
         elif sum_check["status"] == "unknown":
             details.append("已识别到报价内容，但暂时无法可靠完成汇总校验。")
         else:
@@ -641,6 +1018,9 @@ class ItemizedPricingChecker:
                     "declared_total": sum_check["declared_total"],
                     "difference": sum_check["difference"],
                     "matched_total_label": sum_check["matched_total_label"],
+                    "total_mode": sum_check.get("total_mode"),
+                    "preferential_total": sum_check.get("preferential_total"),
+                    "preferential_total_label": sum_check.get("preferential_total_label"),
                 },
                 "duplicate_items": {
                     "status": "fail" if duplicate_items else ("not_detected" if not table_detected else "pass"),
@@ -747,6 +1127,35 @@ class ItemizedPricingChecker:
             "details": details,
         }
 
+    def _detect_preferential_total_mode(self, document: dict | None) -> bool:
+        if not document:
+            return False
+        lines = document.get("lines") or []
+        return any(
+            any(keyword in str(line) for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS)
+            and bool(self._extract_money_candidates(str(line)))
+            for line in lines
+        )
+
+    def _extract_preferential_total_entries(self, lines: list[str]) -> list[dict]:
+        entries = []
+        for line in lines:
+            if not any(keyword in line for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS):
+                continue
+            amounts = self._extract_money_candidates(line)
+            if len(amounts) != 1:
+                continue
+            entries.append(
+                {
+                    "label": self._clean_label(line) or "最终优惠价",
+                    "amount": amounts[0],
+                    "source": "preferential_total",
+                    "is_total": True,
+                    "is_preferential_total": True,
+                }
+            )
+        return entries
+
     def _extract_section_entries(self, lines: list[str]) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
         explicit_entries = self._extract_explicit_amount_entries(lines)
         table_items = []
@@ -765,11 +1174,13 @@ class ItemizedPricingChecker:
             if self._looks_like_total_line(line):
                 amounts = self._extract_money_candidates(line)
                 if amounts:
+                    is_subtotal = self._looks_like_subtotal_line(line)
                     table_totals.append(
                         {
-                            "label": self._clean_label(line) or "合计",
+                            "label": self._clean_label(line) or ("小计" if is_subtotal else "合计"),
                             "amount": amounts[-1],
-                            "source": "table_total",
+                            "source": "table_subtotal" if is_subtotal else "table_total",
+                            "is_subtotal": is_subtotal,
                         }
                     )
                 break
@@ -858,6 +1269,18 @@ class ItemizedPricingChecker:
                     "lines": [line],
                 }
                 continue
+            if self._should_split_amount_continuation(current_block, line):
+                inherited_line = line
+                inherited_serial = str((current_block or {}).get("serial") or "").strip()
+                if inherited_serial and not self._extract_row_serial(line):
+                    inherited_line = f"{inherited_serial} {line}".strip()
+                current_block = self._flush_table_row_block(blocks, current_block)
+                current_block = {
+                    "start_index": idx,
+                    "serial": inherited_serial or self._extract_row_serial(inherited_line),
+                    "lines": [inherited_line],
+                }
+                continue
             if current_block is not None and self._is_row_continuation_line(line):
                 current_block["lines"].append(line)
                 continue
@@ -870,6 +1293,15 @@ class ItemizedPricingChecker:
         if block and block.get("lines"):
             blocks.append(block)
         return None
+
+    def _should_split_amount_continuation(self, current_block: dict | None, line: str) -> bool:
+        if current_block is None:
+            return False
+        if not self._is_row_continuation_line(line):
+            return False
+        if not self._extract_row_amounts(line):
+            return False
+        return bool(current_block.get("serial"))
 
     def _is_table_header_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
@@ -980,7 +1412,11 @@ class ItemizedPricingChecker:
         if self._is_table_header_line(line):
             return False
         compact = re.sub(r"\s+", "", line)
-        return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
+        return any(keyword in compact for keyword in self.TOTAL_KEYWORDS) or self._looks_like_subtotal_line(compact)
+
+    def _looks_like_subtotal_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        return any(keyword in compact for keyword in self.SUBTOTAL_KEYWORDS)
 
     def _looks_like_item_row(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
@@ -1081,7 +1517,7 @@ class ItemizedPricingChecker:
     def _looks_like_money_value(self, value: Decimal) -> bool:
         return value >= Decimal("100")
 
-    def _evaluate_sum_check(self, items: list[dict], totals: list[dict]) -> dict:
+    def _evaluate_sum_check(self, items: list[dict], totals: list[dict], *, preferential_mode: bool = False) -> dict:
         if len(items) < 2 or not totals:
             calculated_total = sum((item["amount"] for item in items if item.get("amount") is not None), Decimal("0"))
             return {
@@ -1090,12 +1526,53 @@ class ItemizedPricingChecker:
                 "declared_total": None,
                 "difference": None,
                 "matched_total_label": None,
+                "total_mode": "preferential_total" if preferential_mode else "standard",
+                "preferential_total": None,
+                "preferential_total_label": None,
             }
 
         calculated_total = sum((item["amount"] for item in items if item.get("amount") is not None), Decimal("0"))
+        if preferential_mode:
+            subtotal_candidates = [item for item in totals if item.get("is_subtotal")]
+            preferential_candidates = [item for item in totals if item.get("is_preferential_total")]
+            if subtotal_candidates:
+                best_subtotal = min(
+                    subtotal_candidates,
+                    key=lambda item: abs(item["amount"] - calculated_total),
+                )
+                subtotal_difference = calculated_total - best_subtotal["amount"]
+                best_preferential_total = None
+                if preferential_candidates:
+                    best_preferential_total = min(
+                        preferential_candidates,
+                        key=lambda item: abs(item["amount"] - calculated_total),
+                    )
+                return {
+                    "status": "pass" if abs(subtotal_difference) <= self.MONEY_TOLERANCE else "fail",
+                    "calculated_total": self._format_decimal(calculated_total),
+                    "declared_total": self._format_decimal(best_subtotal["amount"]),
+                    "difference": self._format_decimal(subtotal_difference),
+                    "matched_total_label": best_subtotal["label"],
+                    "total_mode": "preferential_total",
+                    "preferential_total": (
+                        self._format_decimal(best_preferential_total["amount"])
+                        if best_preferential_total is not None
+                        else None
+                    ),
+                    "preferential_total_label": (
+                        best_preferential_total["label"]
+                        if best_preferential_total is not None
+                        else None
+                    ),
+                }
+
         best_total = min(
             totals,
-            key=lambda item: (abs(item["amount"] - calculated_total), 0 if "总价" in item["label"] or "合计" in item["label"] else 1),
+            key=lambda item: (
+                1 if item.get("is_subtotal") else 0,
+                abs(item["amount"] - calculated_total),
+                0 if "总价" in item["label"] or "合计" in item["label"] else 1,
+            ),
         )
         difference = calculated_total - best_total["amount"]
         status = "pass" if abs(difference) <= self.MONEY_TOLERANCE else "fail"
@@ -1105,6 +1582,9 @@ class ItemizedPricingChecker:
             "declared_total": self._format_decimal(best_total["amount"]),
             "difference": self._format_decimal(difference),
             "matched_total_label": best_total["label"],
+            "total_mode": "standard",
+            "preferential_total": None,
+            "preferential_total_label": None,
         }
 
     def _extract_serials(self, lines: list[str]) -> list[str]:
@@ -1444,6 +1924,46 @@ class ItemizedPricingChecker:
             return None
         normalized = value.quantize(Decimal("0.01"))
         return format(normalized, "f")
+
+    # Final overrides for mixed OCR payloads that contain proper Chinese text
+    # and HTML logical tables.
+    def _is_spare_parts_marker_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return (
+            compact.startswith("随机备品备件")
+            or ("备件名称" in compact and "规格型号" in compact)
+            or compact.startswith("闅忔満澶囧搧澶囦欢")
+            or ("澶囦欢鍚嶇О" in compact and "瑙勬牸鍨嬪彿" in compact)
+        )
+
+    def _is_layout_seal_text(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text)
+        return bool(compact) and ("公司" in compact or "有限" in compact or "鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
+
+    def _extract_row_serial(self, line: str) -> str | None:
+        leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．])", line)
+        if leading_match:
+            serial = leading_match.group(1)
+            remain = line[leading_match.end() :].strip()
+            frequency_probe = f"{serial}{remain}"
+            if not re.match(r"^\d+(?:\.\d+)?\s*(?:GHz|Ghz|MHz|kHz|Hz|mm|cm|kg|g|dB)\b", frequency_probe, re.IGNORECASE):
+                return serial
+
+        trailing_match = re.search(r"(?:^|\s)(\d+(?:\.\d+)*)(?:[\.、．])\s*$", line)
+        if trailing_match and re.search(r"[\u4e00-\u9fff]", line):
+            return trailing_match.group(1)
+        return None
+
+    def _is_table_header_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", line)
+        return (
+            ("序号" in compact and "单价" in compact and "合计" in compact)
+            or ("序号" in compact and ("名称" in compact or "项目名称" in compact or "服务内容" in compact or "人员类型" in compact))
+            or ("规格型号" in compact and "单位" in compact and "数量" in compact)
+            or ("搴忓彿" in compact and "鍗曚环" in compact and "鎬讳环" in compact)
+            or ("搴忓彿" in compact and ("鍚嶇О" in compact or "椤圭洰鍚嶇О" in compact or "鏈嶅姟鍐呭" in compact or "浜哄憳绫诲瀷" in compact))
+            or ("瑙勬牸鍨嬪彿" in compact and "鍗曚綅" in compact and "鏁伴噺" in compact)
+        )
 
 
 def _service_style_preprocess(text: str) -> str:
