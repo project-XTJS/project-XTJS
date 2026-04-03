@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Literal
 from pydantic import BaseModel, Field
 
 class TextAnalysisRequest(BaseModel):
@@ -11,12 +11,3 @@ class TextAnalysisRequest(BaseModel):
         "full_analysis"        # 全量分析
     ]
     text: str = Field(..., min_length=1)
-
-
-class SignatureCropExportRequest(BaseModel):
-    """导出签字位截图请求模型。"""
-
-    tender_document: dict[str, Any] | str
-    bid_document: dict[str, Any] | str
-    bid_pdf_path: str | None = None
-    output_dir: str | None = None

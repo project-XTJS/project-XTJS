@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.router.dependencies import get_text_analysis_service
-from app.schemas.analysis import SignatureCropExportRequest, TextAnalysisRequest
+from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
@@ -76,8 +76,7 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
         bbox = section.get("bbox") or section.get("box")
         if isinstance(bbox, (list, tuple)) and bbox:
             item["bbox"] = _build_public_native_table_value(list(bbox))
-        bbox_signature = tuple(item["bbox"]) if isinstance(item.get("bbox"), list) else None
-        signature = (item.get("page"), section_type, text, bbox_signature)
+        signature = (item.get("page"), section_type, text)
         if signature in seen:
             continue
         seen.add(signature)
@@ -120,7 +119,6 @@ def _build_analyze_file_response(
     content: bytes,
     file_extension: str,
     extraction_result: dict,
-    source_path: Path | None = None,
 ) -> dict:
     metadata = build_analyze_file_metadata(
         filename=upload.filename,
@@ -152,7 +150,6 @@ def _build_analyze_file_response(
 
     return {
         "filename": upload.filename,
-        "source_path": str(source_path) if source_path is not None else None,
         "file_type": file_extension,
         "file_size": len(content),
         "text_length": extraction_result["text_length"],
@@ -317,8 +314,6 @@ async def _analyze_single_upload(
     content = await upload.read()
     temp_file_path = save_temp_file(content, f".{file_extension}")
 
-    resolved_source_path = _resolve_source_path(upload, explicit_source_path)
-
     try:
         extraction_result = await run_in_threadpool(
             analysis_service.extract_text_result,
@@ -330,11 +325,10 @@ async def _analyze_single_upload(
             content=content,
             file_extension=file_extension,
             extraction_result=extraction_result,
-            source_path=resolved_source_path,
         )
         _save_analyze_file_json(
             payload,
-            source_path=resolved_source_path,
+            source_path=_resolve_source_path(upload, explicit_source_path),
             enabled=save_json_to_source,
         )
         return payload
@@ -470,22 +464,3 @@ async def run_text_analysis(
         return analysis_service.run_full_analysis(text, extraction_meta={})
 
     raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")
-
-
-@router.post("/verification/export-signature-crops", summary="导出签字位截图")
-async def export_signature_crops(
-    payload: SignatureCropExportRequest,
-    analysis_service=Depends(get_text_analysis_service),
-):
-    try:
-        return await run_in_threadpool(
-            analysis_service.verification.export_signature_crops,
-            payload.tender_document,
-            payload.bid_document,
-            payload.bid_pdf_path,
-            payload.output_dir,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
