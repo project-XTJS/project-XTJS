@@ -4,6 +4,7 @@ import json
 import re
 from datetime import date
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
 from .template_extractor import TemplateExtractor
@@ -702,6 +703,152 @@ class VerificationChecker:
         if not str(slot.get("line") or "").strip():
             return False
         return date_check.get("status") in {"pass", "not_required", "missing_deadline", "missing_date", "late"}
+
+    def export_signature_crops(
+        self,
+        tender_document: Any,
+        bid_document: Any,
+        bid_pdf_path: str | None,
+        output_dir: str | None = None,
+    ) -> dict:
+        tender = self._as_document(tender_document) or {}
+        bid = self._as_document(bid_document) or {}
+        pdf_path_text = str(bid_pdf_path or "").strip().strip('"').strip("'")
+        if not pdf_path_text and isinstance(bid.get("source_path"), str):
+            pdf_path_text = str(bid.get("source_path") or "").strip()
+        pdf_path = Path(pdf_path_text)
+        if not pdf_path_text:
+            raise ValueError("bid_pdf_path is required unless bid_document.source_path is available.")
+        if not pdf_path.exists():
+            raise ValueError(f"bid_pdf_path does not exist: {pdf_path}")
+        if pdf_path.is_dir():
+            raise ValueError(f"bid_pdf_path must be a file: {pdf_path}")
+
+        export_dir = Path(output_dir).expanduser() if output_dir else (pdf_path.parent / f"{pdf_path.stem}_signature_crops")
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        seal_bundle = self._seal_bundle(bid)
+        bidder_name = self._bidder_name(bid, seal_bundle["texts"])
+        deadline = self._deadline_from_doc(tender)
+        bid_sections = self._attachment_sections(bid, seal_bundle["locations"])
+        bid_by_no = {x["attachment_number"]: x for x in bid_sections if x.get("attachment_number")}
+        required = self._required_attachments(tender, bid_by_no, bid_sections)
+
+        verification_result = self._check_pair(tender, bid)
+        render_cache: dict[int, Any] = {}
+        export_items: list[dict] = []
+        skipped_items: list[dict] = []
+
+        try:
+            for attachment in required:
+                if not attachment["requirements"].get("requires_signature"):
+                    continue
+                bid_section = self._match_attachment(attachment, bid_by_no, bid_sections)
+                if bid_section is None:
+                    skipped_items.append({"title": attachment["title"], "reason": "attachment_not_found"})
+                    continue
+
+                attachment_result = self._evaluate_attachment(attachment, bid_section, deadline, bidder_name)
+                slots = self._collect_signature_slots(attachment, bid_section)
+                if not slots:
+                    skipped_items.append({"title": attachment["title"], "reason": "signature_slot_not_found"})
+                    continue
+
+                for index, slot in enumerate(slots, start=1):
+                    page_no = slot.get("page")
+                    slot_box = self._normalize_bbox(slot.get("bbox"))
+                    if page_no is None:
+                        skipped_items.append({"title": attachment["title"], "line": slot["line"], "reason": "page_not_found"})
+                        continue
+                    if slot_box is None:
+                        skipped_items.append({"title": attachment["title"], "line": slot["line"], "page": page_no, "reason": "bbox_not_found"})
+                        continue
+
+                    image = self._render_pdf_page_image(pdf_path, page_no, render_cache)
+                    crop_box = self._build_signature_crop_box(slot_box, image.size)
+                    crop_image = image.crop(crop_box)
+                    attachment_token = self._slug_token(attachment["title"])
+                    filename = f"p{page_no:03d}_{attachment_token}_{index:02d}.png"
+                    target_path = export_dir / filename
+                    crop_image.save(target_path)
+                    export_items.append(
+                        {
+                            "title": attachment["title"],
+                            "attachment_number": attachment.get("attachment_number"),
+                            "page": page_no,
+                            "line": slot["line"],
+                            "allows_seal": slot.get("allows_seal", False),
+                            "anchor_bbox": slot_box,
+                            "crop_bbox": list(crop_box),
+                            "image_path": str(target_path),
+                            "signature_status": attachment_result["signature_check"]["status"],
+                        }
+                    )
+        finally:
+            for rendered in render_cache.values():
+                try:
+                    rendered.close()
+                except Exception:
+                    pass
+
+        return {
+            "status": "success",
+            "bid_pdf_path": str(pdf_path),
+            "output_dir": str(export_dir),
+            "exported_count": len(export_items),
+            "skipped_count": len(skipped_items),
+            "exports": export_items,
+            "skipped": skipped_items,
+            "verification_result": verification_result,
+        }
+
+    def _render_pdf_page_image(self, pdf_path: Path, page_no: int, cache: dict[int, Any]) -> Any:
+        if page_no in cache:
+            return cache[page_no]
+
+        try:
+            import pypdfium2 as pdfium
+        except Exception as exc:
+            raise RuntimeError(f"pypdfium2 is unavailable: {exc}") from exc
+
+        document = None
+        try:
+            document = pdfium.PdfDocument(str(pdf_path))
+            page = document[page_no - 1]
+            bitmap = page.render(scale=2.0)
+            image = bitmap.to_pil()
+        except Exception as exc:
+            raise RuntimeError(f"failed to render PDF page {page_no}: {exc}") from exc
+        finally:
+            try:
+                close_method = getattr(document, "close", None)
+                if callable(close_method):
+                    close_method()
+            except Exception:
+                pass
+
+        cache[page_no] = image
+        return image
+
+    def _build_signature_crop_box(self, slot_box: list[int], image_size: tuple[int, int]) -> tuple[int, int, int, int]:
+        x, y, w, h = slot_box
+        image_width, image_height = image_size
+        left = max(0, min(x + max(int(w * 0.45), 80), image_width - 1))
+        top = max(0, y - max(int(h * 0.8), 24))
+        width = max(int(w * 1.7), 360)
+        height = max(int(h * 3.2), 130)
+        right = min(image_width, left + width)
+        bottom = min(image_height, top + height)
+        if right <= left:
+            right = min(image_width, max(left + 1, x + w + 240))
+        if bottom <= top:
+            bottom = min(image_height, max(top + 1, y + h + 120))
+        return (left, top, right, bottom)
+
+    def _slug_token(self, text: str) -> str:
+        normalized = re.sub(r"[^\w\u4e00-\u9fa5-]+", "_", str(text or "").strip())
+        normalized = re.sub(r"_+", "_", normalized).strip("_")
+        return normalized[:80] or "signature"
 
     def _seal_check(self, attachment: dict, bid_section: dict | None, bidder_name: str | None) -> dict:
         if not attachment["requirements"].get("requires_seal"):
