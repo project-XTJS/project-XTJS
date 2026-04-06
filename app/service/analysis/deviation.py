@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 from difflib import SequenceMatcher
+from html import unescape
 from typing import Any
 
 
@@ -362,11 +363,11 @@ class DeviationChecker:
         return selected
 
     def _extract_bid_deviation_sections(self, bid_payload: dict) -> dict[str, Any]:
-        lines = [x["text"] for x in self._page_lines(bid_payload)]
-        business = self._collect_sections(lines, self.BUSINESS_TITLES)
-        technical = self._collect_sections(lines, self.TECH_TITLES)
+        line_items = self._page_lines(bid_payload)
+        business = self._collect_sections(line_items, self.BUSINESS_TITLES)
+        technical = self._collect_sections(line_items, self.TECH_TITLES)
         if not business and not technical:
-            generic = self._collect_sections(lines, ("偏离表",))
+            generic = self._collect_sections(line_items, ("偏离表",))
             for sec in generic:
                 head = "\n".join((sec.get("lines") or [])[:3])
                 if "技术" in head:
@@ -435,12 +436,13 @@ class DeviationChecker:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         doc = self._doc_container(bid_payload)
+        section_hints = technical_sections + business_sections
 
         logical_tables = doc.get("logical_tables")
         if isinstance(logical_tables, list):
             for table in logical_tables:
                 if isinstance(table, dict):
-                    rows.extend(self._extract_rows_from_logical_table(table))
+                    rows.extend(self._extract_rows_from_logical_table(table, section_hints=section_hints))
 
         for section in technical_sections:
             rows.extend(self._extract_rows_from_section(section, "technical"))
@@ -457,12 +459,23 @@ class DeviationChecker:
             out.append(row)
         return out
 
-    def _extract_rows_from_logical_table(self, table: dict[str, Any]) -> list[dict[str, Any]]:
+    def _extract_rows_from_logical_table(
+        self,
+        table: dict[str, Any],
+        *,
+        section_hints: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         headers = [str(x or "").strip() for x in (table.get("headers") or [])]
         pages = [x for x in (table.get("pages") or []) if isinstance(x, int)]
         page_no = pages[0] if pages else None
-        title = str(table.get("id") or "logical_table")
+        if page_no is None:
+            raw_page = table.get("page")
+            try:
+                page_no = int(raw_page) if raw_page is not None else None
+            except (TypeError, ValueError):
+                page_no = None
+        title = self._resolve_logical_table_title(table, page_no=page_no, section_hints=section_hints)
 
         records = table.get("records")
         if isinstance(records, list):
@@ -476,6 +489,11 @@ class DeviationChecker:
 
         rows = table.get("rows")
         if not isinstance(rows, list):
+            native_headers, native_records = self._extract_native_table_records(table)
+            for record in native_records:
+                row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+                if row:
+                    out.append(row)
             return out
 
         for values in rows:
@@ -488,7 +506,120 @@ class DeviationChecker:
             row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
             if row:
                 out.append(row)
+
+        if out:
+            return out
+
+        native_headers, native_records = self._extract_native_table_records(table)
+        for record in native_records:
+            row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+            if row:
+                out.append(row)
         return out
+
+    def _extract_native_table_records(self, table: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        raw_html = table.get("block_content") or table.get("html") or table.get("text") or ""
+        if not isinstance(raw_html, str) or not raw_html.strip():
+            return [], []
+
+        html_rows = self._parse_html_table_rows(raw_html)
+        if not html_rows:
+            return [], []
+
+        header_like = self._looks_like_header_row(html_rows[0])
+        headers = html_rows[0] if header_like else [f"col_{idx + 1}" for idx in range(len(html_rows[0]))]
+        data_rows = html_rows[1:] if header_like else html_rows
+
+        records: list[dict[str, Any]] = []
+        for values in data_rows:
+            if not isinstance(values, list):
+                continue
+            record = {
+                headers[idx] if idx < len(headers) else f"col_{idx + 1}": str(value or "").strip()
+                for idx, value in enumerate(values)
+                if str(value or "").strip()
+            }
+            if record:
+                records.append(record)
+
+        return headers, records
+
+    def _parse_html_table_rows(self, raw_html: str) -> list[list[str]]:
+        html = str(raw_html or "")
+        if "<tr" not in html.lower() or ("<td" not in html.lower() and "<th" not in html.lower()):
+            return []
+
+        rows: list[list[str]] = []
+        for row_html in re.findall(r"(?is)<tr\b[^>]*>(.*?)</tr>", html):
+            cells: list[str] = []
+            for cell_html in re.findall(r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>", row_html):
+                cell_text = self._normalize_markup_text(cell_html, preserve_lines=False)
+                if cell_text:
+                    cells.append(cell_text)
+                else:
+                    cells.append("")
+            if any(cell.strip() for cell in cells):
+                rows.append(cells)
+        return rows
+
+    def _looks_like_header_row(self, values: list[str]) -> bool:
+        if not isinstance(values, list) or not values:
+            return False
+        joined = "".join(str(value or "").strip() for value in values)
+        return any(token in joined for token in ("需求", "要求", "条款", "响应", "应答", "偏离", "说明", "备注"))
+
+    def _resolve_logical_table_title(
+        self,
+        table: dict[str, Any],
+        *,
+        page_no: int | None,
+        section_hints: list[dict[str, Any]] | None = None,
+    ) -> str:
+        best_nearby_title = ""
+        best_nearby_rank: tuple[int, int] | None = None
+        for section in section_hints or []:
+            if not isinstance(section, dict):
+                continue
+            title = str(section.get("title") or "").strip()
+            if not title:
+                continue
+            section_page = section.get("page")
+            if page_no is not None and section_page == page_no:
+                return title
+            if not isinstance(page_no, int) or not isinstance(section_page, int):
+                continue
+            distance = abs(section_page - page_no)
+            if distance > 4:
+                continue
+            rank = (distance, 0 if section_page <= page_no else 1)
+            if best_nearby_rank is None or rank < best_nearby_rank:
+                best_nearby_rank = rank
+                best_nearby_title = title
+
+        if best_nearby_title:
+            return best_nearby_title
+
+        for candidate in (
+            table.get("title"),
+            table.get("caption"),
+            table.get("name"),
+            table.get("id"),
+            table.get("block_id"),
+            table.get("block_label"),
+        ):
+            title = str(candidate or "").strip()
+            if title and not self._is_generic_table_title(title):
+                return title
+
+        return f"第{page_no}页表格" if page_no is not None else "logical_table"
+
+    def _is_generic_table_title(self, title: str) -> bool:
+        compact = re.sub(r"\s+", "", str(title or ""))
+        if not compact:
+            return True
+        if compact.lower() in {"table", "logical_table"}:
+            return True
+        return bool(re.fullmatch(r"(?:table_)?\d+", compact, re.IGNORECASE))
 
     def _build_row_from_record(
         self,
@@ -620,7 +751,7 @@ class DeviationChecker:
                 {
                     "group": group,
                     "source": "section_text",
-                    "page": None,
+                    "page": section.get("page"),
                     "title": title,
                     "requirement_text": segment,
                     "response_text": segment if has_response_marker else "",
@@ -773,6 +904,8 @@ class DeviationChecker:
             "response_evidence": self._clip(evidence, 240) if responded else "",
             "response_section": best_row.get("group", ""),
             "response_section_title": best_row.get("title", ""),
+            "response_page": best_row.get("page"),
+            "response_line_number": None,
             "match_score": round(float(best_score), 4),
             "deviation_type": dev_type,
             "risk_level": "high" if (not responded or dev_type == "negative_deviation") else "low",
@@ -798,16 +931,34 @@ class DeviationChecker:
             return row_match
 
         search_order = ("technical", "business") if requirement["section_type"] == "technical" else ("business", "technical")
-        best = {"matched": False, "score": 0.0, "line": "", "section": "", "title": "", "hits": 0, "long_hit": False}
+        best = {
+            "matched": False,
+            "score": 0.0,
+            "line": "",
+            "section": "",
+            "title": "",
+            "page": None,
+            "line_number": None,
+            "hits": 0,
+            "long_hit": False,
+        }
         req_norm = requirement["normalized_requirement"]
         frags = requirement["fragments"]
         candidate_texts: list[str] = []
 
         for group in search_order:
             for sec in sections[group]:
-                lines = sec.get("lines") or self._split_lines(sec.get("text", ""))
+                section_line_items = sec.get("line_items")
+                if isinstance(section_line_items, list) and section_line_items:
+                    iter_items = section_line_items
+                else:
+                    iter_items = [
+                        {"page": sec.get("page"), "line_number": None, "text": line}
+                        for line in (sec.get("lines") or self._split_lines(sec.get("text", "")))
+                    ]
 
-                for line in lines:
+                for item in iter_items:
+                    line = str(item.get("text") or "")
                     line_norm = self._norm(line)
                     if len(line_norm) < 2:
                         continue
@@ -830,6 +981,8 @@ class DeviationChecker:
                             "line": line.strip(),
                             "section": group,
                             "title": sec.get("title", ""),
+                            "page": item.get("page"),
+                            "line_number": item.get("line_number"),
                             "hits": hits,
                             "long_hit": long_hit,
                         }
@@ -843,6 +996,8 @@ class DeviationChecker:
                             "line": "core_fragment_hit",
                             "section": group,
                             "title": sec.get("title", ""),
+                            "page": sec.get("page"),
+                            "line_number": sec.get("start_line"),
                             "hits": 1,
                             "long_hit": True,
                         }
@@ -876,6 +1031,8 @@ class DeviationChecker:
             "response_evidence": best["line"] if matched else "",
             "response_section": best["section"],
             "response_section_title": best["title"],
+            "response_page": best["page"],
+            "response_line_number": best["line_number"],
             "match_score": round(float(best["score"]), 4),
             "deviation_type": dev_type,
             "risk_level": "high" if (not matched or dev_type == "negative_deviation") else "low",
@@ -899,7 +1056,7 @@ class DeviationChecker:
                 "fail",
                 f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
             )
-        return "pass", "pass", "商务标偏离部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"
+        return "pass", "pass", "偏离响应部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"
 
     def _extract_pair(self, payload: dict) -> tuple[dict, dict] | None:
         keys = (
@@ -929,21 +1086,30 @@ class DeviationChecker:
                     return self._coerce_payload(container[tk]), self._coerce_payload(container[bk])
         return None
 
-    def _collect_sections(self, lines: list[str], anchors: tuple[str, ...], window: int = 220) -> list[dict[str, Any]]:
+    def _collect_sections(
+        self,
+        line_items: list[dict[str, Any]],
+        anchors: tuple[str, ...],
+        window: int = 220,
+    ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for i, line in enumerate(lines):
+        texts = [str(item.get("text") or "") for item in line_items]
+        for i, item in enumerate(line_items):
+            line = texts[i]
             anchor = next((x for x in anchors if x in line), None)
             if not anchor:
                 continue
-            end = min(len(lines), i + window)
+            if self._is_catalog_like_line(line):
+                continue
+            end = min(len(line_items), i + window)
             table_mode = any(
                 "招标文件" in probe and "投标文件" in probe and ("响应" in probe or "偏离" in probe)
-                for probe in lines[i : min(i + 12, len(lines))]
+                for probe in texts[i : min(i + 12, len(texts))]
             )
             for c in range(i + 1, end):
                 if c - i < 8:
                     continue
-                now = lines[c]
+                now = texts[c]
                 if any(t in now for t in self.BUSINESS_TITLES + self.TECH_TITLES):
                     end = c
                     break
@@ -955,10 +1121,20 @@ class DeviationChecker:
                 elif self._is_section_boundary(now):
                     end = c
                     break
-            chunk = lines[i:end]
+            chunk_items = line_items[i:end]
+            chunk = [str(chunk_item.get("text") or "") for chunk_item in chunk_items]
             text = "\n".join(chunk).strip()
             if len(self._norm(text)) >= 20:
-                out.append({"title": anchor, "start_line": i + 1, "lines": chunk, "text": text})
+                out.append(
+                    {
+                        "title": anchor,
+                        "page": item.get("page"),
+                        "start_line": item.get("line_number", i + 1),
+                        "lines": chunk,
+                        "line_items": chunk_items,
+                        "text": text,
+                    }
+                )
         return out
 
     def _dedupe_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1031,15 +1207,19 @@ class DeviationChecker:
             return ""
 
         parts: list[str] = []
-        for key in ("text", "raw_text", "markdown", "html", "pred_html", "content", "caption"):
+        for key in ("text", "raw_text", "markdown", "html", "pred_html", "content", "caption", "block_content"):
             val = section.get(key)
             if isinstance(val, str) and val.strip():
-                parts.append(val.strip())
+                parts.append(self._normalize_markup_text(val, preserve_lines=key in {"html", "pred_html", "block_content"}))
 
         for key in ("cell_texts", "texts", "rec_texts", "headers"):
             val = section.get(key)
             if isinstance(val, list):
-                parts.extend(str(x or "").strip() for x in val if str(x or "").strip())
+                parts.extend(
+                    self._normalize_markup_text(x, preserve_lines=False)
+                    for x in val
+                    if self._normalize_markup_text(x, preserve_lines=False)
+                )
 
         rows = section.get("rows")
         if isinstance(rows, list):
@@ -1057,9 +1237,41 @@ class DeviationChecker:
 
         for key, val in section.items():
             if key.startswith("col_") and isinstance(val, str) and val.strip():
-                parts.append(val.strip())
+                parts.append(self._normalize_markup_text(val, preserve_lines=False))
 
         return "\n".join(self._merge_unique_parts(parts)).strip()
+
+    def _normalize_markup_text(self, value: Any, *, preserve_lines: bool) -> str:
+        text = unescape(str(value or ""))
+        if not text.strip():
+            return ""
+
+        text = re.sub(r"(?is)<img\b[^>]*alt=['\"]([^'\"]*)['\"][^>]*>", r" \1 ", text)
+        text = re.sub(r"(?is)<img\b[^>]*>", " ", text)
+
+        if preserve_lines:
+            text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+            text = re.sub(r"(?i)</t[dh]>", "\t", text)
+            text = re.sub(r"(?i)</tr>", "\n", text)
+            text = re.sub(r"(?i)</?(table|thead|tbody|tfoot|tr|p|div|section|article)[^>]*>", "\n", text)
+            text = re.sub(r"(?i)</?(td|th)[^>]*>", " ", text)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            text = re.sub(r"[^\S\n\t]+", " ", text)
+            text = re.sub(r" *\t *", "\t", text)
+            text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            lines: list[str] = []
+            for raw_line in text.splitlines():
+                cells = [re.sub(r" {2,}", " ", cell).strip() for cell in raw_line.split("\t")]
+                cleaned = "\t".join(cell for cell in cells if cell).strip()
+                if cleaned:
+                    lines.append(cleaned)
+            return "\n".join(lines)
+
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     def _section_items(self, doc: dict) -> list[dict[str, Any]]:
         sections: list[dict[str, Any]] = []
@@ -1408,3 +1620,13 @@ class DeviationChecker:
 
     def _has_star_marker(self, text: str) -> bool:
         return bool(self.STAR_RE.search(text or ""))
+
+    def _is_catalog_like_line(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", str(line or ""))
+        if not compact:
+            return False
+        if "目录" in compact:
+            return True
+        if re.search(r"(?:\.{2,}|…{2,}|。{2,})\d{1,4}$", compact):
+            return True
+        return len(re.findall(r"(?:\.{2,}|…{2,}|。{2,})\d{1,4}", compact)) >= 2

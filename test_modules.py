@@ -1,5 +1,13 @@
-import json, os
-from app.service.analysis.template_extractor import TemplateExtractor
+import sys
+import os
+import json
+
+# 确保项目根目录在系统路径中，解决跨文件夹导入问题
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+
+# 引入各业务模块
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
 from app.service.analysis.visualizer import ReportVisualizer

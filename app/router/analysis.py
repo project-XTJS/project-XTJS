@@ -73,6 +73,9 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
         item = {"type": section_type, "text": text}
         if isinstance(page, int) and page > 0:
             item["page"] = page
+        bbox = section.get("bbox") or section.get("box")
+        if isinstance(bbox, (list, tuple)) and bbox:
+            item["bbox"] = _build_public_native_table_value(list(bbox))
         signature = (item.get("page"), section_type, text)
         if signature in seen:
             continue
@@ -82,45 +85,31 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
     return public_sections
 
 
-def _build_public_logical_tables(logical_tables: list[dict] | None) -> list[dict]:
+def _build_public_native_table_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        normalized = html.unescape(value)
+        normalized = normalized.replace("\u3000", " ")
+        normalized = normalized.replace("\xa0", " ")
+        normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+        return normalized.strip()
+    if isinstance(value, list):
+        return [_build_public_native_table_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _build_public_native_table_value(item)
+            for key, item in value.items()
+        }
+    return html.unescape(str(value))
+
+
+def _build_public_logical_tables(native_tables: list[dict] | None) -> list[dict]:
     public_tables: list[dict] = []
-    for table in logical_tables or []:
+    for table in native_tables or []:
         if not isinstance(table, dict):
             continue
-
-        rows = table.get("rows") or []
-        records = table.get("records") or []
-        headers = table.get("headers") or []
-
-        public_tables.append(
-            {
-                "id": str(table.get("id") or "").strip(),
-                "pages": [
-                    int(page)
-                    for page in (table.get("pages") or [])
-                    if isinstance(page, int) and page > 0
-                ],
-                "column_count": int(table.get("column_count") or 0),
-                "header_row_count": int(table.get("header_row_count") or 0),
-                "headers": [_clean_inline_text(item) for item in headers],
-                "rows": [
-                    [_clean_inline_text(cell) for cell in row]
-                    for row in rows
-                    if isinstance(row, list)
-                ],
-                "records": [
-                    {
-                        str(key): _clean_inline_text(value)
-                        for key, value in record.items()
-                    }
-                    for record in records
-                    if isinstance(record, dict)
-                ],
-                "continued": bool(table.get("continued")),
-                "row_count": int(table.get("row_count") or 0),
-                "data_row_count": int(table.get("data_row_count") or 0),
-            }
-        )
+        public_tables.append(_build_public_native_table_value(table))
     return public_tables
 
 
@@ -155,10 +144,9 @@ def _build_analyze_file_response(
         seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
     )
     public_layout_sections = _build_public_sections(extraction_result["layout_sections"])
-    public_table_sections = [
-        section for section in public_layout_sections if section.get("type") == "table"
-    ]
-    public_logical_tables = _build_public_logical_tables(extraction_result["logical_tables"])
+    public_logical_tables = _build_public_logical_tables(
+        extraction_result.get("native_tables") or extraction_result["logical_tables"]
+    )
 
     return {
         "filename": upload.filename,
@@ -167,7 +155,6 @@ def _build_analyze_file_response(
         "text_length": extraction_result["text_length"],
         "page_count": extraction_result["page_count"],
         "layout_sections": public_layout_sections,
-        "table_sections": public_table_sections,
         "logical_tables": public_logical_tables,
         "recognition": {
             "route": extraction_result["recognition_route"],
@@ -180,6 +167,7 @@ def _build_analyze_file_response(
             "detected": extraction_result["seal_detected"],
             "count": extraction_result["seal_count"],
             "texts": extraction_result["seal_texts"],
+            "locations": _build_public_native_table_value(extraction_result.get("seal_locations") or []),
         },
         "metadata": metadata,
     }
@@ -287,7 +275,6 @@ def _save_analyze_file_json(
         message="Analyzed JSON saved beside the source file.",
     )
     serialized_payload = dict(payload)
-    serialized_payload["save_result"] = save_result
 
     try:
         target_path.write_text(
@@ -339,7 +326,7 @@ async def _analyze_single_upload(
             file_extension=file_extension,
             extraction_result=extraction_result,
         )
-        payload["save_result"] = _save_analyze_file_json(
+        _save_analyze_file_json(
             payload,
             source_path=_resolve_source_path(upload, explicit_source_path),
             enabled=save_json_to_source,

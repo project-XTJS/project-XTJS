@@ -1,0 +1,159 @@
+{
+  "code": 200,
+  "message": "success",
+  "rid": "b7f68986-21e3-409c-81d4-6bb564ec96d6",
+  "data": {
+    "filename": "下浮率.pdf",
+    "file_type": "pdf",
+    "file_size": 65149,
+    "text_length": 504,
+    "page_count": 1,
+    "layout_sections": [
+      {
+        "type": "heading",
+        "text": "中国通信服务 CHINA COMSERVICE",
+        "page": 1
+      },
+      {
+        "type": "heading",
+        "text": "1.3. 投标函附录 A：开标一览表",
+        "page": 1
+      },
+      {
+        "type": "heading",
+        "text": "上海电信科技发展有限公司 Shanghai Telecom Science & Technology Development Co., Ltd.",
+        "page": 1
+      },
+      {
+        "type": "text",
+        "text": "投标函附录 A：开标一览表（☑包件一 / ☐包件二）",
+        "page": 1
+      },
+      {
+        "type": "heading",
+        "text": "[图]",
+        "page": 1
+      },
+      {
+        "type": "text",
+        "text": "建设工程名称：上海市信息管线有限公司2025-2027年楼宇、沟通施工项目",
+        "page": 1
+      },
+      {
+        "type": "text",
+        "text": "2025年10月21日",
+        "page": 1
+      },
+      {
+        "type": "text",
+        "text": "注：1. 本项目下浮率须大于“1.5%”否则其投标将被否决。",
+        "page": 1
+      },
+      {
+        "type": "text",
+        "text": "2. 具体以采购订单为准，合同有效期内招标人不承诺满额执行。",
+        "page": 1
+      },
+      {
+        "type": "table",
+        "text": "单位工程名称报价备注下浮率（%） 税率（%） 上海市信息管线有限公司2025-2027年楼宇、沟通施工项目 2.4% 9 / 备注：自报质量：一次验收合格率100%服务周期：合同双方签订之日起2年。单项工程具体工期以招标人下达的施工委托书要求时限为准。项目经理姓名：宋宇贤手机号：13357913916身份证号码：320324198903203350 证书编号：投标人：上海电上海电信科技发展有限公司立公章） 法定代表人或其委托代理人：— 夏雷 —（32于：或盖章）",
+        "page": 1
+      }
+    ],
+    "table_sections": [
+      {
+        "type": "table",
+        "text": "单位工程名称报价备注下浮率（%） 税率（%） 上海市信息管线有限公司2025-2027年楼宇、沟通施工项目 2.4% 9 / 备注：自报质量：一次验收合格率100%服务周期：合同双方签订之日起2年。单项工程具体工期以招标人下达的施工委托书要求时限为准。项目经理姓名：宋宇贤手机号：13357913916身份证号码：320324198903203350 证书编号：投标人：上海电上海电信科技发展有限公司立公章） 法定代表人或其委托代理人：— 夏雷 —（32于：或盖章）",
+        "page": 1
+      }
+    ],
+    "logical_tables": [
+      {
+        "id": "table_1",
+        "pages": [
+          1
+        ],
+        "column_count": 4,
+        "header_row_count": 0,
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4"
+        ],
+        "rows": [
+          [
+            "单位工程名称",
+            "报价",
+            "备注",
+            ""
+          ],
+          [
+            "下浮率（%）",
+            "税率（%）",
+            "",
+            ""
+          ],
+          [
+            "上海市信息管线有限公司2025-2027年楼宇、沟通施工项目",
+            "2.4%",
+            "9",
+            "/"
+          ]
+        ],
+        "records": [
+          {
+            "col_1": "单位工程名称",
+            "col_2": "报价",
+            "col_3": "备注",
+            "col_4": ""
+          },
+          {
+            "col_1": "下浮率（%）",
+            "col_2": "税率（%）",
+            "col_3": "",
+            "col_4": ""
+          },
+          {
+            "col_1": "上海市信息管线有限公司2025-2027年楼宇、沟通施工项目",
+            "col_2": "2.4%",
+            "col_3": "9",
+            "col_4": "/"
+          }
+        ],
+        "continued": false,
+        "row_count": 3,
+        "data_row_count": 3
+      }
+    ],
+    "recognition": {
+      "route": "paddleocr_vl",
+      "parser_engine": "PaddleOCR-VL-1.5",
+      "ocr_engine": "PaddleOCR-VL-1.5",
+      "ocr_used": true,
+      "layout_used": true
+    },
+    "seal": {
+      "detected": false,
+      "count": 0,
+      "texts": []
+    },
+    "metadata": {
+      "schema_version": "analyze_file_v3",
+      "document": {
+        "filename": "下浮率.pdf",
+        "file_type": "pdf",
+        "file_size": 65149,
+        "page_count": 1,
+        "mime_type": "application/pdf",
+        "text_length": 504
+      },
+      "recognition": {
+        "route": "paddleocr_vl",
+        "ocr_used": true,
+        "layout_used": true,
+        "parser_engine": "PaddleOCR-VL-1.5"
+      }
+    }
+  }
+}
