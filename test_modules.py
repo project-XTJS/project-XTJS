@@ -8,6 +8,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 
 # 引入各业务模块
+from app.service.analysis.template_extractor import TemplateExtractor
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
 from app.service.analysis.visualizer import ReportVisualizer
