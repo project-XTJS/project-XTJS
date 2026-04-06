@@ -1,135 +1,189 @@
 import re
 
-class TemplateExtractor:
-    """双雷达导航提取器：独立提取完整性清单与一致性模板"""
+class SectionClassifier:
+    """专门负责识别文本类型的工具类，提供标题识别和目录排除功能"""
+    # 增加对目录页宽容度的排除：匹配省略号、连续点、下划线或末尾带孤立数字
+    RE_TOC = re.compile(r'\.{3,}|…{2,}|_{3,}\s*\d+$|(?:\s\d+$)')
+    
+    # 标题识别标准
+    RE_HEADING_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|[\(（]?\d+[\)）\.、])')
+    RE_KEYWORD_TITLE = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照|招标文件|采购文件')
 
     @classmethod
-    def _promote_sections(cls, sections: list) -> list:
-        """
-        页码匹配提升逻辑：
-        每页先查找是否有匹配特征的 heading。如果找到了，跳过该页剩下的所有寻找。
-        如果没有找到匹配的 heading，就在该页的 text 里找，找到匹配的将其强行提升为 heading。
-        """
-        PATTERN_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.])')
-        PATTERN_KEYWORD = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照')
-        
-        def is_target(text: str) -> bool:
-            if PATTERN_START.search(text): return True
-            # 短文本关键词匹配，防止将正文中的长句误认为标题
-            if PATTERN_KEYWORD.search(text) and len(text) < 40: return True
+    def is_heading(cls, text: str, is_strict=False) -> bool:
+        """判断是否为有效标题"""
+        if cls.RE_TOC.search(text): 
             return False
+        if is_strict:
+            return bool(cls.RE_HEADING_START.search(text) or cls.RE_KEYWORD_TITLE.search(text))
+        return bool(cls.RE_HEADING_START.search(text) or (cls.RE_KEYWORD_TITLE.search(text) and len(text) < 60))
 
-        # 1. 记录拥有原生合法 heading 的页码
-        page_has_native = {}
-        for sec in sections:
-            if not isinstance(sec, dict): continue
-            page = sec.get('page', -1)
-            if sec.get('type') == 'heading' and is_target(str(sec.get('text', '')).strip()):
-                page_has_native[page] = True
-                
-        # 2. 依次提权兜底
-        processed = []
-        promoted = set() # 记录已经被提升过 text 的页码
-        for sec in sections:
-            if not isinstance(sec, dict): 
-                processed.append(sec)
-                continue
-            page = sec.get('page', -1)
-            sec_type = sec.get('type', '')
-            text = str(sec.get('text', '')).strip()
-            
-            if sec_type == 'text' and not page_has_native.get(page, False) and page not in promoted:
-                if is_target(text):
-                    new_sec = sec.copy()
-                    new_sec['type'] = 'heading' # 提权为 heading
-                    processed.append(new_sec)
-                    promoted.add(page) # 找到了一个就跳过当前page的后续查找
-                    continue
-            processed.append(sec)
-        return processed
+
+class TemplateExtractor:
+    """双雷达导航提取器：负责从招标文件中提取清单与模板基准"""
+
+    RE_TAGS = re.compile(r'\\[a-zA-Z]+|[{}$]')
 
     @classmethod
-    def extract_requirements(cls, model_raw_json: dict) -> dict:
-        """为完整性检查提取商务文件清单"""
-        data_node = model_raw_json.get('data', model_raw_json)
-        sections = cls._promote_sections(data_node.get('layout_sections', []))
+    def _format_logical_table(cls, tb: dict, is_template: bool = False) -> str:
+        """将逻辑表格格式化为文本
+        :param is_template: 如果为 True，则只提取表格的第一行（表头）作为一致性锚点
+        """
+        lines = []
+        rows = tb.get('rows', tb.get('body', tb.get('data', [])))
         
-        main_list, sub_list = [], []
-        STAGE_FIND_COMPOSE = 0
-        STAGE_FIND_BUSINESS = 1
-        STAGE_RECORDING = 2
-        current_stage = STAGE_FIND_COMPOSE
+        if not rows and tb.get('headers'):
+            lines.append(" | ".join(str(x) for x in tb['headers']))
+            
+        # 【核心修改点】：如果是模版文件且存在多行，我们只截取 rows[0]（通常为表头要求）
+        if is_template and rows:
+            rows = rows[:1]
+            
+        for row in rows:
+            if isinstance(row, dict):
+                lines.append(" | ".join(str(v) for v in row.values() if v is not None))
+            elif isinstance(row, list):
+                cell_texts = [str(cell['text']) if isinstance(cell, dict) and 'text' in cell else str(cell) for cell in row]
+                lines.append(" | ".join(cell_texts))
+        return "\n".join(lines)
+    
+    @classmethod
+    def preprocess_sections(cls, layout_sections: list, logical_tables: list = None, is_template: bool = False) -> tuple:
+        """统一预处理：提权、清洗、识别全局页眉
+        如果传入 logical_tables，则执行表格结构解析植入
+        """
+        # 预处理：构建表格跨页映射字典（只有在传入 logical_tables 时才执行）
+        tables_by_page = {}
+        if logical_tables:
+            for tb in logical_tables:
+                for p in tb.get('pages', []):
+                    tables_by_page.setdefault(p, []).append(tb)
+                    
+        consumed_tables = {}
+        overall_consumed = set()
+        
+        processed = []
+        page_has_heading = {}
+        heading_counts = {}
+
+        # 第一遍扫描：清洗文本并使用分类器识别原生标题
+        for sec in layout_sections:
+            if not isinstance(sec, dict) or 'text' not in sec: continue
+            
+            new_sec = sec.copy()
+            page = new_sec.get('page', -1)
+            
+            # 如果启用了表格处理，且当前是 table 类型
+            if logical_tables and new_sec.get('type') == 'table':
+                tbs = tables_by_page.get(page, [])
+                idx = consumed_tables.get(page, 0)
+                if idx < len(tbs):
+                    tb = tbs[idx]
+                    consumed_tables[page] = idx + 1
+                    tb_id = tb.get('id', id(tb))
+                    # 避免跨页表格内容重复提取
+                    if tb_id not in overall_consumed:
+                        overall_consumed.add(tb_id)
+                        # 【核心修改点】：将 is_template 标志传递给表格格式化函数
+                        new_sec['text'] = cls._format_logical_table(tb, is_template)
+                    else:
+                        new_sec['text'] = "" 
+                else:
+                    new_sec['text'] = cls.RE_TAGS.sub('', str(new_sec.get('text', ''))).strip()
+            else:
+                new_sec['text'] = cls.RE_TAGS.sub('', str(new_sec.get('text', ''))).strip()
+                
+            text = new_sec['text']
+            if not text:
+                continue
+
+            if new_sec.get('type') == 'heading' and SectionClassifier.is_heading(text, is_strict=True):
+                page_has_heading[page] = True
+                clean_h = text.replace(' ', '')
+                heading_counts[clean_h] = heading_counts.get(clean_h, 0) + 1
+                
+            processed.append(new_sec)
+
+        final_processed = []
+        # 第二遍扫描：执行提权逻辑 (Text -> Heading)
+        for sec in processed:
+            text = sec['text']
+            if sec.get('type') == 'text' and not page_has_heading.get(sec.get('page'), False):
+                if SectionClassifier.is_heading(text):
+                    sec['type'] = 'heading'
+                    page_has_heading[sec.get('page')] = True
+            final_processed.append(sec)
+
+        global_headers = {t for t, c in heading_counts.items() if c > 2}
+        return final_processed, global_headers
+
+    @classmethod
+    def _is_noise(cls, text: str, headers: set) -> bool:
+        """判断是否为目录行或重复页眉"""
+        clean = text.replace(' ', '')
+        return SectionClassifier.RE_TOC.search(text) or clean in headers
+
+    @classmethod
+    def extract_requirements(cls, model_raw_json: dict) -> list:
+        """提取完整性清单：改为返回单一顺序列表，保留主子项的相对位置"""
+        data_node = model_raw_json.get('data', model_raw_json)
+        sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
+        
+        ordered_list = [] # 改用单一列表存储所有项
+        stage = 0 
 
         for sec in sections:
-            text = str(sec.get('text', '')).strip()
-            sec_type = sec.get('type', '')
-            if not text: continue
+            text = sec['text']
+            if not text or cls._is_noise(text, headers): continue
 
-            if sec_type == 'heading':
-                if current_stage == STAGE_FIND_COMPOSE and re.search(r'[一二三四五]、.*文件[的]?组成', text):
-                    current_stage = STAGE_FIND_BUSINESS
-                    continue
-                if current_stage == STAGE_FIND_BUSINESS and "商务文件" in text:
-                    current_stage = STAGE_RECORDING
-                    continue
-                if current_stage == STAGE_RECORDING and "技术文件" in text:
-                    break
+            if sec['type'] == 'heading':
+                if stage == 0 and '文件' in text and '组成' in text: stage = 1; continue
+                if stage == 1 and "商务" in text: stage = 2; continue
+                if stage == 2 and "技术" in text: break
 
-            if current_stage == STAGE_RECORDING:
-                main_match = re.match(r'^(\d+)[．\.]\s*(.+)', text)
-                sub_match = re.match(r'^([A-Z])[．\.]\s*(.+)', text)
-                if main_match:
-                    main_list.append(cls._clean_text(main_match.group(2)))
-                elif sub_match:
-                    sub_list.append(cls._clean_text(sub_match.group(2)))
-
-        return {"main": main_list, "sub": sub_list}
+            if stage == 2:
+                # 按照文本出现的先后顺序切分并压入同一个列表
+                parts = re.split(r'(?<![\dA-Z])(?=(?:\d+|[A-Z])[．\.]\s*)', text)
+                for part in filter(None, [p.strip() for p in parts]):
+                    if m := re.match(r'^(\d+)[．\.]\s*(.+)', part):
+                        ordered_list.append(f"{m.group(1)}. {cls._clean_label(m.group(2))}")
+                    elif s := re.match(r'^([A-Z])[．\.]\s*(.+)', part):
+                        ordered_list.append(f"{s.group(1)}. {cls._clean_label(s.group(2))}")
+        
+        return ordered_list
 
     @classmethod
     def extract_consistency_templates(cls, model_raw_json: dict) -> list:
-        """为一致性检查提取“附件X”标准模板"""
+        """提取一致性模板基准（传入 logical_tables 启动表格结构化）"""
         data_node = model_raw_json.get('data', model_raw_json)
-        sections = cls._promote_sections(data_node.get('layout_sections', []))
         
-        templates = []
-        in_attachment_zone = False
-        current_attachment = None
+        # 【核心修改点】：通过传递 is_template=True 激活表头单行提取逻辑
+        sections, headers = cls.preprocess_sections(
+            data_node.get('layout_sections', []), 
+            data_node.get('logical_tables', []),
+            is_template=True
+        )
 
+        templates, current, in_zone = [], None, False
         for sec in sections:
-            text = str(sec.get('text', '')).strip()
-            sec_type = sec.get('type', '')
+            text = sec['text']
+            if not text or cls._is_noise(text, headers): continue
             
-            if sec_type == 'heading' and not in_attachment_zone:
-                if re.search(r'文件.*部分格式附件', text):
-                    in_attachment_zone = True
-                    continue
+            if sec['type'] == 'heading' and not in_zone:
+                if "部分格式附件" in text: in_zone = True; continue
 
-            if in_attachment_zone:
-                if sec_type == 'heading':
-                    if re.match(r'^第[一二三四五六七八九十百]+章', text) or "营业执照" in text:
-                        break
-
-                if sec_type == 'heading' and re.search(r'^\s*[\(（]?(附件|附表|格式)\s*[\d\-]+', text):
-                    if current_attachment:
-                        templates.append(current_attachment)
-                        
-                    if "人员配置表" in text or "项目人员配置表" in text:
-                        current_attachment = None
+            if in_zone:
+                if sec['type'] == 'heading':
+                    if re.match(r'^第[一二三四五六七八九十百]+章', text) or "营业执照" in text: break
+                    if SectionClassifier.RE_HEADING_START.search(text):
+                        if current: templates.append(current)
+                        current = {"title": cls._clean_label(text), "content": [text]}
                         continue
-                        
-                    current_attachment = {"title": cls._clean_text(text), "content": [text]}
-                elif current_attachment:
-                    current_attachment["content"].append(text)
+                if current: current["content"].append(text)
 
-        if current_attachment:
-            templates.append(current_attachment)
-            
+        if current: templates.append(current)
         return templates
 
-    @classmethod
-    def _clean_text(cls, text: str) -> str:
-        if "营业执照" in text: return "营业执照"
-        text = re.sub(r'[；;:：。]$', '', text).strip()
-        text = re.sub(r'[(（].*?格式.*?参见.*?[)）]', '', text).strip()
-        text = re.sub(r'[\.…]+\s*\d+$', '', text).strip()
-        return text
+    @staticmethod
+    def _clean_label(text: str) -> str:
+        return re.sub(r'[；;:：。]$|[(（].*?格式.*?参见.*?[)）]|[\.…]+\s*\d+$', '', text).strip()

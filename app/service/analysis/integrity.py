@@ -2,157 +2,112 @@ import re
 from .template_extractor import TemplateExtractor
 
 class IntegrityChecker:
-    """针对结构化标题、逻辑依赖及特殊业务规则的投标文件完整性检查器"""
+    """完整性校验器：检查必要章节是否缺失"""
+
+    # 集中化同义词映射字典，便于维护和扩展
+    SENSITIVE_MAPPING = {
+        "基本情况": ["基本情况"],
+        "类似项目业绩": ["类似项目业绩清单", "业绩证明"],
+        "营业执照": ["营业执照", "经营许可"],
+        "制造商声明函": ["制造商声明", "制造商授权", "原厂授权"],
+        "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
+        "缴纳社保": ["社会保险个人权益记录", "社保缴纳证明", "劳动合同证明"]
+    }
 
     def __init__(self):
-        self.ATTACHMENT_PREFIX = re.compile(r'^\s*[\(（]?附件')
+        self.VALID_PREFIX = re.compile(r'^\s*([\(（]?附件|[一二三四五六七八九十]+[、.]|[\(（]?\d+[\)）\.、])')
 
-    def _promote_sections(self, sections: list) -> list:
-        """同上的页码提权容错逻辑"""
-        PATTERN_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.])')
-        PATTERN_KEYWORD = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照')
+    def _normalize_target(self, name: str) -> str:
+        name = re.sub(r'^(\d+|[A-Z])[．\.]\s*', '', name)
         
-        def is_target(text: str) -> bool:
-            if PATTERN_START.search(text): return True
-            if PATTERN_KEYWORD.search(text) and len(text) < 40: return True
-            return False
-
-        page_has_native = {}
-        for sec in sections:
-            if not isinstance(sec, dict): continue
-            page = sec.get('page', -1)
-            if sec.get('type') == 'heading' and is_target(str(sec.get('text', '')).strip()):
-                page_has_native[page] = True
-                
-        processed = []
-        promoted = set()
-        for sec in sections:
-            if not isinstance(sec, dict): 
-                processed.append(sec)
-                continue
-            page = sec.get('page', -1)
-            sec_type = sec.get('type', '')
-            text = str(sec.get('text', '')).strip()
+        # 优先通过字典映射标准化名称
+        for key, mapped_vals in self.SENSITIVE_MAPPING.items():
+            if key in name: return mapped_vals[0]
             
-            if sec_type == 'text' and not page_has_native.get(page, False) and page not in promoted:
-                if is_target(text):
-                    new_sec = sec.copy()
-                    new_sec['type'] = 'heading'
-                    processed.append(new_sec)
-                    promoted.add(page)
-                    continue
-            processed.append(sec)
-        return processed
+        name = re.sub(r'^(参选人|投标人|应答人)(认为|的)?|可另外再附.*|后附.*材料$|[(（].*?[））]', '', name)
+        return name.strip('。，；;,. ')
 
-    def _normalize_target_name(self, item_name: str) -> str:
-        """提炼核心词，用于标题匹配"""
-        if "基本情况" in item_name: return "基本情况"
-        if "类似项目业绩清单" in item_name: return "类似项目业绩清单"
-        if "财务状况" in item_name and "社会保障" in item_name: return "社会保障资金缴纳情况声明函"
-        if "营业执照" in item_name: return "营业执照"
-            
-        item_name = re.sub(r'^(参选人的|投标人的|应答人的|参选人认为|投标人认为|应答人认为|参选人|投标人|应答人)', '', item_name)
-        item_name = re.sub(r'(可另外再附.*|后附.*材料)$', '', item_name)
-        item_name = re.sub(r'[（\(].*?(公章|原件|复印件|如有|格式).*?[）\)]', '', item_name)
-        return item_name.strip('。，；;,. ')
+    def _smart_match(self, clean_text: str, keyword: str, clean_target: str) -> bool:
+        """基于字典映射的智能模糊匹配"""
+        if clean_target in clean_text: 
+            return True
+        
+        # 检查同义词映射
+        for key, aliases in self.SENSITIVE_MAPPING.items():
+            if key in keyword:
+                if any(alias in clean_text for alias in aliases):
+                    return True
+        return False
 
-    def _find_heading(self, sections: list, target_keyword: str) -> str:
-        """在 headings 中寻找核心关键词"""
-        is_license = "营业执照" in target_keyword
+    def _find_heading(self, sections: list, headers: set, keyword: str) -> str:
+        clean_target = keyword.replace(' ', '')
+        EXEMPT_KEYWORDS = ["营业执照", "社会保险"] # 特例：这两类资质常见无编号或前缀，且具有较强的文本特征，可以放宽前缀要求
+
         for sec in sections:
-            if not isinstance(sec, dict) or sec.get('type') != 'heading':
-                continue
-            text = str(sec.get('text') or '').strip()
+            if sec.get('type') != 'heading': continue
+            text = sec['text']
+            if TemplateExtractor._is_noise(text, headers): continue
             
-            if is_license:
-                if target_keyword in text: return text
-            else:
-                if self.ATTACHMENT_PREFIX.search(text) and target_keyword in text:
+            clean_text = text.replace(' ', '')
+            
+            if self._smart_match(clean_text, keyword, clean_target):
+                # 特殊资质可以不依赖前缀编号
+                is_exempt = any(k in keyword for k in EXEMPT_KEYWORDS)
+                if is_exempt or self.VALID_PREFIX.search(text):
                     return text
         return None
 
-    def check_integrity(self, model_raw_json: dict, test_raw_json: dict) -> dict:
-        reqs = TemplateExtractor.extract_requirements(model_raw_json)
-        test_data = test_raw_json.get('data', {})
-        # 🌟 核心：注入页面提权过滤
-        sections = self._promote_sections(test_data.get('layout_sections', []))
-
-        sub_details = {}
-        for sub_item in reqs['sub']:
-            clean_name = self._normalize_target_name(sub_item)
-            
-            if "法定代表人" in sub_item:
-                targets = ["法定代表人授权委托书", "法定代表人资格证明书"]
-                found_parts = []
-                missing_parts = []
-                for t in targets:
-                    match = self._find_heading(sections, t)
-                    if match: found_parts.append(match)
-                    else: missing_parts.append(t)
-                
-                if not missing_parts:
-                    sub_details[sub_item] = {"status": "已找到", "preview": " + ".join(found_parts), "is_passed": True}
-                else:
-                    missing_desc = f"部分缺失 (缺: {', '.join(missing_parts)})" if found_parts else "缺失"
-                    sub_details[sub_item] = {
-                        "status": missing_desc, 
-                        "preview": " + ".join(found_parts) if found_parts else "-",
-                        "is_passed": False
-                    }
-            else:
-                match = self._find_heading(sections, clean_name)
-                if match:
-                    sub_details[sub_item] = {"status": "已找到", "preview": match, "is_passed": True}
-                else:
-                    sub_details[sub_item] = {"status": "缺失", "preview": "-", "is_passed": False}
-
-        main_details = {}
-        for main_item in reqs['main']:
-            if "资格" in main_item or "证明文件" in main_item:
-                missing_subs = [self._normalize_target_name(s) for s, d in sub_details.items() if not d['is_passed']]
-                if not missing_subs:
-                    main_details[main_item] = {"status": "已找到", "preview": "所有子项均已通过校验", "is_passed": True}
-                else:
-                    main_details[main_item] = {
-                        "status": f"不全 (缺: {', '.join(missing_subs)})", 
-                        "preview": "部分子项缺失或内容不合规",
-                        "is_passed": False
-                    }
-            else:
-                clean_name = self._normalize_target_name(main_item)
-                match = self._find_heading(sections, clean_name)
-                if match:
-                    main_details[main_item] = {"status": "已找到", "preview": match, "is_passed": True}
-                else:
-                    if any(kw in main_item for kw in ["其他内容", "如有"]):
-                        main_details[main_item] = {"status": "未提供 (可选附加项)", "preview": "-", "is_passed": True}
-                    else:
-                        main_details[main_item] = {"status": "缺失", "preview": "-", "is_passed": False}
-
+    def check_integrity(self, model_json: dict, test_json: dict) -> dict:
+        # reqs 现在接收的是一个按文档物理顺序排列的单一列表 List[str]
+        reqs = TemplateExtractor.extract_requirements(model_json)
+        data_node = test_json.get('data', test_json)
+        sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
+        
         all_details = {}
-        found_sections = []
-        missing_sections = []
+        # 直接遍历有序列表，字典 all_details 将天然保持原文档的主子层级顺序
+        for item in reqs:
+            # 动态判断当前项是子项还是主项
+            is_sub = re.match(r'^[A-Z][．\.]|^[\(（]\d+[\)）]', item)
+            cat = "资格证明子项" if is_sub else "商务标主项"
 
-        for name, info in main_details.items():
-            all_details[name] = {**info, "category": "商务标主项文件"}
-            if info['is_passed']: found_sections.append(name)
-            else: missing_sections.append(name)
+            # 特例处理：法定代表人证明书和授权委托书通常成对出现，且文本特征明显，单独设计逻辑进行匹配
+            if "法定代表人" in item and "证明书" in item and "授权委托书" in item:
+                zm_match, sq_match = None, None
+                
+                for sec in sections:
+                    if sec.get('type') != 'heading': continue
+                    text = sec['text']
+                    if TemplateExtractor._is_noise(text, headers): continue
+                    clean_text = text.replace(' ', '')
+                    
+                    if ("法定代表人" in clean_text or "法人" in clean_text) and "证明" in clean_text:
+                        zm_match = text
+                    if ("法定代表人" in clean_text or "法人" in clean_text or "委托" in clean_text) and "授权" in clean_text:
+                        sq_match = text
+                        
+                if zm_match and sq_match:
+                    status, preview, is_passed = "已找到", f"{zm_match} | {sq_match}", True
+                elif zm_match:
+                    status, preview, is_passed = "缺失授权委托书", zm_match, False
+                elif sq_match:
+                    status, preview, is_passed = "缺失证明书", sq_match, False
+                else:
+                    status, preview, is_passed = "缺失证明书及授权书", "-", False
+                    
+                all_details[item] = {
+                    "status": status, "preview": preview, "is_passed": is_passed, "category": cat
+                }
+                continue
 
-        for name, info in sub_details.items():
-            key = f"子项: {name}"
-            all_details[key] = {**info, "category": "资格证明子项材料"}
-            if info['is_passed']: found_sections.append(key)
-            else: missing_sections.append(key)
-
-        total_items = len(reqs['main']) + len(reqs['sub'])
-        passed_items = len([v for v in all_details.values() if v.get('is_passed')])
-        score = round((passed_items / total_items) * 100, 2) if total_items > 0 else 100.0
-
-        return {
-            "integrity_score": score,
-            "found_count": passed_items,
-            "missing_count": len(missing_sections),
-            "found_sections": found_sections, 
-            "missing_sections": missing_sections,
-            "details": all_details,
-        }
+            norm_item = self._normalize_target(item)
+            match = self._find_heading(sections, headers, norm_item)
+            all_details[item] = {
+                "status": "已找到" if match else "缺失",
+                "preview": match or "-",
+                "is_passed": bool(match) or "如有" in item,
+                "category": cat
+            }
+                
+        passed = len([v for v in all_details.values() if v['is_passed']])
+        score = round((passed / len(all_details)) * 100, 2) if all_details else 0
+        return {"integrity_score": score, "details": all_details}
