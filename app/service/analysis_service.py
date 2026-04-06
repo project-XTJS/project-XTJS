@@ -50,11 +50,16 @@ class AnalysisService:
         native_tables = ocr_result.get("native_tables") or []
         logical_tables = ocr_result.get("logical_tables") or []
         seal_data = ocr_result.get("seals") or {"count": 0, "texts": []}
+        signature_data = ocr_result.get("signatures") or {"count": 0, "texts": []}
 
         try:
             seal_count = int(seal_data.get("count", 0))
         except (TypeError, ValueError):
             seal_count = 0
+        try:
+            signature_count = int(signature_data.get("count", 0))
+        except (TypeError, ValueError):
+            signature_count = 0
 
         table_sections = [
             section
@@ -85,6 +90,12 @@ class AnalysisService:
             "seal_count": seal_count,
             "seal_texts": seal_data.get("texts", []),
             "seal_locations": seal_data.get("locations", []),
+            "signature_detected": signature_count > 0,
+            "signature_count": signature_count,
+            "signature_texts": signature_data.get("texts", []),
+            "signature_locations": signature_data.get("locations", []),
+            "bbox_coordinate_space": ocr_result.get("bbox_coordinate_space", "ocr_image"),
+            "bbox_source_coordinate_space": ocr_result.get("bbox_source_coordinate_space", "ocr_image"),
             "recognition_route": "paddleocr_vl",
             "recognition_reason": "vl_only_pipeline",
             "pdf_mode": "vl_only",

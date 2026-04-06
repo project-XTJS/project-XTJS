@@ -76,7 +76,10 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
         bbox = section.get("bbox") or section.get("box")
         if isinstance(bbox, (list, tuple)) and bbox:
             item["bbox"] = _build_public_native_table_value(list(bbox))
-        signature = (item.get("page"), section_type, text)
+        bbox_ocr = section.get("bbox_ocr")
+        if isinstance(bbox_ocr, (list, tuple)) and bbox_ocr:
+            item["bbox_ocr"] = _build_public_native_table_value(list(bbox_ocr))
+        signature = (item.get("page"), section_type, text, str(item.get("bbox")))
         if signature in seen:
             continue
         seen.add(signature)
@@ -162,12 +165,20 @@ def _build_analyze_file_response(
             "ocr_engine": extraction_result["ocr_engine"],
             "ocr_used": extraction_result["ocr_used"],
             "layout_used": extraction_result["layout_used"],
+            "bbox_coordinate_space": extraction_result.get("bbox_coordinate_space", "ocr_image"),
+            "bbox_source_coordinate_space": extraction_result.get("bbox_source_coordinate_space", "ocr_image"),
         },
         "seal": {
             "detected": extraction_result["seal_detected"],
             "count": extraction_result["seal_count"],
             "texts": extraction_result["seal_texts"],
             "locations": _build_public_native_table_value(extraction_result.get("seal_locations") or []),
+        },
+        "signature": {
+            "detected": extraction_result["signature_detected"],
+            "count": extraction_result["signature_count"],
+            "texts": extraction_result["signature_texts"],
+            "locations": _build_public_native_table_value(extraction_result.get("signature_locations") or []),
         },
         "metadata": metadata,
     }
