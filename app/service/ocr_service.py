@@ -158,6 +158,29 @@ class OCRService:
             "use_queues": settings.PADDLE_VL_USE_QUEUES,
         }
 
+    def _extract_unknown_argument(self, exc: Exception) -> str | None:
+        match = re.search(r"Unknown argument:\s*([A-Za-z0-9_]+)", str(exc or ""))
+        return match.group(1) if match else None
+
+    def _instantiate_pipeline(self, pipeline_cls: Any, device: str) -> tuple[Any, list[str]]:
+        kwargs = dict(self._build_pipeline_kwargs(device))
+        disabled_args: list[str] = []
+
+        while True:
+            try:
+                return pipeline_cls(**kwargs), disabled_args
+            except Exception as exc:
+                unknown_arg = self._extract_unknown_argument(exc)
+                if not unknown_arg or unknown_arg not in kwargs:
+                    raise
+                kwargs.pop(unknown_arg, None)
+                disabled_args.append(unknown_arg)
+                print(
+                    "OCRService: retrying model load without unsupported argument "
+                    f"{unknown_arg!r} (device={device})",
+                    flush=True,
+                )
+
     def _init_engine(self) -> None:
         try:
             self._patch_paddle_tensor_int()
@@ -174,9 +197,15 @@ class OCRService:
                     f"(device={device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})",
                     flush=True,
                 )
-                self.pipeline = PaddleOCRVL(**self._build_pipeline_kwargs(device))
+                self.pipeline, disabled_args = self._instantiate_pipeline(PaddleOCRVL, device)
                 self.available = True
                 self.active_device = device
+                if disabled_args:
+                    print(
+                        "OCRService: model loading completed with compatibility fallback "
+                        f"(device={self.active_device}, disabled_args={disabled_args})",
+                        flush=True,
+                    )
                 print(
                     "OCRService: model loading completed "
                     f"(device={self.active_device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})",
