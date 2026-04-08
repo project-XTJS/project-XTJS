@@ -9,6 +9,7 @@ from app.core.document_types import DocumentType
 from app.router.dependencies import (
     RecognitionOptions,
     get_db_service,
+    get_duplicate_check_service,
     get_form_recognition_options,
     get_oss_service,
     get_text_analysis_service,
@@ -17,9 +18,11 @@ from app.schemas.postgresql import (
     DocumentUpdateRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
+    ProjectDuplicateCheckRequest,
     ProjectRelationUpdateRequest,
     ProjectUpdateRequest,
 )
+from app.service.analysis import DuplicateCheckService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -64,6 +67,41 @@ async def get_project_detail(
         return detail
     except HTTPException:
         raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.post("/projects/{identifier_id}/duplicate-check", summary="项目商务标/技术标查重")
+async def project_duplicate_check(
+    identifier_id: str,
+    payload: Optional[ProjectDuplicateCheckRequest] = None,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
+):
+    request_payload = payload or ProjectDuplicateCheckRequest()
+    try:
+        payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
+        if not payload_data:
+            raise HTTPException(status_code=404, detail="项目不存在")
+
+        duplicate_result = duplicate_check_service.check_project_documents(
+            project_identifier=identifier_id,
+            project=payload_data["project"],
+            document_records=payload_data["documents"],
+            document_types=request_payload.document_types,
+            max_evidence_sections=request_payload.max_evidence_sections,
+            max_pairs_per_type=request_payload.max_pairs_per_type,
+        )
+        db_service.upsert_project_result_item(
+            project_identifier_id=identifier_id,
+            result_key="duplicate_check",
+            result_value=duplicate_result,
+        )
+        return duplicate_result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 

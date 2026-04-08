@@ -2,6 +2,7 @@
 from .deviation import DeviationChecker
 from .integrity import IntegrityChecker
 from .consistency import ConsistencyChecker
+from .duplicate_check import DuplicateCheckService
 from .pricing_reasonableness import ReasonablenessChecker
 from .itemized_pricing import ItemizedPricingChecker
 from .verification import VerificationChecker
@@ -10,6 +11,7 @@ __all__ = [
     "DeviationChecker",
     "IntegrityChecker",
     "ConsistencyChecker",
+    "DuplicateCheckService",
     "ReasonablenessChecker",
     "ItemizedPricingChecker",
     "VerificationChecker",

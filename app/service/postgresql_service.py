@@ -710,3 +710,120 @@ class PostgreSQLService:
                 cursor.execute(query, (project["id"],))
                 relations: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
         return {"project": project, "relations": relations}
+
+    def get_project_documents_for_duplicate_check(
+        self,
+        identifier_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        project = self.get_project_by_identifier(identifier_id)
+        if not project:
+            return None
+
+        query = """
+            SELECT
+                pd.id AS relation_id,
+                'business_bid' AS relation_role,
+                bbd.id AS document_id,
+                bbd.identifier_id,
+                bbd.document_type,
+                bbd.file_name,
+                bbd.file_url,
+                bbd.extracted,
+                bbd.content,
+                pd.create_time
+            FROM xtjs_project_documents pd
+            JOIN xtjs_documents bbd
+              ON pd.business_bid_document_id = bbd.id
+             AND bbd.deleted = FALSE
+            WHERE pd.project_id = %s
+
+            UNION ALL
+
+            SELECT
+                pd.id AS relation_id,
+                'technical_bid' AS relation_role,
+                tbd.id AS document_id,
+                tbd.identifier_id,
+                tbd.document_type,
+                tbd.file_name,
+                tbd.file_url,
+                tbd.extracted,
+                tbd.content,
+                pd.create_time
+            FROM xtjs_project_documents pd
+            JOIN xtjs_documents tbd
+              ON pd.technical_bid_document_id = tbd.id
+             AND tbd.deleted = FALSE
+            WHERE pd.project_id = %s
+
+            ORDER BY create_time DESC, relation_id DESC, document_id DESC
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, (project["id"], project["id"]))
+                documents: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
+
+        return {"project": project, "documents": documents}
+
+    def get_project_result(self, project_identifier_id: str) -> Optional[Dict[str, Any]]:
+        query = """
+            SELECT
+                id,
+                project_identifier_id,
+                result,
+                create_time,
+                update_time
+            FROM xtjs_result
+            WHERE project_identifier_id = %s
+            LIMIT 1
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, (project_identifier_id,))
+                result = cursor.fetchone()
+                return dict(result) if result else None
+
+    def upsert_project_result_item(
+        self,
+        project_identifier_id: str,
+        result_key: str,
+        result_value: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_project_identifier = self._normalize_required_identifier(
+            project_identifier_id,
+            "project_identifier_id",
+        )
+        normalized_result_key = self._normalize_required_identifier(result_key, "result_key")
+        if not isinstance(result_value, dict):
+            raise ValueError("result_value must be a JSON object")
+
+        project = self.get_project_by_identifier(normalized_project_identifier)
+        if not project:
+            raise ValueError(f"项目不存在：{normalized_project_identifier}")
+
+        payload = {normalized_result_key: result_value}
+        query = """
+            INSERT INTO xtjs_result (project_identifier_id, result)
+            VALUES (%s, %s)
+            ON CONFLICT (project_identifier_id)
+            DO UPDATE
+            SET
+                result = COALESCE(xtjs_result.result, '{}'::jsonb) || EXCLUDED.result,
+                update_time = CURRENT_TIMESTAMP
+            RETURNING
+                id,
+                project_identifier_id,
+                result,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(payload),
+                    ),
+                )
+                return dict(cursor.fetchone())
