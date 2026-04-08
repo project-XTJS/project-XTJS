@@ -33,6 +33,9 @@ class ReasonablenessChecker:
             "响应报价一览表",
             "参选报价一览表",
         ]
+        self.ITEMIZED_SECTION_TITLES = [
+            "分项报价表",
+        ]
 
         self.SECTION_END_TITLES = [
             "分项报价表",
@@ -154,6 +157,26 @@ class ReasonablenessChecker:
     def _contains_bid_opening_title(self, text: str) -> bool:
         normalized = self._normalize(text)
         return any(title in normalized for title in self.BID_OPENING_TITLES)
+
+    def _has_page_heading_title(self, page_sections: List[Dict], titles: List[str]) -> bool:
+        for sec in page_sections:
+            text = str(sec.get("text") or "").strip()
+            if not text:
+                continue
+            normalized = self._normalize(text)
+            if not any(title in normalized for title in titles):
+                continue
+            if self._is_catalog_line(text):
+                continue
+
+            section_type = str(sec.get("type") or "").strip().lower()
+            if section_type == "heading":
+                return True
+
+            compact = re.sub(r"\s+", "", text)
+            if len(compact) <= 40:
+                return True
+        return False
 
     def _contains_direct_price_keywords(self, text: str) -> bool:
         normalized = self._normalize(text)
@@ -350,6 +373,9 @@ class ReasonablenessChecker:
     def _score_page_candidate(self, page_sections: List[Dict]) -> int:
         page_text = "\n".join(sec["text"] for sec in page_sections if sec["text"])
         normalized_page_text = self._normalize(page_text)
+
+        if self._has_page_heading_title(page_sections, self.ITEMIZED_SECTION_TITLES):
+            return -1000
 
         score = 0
 
