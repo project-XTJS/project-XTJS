@@ -15,13 +15,20 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------------
+# HTML 表格解析辅助
+# ---------------------------------------------------------------------------
+# 将 HTML 表格片段解析成保留行列合并信息的二维单元格结构。
 class _TableHTMLParser(HTMLParser):
+
+    # 初始化解析过程中用于暂存行、单元格和结果的状态。
     def __init__(self) -> None:
         super().__init__()
         self.rows: list[list[dict]] = []
         self._current_row: list[dict] | None = None
         self._current_cell: dict | None = None
 
+    # 在遇到行或单元格起始标签时创建对应的缓存结构。
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "tr":
             self._current_row = []
@@ -36,6 +43,7 @@ class _TableHTMLParser(HTMLParser):
             "colspan": self._safe_span(attr_map.get("colspan")),
         }
 
+    # 在遇到结束标签时落盘当前单元格或整行数据。
     def handle_endtag(self, tag: str) -> None:
         if tag == "td" and self._current_row is not None and self._current_cell is not None:
             text = html.unescape("".join(self._current_cell["text_parts"]))
@@ -54,11 +62,13 @@ class _TableHTMLParser(HTMLParser):
             self.rows.append(self._current_row)
             self._current_row = None
 
+    # 累积当前单元格内的文本内容。
     def handle_data(self, data: str) -> None:
         if self._current_cell is not None:
             self._current_cell["text_parts"].append(data)
 
     @staticmethod
+    # 将 rowspan/colspan 安全转换为正整数，异常时回退为 1。
     def _safe_span(value: str | None) -> int:
         try:
             return max(1, int(str(value or "1")))
@@ -66,7 +76,13 @@ class _TableHTMLParser(HTMLParser):
             return 1
 
 
+# ---------------------------------------------------------------------------
+# 分项报价主检查器
+# ---------------------------------------------------------------------------
+# 分项报价表规则检查器，负责抽取报价项并输出可解释的校验结果。
 class ItemizedPricingChecker:
+
+    # 报价表/总价表锚点与关键词配置
     ITEM_SECTION_ANCHORS = (
         "分项报价表",
         "供应清单",
@@ -140,6 +156,8 @@ class ItemizedPricingChecker:
     )
     MONEY_TOLERANCE = Decimal("0.10")
 
+    # 入口与输入整理
+    # 执行分项报价检查，并按普通报价或下浮率报价模式分流处理。
     def check_itemized_logic(self, text: object, tender_text: object | None = None) -> dict:
         document = self._prepare_document(text)
         item_sections = document["item_sections"]
@@ -151,6 +169,7 @@ class ItemizedPricingChecker:
             return self._check_downward_rate_mode(candidate_sections, tender_document=tender_document)
         return self._check_normal_mode(item_sections, total_sections, candidate_sections, document=document)
 
+    # 统一整理输入，抽取文本、分项段落、总价段落和候选检查区间。
     def _prepare_document(self, payload: object) -> dict:
         parsed_payload = self._parse_payload(payload)
         source_text = _extract_text_from_payload(parsed_payload) if parsed_payload is not None else str(payload or "")
@@ -186,6 +205,7 @@ class ItemizedPricingChecker:
             "candidate_sections": candidate_sections,
         }
 
+    # 将字符串或对象输入解析为 OCR JSON 字典，失败时返回空。
     def _parse_payload(self, payload: object) -> dict | None:
         if isinstance(payload, dict):
             return payload
@@ -200,6 +220,7 @@ class ItemizedPricingChecker:
             return None
         return parsed if isinstance(parsed, dict) else None
 
+    # 规范换行和空白，便于后续按行切分和锚点识别。
     def _normalize_text(self, text: str) -> str:
         normalized = str(text or "")
         normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
@@ -212,9 +233,12 @@ class ItemizedPricingChecker:
             normalized = re.sub(r"((?:合计|总计|总价|投标总价|单价合计)[^。；]{0,20})", r"\n\1", normalized)
         return normalized.strip()
 
+    # 将标准化文本拆成去空白后的有效行。
     def _split_lines(self, text: str) -> list[str]:
         return [line.strip() for line in text.split("\n") if line and line.strip()]
 
+    # 区段定位与结构化表格拼接
+    # 在纯文本中按锚点截取可能的报价区段，并用简单评分过滤噪声。
     def _find_sections(
         self,
         lines: list[str],
@@ -272,6 +296,7 @@ class ItemizedPricingChecker:
             )
         return deduped
 
+    # 从 layout_sections 中定位锚点后的表格序列，优先使用结构化表格结果。
     def _find_layout_table_sections(self, payload: dict | None, anchors: tuple[str, ...]) -> list[dict]:
         layout_sections = self._get_layout_sections(payload)
         logical_tables = self._get_logical_tables(payload)
@@ -350,6 +375,7 @@ class ItemizedPricingChecker:
         sections.sort(key=lambda item: item.get("start", 0))
         return self._dedupe_sections(sections)
 
+    # 优先保留更像正式分项报价表的核心区段。
     def _prioritize_item_sections(self, sections: list[dict]) -> list[dict]:
         if not sections:
             return sections
@@ -360,6 +386,7 @@ class ItemizedPricingChecker:
         ]
         return primary_sections or sections
 
+    # 从 OCR 结果中提取版面分区列表。
     def _get_layout_sections(self, payload: dict | None) -> list[dict]:
         container = self._get_structured_container(payload)
         if not isinstance(container, dict):
@@ -369,6 +396,7 @@ class ItemizedPricingChecker:
             return []
         return [section for section in layout_sections if isinstance(section, dict)]
 
+    # 从 OCR 结果中提取逻辑表格列表。
     def _get_logical_tables(self, payload: dict | None) -> list[dict]:
         container = self._get_structured_container(payload)
         if not isinstance(container, dict):
@@ -378,6 +406,7 @@ class ItemizedPricingChecker:
             return []
         return [table for table in logical_tables if isinstance(table, dict)]
 
+    # 兼容直接字典和带 data 包裹的结构化 OCR 结果。
     def _get_structured_container(self, payload: dict | None) -> dict | None:
         if not isinstance(payload, dict):
             return None
@@ -387,6 +416,7 @@ class ItemizedPricingChecker:
             return data
         return payload
 
+    # 将 layout 表格区段转换为逐行文本，必要时绑定对应 logical table。
     def _extract_layout_table_lines(self, section: dict, logical_tables: list[dict]) -> list[str]:
         logical_table_index = self._match_logical_table_index(section, logical_tables)
         if logical_table_index is not None:
@@ -399,6 +429,7 @@ class ItemizedPricingChecker:
         section_text = self._get_section_text(section)
         return self._split_lines(self._normalize_text(section_text))
 
+    # 为某个 layout 表格区段匹配最可能对应的 logical table 起点。
     def _match_logical_table_index(self, section: dict, logical_tables: list[dict]) -> int | None:
         if not logical_tables:
             return None
@@ -439,6 +470,7 @@ class ItemizedPricingChecker:
 
         return best_table_index if best_score > 0 else None
 
+    # 从一张 logical table 开始收集其后连续的跨页续表。
     def _collect_logical_table_sequence(self, logical_tables: list[dict], start_index: int) -> list[dict]:
         collected = [logical_tables[start_index]]
         current_table = logical_tables[start_index]
@@ -449,6 +481,7 @@ class ItemizedPricingChecker:
             current_table = next_table
         return collected
 
+    # 判断后一张 logical table 是否属于当前表格的续页。
     def _is_logical_table_continuation(self, current_table: dict, next_table: dict) -> bool:
         if not isinstance(next_table, dict):
             return False
@@ -463,6 +496,7 @@ class ItemizedPricingChecker:
             return False
         return True
 
+    # 把逻辑表格统一展开为逐行文本，兼容 HTML 表与普通二维数组表。
     def _logical_table_to_lines(self, table: dict, *, include_headers: bool = True) -> list[str]:
         html_lines = self._logical_html_table_to_lines(table, include_headers=include_headers)
         if html_lines:
@@ -485,6 +519,7 @@ class ItemizedPricingChecker:
             lines.append(" ".join(cells))
         return lines
 
+    # 读取 logical table 关联的页码列表。
     def _get_logical_table_pages(self, table: dict) -> list[int]:
         pages = table.get("pages")
         if isinstance(pages, list):
@@ -492,6 +527,7 @@ class ItemizedPricingChecker:
         page = table.get("page")
         return [page] if isinstance(page, int) else []
 
+    # 提取 logical table 表头，必要时从 HTML 表格内容里反推。
     def _get_logical_table_headers(self, table: dict) -> list[str]:
         headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
         if headers:
@@ -504,6 +540,7 @@ class ItemizedPricingChecker:
         header_row = self._extract_html_header_row(html_rows[1:])
         return header_row or []
 
+    # 生成表格预览文本，用于 layout 表格与 logical table 的匹配评分。
     def _logical_table_preview_lines(self, table: dict) -> list[str]:
         html_lines = self._logical_html_table_to_lines(table, include_headers=True)
         if html_lines:
@@ -519,6 +556,7 @@ class ItemizedPricingChecker:
                 preview.append(" ".join(cells))
         return preview
 
+    # 根据 HTML 表头和首行数据特征判断两张表是否相邻续接。
     def _looks_like_html_table_continuation(self, current_table: dict, next_table: dict) -> bool:
         current_rows = self._parse_html_table_rows(current_table)
         next_rows = self._parse_html_table_rows(next_table)
@@ -535,6 +573,7 @@ class ItemizedPricingChecker:
         next_text = " ".join(cell["text"] for cell in next_first_data if cell["text"])
         return bool(self._extract_money_candidates(next_text))
 
+    # 把 HTML 形式的逻辑表格展平成逐行文本，并合并被拆断的续行。
     def _logical_html_table_to_lines(self, table: dict, *, include_headers: bool = True) -> list[str]:
         html_rows = self._parse_html_table_rows(table)
         if not html_rows:
@@ -599,6 +638,7 @@ class ItemizedPricingChecker:
 
         return lines
 
+    # 解析 logical table 中保存的 HTML 表格内容，并补齐跨行继承单元格。
     def _parse_html_table_rows(self, table: dict) -> list[list[dict]]:
         block_content = table.get("block_content")
         if not isinstance(block_content, str) or "<table" not in block_content.lower():
@@ -649,6 +689,7 @@ class ItemizedPricingChecker:
                 row.append({"text": "", "inherited": False})
         return expanded_rows
 
+    # 识别 HTML 表格顶部可能存在的单行标题。
     def _extract_html_title_row(self, rows: list[list[dict]]) -> str | None:
         if not rows:
             return None
@@ -657,6 +698,7 @@ class ItemizedPricingChecker:
             return values[0]
         return None
 
+    # 识别 HTML 表格中真正的列表头。
     def _extract_html_header_row(self, rows: list[list[dict]]) -> list[str]:
         for row in rows[:2]:
             values = [cell["text"] for cell in row if cell["text"]]
@@ -665,6 +707,7 @@ class ItemizedPricingChecker:
                 return values
         return []
 
+    # 返回第一行有效数据行，供续表识别逻辑使用。
     def _first_html_data_row(self, rows: list[list[dict]]) -> list[dict]:
         start_index = 1 if self._extract_html_title_row(rows) else 0
         if self._extract_html_header_row(rows[start_index:]):
@@ -676,6 +719,7 @@ class ItemizedPricingChecker:
                 return row
         return []
 
+    # 判断 HTML 表格是否已经进入备件等无需参与主校验的区域。
     def _html_table_contains_spare_parts(self, rows: list[list[dict]]) -> bool:
         for row in rows[:3]:
             row_text = "".join(cell["text"] for cell in row if cell["text"])
@@ -683,6 +727,7 @@ class ItemizedPricingChecker:
                 return True
         return False
 
+    # 判断 HTML 行是否只是分页桥接文本而非真实报价行。
     def _is_html_bridge_row(self, row: list[dict]) -> bool:
         values = [cell["text"] for cell in row if cell["text"]]
         if not values:
@@ -698,18 +743,23 @@ class ItemizedPricingChecker:
         compact = re.sub(r"\s+", "", value)
         return bool(compact) and len(compact) <= 4
 
+    # 优先返回结构化分区中的原始文本内容。
     def _get_section_text(self, section: dict) -> str:
         text = section.get("raw_text") or section.get("text")
         return text.strip() if isinstance(text, str) and text.strip() else ""
 
+    # layout 文本过滤与标题识别
+    # 判断一段文本是否命中了当前扫描集合中的其他锚点。
     def _matches_other_anchor(self, text: str, anchors: tuple[str, ...]) -> bool:
         matched_anchor = next((anchor for anchor in anchors if anchor in text), None)
         return bool(matched_anchor and self._is_anchor_line(text, matched_anchor))
 
+    # 判断 layout 文本是否全部由可忽略内容组成。
     def _is_skippable_layout_text(self, text: str) -> bool:
         lines = self._split_lines(self._normalize_text(text))
         return bool(lines) and all(self._should_skip_line(line) for line in lines)
 
+    # 判断 layout 文本是否只是分页桥接、页码或印章噪声。
     def _is_layout_bridge_text(self, text: str) -> bool:
         return (
             self._is_skippable_layout_text(text)
@@ -718,12 +768,14 @@ class ItemizedPricingChecker:
             or self._is_layout_seal_text(text)
         )
 
+    # 识别分页页码或商务/技术部分页眉页脚。
     def _is_layout_page_marker_text(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         if re.fullmatch(r"第\d+页", compact):
             return True
         return compact in {"投标文件-商务部分", "投标文件-技术部分", "商务部分", "技术部分"}
 
+    # 判断锚点后的下一张 layout 表格是否应并入当前报价表。
     def _should_attach_following_layout_table(self, text: str) -> bool:
         if self._is_spare_parts_marker_text(text):
             return False
@@ -740,6 +792,7 @@ class ItemizedPricingChecker:
         return True
 
 
+    # 按锚点和内容对区段去重，避免重复校验同一块表格。
     def _dedupe_sections(self, sections: list[dict]) -> list[dict]:
         deduped = []
         seen = set()
@@ -754,6 +807,7 @@ class ItemizedPricingChecker:
             deduped.append(section)
         return deduped
 
+    # 判断某一行是否真的是标题锚点，而不是目录或说明文字。
     def _is_anchor_line(self, line: str, anchor: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         anchor_index = compact.find(anchor)
@@ -781,6 +835,7 @@ class ItemizedPricingChecker:
             return False
         return True
 
+    # 根据金额命中数和总价特征对候选区段打分。
     def _score_section(self, lines: list[str], anchor: str) -> int:
         text = "\n".join(lines)
         amount_hits = sum(len(self._extract_money_candidates(line)) for line in lines)
@@ -792,6 +847,7 @@ class ItemizedPricingChecker:
             return 0
         return score
 
+    # 判断文本中是否出现数量和计量单位组合。
     def _contains_quantity_unit(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
@@ -803,6 +859,7 @@ class ItemizedPricingChecker:
             )
         )
 
+    # 识别章节标题行，避免被误当成报价明细。
     def _is_heading_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         serial = self._extract_row_serial(line)
@@ -814,6 +871,7 @@ class ItemizedPricingChecker:
             re.match(r"^(第[一二三四五六七八九十百]+章|[一二三四五六七八九十]+、|\d+\.[\d\.]*|（[一二三四五六七八九十]+）)", compact)
         )
 
+    # 识别形如 GHz/MHz 范围的技术参数行。
     def _looks_like_frequency_range_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         return bool(
@@ -824,6 +882,7 @@ class ItemizedPricingChecker:
             )
         )
 
+    # 判断当前文档是否属于下浮率/优惠率报价模式。
     def _detect_downward_rate_mode(self, sections: list[dict]) -> bool:
         for section in sections:
             section_text = "\n".join(section["lines"])
@@ -835,6 +894,8 @@ class ItemizedPricingChecker:
                 return True
         return False
 
+    # 普通模式与下浮率模式主流程
+    # 执行普通金额报价模式下的分项抽取、汇总和异常检查。
     def _check_normal_mode(
         self,
         item_sections: list[dict],
@@ -986,6 +1047,7 @@ class ItemizedPricingChecker:
             "details": details,
         }
 
+    # 执行下浮率报价模式下的列项抽取和删减项比对。
     def _check_downward_rate_mode(self, candidate_sections: list[dict], tender_document: dict | None = None) -> dict:
         relevant_sections = [
             section for section in candidate_sections if any(keyword in "\n".join(section["lines"]) for keyword in self.RATE_KEYWORDS)
@@ -1073,6 +1135,8 @@ class ItemizedPricingChecker:
             "details": details,
         }
 
+    # 优惠价/小计模式识别
+    # 识别文档是否存在“小计 + 最终优惠价”的特殊总价模式。
     def _detect_preferential_total_mode(self, document: dict | None) -> bool:
         if not document:
             return False
@@ -1093,6 +1157,7 @@ class ItemizedPricingChecker:
                     return True
         return False
 
+    # 从全文中提取“最终优惠价/优惠价”等特殊总价声明。
     def _extract_preferential_total_entries(self, lines: list[str]) -> list[dict]:
         entries = []
         for idx, line in enumerate(lines):
@@ -1113,6 +1178,7 @@ class ItemizedPricingChecker:
             )
         return entries
 
+    # 从全文中提取小计行，供优惠价模式下对账使用。
     def _extract_document_subtotal_entries(self, lines: list[str]) -> list[dict]:
         entries = []
         for idx, line in enumerate(lines):
@@ -1133,6 +1199,7 @@ class ItemizedPricingChecker:
             )
         return entries
 
+    # 判断某一行是否像“最终优惠价”声明，而不是普通分项或表头。
     def _looks_like_preferential_total_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not compact or self._is_table_header_line(line):
@@ -1152,6 +1219,8 @@ class ItemizedPricingChecker:
             return True
         return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
 
+    # 分项抽取与表格行重建
+    # 从一个候选区段中抽取分项、总价、算术疑点和未完整识别的行。
     def _extract_section_entries(
         self,
         lines: list[str],
@@ -1240,6 +1309,7 @@ class ItemizedPricingChecker:
         totals.extend(table_totals)
         return items, totals, row_issues, unresolved_rows
 
+    # 收集层级序号中的父级编号，用于忽略只有标题作用的父行。
     def _collect_parent_serials(self, row_blocks: list[dict]) -> set[str]:
         parent_serials: set[str] = set()
         for block in row_blocks:
@@ -1251,6 +1321,7 @@ class ItemizedPricingChecker:
                 parent_serials.add(".".join(parts[:index]))
         return parent_serials
 
+    # 把连续多行文本重新拼装成按报价项分组的表格行块。
     def _build_table_row_blocks(self, lines: list[str]) -> list[dict]:
         blocks = []
         current_block = None
@@ -1296,11 +1367,13 @@ class ItemizedPricingChecker:
         self._flush_table_row_block(blocks, current_block)
         return blocks
 
+    # 将当前构建中的行块写入结果列表。
     def _flush_table_row_block(self, blocks: list[dict], block: dict | None) -> None:
         if block and block.get("lines"):
             blocks.append(block)
         return None
 
+    # 判断续行是否应拆成新分项，处理 OCR 把金额拆到下一行的情况。
     def _should_split_amount_continuation(self, current_block: dict | None, line: str) -> bool:
         if current_block is None:
             return False
@@ -1310,6 +1383,7 @@ class ItemizedPricingChecker:
             return False
         return bool(current_block.get("serial"))
 
+    # 判断一行是否像新的分项起始行。
     def _is_row_start_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not re.search(r"[\u4e00-\u9fff]", compact):
@@ -1322,6 +1396,7 @@ class ItemizedPricingChecker:
             return False
         return bool(self._looks_like_item_row(line) and self._extract_money_candidates(line))
 
+    # 判断一行是否像当前分项的续行。
     def _is_row_continuation_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not compact:
@@ -1332,11 +1407,13 @@ class ItemizedPricingChecker:
             return False
         return bool(re.search(r"[\u4e00-\u9fff]", compact) or self._extract_money_candidates(line))
 
+    # 从一个行块的首行提取分项名称。
     def _extract_block_label(self, block: dict) -> str:
         first_line = (block.get("lines") or [""])[0]
         start_index = int(block.get("start_index", 0))
         return self._extract_row_label(first_line, start_index)
 
+    # 判断行块是否像分项，但因缺少金额而只能标记为未完整识别。
     def _is_unresolved_item_block(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         if not compact or "免费" in compact:
@@ -1345,6 +1422,7 @@ class ItemizedPricingChecker:
             return False
         return bool(re.search(r"(?:台|套|项|个|批|次|人|年|月|日|米|吨|樘|组|m2|㎡|设备|系统|服务|子系统)", compact))
 
+    # 提取“小写金额/报价金额”这类显式金额声明行。
     def _extract_explicit_amount_entries(self, lines: list[str], *, section_context: dict | None = None) -> list[dict]:
         entries = []
         for idx, line in enumerate(lines):
@@ -1377,6 +1455,7 @@ class ItemizedPricingChecker:
             )
         return entries
 
+    # 为显式金额行回溯或前瞻寻找对应的业务标签。
     def _resolve_neighbor_label(self, lines: list[str], index: int) -> str | None:
         current_label = self._clean_label(lines[index])
         if current_label and "小写" not in current_label and "大写" not in current_label:
@@ -1398,6 +1477,7 @@ class ItemizedPricingChecker:
                 return cleaned
         return None
 
+    # 过滤明显无意义的空行、注释行、落款行和纯符号行。
     def _should_skip_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not compact:
@@ -1412,16 +1492,20 @@ class ItemizedPricingChecker:
             return True
         return False
 
+    # 金额、标签与算术校验
+    # 判断一行是否属于合计、总计、总价等汇总行。
     def _looks_like_total_line(self, line: str) -> bool:
         if self._is_table_header_line(line):
             return False
         compact = re.sub(r"\s+", "", line)
         return any(keyword in compact for keyword in self.TOTAL_KEYWORDS) or self._looks_like_subtotal_line(compact)
 
+    # 判断一行是否属于小计行。
     def _looks_like_subtotal_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         return any(keyword in compact for keyword in self.SUBTOTAL_KEYWORDS)
 
+    # 判断一行是否具有分项名称、单位、数量等明细行特征。
     def _looks_like_item_row(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         if not re.search(r"[\u4e00-\u9fff]", compact):
@@ -1433,6 +1517,7 @@ class ItemizedPricingChecker:
         unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
         return bool(re.search(rf"(?:{unit_pattern})\s*\d+(?:\.\d+)?", compact))
 
+    # 从单行文本中清理出分项名称标签。
     def _extract_row_label(self, line: str, index: int) -> str:
         unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
         label = re.sub(r"^\s*\d+(?:\.\d+)*\s*[\.、．）)]?\s*", "", line)
@@ -1447,6 +1532,7 @@ class ItemizedPricingChecker:
         label = re.sub(r"\s+", " ", label).strip()
         return label[:60] if label else f"第{index + 1}行"
 
+    # 从一行中提取数量、单价、行总价，用于逐项算术校验。
     def _extract_row_arithmetic(self, line: str) -> dict | None:
         money_pattern = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
         unit_pattern = "|".join(re.escape(unit) for unit in self.UNIT_KEYWORDS)
@@ -1478,6 +1564,7 @@ class ItemizedPricingChecker:
                 }
         return None
 
+    # 提取一行里的金额候选值，并过滤百分比和技术参数数字。
     def _extract_money_candidates(self, line: str) -> list[Decimal]:
         candidates = []
         for match in re.finditer(r"(?:￥|¥)?\s*((?:\d+,\d{4,}|\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)", line):
@@ -1497,6 +1584,7 @@ class ItemizedPricingChecker:
             candidates.append(value)
         return candidates
 
+    # 识别“免费/包含”等应被视为 0 金额的分项。
     def _extract_zero_amount_candidate(self, line: str) -> Decimal | None:
         normalized = re.sub(r"\s+", " ", line).strip()
         if not normalized or not self._extract_row_serial(normalized):
@@ -1511,6 +1599,7 @@ class ItemizedPricingChecker:
             return Decimal("0")
         return None
 
+    # 抽取一行或行块中的金额，必要时回退到零金额识别。
     def _extract_row_amounts(self, line: str) -> list[Decimal]:
         amounts = self._extract_money_candidates(line)
         if amounts:
@@ -1518,9 +1607,11 @@ class ItemizedPricingChecker:
         zero_amount = self._extract_zero_amount_candidate(line)
         return [zero_amount] if zero_amount is not None else []
 
+    # 判断一个数字是否足够像报价金额而不是普通参数值。
     def _looks_like_money_value(self, value: Decimal) -> bool:
         return value >= Decimal("100")
 
+    # 比较分项金额汇总与声明总价，生成统一的汇总校验结果。
     def _evaluate_sum_check(self, items: list[dict], totals: list[dict], *, preferential_mode: bool = False) -> dict:
         if len(items) < 2 or not totals:
             calculated_total = sum((item["amount"] for item in items if item.get("amount") is not None), Decimal("0"))
@@ -1591,6 +1682,8 @@ class ItemizedPricingChecker:
             "preferential_total_label": None,
         }
 
+    # 下浮率模式列项抽取与对比
+    # 从候选区段中抽取所有可识别的序号。
     def _extract_serials(self, lines: list[str]) -> list[str]:
         serials = []
         for line in lines:
@@ -1610,12 +1703,14 @@ class ItemizedPricingChecker:
                 serials.append(serial)
         return serials
 
+    # 汇总多个区段中的序号，并给出可能的跳号提示。
     def _extract_serial_gap_hints(self, sections: list[dict]) -> list[str]:
         serials = []
         for section in sections:
             serials.extend(self._extract_serials(section["lines"]))
         return self._find_missing_serials(serials)
 
+    # 在下浮率模式下提取可用于比对的列项标签。
     def _extract_rate_items(self, lines: list[str], *, section_context: dict | None = None) -> list[dict]:
         items = []
         for idx, line in enumerate(lines):
@@ -1640,6 +1735,7 @@ class ItemizedPricingChecker:
             )
         return items
 
+    # 从招标参考文档中提取标准列项集合。
     def _extract_reference_items(self, document: dict | None) -> list[dict]:
         if not document:
             return []
@@ -1649,6 +1745,7 @@ class ItemizedPricingChecker:
             item_sections = self._find_sections(lines, self.ITEM_SECTION_ANCHORS, require_score=False)
         return self._extract_comparison_items_from_sections(item_sections, rate_mode=False)
 
+    # 从多个区段中提取列项，并按序号与标签去重。
     def _extract_comparison_items_from_sections(self, sections: list[dict], *, rate_mode: bool) -> list[dict]:
         items = []
         for section in sections:
@@ -1664,6 +1761,7 @@ class ItemizedPricingChecker:
             deduped.append(item)
         return deduped
 
+    # 从单个区段中提取用于招投标比对的列项。
     def _extract_comparison_items(self, lines: list[str], *, rate_mode: bool) -> list[dict]:
         items = []
         for idx, line in enumerate(lines):
@@ -1701,6 +1799,7 @@ class ItemizedPricingChecker:
             )
         return items
 
+    # 清洗比较用标签，去掉金额、单位和下浮率尾巴。
     def _extract_comparison_label(self, line: str, index: int, *, rate_mode: bool) -> str:
         label = re.sub(r"^\s*\d+(?:\.\d+)?\s*", "", line)
         label = re.sub(r"^\s*\d+(?:\.\d+)?\s+", "", label)
@@ -1712,6 +1811,7 @@ class ItemizedPricingChecker:
         label = re.sub(r"\s+", " ", label).strip("：: /")
         return label[:80] if label else f"第{index + 1}行"
 
+    # 比较招标与投标列项，输出疑似缺失项。
     def _compare_reference_items(self, reference_items: list[dict], bid_items: list[dict]) -> dict:
         reference_with_serial = [item for item in reference_items if item.get("serial")]
         bid_serials = {item["serial"] for item in bid_items if item.get("serial")}
@@ -1744,6 +1844,7 @@ class ItemizedPricingChecker:
             "missing_items": deduped_missing,
         }
 
+    # 把列项格式化成便于展示和人工复核的字符串。
     def _format_comparison_item(self, item: dict) -> str:
         serial = item.get("serial")
         label = item.get("label")
@@ -1751,6 +1852,7 @@ class ItemizedPricingChecker:
             return f"{serial}:{label}"
         return label or str(serial or "")
 
+    # 识别分项金额中标签、金额和上下文完全重复的疑似重项。
     def _extract_duplicate_items(self, entries: list[dict]) -> list[dict]:
         duplicate_keys = []
         for entry in entries:
@@ -1773,6 +1875,7 @@ class ItemizedPricingChecker:
             )
         return duplicates
 
+    # 根据整数序号和子序号推断可能缺失的编号。
     def _find_missing_serials(self, serials: list[str]) -> list[str]:
         if not serials:
             return []
@@ -1803,6 +1906,8 @@ class ItemizedPricingChecker:
                 missing.extend([f"{prefix}.{number}" for number in range(left + 1, right)])
         return missing
 
+    # 状态汇总与结果格式化
+    # 综合汇总校验、算术疑点和 OCR 完整度，给出普通模式总状态。
     def _resolve_normal_status(
         self,
         table_detected: bool,
@@ -1823,6 +1928,7 @@ class ItemizedPricingChecker:
             return "pass"
         return "unknown"
 
+    # 把字符串状态转换为布尔 passed 标记。
     def _status_to_passed(self, status: str) -> bool | None:
         if status == "pass":
             return True
@@ -1830,6 +1936,7 @@ class ItemizedPricingChecker:
             return False
         return None
 
+    # 生成普通报价模式下的摘要结论。
     def _build_normal_summary(
         self,
         status: str,
@@ -1854,6 +1961,7 @@ class ItemizedPricingChecker:
             return "分项汇总与声明总价不一致。"
         return "已识别到报价内容，但当前证据不足以完成完整校验。"
 
+    # 生成下浮率模式下的摘要结论。
     def _build_downward_rate_summary(self, missing_item_status: str) -> str:
         if missing_item_status == "fail":
             return "检测到下浮率模式，并发现疑似删减项。"
@@ -1861,6 +1969,7 @@ class ItemizedPricingChecker:
             return "检测到下浮率模式，已完成招标列项与投标列项比对，暂未发现删减项。"
         return "检测到下浮率模式，但当前缺少足够参考信息，无法完成删减项比对。"
 
+    # 为抽取结果附带区段、页码、序号等上下文信息。
     def _build_entry_context(
         self,
         section_context: dict | None,
@@ -1892,6 +2001,7 @@ class ItemizedPricingChecker:
                 context["section_pages"] = normalized_pages
         return context
 
+    # 构造仅由上下文决定的唯一键。
     def _entry_context_key(self, entry: dict) -> tuple | None:
         serial = str(entry.get("serial") or "").strip()
         section_id = str(entry.get("section_id") or "").strip()
@@ -1908,6 +2018,7 @@ class ItemizedPricingChecker:
             return ("section", section_id, section_anchor, section_pages)
         return None
 
+    # 构造用于抽取结果去重的完整键。
     def _entry_dedupe_key(self, entry: dict) -> tuple:
         amount = entry.get("amount")
         return (
@@ -1920,6 +2031,7 @@ class ItemizedPricingChecker:
             self._entry_context_key(entry),
         )
 
+    # 构造用于识别疑似重项的比对键。
     def _entry_duplicate_key(self, entry: dict) -> tuple:
         amount = entry.get("amount")
         return (
@@ -1928,6 +2040,7 @@ class ItemizedPricingChecker:
             self._entry_context_key(entry),
         )
 
+    # 按标签、金额、来源和上下文对抽取结果去重。
     def _dedupe_entries(self, entries: list[dict]) -> list[dict]:
         deduped = []
         seen = set()
@@ -1939,6 +2052,7 @@ class ItemizedPricingChecker:
             deduped.append(dict(entry))
         return deduped
 
+    # 按标签和数值组合去重逐项算术疑点。
     def _dedupe_row_issues(self, issues: list[dict]) -> list[dict]:
         deduped = []
         seen = set()
@@ -1955,6 +2069,7 @@ class ItemizedPricingChecker:
             deduped.append(issue)
         return deduped
 
+    # 按序号和标签去重未完整识别的分项行。
     def _dedupe_unresolved_rows(self, rows: list[dict]) -> list[dict]:
         deduped = []
         seen = set()
@@ -1966,6 +2081,7 @@ class ItemizedPricingChecker:
             deduped.append(row)
         return deduped
 
+    # 将 Decimal 金额转为字符串，便于接口输出。
     def _serialize_entries(self, entries: list[dict]) -> list[dict]:
         serialized = []
         for entry in entries:
@@ -1975,10 +2091,12 @@ class ItemizedPricingChecker:
             serialized.append(normalized_entry)
         return serialized
 
+    # 将标签归一化为适合比较和去重的键。
     def _normalize_label_key(self, label: str | None) -> str:
         normalized = re.sub(r"\s+", "", str(label or ""))
         return normalized.strip("：: /")
 
+    # 从原始文本中移除金额和固定前缀，保留可读标签。
     def _clean_label(self, line: str) -> str:
         label = re.sub(r"(?:￥|¥)?\s*\d[\d,]*(?:\.\d{1,2})?\s*元?", "", line)
         label = label.replace("小写：", "").replace("小写:", "")
@@ -1987,6 +2105,7 @@ class ItemizedPricingChecker:
         label = re.sub(r"\s+", " ", label).strip("：: /")
         return label.strip()
 
+    # 安全地把字符串金额转换为 Decimal。
     def _to_decimal(self, value: str | Decimal | None) -> Decimal | None:
         if value is None:
             return None
@@ -1997,14 +2116,17 @@ class ItemizedPricingChecker:
         except (InvalidOperation, ValueError):
             return None
 
+    # 把 Decimal 规范化为保留两位小数的字符串。
     def _format_decimal(self, value: Decimal | None) -> str | None:
         if value is None:
             return None
         normalized = value.quantize(Decimal("0.01"))
         return format(normalized, "f")
 
+    # 底层兼容辅助
     # Canonical helper implementations used by both clean Chinese OCR output
     # and legacy mojibake-style payloads.
+    # 识别随机备品备件等应停止主表抽取的标记文本。
     def _is_spare_parts_marker_text(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         return (
@@ -2014,10 +2136,12 @@ class ItemizedPricingChecker:
             or ("澶囦欢鍚嶇О" in compact and "瑙勬牸鍨嬪彿" in compact)
         )
 
+    # 识别 layout 中可能由公司印章或页脚带来的噪声文本。
     def _is_layout_seal_text(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text)
         return bool(compact) and ("公司" in compact or "有限" in compact or "鍏徃" in compact or "鏈夐檺" in compact) and bool(re.search(r"\d{6,}", compact))
 
+    # 从行首或行尾提取报价序号，并排除技术参数数字误判。
     def _extract_row_serial(self, line: str) -> str | None:
         leading_match = re.match(r"^\s*(\d+(?:\.\d+)*)(?:\s+|[\.、．])", line)
         if leading_match:
@@ -2032,6 +2156,7 @@ class ItemizedPricingChecker:
             return trailing_match.group(1)
         return None
 
+    # 识别中英文/乱码混杂场景下的表头行。
     def _is_table_header_line(self, line: str) -> bool:
         compact = re.sub(r"\s+", "", line)
         return (
@@ -2044,10 +2169,15 @@ class ItemizedPricingChecker:
         )
 
 
+# ---------------------------------------------------------------------------
+# 本地调试与命令行入口
+# ---------------------------------------------------------------------------
+# 模拟服务层把多余空白压缩后的输入形态。
 def _service_style_preprocess(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip()) if text else ""
 
 
+# 从纯文本或 OCR JSON 载荷中提取可供分析的正文文本。
 def _extract_text_from_payload(payload: object) -> str:
     if isinstance(payload, str):
         return payload
@@ -2087,6 +2217,7 @@ def _extract_text_from_payload(payload: object) -> str:
     return str(payload or "")
 
 
+# 为本地调试读取文本或 JSON 文件，并自动解析 JSON。
 def _load_input_for_local_test(file_path: Path) -> object:
     try:
         text = file_path.read_text(encoding="utf-8")
@@ -2102,6 +2233,7 @@ def _load_input_for_local_test(file_path: Path) -> object:
         return text
 
 
+# 收集疑似因 OCR 拆行而缺失金额的分项文本，便于本地排查。
 def _collect_missing_amount_lines(checker: ItemizedPricingChecker, payload: object) -> list[str]:
     document = checker._prepare_document(payload)
     item_sections = document["item_sections"]
@@ -2126,6 +2258,7 @@ def _collect_missing_amount_lines(checker: ItemizedPricingChecker, payload: obje
     return deduped
 
 
+# 打印本地调试报告，便于离线验证抽取和校验效果。
 def _print_local_test_report(
     path: Path,
     checker: ItemizedPricingChecker,
@@ -2207,6 +2340,7 @@ def _print_local_test_report(
     return 0
 
 
+# 提供命令行入口，支持单文件或招投标配对测试。
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="本地测试分项报价检查器。")
     parser.add_argument(
