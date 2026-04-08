@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -50,6 +51,12 @@ class ProjectRelationUpdateRequest(BaseModel):
     tender_document_identifier: str
     business_bid_document_identifier: str
     technical_bid_document_identifier: str
+
+
+class DuplicateCheckScope(str, Enum):
+    ALL = "all"
+    BUSINESS_BID = "business_bid"
+    TECHNICAL_BID = "technical_bid"
 
 
 class ProjectDuplicateCheckRequest(BaseModel):

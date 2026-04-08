@@ -10,6 +10,8 @@ from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
 
+from .deviation import DeviationChecker
+from .itemized_pricing import ItemizedPricingChecker
 from .template_extractor import SectionClassifier
 
 
@@ -53,6 +55,14 @@ class DuplicateCheckService:
     SUPPORTED_DOCUMENT_TYPES = (DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID)
     PAGE_NUMBER_PATTERN = re.compile(r"^\d+$")
     SPLIT_LINE_PATTERN = re.compile(r"[\r\n]+")
+    SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[。！？!?；;])|(?<=\.)(?=\s|$)")
+    BUSINESS_SCOPE_SKIP_REASON = "missing_business_duplicate_scope_content"
+    TEMPLATE_EXCLUDED_SKIP_REASON = "content_fully_covered_by_tender_template"
+    MIN_SENTENCE_COMPACT_LENGTH = 10
+
+    def __init__(self) -> None:
+        self._itemized_checker = ItemizedPricingChecker()
+        self._deviation_checker = DeviationChecker()
 
     def check_project_documents(
         self,
@@ -67,6 +77,7 @@ class DuplicateCheckService:
         requested_types = self._normalize_requested_types(document_types)
         prepared_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
         skipped_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
+        template_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
 
         dedupe_keys: set[tuple[str, str]] = set()
         for record in document_records:
@@ -92,14 +103,23 @@ class DuplicateCheckService:
                 continue
             dedupe_keys.add(dedupe_key)
 
-            prepared = self._prepare_document(record)
+            template_context = self._get_tender_template_context(
+                record,
+                role=role,
+                cache=template_cache,
+            )
+            prepared, skip_reason = self._prepare_document(
+                record,
+                role=role,
+                template_context=template_context,
+            )
             if prepared is None:
                 skipped_groups[role].append(
                     {
                         "identifier_id": identifier_id,
                         "relation_id": record.get("relation_id"),
                         "file_name": record.get("file_name"),
-                        "reason": "missing_or_unusable_ocr_content",
+                        "reason": skip_reason or "missing_or_unusable_ocr_content",
                     }
                 )
                 continue
@@ -162,6 +182,9 @@ class DuplicateCheckService:
                 "document_types": list(requested_types),
                 "max_evidence_sections": int(max_evidence_sections),
                 "max_pairs_per_type": int(max_pairs_per_type),
+                "template_exclusion_enabled": True,
+                "template_exclusion_source": "tender_document",
+                "block_matching_unit": "sentence",
             },
             "groups": groups,
             "summary": {
@@ -207,8 +230,42 @@ class DuplicateCheckService:
             int(metrics.get("exact_block_count") or 0),
         )
 
-    def _prepare_document(self, record: dict[str, Any]) -> dict[str, Any] | None:
+    def _prepare_document(
+        self,
+        record: dict[str, Any],
+        *,
+        role: str,
+        template_context: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, str | None]:
         payload = self._coerce_payload(record.get("content"))
+        ordered_blocks, table_entries, empty_reason = self._extract_document_content(payload, role=role)
+        if not ordered_blocks:
+            return None, empty_reason
+
+        ordered_blocks, table_entries = self._exclude_template_content(
+            ordered_blocks,
+            table_entries,
+            template_context=template_context,
+        )
+        if not ordered_blocks:
+            return None, self.TEMPLATE_EXCLUDED_SKIP_REASON
+
+        prepared = self._build_prepared_document(record, ordered_blocks, table_entries)
+        return prepared, None if prepared is not None else empty_reason
+
+    def _extract_document_content(
+        self,
+        payload: dict[str, Any],
+        *,
+        role: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        if role == DOCUMENT_TYPE_BUSINESS_BID:
+            scoped_segments = self._extract_business_duplicate_segments(payload)
+            if not scoped_segments:
+                return [], [], self.BUSINESS_SCOPE_SKIP_REASON
+            ordered_blocks, table_entries = self._build_scoped_blocks_and_tables(scoped_segments)
+            return ordered_blocks, table_entries, self.BUSINESS_SCOPE_SKIP_REASON
+
         container = self._container(payload)
         ordered_blocks, table_entries = self._extract_ordered_blocks(container)
 
@@ -226,6 +283,129 @@ class DuplicateCheckService:
                     }
                 ]
 
+        return ordered_blocks, table_entries, "missing_or_unusable_ocr_content"
+
+    def _get_tender_template_context(
+        self,
+        record: dict[str, Any],
+        *,
+        role: str,
+        cache: dict[tuple[str, str], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        tender_identifier = str(record.get("tender_identifier_id") or "").strip()
+        if not tender_identifier:
+            return None
+
+        cache_key = (role, tender_identifier)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        tender_payload = self._coerce_payload(record.get("tender_content"))
+        ordered_blocks, table_entries, _ = self._extract_document_content(tender_payload, role=role)
+        if not ordered_blocks:
+            cache[cache_key] = None
+            return None
+
+        cache[cache_key] = {
+            "tender_identifier_id": tender_identifier,
+            "block_hashes": {
+                str(block.get("exact_hash") or "")
+                for block in ordered_blocks
+                if str(block.get("exact_hash") or "")
+            },
+            "table_hashes": {
+                str(table.get("exact_hash") or "")
+                for table in table_entries
+                if str(table.get("exact_hash") or "")
+            },
+            "placeholder_patterns": self._build_template_placeholder_patterns(ordered_blocks),
+        }
+        return cache[cache_key]
+
+    def _exclude_template_content(
+        self,
+        ordered_blocks: list[dict[str, Any]],
+        table_entries: list[dict[str, Any]],
+        *,
+        template_context: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if template_context is None:
+            return ordered_blocks, table_entries
+
+        block_hashes = set(template_context.get("block_hashes") or [])
+        table_hashes = set(template_context.get("table_hashes") or [])
+        placeholder_patterns = list(template_context.get("placeholder_patterns") or [])
+        filtered_blocks = [
+            block
+            for block in ordered_blocks
+            if str(block.get("exact_hash") or "") not in block_hashes
+            and not self._matches_template_placeholder(block, placeholder_patterns)
+        ]
+        filtered_tables = [
+            table
+            for table in table_entries
+            if str(table.get("exact_hash") or "") not in table_hashes
+        ]
+        return filtered_blocks, filtered_tables
+
+    def _build_template_placeholder_patterns(
+        self,
+        blocks: list[dict[str, Any]],
+    ) -> list[re.Pattern[str]]:
+        patterns: list[re.Pattern[str]] = []
+        seen = set()
+        for block in blocks:
+            pattern = self._template_placeholder_pattern(str(block.get("text") or ""))
+            if pattern is None:
+                continue
+            key = pattern.pattern
+            if key in seen:
+                continue
+            seen.add(key)
+            patterns.append(pattern)
+        return patterns
+
+    def _template_placeholder_pattern(self, text: str) -> re.Pattern[str] | None:
+        normalized = self._normalize_plain_text(text)
+        changed = False
+        format_tokens = re.findall(r"[（(][^）)]{0,80}格式[^）)]*[）)]", normalized)
+        pattern_source = normalized
+        for index, token in enumerate(format_tokens):
+            pattern_source = pattern_source.replace(token, f"__FMT_TOKEN_{index}__", 1)
+        escaped = re.escape(pattern_source)
+
+        if re.search(r"_{2,}|…{2,}|\.{3,}", normalized):
+            escaped = re.sub(r"_{2,}", ".+?", escaped)
+            escaped = re.sub(r"…{2,}", ".+?", escaped)
+            escaped = re.sub(r"(?:\\\.){3,}", ".+?", escaped)
+            changed = True
+
+        for index, token in enumerate(format_tokens):
+            escaped = escaped.replace(re.escape(f"__FMT_TOKEN_{index}__"), rf"(?:{re.escape(token)})?")
+            changed = True
+
+        if not changed:
+            return None
+
+        escaped = escaped.replace(r"\ ", r"\s*")
+        return re.compile(rf"^{escaped}$", re.IGNORECASE)
+
+    def _matches_template_placeholder(
+        self,
+        block: dict[str, Any],
+        patterns: list[re.Pattern[str]],
+    ) -> bool:
+        if not patterns:
+            return False
+        text = self._normalize_plain_text(block.get("text") or "")
+        return any(pattern.fullmatch(text) for pattern in patterns)
+
+    def _build_prepared_document(
+        self,
+        record: dict[str, Any],
+        ordered_blocks: list[dict[str, Any]],
+        table_entries: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
         if not ordered_blocks:
             return None
 
@@ -235,11 +415,7 @@ class DuplicateCheckService:
         if len(exact_key) < 16:
             return None
 
-        exact_block_map = {
-            block["exact_hash"]: block
-            for block in ordered_blocks
-            if block["type"] != "heading" and len(block["exact_key"]) >= 18
-        }
+        exact_block_map = self._build_sentence_unit_map(ordered_blocks)
         exact_section_map = {
             section["exact_hash"]: section
             for section in sections
@@ -267,6 +443,264 @@ class DuplicateCheckService:
             "exact_table_hashes": set(exact_table_map.keys()),
             "exact_table_map": exact_table_map,
         }
+
+    def _build_sentence_unit_map(
+        self,
+        ordered_blocks: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        sentence_map: dict[str, dict[str, Any]] = {}
+        for block in ordered_blocks:
+            if block.get("type") == "heading":
+                continue
+            for sentence in self._sentence_units_from_block(block):
+                sentence_map.setdefault(sentence["exact_hash"], sentence)
+        return sentence_map
+
+    def _sentence_units_from_block(self, block: dict[str, Any]) -> list[dict[str, Any]]:
+        text = self._normalize_plain_text(block.get("text") or "")
+        if not text:
+            return []
+
+        items: list[dict[str, Any]] = []
+        for sentence_text in self._split_sentences(text):
+            exact_key = self._compact_raw_text(sentence_text)
+            if len(exact_key) < self.MIN_SENTENCE_COMPACT_LENGTH:
+                continue
+            items.append(
+                {
+                    "page": block.get("page"),
+                    "type": block.get("type"),
+                    "text": sentence_text,
+                    "exact_key": exact_key,
+                    "exact_hash": self._hash_text(exact_key),
+                }
+            )
+        return items
+
+    def _split_sentences(self, text: str) -> list[str]:
+        normalized = self._normalize_plain_text(text)
+        if not normalized:
+            return []
+
+        sentences: list[str] = []
+        for line in self.SPLIT_LINE_PATTERN.split(normalized):
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = self.SENTENCE_BOUNDARY_PATTERN.split(line)
+            buffer = ""
+            for part in parts:
+                fragment = str(part or "").strip()
+                if not fragment:
+                    continue
+                buffer = f"{buffer}{fragment}".strip()
+                if self.SENTENCE_BOUNDARY_PATTERN.search(fragment):
+                    sentences.append(buffer)
+                    buffer = ""
+            if buffer:
+                sentences.append(buffer)
+
+        deduped: list[str] = []
+        seen = set()
+        for sentence in sentences:
+            normalized_sentence = self._normalize_plain_text(sentence)
+            if not normalized_sentence:
+                continue
+            key = self._compact_raw_text(normalized_sentence)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized_sentence)
+        return deduped
+
+    def _extract_business_duplicate_segments(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+
+        itemized_document = self._itemized_checker._prepare_document(payload)
+        for section in itemized_document.get("item_sections") or []:
+            segment = self._segment_from_itemized_section(section)
+            if segment is not None:
+                segments.append(segment)
+
+        deviation_payload = self._deviation_checker._coerce_payload(payload)
+        deviation_sections = self._deviation_checker._extract_bid_deviation_sections(deviation_payload)
+        for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or []):
+            segment = self._segment_from_deviation_section(section)
+            if segment is not None:
+                segments.append(segment)
+
+        deduped = self._dedupe_scoped_segments(segments)
+        deduped.sort(key=self._scoped_segment_sort_key)
+        return deduped
+
+    def _segment_from_itemized_section(self, section: dict[str, Any]) -> dict[str, Any] | None:
+        lines = self._normalize_scope_lines(section.get("lines") or [])
+        if not lines:
+            return None
+
+        raw_pages = section.get("pages")
+        pages = [page for page in raw_pages if isinstance(page, int)] if isinstance(raw_pages, list) else []
+        if not pages and isinstance(section.get("page"), int):
+            pages = [int(section["page"])]
+
+        return {
+            "title": str(section.get("anchor") or "分项报价表").strip() or "分项报价表",
+            "pages": pages or [1],
+            "kind": "table",
+            "source": "itemized_pricing",
+            "lines": lines,
+        }
+
+    def _segment_from_deviation_section(self, section: dict[str, Any]) -> dict[str, Any] | None:
+        raw_lines = section.get("lines")
+        if not isinstance(raw_lines, list) or not raw_lines:
+            raw_lines = self.SPLIT_LINE_PATTERN.split(str(section.get("text") or ""))
+        lines = self._normalize_scope_lines(self._trim_deviation_section_lines(raw_lines))
+        if not lines:
+            return None
+
+        pages: list[int] = []
+        line_items = section.get("line_items")
+        if isinstance(line_items, list):
+            for item in line_items:
+                if isinstance(item, dict) and isinstance(item.get("page"), int):
+                    page = int(item["page"])
+                    if page not in pages:
+                        pages.append(page)
+        if not pages and isinstance(section.get("page"), int):
+            pages.append(int(section["page"]))
+
+        title = str(section.get("title") or "").strip() or "偏离表"
+        return {
+            "title": title,
+            "pages": pages or [1],
+            "kind": "table",
+            "source": "deviation_table",
+            "lines": lines,
+        }
+
+    def _trim_deviation_section_lines(self, values: list[Any]) -> list[str]:
+        trimmed: list[str] = []
+        for raw_value in values:
+            text = self._normalize_plain_text(raw_value)
+            if not text:
+                continue
+            if trimmed and self._is_deviation_scope_boundary(text):
+                break
+            trimmed.append(text)
+        return trimmed
+
+    def _is_deviation_scope_boundary(self, text: str) -> bool:
+        compact = self._compact_raw_text(text)
+        if not compact:
+            return False
+        if "偏离" in compact:
+            return False
+        if re.match(r"^(附件|附表|附录)\s*[0-9一二三四五六七八九十]+", text):
+            return True
+        return any(
+            token in compact
+            for token in (
+                "基本情况表",
+                "资格证明",
+                "资信证明",
+                "业绩证明",
+                "类似项目",
+                "开标一览表",
+                "报价一览表",
+            )
+        )
+
+    def _normalize_scope_lines(self, values: list[Any]) -> list[str]:
+        normalized: list[str] = []
+        seen = set()
+        for value in values:
+            text = self._normalize_plain_text(value)
+            if not text:
+                continue
+            key = self._compact_raw_text(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(text)
+        return normalized
+
+    def _dedupe_scoped_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen = set()
+        for segment in segments:
+            joined = "\n".join(segment.get("lines") or [])
+            key = self._compact_raw_text(
+                f"{segment.get('source') or ''}\n{segment.get('title') or ''}\n{joined}"
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(segment)
+        return deduped
+
+    def _scoped_segment_sort_key(self, segment: dict[str, Any]) -> tuple[int, int, str]:
+        pages = [page for page in (segment.get("pages") or []) if isinstance(page, int)]
+        first_page = min(pages) if pages else 1
+        source = str(segment.get("source") or "")
+        source_rank = 0 if source == "itemized_pricing" else 1
+        title = str(segment.get("title") or "")
+        return (first_page, source_rank, title)
+
+    def _build_scoped_blocks_and_tables(
+        self,
+        segments: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        blocks: list[dict[str, Any]] = []
+        tables: list[dict[str, Any]] = []
+
+        for index, segment in enumerate(segments, start=1):
+            lines = self._normalize_scope_lines(segment.get("lines") or [])
+            if not lines:
+                continue
+
+            pages = [page for page in (segment.get("pages") or []) if isinstance(page, int)] or [1]
+            title = self._normalize_plain_text(segment.get("title") or "") or f"scope_{index}"
+            heading_key = self._compact_raw_text(title)
+            if heading_key:
+                blocks.append(
+                    {
+                        "type": "heading",
+                        "page": pages[0],
+                        "text": title,
+                        "exact_key": heading_key,
+                        "exact_hash": self._hash_text(heading_key),
+                    }
+                )
+
+            block_type = str(segment.get("kind") or "text")
+            for line in lines:
+                exact_key = self._compact_raw_text(line)
+                if block_type != "heading" and len(exact_key) < 8:
+                    continue
+                blocks.append(
+                    {
+                        "type": block_type,
+                        "page": pages[0],
+                        "text": line,
+                        "exact_key": exact_key,
+                        "exact_hash": self._hash_text(exact_key),
+                    }
+                )
+
+            table_text = "\n".join(lines).strip()
+            if table_text:
+                tables.append(
+                    {
+                        "pages": pages,
+                        "text": table_text,
+                        "rows": lines,
+                        "exact_hash": self._hash_text(self._compact_raw_text(table_text)),
+                    }
+                )
+
+        return blocks, tables
 
     def _coerce_payload(self, value: Any) -> dict[str, Any]:
         if isinstance(value, dict):
@@ -676,14 +1110,19 @@ class DuplicateCheckService:
 
         items = []
         for block_hash in sorted(common_hashes):
-            block = left["exact_block_map"].get(block_hash)
-            if not block:
+            left_block = left["exact_block_map"].get(block_hash)
+            right_block = right["exact_block_map"].get(block_hash)
+            if not left_block or not right_block:
                 continue
             items.append(
                 {
-                    "page": block.get("page"),
-                    "type": block.get("type"),
-                    "text": self._clip(block.get("text") or "", 160),
+                    "page": left_block.get("page"),
+                    "left_page": left_block.get("page"),
+                    "right_page": right_block.get("page"),
+                    "type": "sentence",
+                    "left_type": left_block.get("type"),
+                    "right_type": right_block.get("type"),
+                    "text": self._clip(left_block.get("text") or "", 160),
                 }
             )
             if len(items) >= max_evidence_sections:

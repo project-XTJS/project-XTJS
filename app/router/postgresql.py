@@ -15,6 +15,7 @@ from app.router.dependencies import (
     get_text_analysis_service,
 )
 from app.schemas.postgresql import (
+    DuplicateCheckScope,
     DocumentUpdateRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
@@ -28,6 +29,41 @@ from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
+
+
+def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]]:
+    if scope == DuplicateCheckScope.ALL:
+        return None
+    return [scope.value]
+
+
+def _run_project_duplicate_check(
+    *,
+    identifier_id: str,
+    document_types: Optional[list[str]],
+    max_evidence_sections: int,
+    max_pairs_per_type: int,
+    db_service: PostgreSQLService,
+    duplicate_check_service: DuplicateCheckService,
+):
+    payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
+    if not payload_data:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    duplicate_result = duplicate_check_service.check_project_documents(
+        project_identifier=identifier_id,
+        project=payload_data["project"],
+        document_records=payload_data["documents"],
+        document_types=document_types,
+        max_evidence_sections=max_evidence_sections,
+        max_pairs_per_type=max_pairs_per_type,
+    )
+    db_service.upsert_project_result_item(
+        project_identifier_id=identifier_id,
+        result_key="duplicate_check",
+        result_value=duplicate_result,
+    )
+    return duplicate_result
 
 
 @router.post("/projects", summary="创建项目")
@@ -71,8 +107,51 @@ async def get_project_detail(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post("/projects/{identifier_id}/duplicate-check", summary="项目商务标/技术标查重")
+@router.post("/projects/duplicate-check", summary="项目商务标/技术标查重")
 async def project_duplicate_check(
+    identifier_id: str = Query(..., description="选择需要执行查重的项目"),
+    document_scope: DuplicateCheckScope = Query(
+        default=DuplicateCheckScope.ALL,
+        description="查重范围：business_bid=商务标，technical_bid=技术标，all=全部",
+    ),
+    max_evidence_sections: int = Query(
+        default=5,
+        ge=1,
+        le=20,
+        description="每组最多返回的证据章节数。",
+    ),
+    max_pairs_per_type: int = Query(
+        default=0,
+        ge=0,
+        le=500,
+        description="每类文档最多返回的对比对数，0 表示不截断。",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
+):
+    try:
+        return _run_project_duplicate_check(
+            identifier_id=identifier_id,
+            document_types=_document_types_from_scope(document_scope),
+            max_evidence_sections=max_evidence_sections,
+            max_pairs_per_type=max_pairs_per_type,
+            db_service=db_service,
+            duplicate_check_service=duplicate_check_service,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.post(
+    "/projects/{identifier_id}/duplicate-check",
+    summary="项目商务标/技术标查重",
+    include_in_schema=False,
+)
+async def project_duplicate_check_legacy(
     identifier_id: str,
     payload: Optional[ProjectDuplicateCheckRequest] = None,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -80,24 +159,14 @@ async def project_duplicate_check(
 ):
     request_payload = payload or ProjectDuplicateCheckRequest()
     try:
-        payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
-        if not payload_data:
-            raise HTTPException(status_code=404, detail="项目不存在")
-
-        duplicate_result = duplicate_check_service.check_project_documents(
-            project_identifier=identifier_id,
-            project=payload_data["project"],
-            document_records=payload_data["documents"],
+        return _run_project_duplicate_check(
+            identifier_id=identifier_id,
             document_types=request_payload.document_types,
             max_evidence_sections=request_payload.max_evidence_sections,
             max_pairs_per_type=request_payload.max_pairs_per_type,
+            db_service=db_service,
+            duplicate_check_service=duplicate_check_service,
         )
-        db_service.upsert_project_result_item(
-            project_identifier_id=identifier_id,
-            result_key="duplicate_check",
-            result_value=duplicate_result,
-        )
-        return duplicate_result
     except HTTPException:
         raise
     except ValueError as exc:

@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 import psycopg2
+from fastapi.encoders import jsonable_encoder
 from psycopg2.extras import Json, RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -169,6 +170,19 @@ class PostgreSQLService:
             "offset": normalized_offset,
             "items": items,
         }
+
+    def list_project_identifiers(self) -> List[str]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT identifier_id
+                    FROM xtjs_projects
+                    WHERE deleted = FALSE
+                    ORDER BY create_time DESC, id DESC
+                    """
+                )
+                return [str(identifier_id) for (identifier_id,) in cursor.fetchall()]
 
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         query = """
@@ -730,8 +744,17 @@ class PostgreSQLService:
                 bbd.file_url,
                 bbd.extracted,
                 bbd.content,
+                td.identifier_id AS tender_identifier_id,
+                td.document_type AS tender_document_type,
+                td.file_name AS tender_file_name,
+                td.file_url AS tender_file_url,
+                td.extracted AS tender_extracted,
+                td.content AS tender_content,
                 pd.create_time
             FROM xtjs_project_documents pd
+            JOIN xtjs_documents td
+              ON pd.tender_document_id = td.id
+             AND td.deleted = FALSE
             JOIN xtjs_documents bbd
               ON pd.business_bid_document_id = bbd.id
              AND bbd.deleted = FALSE
@@ -749,8 +772,17 @@ class PostgreSQLService:
                 tbd.file_url,
                 tbd.extracted,
                 tbd.content,
+                td.identifier_id AS tender_identifier_id,
+                td.document_type AS tender_document_type,
+                td.file_name AS tender_file_name,
+                td.file_url AS tender_file_url,
+                td.extracted AS tender_extracted,
+                td.content AS tender_content,
                 pd.create_time
             FROM xtjs_project_documents pd
+            JOIN xtjs_documents td
+              ON pd.tender_document_id = td.id
+             AND td.deleted = FALSE
             JOIN xtjs_documents tbd
               ON pd.technical_bid_document_id = tbd.id
              AND tbd.deleted = FALSE
@@ -801,7 +833,7 @@ class PostgreSQLService:
         if not project:
             raise ValueError(f"项目不存在：{normalized_project_identifier}")
 
-        payload = {normalized_result_key: result_value}
+        payload = jsonable_encoder({normalized_result_key: result_value})
         query = """
             INSERT INTO xtjs_result (project_identifier_id, result)
             VALUES (%s, %s)
