@@ -5,7 +5,10 @@ from .consistency import ConsistencyChecker
 from .duplicate_check import DuplicateCheckService
 from .pricing_reasonableness import ReasonablenessChecker
 from .itemized_pricing import ItemizedPricingChecker
+from .bid_document_review import BidDocumentReviewService
 from .verification import VerificationChecker
+
+TechnicalBidReviewService = BidDocumentReviewService
 
 __all__ = [
     "DeviationChecker",
@@ -14,5 +17,7 @@ __all__ = [
     "DuplicateCheckService",
     "ReasonablenessChecker",
     "ItemizedPricingChecker",
+    "BidDocumentReviewService",
+    "TechnicalBidReviewService",
     "VerificationChecker",
 ]

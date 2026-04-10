@@ -1,4 +1,4 @@
-# --- Web 框架核心 ---
+﻿# --- Web 框架核心 ---
 fastapi==0.104.1
 uvicorn==0.24.0.post1
 python-multipart==0.0.6
@@ -17,7 +17,7 @@ paddleocr[doc-parser]==3.4.0
 opencv-contrib-python==4.10.0.84
 numpy>=1.26.4,<3
 urllib3<2.0
-requests
+requests  
 psutil>=5.9,<8
 
 # --- 文档处理与分析 ---

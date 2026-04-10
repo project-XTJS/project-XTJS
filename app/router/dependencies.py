@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 
-from app.service.analysis import DuplicateCheckService
+from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
 from app.service.analysis_service import get_analysis_service
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -39,3 +39,11 @@ def get_text_analysis_service():
 
 def get_duplicate_check_service() -> DuplicateCheckService:
     return DuplicateCheckService()
+
+
+def get_bid_document_review_service() -> BidDocumentReviewService:
+    return BidDocumentReviewService()
+
+
+def get_technical_bid_review_service() -> BidDocumentReviewService:
+    return get_bid_document_review_service()

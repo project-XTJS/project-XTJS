@@ -8,6 +8,7 @@ from psycopg2 import Error as PsycopgError
 from app.core.document_types import DocumentType
 from app.router.dependencies import (
     RecognitionOptions,
+    get_bid_document_review_service,
     get_db_service,
     get_duplicate_check_service,
     get_form_recognition_options,
@@ -23,7 +24,7 @@ from app.schemas.postgresql import (
     ProjectRelationUpdateRequest,
     ProjectUpdateRequest,
 )
-from app.service.analysis import DuplicateCheckService
+from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -64,6 +65,31 @@ def _run_project_duplicate_check(
         result_value=duplicate_result,
     )
     return duplicate_result
+
+
+def _run_project_bid_document_review(
+    *,
+    identifier_id: str,
+    document_types: Optional[list[str]],
+    db_service: PostgreSQLService,
+    bid_document_review_service: BidDocumentReviewService,
+):
+    payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
+    if not payload_data:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    review_result = bid_document_review_service.check_project_documents(
+        project_identifier=identifier_id,
+        project=payload_data["project"],
+        document_records=payload_data["documents"],
+        document_types=document_types,
+    )
+    db_service.upsert_project_result_item(
+        project_identifier_id=identifier_id,
+        result_key="bid_document_review",
+        result_value=review_result,
+    )
+    return review_result
 
 
 @router.post("/projects", summary="创建项目")
@@ -146,9 +172,63 @@ async def project_duplicate_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+@router.post("/projects/bid-document-review", summary="Project bid document review")
+async def project_bid_document_review(
+    identifier_id: str = Query(..., description="Select the project to review business/technical bid documents."),
+    document_scope: DuplicateCheckScope = Query(
+        default=DuplicateCheckScope.ALL,
+        description="Review scope: business_bid, technical_bid, or all.",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
+):
+    try:
+        return _run_project_bid_document_review(
+            identifier_id=identifier_id,
+            document_types=_document_types_from_scope(document_scope),
+            db_service=db_service,
+            bid_document_review_service=bid_document_review_service,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post(
+    "/projects/technical-bid-review",
+    summary="Legacy project bid document review",
+    include_in_schema=False,
+)
+async def project_technical_bid_review_legacy(
+    identifier_id: str = Query(..., description="Select the project to review business/technical bid documents."),
+    document_scope: DuplicateCheckScope = Query(
+        default=DuplicateCheckScope.ALL,
+        description="Review scope: business_bid, technical_bid, or all.",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
+):
+    try:
+        return _run_project_bid_document_review(
+            identifier_id=identifier_id,
+            document_types=_document_types_from_scope(document_scope),
+            db_service=db_service,
+            bid_document_review_service=bid_document_review_service,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
 @router.post(
     "/projects/{identifier_id}/duplicate-check",
-    summary="项目商务标/技术标查重",
+    summary="Project business/technical duplicate check",
     include_in_schema=False,
 )
 async def project_duplicate_check_legacy(

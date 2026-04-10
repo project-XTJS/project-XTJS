@@ -38,28 +38,28 @@ app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresq
 app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["postgresql"])
 
 
-def _inject_duplicate_check_project_choices(openapi_schema: dict) -> dict:
-    operation = (
-        openapi_schema.get("paths", {})
-        .get("/api/postgresql/projects/duplicate-check", {})
-        .get("post")
-    )
-    if not operation:
-        return openapi_schema
-
+def _inject_project_identifier_choices(openapi_schema: dict) -> dict:
     try:
         project_identifiers = PostgreSQLService().list_project_identifiers()
     except Exception:
         project_identifiers = []
 
-    for parameter in operation.get("parameters", []):
-        if parameter.get("name") != "identifier_id" or parameter.get("in") != "query":
+    paths = openapi_schema.get("paths", {})
+    for path in (
+        "/api/postgresql/projects/duplicate-check",
+        "/api/postgresql/projects/bid-document-review",
+    ):
+        operation = paths.get(path, {}).get("post")
+        if not operation:
             continue
-        schema = parameter.setdefault("schema", {"type": "string"})
-        if project_identifiers:
-            schema["enum"] = project_identifiers
-            schema["default"] = project_identifiers[0]
-        break
+        for parameter in operation.get("parameters", []):
+            if parameter.get("name") != "identifier_id" or parameter.get("in") != "query":
+                continue
+            schema = parameter.setdefault("schema", {"type": "string"})
+            if project_identifiers:
+                schema["enum"] = project_identifiers
+                schema["default"] = project_identifiers[0]
+            break
 
     return openapi_schema
 
@@ -71,7 +71,7 @@ def custom_openapi():
         description=app.description,
         routes=app.routes,
     )
-    return _inject_duplicate_check_project_choices(openapi_schema)
+    return _inject_project_identifier_choices(openapi_schema)
 
 
 app.openapi = custom_openapi
