@@ -157,6 +157,7 @@ def build_logical_tables(layout_sections: list[dict[str, Any]] | None) -> list[d
             "pages": [page_no] if page_no is not None else [],
             "source_section_indexes": [section_index],
             "parser_chain": [str(structure.get("parser") or "unknown")],
+            "title": str(structure.get("title") or "").strip() or None,
             "column_count": int(structure.get("column_count") or 0),
             "header_row_count": int(structure.get("header_row_count") or 0),
             "headers": [str(item or "") for item in (structure.get("headers") or [])],
@@ -346,14 +347,19 @@ def _build_structured_table_from_raw_rows(
     if not rows or max((len(row) for row in rows), default=0) <= 0:
         return None
 
+    rows, header_flags, spans, title = _strip_leading_title_rows(rows, header_flags, spans)
+    if not rows:
+        return None
+
     header_row_count = (
         min(max(int(forced_header_rows or 0), 0), len(rows))
         if forced_header_rows is not None
         else _detect_header_row_count(rows, header_flags)
     )
     headers = _build_headers(rows, header_row_count)
+    rows = _fill_group_header_columns(rows, headers, header_row_count)
     records = _build_records(rows, headers, header_row_count)
-    return {
+    result = {
         "parser": parser_name,
         "row_count": len(rows),
         "column_count": max((len(row) for row in rows), default=0),
@@ -365,6 +371,9 @@ def _build_structured_table_from_raw_rows(
         "spans": spans,
         "header_signature": _build_header_signature(headers),
     }
+    if title:
+        result["title"] = title
+    return result
 
 
 def _split_text_row(line: str) -> list[str]:
@@ -535,6 +544,49 @@ def _compress_empty_columns(
     return compressed_rows, compressed_flags, compressed_spans
 
 
+def _strip_leading_title_rows(
+    rows: list[list[str]],
+    header_flags: list[list[bool]],
+    spans: list[dict[str, Any]],
+) -> tuple[list[list[str]], list[list[bool]], list[dict[str, Any]], str | None]:
+    if not rows:
+        return rows, header_flags, spans, None
+
+    title_parts: list[str] = []
+    title_row_count = 0
+    max_prefix = min(len(rows), 2)
+    while title_row_count < max_prefix and _is_title_like_row(rows[title_row_count]):
+        values = [str(item or "").strip() for item in rows[title_row_count] if str(item or "").strip()]
+        if values:
+            title_parts.append(values[0])
+        title_row_count += 1
+
+    if title_row_count <= 0:
+        return rows, header_flags, spans, None
+
+    stripped_rows = rows[title_row_count:]
+    stripped_flags = header_flags[title_row_count:]
+    stripped_spans: list[dict[str, Any]] = []
+    for span in spans:
+        span_row = int(span.get("row") or 0)
+        if span_row < title_row_count:
+            continue
+        updated = dict(span)
+        updated["row"] = span_row - title_row_count
+        stripped_spans.append(updated)
+    title = " / ".join(part for part in title_parts if part) or None
+    return stripped_rows, stripped_flags, stripped_spans, title
+
+
+def _is_title_like_row(row: list[str]) -> bool:
+    non_empty = [str(item or "").strip() for item in row if str(item or "").strip()]
+    if not non_empty:
+        return False
+    if len(non_empty) == 1:
+        return len(non_empty[0]) >= 4
+    return len(set(non_empty)) == 1 and len(non_empty[0]) >= 4
+
+
 def _build_headers(rows: list[list[str]], header_row_count: int) -> list[str]:
     column_count = max((len(row) for row in rows), default=0)
     if column_count <= 0:
@@ -553,6 +605,63 @@ def _build_headers(rows: list[list[str]], header_row_count: int) -> list[str]:
                 parts.append(text)
         headers.append(" / ".join(parts) if parts else f"col_{col_index + 1}")
     return headers
+
+
+def _fill_group_header_columns(rows: list[list[str]], headers: list[str], header_row_count: int) -> list[list[str]]:
+    if not rows or header_row_count <= 0 or len(headers) < 3:
+        return rows
+
+    carry_indexes = _leading_group_column_indexes(headers)
+    if not carry_indexes:
+        return rows
+
+    filled_rows = [list(row) for row in rows]
+    last_values = {index: "" for index in carry_indexes}
+
+    for row_index, row in enumerate(filled_rows):
+        if row_index < header_row_count:
+            continue
+
+        non_empty_indexes = [index for index, value in enumerate(row) if str(value or "").strip()]
+        if not non_empty_indexes:
+            continue
+
+        first_non_empty = non_empty_indexes[0]
+        leading_blank_indexes = [index for index in carry_indexes if index < first_non_empty and not str(row[index] or "").strip()]
+        if leading_blank_indexes and _row_should_inherit_group_values(row):
+            if all(str(last_values.get(index) or "").strip() for index in leading_blank_indexes):
+                for index in leading_blank_indexes:
+                    row[index] = last_values[index]
+
+        for index in carry_indexes:
+            value = str(row[index] or "").strip()
+            if value:
+                last_values[index] = value
+
+    return filled_rows
+
+
+def _leading_group_column_indexes(headers: list[str]) -> list[int]:
+    normalized = [_normalize_header_token(item) for item in headers]
+    if not normalized:
+        return []
+
+    first = normalized[0] if len(normalized) > 0 else ""
+    second = normalized[1] if len(normalized) > 1 else ""
+    third = normalized[2] if len(normalized) > 2 else ""
+
+    sequence_like = ("序号", "编号", "项号", "子目号", "序")
+    group_like = ("型号", "项目", "类别", "名称", "设备", "货物", "服务")
+    detail_like = ("说明", "内容", "规格", "描述", "参数")
+
+    if any(token in first for token in sequence_like):
+        indexes = [0]
+        if second and any(token in second for token in group_like):
+            indexes.append(1)
+        elif third and any(token in third for token in detail_like):
+            indexes.append(1)
+        return indexes
+    return []
 
 
 def _build_records(rows: list[list[str]], headers: list[str], header_row_count: int) -> list[dict[str, str]]:
@@ -593,33 +702,48 @@ def _ensure_unique_headers(headers: list[str]) -> list[str]:
 def _can_merge_logical_tables(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_pages = [page for page in left.get("pages", []) if isinstance(page, int)]
     right_pages = [page for page in right.get("pages", []) if isinstance(page, int)]
-    if not left_pages or not right_pages or right_pages[0] != left_pages[-1] + 1:
+    if not left_pages or not right_pages:
+        return False
+    page_gap = right_pages[0] - left_pages[-1]
+    if page_gap <= 0 or page_gap > 3:
         return False
 
     left_columns = int(left.get("column_count") or 0)
     right_columns = int(right.get("column_count") or 0)
-    if left_columns <= 0 or right_columns <= 0 or abs(left_columns - right_columns) > 1:
+    if left_columns <= 0 or right_columns <= 0 or abs(left_columns - right_columns) > 2:
         return False
 
     left_signature = str(left.get("header_signature") or "")
     right_signature = str(right.get("header_signature") or "")
-    if left_signature and right_signature and left_signature == right_signature:
+    if page_gap == 1 and left_signature and right_signature and left_signature == right_signature:
         return True
-    return _headers_match(left.get("headers") or [], right.get("headers") or [])
+    if page_gap == 1 and _headers_match(left.get("headers") or [], right.get("headers") or []):
+        return True
+    return _looks_like_headerless_continuation(left, right)
 
 
 def _merge_logical_table(target: dict[str, Any], source: dict[str, Any]) -> None:
     source_rows = [list(row) for row in source.get("rows", []) if isinstance(row, list)]
     if not source_rows:
         return
+    if not target.get("title") and source.get("title"):
+        target["title"] = source.get("title")
 
     rows_to_add = source_rows
     if _headers_match(target.get("headers") or [], source.get("headers") or []):
         header_row_count = int(source.get("header_row_count") or 0)
         if header_row_count > 0:
             rows_to_add = source_rows[header_row_count:]
+    elif _looks_like_headerless_continuation(target, source):
+        rows_to_add = _align_continuation_rows(target, source_rows)
+        rows_to_add = _attach_leading_continuation_row(target.get("rows") or [], rows_to_add)
 
     target["rows"].extend(rows_to_add)
+    target["rows"] = _fill_group_header_columns(
+        target.get("rows") or [],
+        target.get("headers") or [],
+        int(target.get("header_row_count") or 0),
+    )
     target["records"] = _build_records(
         target.get("rows") or [],
         target.get("headers") or [],
@@ -653,6 +777,131 @@ def _headers_match(left: list[str], right: list[str]) -> bool:
     overlap = sum(1 for item in left_normalized if item in right_normalized)
     baseline = max(1, min(len(left_normalized), len(right_normalized)))
     return overlap >= max(2, baseline - 1)
+
+
+def _looks_like_headerless_continuation(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    if _has_meaningful_headers(right):
+        return False
+    if not _table_has_amount_pattern(left):
+        return False
+
+    right_rows = [list(row) for row in right.get("rows", []) if isinstance(row, list)]
+    if not right_rows:
+        return False
+
+    if not any(_row_has_amount_pattern(row) or _row_is_total_like(row) for row in right_rows):
+        return False
+
+    left_columns = int(left.get("column_count") or 0)
+    right_columns = int(right.get("column_count") or 0)
+    if right_columns > left_columns:
+        return False
+    return True
+
+
+def _align_continuation_rows(target: dict[str, Any], rows: list[list[str]]) -> list[list[str]]:
+    target_columns = int(target.get("column_count") or 0)
+    source_columns = max((len(row) for row in rows), default=0)
+    if target_columns <= 0 or source_columns <= 0 or source_columns >= target_columns:
+        return _squash_short_continuation_rows(rows)
+
+    pad = target_columns - source_columns
+    aligned_rows: list[list[str]] = []
+    for row in rows:
+        normalized_row = list(row[:source_columns])
+        if len(normalized_row) < source_columns:
+            normalized_row.extend([""] * (source_columns - len(normalized_row)))
+        aligned_rows.append(([""] * pad) + normalized_row)
+    return _squash_short_continuation_rows(aligned_rows)
+
+
+def _has_meaningful_headers(table: dict[str, Any]) -> bool:
+    headers = [str(item or "").strip() for item in (table.get("headers") or []) if str(item or "").strip()]
+    if not headers:
+        return False
+    if all(re.fullmatch(r"col_\d+", header, re.IGNORECASE) for header in headers):
+        return False
+    return int(table.get("header_row_count") or 0) > 0
+
+
+def _table_has_amount_pattern(table: dict[str, Any]) -> bool:
+    return any(
+        _row_has_amount_pattern(row) or _row_is_total_like(row)
+        for row in (table.get("rows") or [])
+        if isinstance(row, list)
+    )
+
+
+def _row_has_amount_pattern(row: list[str]) -> bool:
+    non_empty = [str(cell or "").strip() for cell in row if str(cell or "").strip()]
+    if not non_empty:
+        return False
+    amount_like = sum(1 for cell in non_empty if _looks_like_amount_cell(cell))
+    return amount_like >= 2
+
+
+def _row_is_total_like(row: list[str]) -> bool:
+    compact = "".join(str(cell or "").strip() for cell in row)
+    return ("小计" in compact or "合计" in compact) and any(_looks_like_amount_cell(cell) for cell in row)
+
+
+def _row_should_inherit_group_values(row: list[str]) -> bool:
+    if _row_is_total_like(row):
+        return False
+    return _row_has_amount_pattern(row)
+
+
+def _looks_like_amount_cell(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r"[￥¥]?\s*\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?", text) or re.fullmatch(r"[￥¥]?\s*\d+(?:\.\d{1,2})?", text))
+
+
+def _squash_short_continuation_rows(rows: list[list[str]]) -> list[list[str]]:
+    squashed: list[list[str]] = []
+    for row in rows:
+        non_empty = [(index, str(cell or "").strip()) for index, cell in enumerate(row) if str(cell or "").strip()]
+        if (
+            len(non_empty) == 1
+            and squashed
+            and len(non_empty[0][1]) <= 12
+            and not _looks_like_amount_cell(non_empty[0][1])
+        ):
+            col_index, text = non_empty[0]
+            previous_row = squashed[-1]
+            if col_index < len(previous_row):
+                previous_text = str(previous_row[col_index] or "").strip()
+                if previous_text and not _looks_like_amount_cell(previous_text):
+                    previous_row[col_index] = f"{previous_text}{text}"
+                    continue
+        squashed.append(list(row))
+    return squashed
+
+
+def _attach_leading_continuation_row(target_rows: list[list[str]], source_rows: list[list[str]]) -> list[list[str]]:
+    if not target_rows or not source_rows:
+        return source_rows
+
+    first_row = source_rows[0]
+    non_empty = [(index, str(cell or "").strip()) for index, cell in enumerate(first_row) if str(cell or "").strip()]
+    if len(non_empty) != 1:
+        return source_rows
+
+    col_index, text = non_empty[0]
+    if len(text) > 12 or _looks_like_amount_cell(text):
+        return source_rows
+
+    previous_row = target_rows[-1]
+    if col_index >= len(previous_row):
+        return source_rows
+
+    previous_text = str(previous_row[col_index] or "").strip()
+    if not previous_text or _looks_like_amount_cell(previous_text):
+        return source_rows
+
+    previous_row[col_index] = f"{previous_text}{text}"
+    return source_rows[1:]
 
 
 def _normalize_header_token(value: str) -> str:

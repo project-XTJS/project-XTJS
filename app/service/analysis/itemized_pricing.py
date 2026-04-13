@@ -112,6 +112,12 @@ class ItemizedPricingChecker:
         "金额合计",
         "报价合计",
     )
+    OPENING_TOTAL_KEYWORDS = (
+        "投标总价",
+        "总报价",
+        "开标一览表",
+        "报价一览表",
+    )
     SUBTOTAL_KEYWORDS = ("小计",)
     PREFERENTIAL_TOTAL_KEYWORDS = (
         "最终优惠价",
@@ -154,6 +160,15 @@ class ItemizedPricingChecker:
         "无偿",
         "不收费",
     )
+    STRUCTURED_COLUMN_ALIASES = {
+        "serial": ("序号", "编号"),
+        "model": ("型号", "规格型号", "项目", "品名", "设备名称"),
+        "description": ("说明", "名称", "内容", "参数", "配置", "描述"),
+        "brand": ("品牌", "厂家", "厂商", "制造商", "生产厂家", "产地"),
+        "quantity": ("数量",),
+        "unit_price": ("单价", "投标单价", "报价单价", "综合单价", "含税单价"),
+        "line_total": ("合计", "总价", "金额", "小计", "总额", "分项总价", "单项总价"),
+    }
     MONEY_TOLERANCE = Decimal("0.10")
 
     # 入口与输入整理
@@ -428,6 +443,473 @@ class ItemizedPricingChecker:
 
         section_text = self._get_section_text(section)
         return self._split_lines(self._normalize_text(section_text))
+
+    # 优先从结构化 logical table 中抽取报价行关系，避免 OCR 展平后重复累计组总价。
+    def _extract_structured_itemized_entries(self, document: dict | None) -> dict:
+        empty_result = {
+            "items": [],
+            "totals": [],
+            "row_issues": [],
+            "unresolved_rows": [],
+            "relation_rows": [],
+            "group_checks": [],
+            "used_tables": [],
+        }
+        if not isinstance(document, dict):
+            return empty_result
+
+        logical_tables = self._get_logical_tables(document.get("payload"))
+        if not logical_tables:
+            return empty_result
+
+        extracted_items = []
+        extracted_totals = []
+        row_issues = []
+        unresolved_rows = []
+        relation_rows = []
+        group_checks = []
+        used_tables = []
+
+        for table_index, table in enumerate(logical_tables):
+            headers = self._get_logical_table_headers(table)
+            column_map = self._resolve_structured_price_columns(headers)
+            if column_map is None:
+                continue
+
+            table_result = self._analyze_structured_itemized_table(
+                table,
+                table_index=table_index,
+                column_map=column_map,
+            )
+            if not (
+                table_result["items"]
+                or table_result["totals"]
+                or table_result["row_issues"]
+                or table_result["unresolved_rows"]
+            ):
+                continue
+
+            extracted_items.extend(table_result["items"])
+            extracted_totals.extend(table_result["totals"])
+            row_issues.extend(table_result["row_issues"])
+            unresolved_rows.extend(table_result["unresolved_rows"])
+            relation_rows.extend(table_result["relation_rows"])
+            group_checks.extend(table_result["group_checks"])
+            used_tables.append(
+                {
+                    "table_id": table.get("id"),
+                    "title": table.get("title"),
+                    "pages": self._get_logical_table_pages(table),
+                    "headers": headers,
+                    "row_count": len(table.get("rows") or []),
+                }
+            )
+
+        return {
+            "items": extracted_items,
+            "totals": extracted_totals,
+            "row_issues": row_issues,
+            "unresolved_rows": unresolved_rows,
+            "relation_rows": relation_rows,
+            "group_checks": group_checks,
+            "used_tables": used_tables,
+        }
+
+    # 根据表头识别结构化报价表中的关键列。
+    def _resolve_structured_price_columns(self, headers: list[str]) -> dict | None:
+        normalized_headers = [self._normalize_label_key(header) for header in headers]
+        column_map = {}
+        for field, aliases in self.STRUCTURED_COLUMN_ALIASES.items():
+            alias_candidates = [self._normalize_label_key(alias) for alias in aliases]
+            matched_index = self._match_structured_column_index(normalized_headers, alias_candidates)
+            if matched_index is not None:
+                column_map[field] = matched_index
+
+        required_fields = {"quantity", "unit_price", "line_total"}
+        if not required_fields.issubset(column_map):
+            return None
+        if not any(field in column_map for field in ("serial", "model", "description")):
+            return None
+        return column_map
+
+    # 在规范化表头列表中查找最贴近目标语义的列。
+    def _match_structured_column_index(self, headers: list[str], aliases: list[str]) -> int | None:
+        for index, header in enumerate(headers):
+            if not header:
+                continue
+            if any(alias == header or alias in header or header in alias for alias in aliases):
+                return index
+        return None
+
+    # 对单张 logical table 做结构化行关系抽取，并处理组总价重复展示。
+    def _analyze_structured_itemized_table(self, table: dict, *, table_index: int, column_map: dict) -> dict:
+        headers = self._get_logical_table_headers(table)
+        rows = table.get("rows") or []
+        header_row_count = int(table.get("header_row_count") or 0)
+        start_index = min(len(rows), header_row_count)
+        pages = self._get_logical_table_pages(table)
+        section_context = {
+            "section_id": f"logical_table:{table.get('id') or table_index}",
+            "anchor": "logical_table",
+            "pages": pages,
+        }
+        carry = {"serial": None, "model": None, "brand": None}
+        raw_relations = []
+        totals = []
+        unresolved_rows = []
+
+        for offset, row in enumerate(rows[start_index:], start=start_index):
+            if not isinstance(row, list):
+                continue
+            cells = self._normalize_structured_row_cells(row, len(headers))
+            if not any(cells):
+                continue
+            if self._is_structured_header_like_row(cells, headers):
+                continue
+
+            total_entry = self._extract_structured_total_entry(
+                cells,
+                section_context=section_context,
+                row_index=offset,
+                title=table.get("title"),
+                column_map=column_map,
+            )
+            if total_entry is not None:
+                totals.append(total_entry)
+                continue
+
+            relation = self._extract_structured_row_relation(
+                cells,
+                section_context=section_context,
+                row_index=offset,
+                column_map=column_map,
+                title=table.get("title"),
+                carry=carry,
+            )
+            if relation is None:
+                continue
+            if relation.pop("_unresolved", False):
+                unresolved_rows.append(relation)
+                continue
+            raw_relations.append(relation)
+
+        grouped_result = self._summarize_structured_relations(raw_relations)
+        return {
+            "items": grouped_result["items"],
+            "totals": totals,
+            "row_issues": grouped_result["row_issues"],
+            "unresolved_rows": unresolved_rows,
+            "relation_rows": grouped_result["relation_rows"],
+            "group_checks": grouped_result["group_checks"],
+        }
+
+    # 统一结构化表格行长度，避免缺列时后续索引越界。
+    def _normalize_structured_row_cells(self, row: list[object], target_len: int) -> list[str]:
+        normalized = [str(cell).strip() for cell in row[:target_len]]
+        if len(normalized) < target_len:
+            normalized.extend([""] * (target_len - len(normalized)))
+        return normalized
+
+    # 识别被 OCR 切到数据区中的表头残片，避免误作报价行。
+    def _is_structured_header_like_row(self, cells: list[str], headers: list[str]) -> bool:
+        nonempty_cells = [cell for cell in cells if cell]
+        if not nonempty_cells:
+            return False
+        normalized_headers = {self._normalize_label_key(header) for header in headers if header}
+        header_hits = [cell for cell in nonempty_cells if self._normalize_label_key(cell) in normalized_headers]
+        if not header_hits:
+            return False
+        if len(header_hits) == len(nonempty_cells):
+            return True
+        return len(header_hits) >= 2 and not any(self._extract_money_candidates(cell) for cell in nonempty_cells)
+
+    # 从结构化表格中提取小计/合计等汇总行。
+    def _extract_structured_total_entry(
+        self,
+        cells: list[str],
+        *,
+        section_context: dict,
+        row_index: int,
+        title: str | None,
+        column_map: dict,
+    ) -> dict | None:
+        row_text = " ".join(cell for cell in cells if cell)
+        if not row_text or not self._looks_like_total_line(row_text):
+            return None
+
+        amount_candidates = []
+        total_index = column_map.get("line_total")
+        if total_index is not None and total_index < len(cells):
+            amount_candidates = self._extract_row_amounts(cells[total_index])
+        if not amount_candidates:
+            amount_candidates = self._extract_row_amounts(row_text)
+        if not amount_candidates:
+            return None
+
+        label_source = next((cell for cell in cells if self._looks_like_total_line(cell)), row_text)
+        label = self._clean_label(label_source) or ("小计" if self._looks_like_subtotal_line(row_text) else "合计")
+        if title and label in {"小计", "合计", "总计"}:
+            label = f"{title} {label}"
+        return {
+            "label": label,
+            "amount": amount_candidates[-1],
+            "source": "structured_subtotal" if self._looks_like_subtotal_line(row_text) else "structured_total",
+            "is_subtotal": self._looks_like_subtotal_line(row_text),
+            **self._build_entry_context(section_context, line_index=row_index),
+        }
+
+    # 把结构化表格中的一行抽成数量-单价-总价关系，必要时继承前序组头。
+    def _extract_structured_row_relation(
+        self,
+        cells: list[str],
+        *,
+        section_context: dict,
+        row_index: int,
+        column_map: dict,
+        title: str | None,
+        carry: dict,
+    ) -> dict | None:
+        row_text = " ".join(cell for cell in cells if cell)
+        serial = self._structured_cell_value(cells, column_map.get("serial"))
+        model = self._structured_cell_value(cells, column_map.get("model"))
+        description = self._structured_cell_value(cells, column_map.get("description"))
+        brand = self._structured_cell_value(cells, column_map.get("brand"))
+        quantity = self._to_decimal(self._structured_cell_value(cells, column_map.get("quantity")))
+        unit_price = self._to_decimal(self._structured_cell_value(cells, column_map.get("unit_price")))
+        line_total = self._to_decimal(self._structured_cell_value(cells, column_map.get("line_total")))
+
+        has_pricing_signal = quantity is not None or unit_price is not None or line_total is not None
+        if has_pricing_signal and not serial:
+            serial = carry.get("serial")
+        if has_pricing_signal and not model:
+            model = carry.get("model")
+        if has_pricing_signal and not brand:
+            brand = carry.get("brand")
+
+        if serial:
+            carry["serial"] = serial
+        if model:
+            carry["model"] = model
+        if brand:
+            carry["brand"] = brand
+
+        label = self._build_structured_row_label(
+            serial=serial,
+            model=model,
+            description=description,
+            title=title,
+        )
+        if quantity is None or unit_price is None or line_total is None:
+            if has_pricing_signal:
+                return {
+                    "_unresolved": True,
+                    "serial": serial,
+                    "label": label,
+                    "text": row_text[:200],
+                    **self._build_entry_context(section_context, serial=serial, line_index=row_index),
+                }
+            if label and (description or model or serial):
+                return None
+            return None
+
+        expected_total = quantity * unit_price
+        return {
+            "label": label,
+            "serial": serial,
+            "model": model,
+            "description": description,
+            "brand": brand,
+            "quantity": quantity,
+            "unit_price": unit_price,
+            "line_total": line_total,
+            "expected_total": expected_total,
+            "difference": expected_total - line_total,
+            "table_title": title,
+            "group_key": (
+                str(section_context.get("section_id") or ""),
+                str(serial or ""),
+                str(model or ""),
+            ),
+            **self._build_entry_context(section_context, serial=serial, line_index=row_index),
+        }
+
+    # 读取指定列位的文本值。
+    def _structured_cell_value(self, cells: list[str], index: int | None) -> str:
+        if index is None or index < 0 or index >= len(cells):
+            return ""
+        return str(cells[index]).strip()
+
+    # 组合结构化行的人类可读标签。
+    def _build_structured_row_label(
+        self,
+        *,
+        serial: str | None,
+        model: str | None,
+        description: str | None,
+        title: str | None,
+    ) -> str:
+        parts = [part for part in (model, description) if part]
+        label = " / ".join(parts)
+        if serial and label:
+            return f"{serial}:{label}"[:120]
+        if label:
+            return label[:120]
+        if serial and title:
+            return f"{serial}:{title}"[:120]
+        return (title or serial or "结构化分项")[:120]
+
+    # 按组识别“行内重复展示组总价”的情况，并据此生成有效汇总金额。
+    def _summarize_structured_relations(self, relations: list[dict]) -> dict:
+        if not relations:
+            return {
+                "items": [],
+                "row_issues": [],
+                "relation_rows": [],
+                "group_checks": [],
+            }
+
+        groups = []
+        current_group = []
+        for relation in relations:
+            if not current_group or relation["group_key"] == current_group[-1]["group_key"]:
+                current_group.append(relation)
+                continue
+            groups.append(current_group)
+            current_group = [relation]
+        if current_group:
+            groups.append(current_group)
+
+        items = []
+        row_issues = []
+        relation_rows = []
+        group_checks = []
+
+        for group in groups:
+            repeated_group_total = self._detect_repeated_group_total(group)
+            if repeated_group_total is not None:
+                expected_group_total = sum((item["expected_total"] for item in group), Decimal("0"))
+                group_difference = expected_group_total - repeated_group_total
+                representative = group[0]
+                group_check = {
+                    "group_key": list(representative["group_key"]),
+                    "label": representative["label"],
+                    "serial": representative.get("serial"),
+                    "model": representative.get("model"),
+                    "row_count": len(group),
+                    "status": "pass" if abs(group_difference) <= self.MONEY_TOLERANCE else "fail",
+                    "group_declared_total": repeated_group_total,
+                    "group_expected_total": expected_group_total,
+                    "difference": group_difference,
+                    "pages": representative.get("section_pages"),
+                }
+                group_checks.append(group_check)
+                if abs(group_difference) > self.MONEY_TOLERANCE:
+                    row_issues.append(
+                        {
+                            "kind": "group_total_mismatch",
+                            "label": representative["label"],
+                            "serial": representative.get("serial"),
+                            "declared_group_total": self._format_decimal(repeated_group_total),
+                            "expected_total": self._format_decimal(expected_group_total),
+                            "difference": self._format_decimal(group_difference),
+                            "row_count": len(group),
+                        }
+                    )
+
+                for relation in group:
+                    normalized_relation = dict(relation)
+                    normalized_relation["relation_type"] = "repeated_group_total"
+                    normalized_relation["raw_line_total"] = relation["line_total"]
+                    normalized_relation["difference"] = None
+                    normalized_relation["effective_total"] = relation["expected_total"]
+                    normalized_relation["group_declared_total"] = repeated_group_total
+                    normalized_relation["group_expected_total"] = expected_group_total
+                    normalized_relation["group_difference"] = group_difference
+                    relation_rows.append(normalized_relation)
+                    items.append(
+                        {
+                            "label": relation["label"],
+                            "amount": relation["expected_total"],
+                            "source": "structured_group_row",
+                            "declared_line_total": relation["line_total"],
+                            "expected_total": relation["expected_total"],
+                            "quantity": relation["quantity"],
+                            "unit_price": relation["unit_price"],
+                            **self._build_entry_context(
+                                {
+                                    "section_id": relation.get("section_id"),
+                                    "anchor": relation.get("section_anchor"),
+                                    "pages": relation.get("section_pages"),
+                                },
+                                serial=relation.get("serial"),
+                                line_index=relation.get("line_index"),
+                            ),
+                        }
+                    )
+                continue
+
+            for relation in group:
+                difference = relation["difference"]
+                normalized_relation = dict(relation)
+                normalized_relation["relation_type"] = "row_total"
+                relation_rows.append(normalized_relation)
+                items.append(
+                    {
+                        "label": relation["label"],
+                        "amount": relation["expected_total"],
+                        "source": "structured_row",
+                        "declared_line_total": relation["line_total"],
+                        "expected_total": relation["expected_total"],
+                        "quantity": relation["quantity"],
+                        "unit_price": relation["unit_price"],
+                        **self._build_entry_context(
+                            {
+                                "section_id": relation.get("section_id"),
+                                "anchor": relation.get("section_anchor"),
+                                "pages": relation.get("section_pages"),
+                            },
+                            serial=relation.get("serial"),
+                            line_index=relation.get("line_index"),
+                        ),
+                    }
+                )
+                if abs(difference) > self.MONEY_TOLERANCE:
+                    row_issues.append(
+                        {
+                            "kind": "row_total_mismatch",
+                            "label": relation["label"],
+                            "serial": relation.get("serial"),
+                            "quantity": self._format_decimal(relation["quantity"]),
+                            "unit_price": self._format_decimal(relation["unit_price"]),
+                            "line_total": self._format_decimal(relation["line_total"]),
+                            "expected_total": self._format_decimal(relation["expected_total"]),
+                            "difference": self._format_decimal(difference),
+                        }
+                    )
+
+        return {
+            "items": items,
+            "row_issues": row_issues,
+            "relation_rows": relation_rows,
+            "group_checks": group_checks,
+        }
+
+    # 检测同一组内每行都重复展示同一个组总价的模式。
+    def _detect_repeated_group_total(self, group: list[dict]) -> Decimal | None:
+        if len(group) < 2:
+            return None
+        line_totals = [relation.get("line_total") for relation in group if relation.get("line_total") is not None]
+        if len(line_totals) != len(group):
+            return None
+        unique_totals = {total for total in line_totals}
+        if len(unique_totals) != 1:
+            return None
+
+        repeated_total = next(iter(unique_totals))
+        max_expected_total = max((relation["expected_total"] for relation in group), default=Decimal("0"))
+        if repeated_total <= max_expected_total + self.MONEY_TOLERANCE:
+            return None
+        return repeated_total
 
     # 为某个 layout 表格区段匹配最可能对应的 logical table 起点。
     def _match_logical_table_index(self, section: dict, logical_tables: list[dict]) -> int | None:
@@ -894,78 +1376,60 @@ class ItemizedPricingChecker:
                 return True
         return False
 
-    # 普通模式与下浮率模式主流程
-    # 执行普通金额报价模式下的分项抽取、汇总和异常检查。
-    def _check_normal_mode(
-        self,
-        item_sections: list[dict],
-        total_sections: list[dict],
-        candidate_sections: list[dict],
-        *,
-        document: dict | None = None,
-    ) -> dict:
-        item_source_sections = item_sections or total_sections or candidate_sections
-        extracted_items = []
-        extracted_totals = []
-        row_issues = []
-        unresolved_rows = []
-        preferential_mode = self._detect_preferential_total_mode(document)
+    def _empty_section_analysis(self) -> dict:
+        return {
+            "items": [],
+            "totals": [],
+            "row_issues": [],
+            "unresolved_rows": [],
+        }
 
-        for section in item_source_sections:
+    def _collect_section_analysis(self, sections: list[dict]) -> dict:
+        aggregated = self._empty_section_analysis()
+        for section in sections or []:
             section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
                 section["lines"],
                 section_context=section,
             )
-            extracted_items.extend(section_items)
-            extracted_totals.extend(section_totals)
-            row_issues.extend(section_row_issues)
-            unresolved_rows.extend(section_unresolved_rows)
+            aggregated["items"].extend(section_items)
+            aggregated["totals"].extend(section_totals)
+            aggregated["row_issues"].extend(section_row_issues)
+            aggregated["unresolved_rows"].extend(section_unresolved_rows)
+        return aggregated
 
-        if not extracted_items and total_sections:
-            for section in total_sections:
-                section_items, section_totals, section_row_issues, section_unresolved_rows = self._extract_section_entries(
-                    section["lines"],
-                    section_context=section,
-                )
-                extracted_items.extend(section_items)
-                extracted_totals.extend(section_totals)
-                row_issues.extend(section_row_issues)
-                unresolved_rows.extend(section_unresolved_rows)
+    def _collect_section_totals(self, sections: list[dict]) -> list[dict]:
+        return self._collect_section_analysis(sections)["totals"]
 
-        if preferential_mode and document is not None:
-            extracted_totals.extend(self._extract_preferential_total_entries(document.get("lines") or []))
-
-        if not extracted_totals or all(entry.get("is_subtotal") for entry in extracted_totals):
-            for section in total_sections or candidate_sections:
-                _, section_totals, _, _ = self._extract_section_entries(section["lines"], section_context=section)
-                extracted_totals.extend(section_totals)
-
-        extracted_items = self._dedupe_entries(extracted_items)
-        extracted_totals = self._dedupe_entries(extracted_totals)
-        row_issues = self._dedupe_row_issues(row_issues)
-        unresolved_rows = self._dedupe_unresolved_rows(unresolved_rows)
-        duplicate_items = self._extract_duplicate_items(extracted_items)
-        serial_gap_hints = self._extract_serial_gap_hints(item_sections) if item_sections else []
-
-        table_detected = bool(item_sections or total_sections or extracted_items or extracted_totals)
-        sum_check = self._evaluate_sum_check(extracted_items, extracted_totals, preferential_mode=preferential_mode)
-        status = self._resolve_normal_status(
-            table_detected,
-            sum_check["status"],
-            row_issues,
-            duplicate_items,
-            unresolved_rows,
-        )
-        passed = self._status_to_passed(status)
-
+    def _build_normal_details(
+        self,
+        *,
+        structured_analysis: dict,
+        extracted_items: list[dict],
+        extracted_totals: list[dict],
+        sum_check: dict,
+        row_issues: list[dict],
+        duplicate_items: list[dict],
+        unresolved_rows: list[dict],
+        serial_gap_hints: list[str],
+    ) -> list[str]:
         details = []
+        if structured_analysis["used_tables"]:
+            details.append(f"优先基于 {len(structured_analysis['used_tables'])} 张结构化表格进行单价、数量与小计校验。")
+        if structured_analysis["group_checks"]:
+            details.append(
+                f"识别到 {len(structured_analysis['group_checks'])} 组因合并单元格导致的组总价重复展示，汇总时已按分项明细去重。"
+            )
         if extracted_items:
             details.append(f"识别到 {len(extracted_items)} 个分项金额。")
         if extracted_totals:
             details.append(f"识别到 {len(extracted_totals)} 个合计/总价候选值。")
+
         if sum_check["status"] == "pass":
             if sum_check.get("total_mode") == "preferential_total":
-                details.append("检测到最终优惠价模式，分项金额汇总与分项小计一致。")
+                if sum_check.get("opening_total") is not None:
+                    details.append("检测到最终优惠价模式，分项金额汇总、分项小计与开标一览表总价一致。")
+                else:
+                    details.append("检测到最终优惠价模式，分项金额汇总与分项小计一致。")
                 if sum_check.get("preferential_total") is not None:
                     details.append(
                         f"文档同时声明最终优惠价 {sum_check['preferential_total']}（{sum_check.get('preferential_total_label') or '最终优惠价'}）。"
@@ -974,9 +1438,26 @@ class ItemizedPricingChecker:
                 details.append("分项金额汇总与声明总价一致。")
         elif sum_check["status"] == "fail":
             if sum_check.get("total_mode") == "preferential_total":
-                details.append(
-                    f"检测到最终优惠价模式，但分项金额汇总与分项小计不一致：计算值 {sum_check['calculated_total']}，小计 {sum_check['declared_total']}。"
-                )
+                if (
+                    sum_check.get("subtotal_status") == "pass"
+                    and sum_check.get("opening_total_status") == "fail"
+                    and sum_check.get("opening_total") is not None
+                ):
+                    details.append(
+                        f"分项金额汇总与分项小计一致，但与开标一览表总价不一致：分项小计 {sum_check.get('subtotal_total')}，开标一览表总价 {sum_check.get('opening_total')}。"
+                    )
+                elif sum_check.get("subtotal_status") == "fail":
+                    details.append(
+                        f"检测到最终优惠价模式，但分项金额汇总与分项小计不一致：计算值 {sum_check['calculated_total']}，小计 {sum_check.get('subtotal_total') or sum_check['declared_total']}。"
+                    )
+                    if sum_check.get("opening_total") is not None:
+                        details.append(
+                            f"同时，开标一览表总价为 {sum_check.get('opening_total')}（{sum_check.get('opening_total_label')}）。"
+                        )
+                else:
+                    details.append(
+                        f"检测到最终优惠价模式，但总价口径存在不一致：计算值 {sum_check['calculated_total']}，声明值 {sum_check['declared_total']}。"
+                    )
             else:
                 details.append(
                     f"分项金额汇总与声明总价不一致：计算值 {sum_check['calculated_total']}，声明值 {sum_check['declared_total']}。"
@@ -996,6 +1477,73 @@ class ItemizedPricingChecker:
             details.append(
                 f"提示：检测到序号可能跳号：{', '.join(serial_gap_hints)}。该提示仅供人工复核，不影响当前金额校验结论。"
             )
+        return details
+
+    def _check_normal_mode(
+        self,
+        item_sections: list[dict],
+        total_sections: list[dict],
+        candidate_sections: list[dict],
+        *,
+        document: dict | None = None,
+    ) -> dict:
+        item_source_sections = item_sections or total_sections or candidate_sections
+        structured_analysis = self._extract_structured_itemized_entries(document)
+        extracted_items = list(structured_analysis["items"])
+        extracted_totals = list(structured_analysis["totals"])
+        row_issues = list(structured_analysis["row_issues"])
+        unresolved_rows = list(structured_analysis["unresolved_rows"])
+        preferential_mode = self._detect_preferential_total_mode(document)
+
+        if structured_analysis["used_tables"]:
+            extracted_totals.extend(self._collect_section_totals(total_sections or candidate_sections))
+        else:
+            section_analysis = self._collect_section_analysis(item_source_sections)
+            extracted_items.extend(section_analysis["items"])
+            extracted_totals.extend(section_analysis["totals"])
+            row_issues.extend(section_analysis["row_issues"])
+            unresolved_rows.extend(section_analysis["unresolved_rows"])
+
+        if not extracted_items and total_sections:
+            fallback_analysis = self._collect_section_analysis(total_sections)
+            extracted_items.extend(fallback_analysis["items"])
+            extracted_totals.extend(fallback_analysis["totals"])
+            row_issues.extend(fallback_analysis["row_issues"])
+            unresolved_rows.extend(fallback_analysis["unresolved_rows"])
+
+        if preferential_mode and document is not None:
+            extracted_totals.extend(self._extract_preferential_total_entries(document.get("lines") or []))
+
+        if not extracted_totals or all(entry.get("is_subtotal") for entry in extracted_totals):
+            extracted_totals.extend(self._collect_section_totals(total_sections or candidate_sections))
+
+        extracted_items = self._dedupe_entries(extracted_items)
+        extracted_totals = self._dedupe_entries(extracted_totals)
+        row_issues = self._dedupe_row_issues(row_issues)
+        unresolved_rows = self._dedupe_unresolved_rows(unresolved_rows)
+        duplicate_items = self._extract_duplicate_items(extracted_items)
+        serial_gap_hints = self._extract_serial_gap_hints(item_sections) if item_sections else []
+
+        table_detected = bool(item_sections or total_sections or extracted_items or extracted_totals)
+        sum_check = self._evaluate_sum_check(extracted_items, extracted_totals, preferential_mode=preferential_mode)
+        status = self._resolve_normal_status(
+            table_detected,
+            sum_check["status"],
+            row_issues,
+            duplicate_items,
+            unresolved_rows,
+        )
+        passed = self._status_to_passed(status)
+        details = self._build_normal_details(
+            structured_analysis=structured_analysis,
+            extracted_items=extracted_items,
+            extracted_totals=extracted_totals,
+            sum_check=sum_check,
+            row_issues=row_issues,
+            duplicate_items=duplicate_items,
+            unresolved_rows=unresolved_rows,
+            serial_gap_hints=serial_gap_hints,
+        )
 
         return {
             "itemized_table_detected": table_detected,
@@ -1014,6 +1562,8 @@ class ItemizedPricingChecker:
                     "issues": row_issues,
                     "unresolved_count": len(unresolved_rows),
                     "unresolved_rows": unresolved_rows,
+                    "group_check_count": len(structured_analysis["group_checks"]),
+                    "group_checks": self._serialize_entries(structured_analysis["group_checks"]),
                 },
                 "sum_consistency": {
                     "status": "unknown" if unresolved_rows and sum_check["status"] in {"pass", "fail"} else sum_check["status"],
@@ -1024,6 +1574,14 @@ class ItemizedPricingChecker:
                     "total_mode": sum_check.get("total_mode"),
                     "preferential_total": sum_check.get("preferential_total"),
                     "preferential_total_label": sum_check.get("preferential_total_label"),
+                    "subtotal_total": sum_check.get("subtotal_total"),
+                    "subtotal_label": sum_check.get("subtotal_label"),
+                    "subtotal_difference": sum_check.get("subtotal_difference"),
+                    "subtotal_status": sum_check.get("subtotal_status"),
+                    "opening_total": sum_check.get("opening_total"),
+                    "opening_total_label": sum_check.get("opening_total_label"),
+                    "opening_total_difference": sum_check.get("opening_total_difference"),
+                    "opening_total_status": sum_check.get("opening_total_status"),
                 },
                 "duplicate_items": {
                     "status": "fail" if duplicate_items else ("not_detected" if not table_detected else "pass"),
@@ -1039,6 +1597,11 @@ class ItemizedPricingChecker:
                 },
             },
             "evidence": {
+                "analysis_basis": "structured_logical_tables" if structured_analysis["used_tables"] else "text_sections",
+                "structured_tables": structured_analysis["used_tables"],
+                "structured_relation_count": len(structured_analysis["relation_rows"]),
+                "structured_relations": self._serialize_entries(structured_analysis["relation_rows"]),
+                "structured_group_checks": self._serialize_entries(structured_analysis["group_checks"]),
                 "extracted_item_count": len(extracted_items),
                 "extracted_items": self._serialize_entries(extracted_items),
                 "total_candidates": self._serialize_entries(extracted_totals),
@@ -1218,6 +1781,41 @@ class ItemizedPricingChecker:
         if has_strong_keyword:
             return True
         return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
+
+    # 判断总价标签是否更像开标一览表/总报价口径的声明总价。
+    def _looks_like_opening_total_label(self, label: str | None) -> bool:
+        compact = re.sub(r"\s+", "", str(label or ""))
+        if not compact:
+            return False
+        return any(keyword in compact for keyword in self.OPENING_TOTAL_KEYWORDS)
+
+    # 从总价候选值中优先挑出开标一览表或投标总价口径的声明总价。
+    def _select_opening_total_candidate(self, totals: list[dict]) -> dict | None:
+        preferred_candidates = [
+            item
+            for item in totals
+            if not item.get("is_subtotal") and self._looks_like_opening_total_label(item.get("label"))
+        ]
+        if preferred_candidates:
+            return min(
+                preferred_candidates,
+                key=lambda item: (
+                    0 if "投标总价" in str(item.get("label") or "") else 1,
+                    0 if item.get("source") == "explicit_amount" else 1 if item.get("source") == "table_total" else 2,
+                    len(str(item.get("label") or "")),
+                ),
+            )
+
+        preferential_candidates = [item for item in totals if item.get("is_preferential_total")]
+        if preferential_candidates:
+            return min(
+                preferential_candidates,
+                key=lambda item: (
+                    0 if item.get("source") == "explicit_amount" else 1,
+                    len(str(item.get("label") or "")),
+                ),
+            )
+        return None
 
     # 分项抽取与表格行重建
     # 从一个候选区段中抽取分项、总价、算术疑点和未完整识别的行。
@@ -1611,55 +2209,121 @@ class ItemizedPricingChecker:
     def _looks_like_money_value(self, value: Decimal) -> bool:
         return value >= Decimal("100")
 
-    # 比较分项金额汇总与声明总价，生成统一的汇总校验结果。
-    def _evaluate_sum_check(self, items: list[dict], totals: list[dict], *, preferential_mode: bool = False) -> dict:
-        if len(items) < 2 or not totals:
-            calculated_total = sum((item["amount"] for item in items if item.get("amount") is not None), Decimal("0"))
-            return {
-                "status": "unknown" if items else "not_detected",
-                "calculated_total": self._format_decimal(calculated_total) if items else None,
-                "declared_total": None,
-                "difference": None,
-                "matched_total_label": None,
-                "total_mode": "preferential_total" if preferential_mode else "standard",
-                "preferential_total": None,
-                "preferential_total_label": None,
-            }
+    def _sum_entry_amounts(self, entries: list[dict]) -> Decimal:
+        return sum((entry["amount"] for entry in entries if entry.get("amount") is not None), Decimal("0"))
 
-        calculated_total = sum((item["amount"] for item in items if item.get("amount") is not None), Decimal("0"))
+    def _build_sum_check_result(
+        self,
+        *,
+        status: str,
+        calculated_total: Decimal | None,
+        declared_total: Decimal | None = None,
+        difference: Decimal | None = None,
+        matched_total_label: str | None = None,
+        total_mode: str = "standard",
+        preferential_total: Decimal | None = None,
+        preferential_total_label: str | None = None,
+        subtotal_total: Decimal | None = None,
+        subtotal_label: str | None = None,
+        subtotal_difference: Decimal | None = None,
+        subtotal_status: str | None = None,
+        opening_total: Decimal | None = None,
+        opening_total_label: str | None = None,
+        opening_total_difference: Decimal | None = None,
+        opening_total_status: str | None = None,
+    ) -> dict:
+        return {
+            "status": status,
+            "calculated_total": self._format_decimal(calculated_total),
+            "declared_total": self._format_decimal(declared_total),
+            "difference": self._format_decimal(difference),
+            "matched_total_label": matched_total_label,
+            "total_mode": total_mode,
+            "preferential_total": self._format_decimal(preferential_total),
+            "preferential_total_label": preferential_total_label,
+            "subtotal_total": self._format_decimal(subtotal_total),
+            "subtotal_label": subtotal_label,
+            "subtotal_difference": self._format_decimal(subtotal_difference),
+            "subtotal_status": subtotal_status,
+            "opening_total": self._format_decimal(opening_total),
+            "opening_total_label": opening_total_label,
+            "opening_total_difference": self._format_decimal(opening_total_difference),
+            "opening_total_status": opening_total_status,
+        }
+
+    def _evaluate_preferential_sum_check(self, calculated_total: Decimal, totals: list[dict]) -> dict | None:
+        subtotal_candidates = [item for item in totals if item.get("is_subtotal")]
+        preferential_candidates = [item for item in totals if item.get("is_preferential_total")]
+        if not subtotal_candidates:
+            return None
+
+        best_subtotal = min(
+            subtotal_candidates,
+            key=lambda item: abs(item["amount"] - calculated_total),
+        )
+        subtotal_difference = calculated_total - best_subtotal["amount"]
+        subtotal_status = "pass" if abs(subtotal_difference) <= self.MONEY_TOLERANCE else "fail"
+
+        best_preferential_total = None
+        if preferential_candidates:
+            best_preferential_total = min(
+                preferential_candidates,
+                key=lambda item: abs(item["amount"] - calculated_total),
+            )
+
+        best_opening_total = self._select_opening_total_candidate(totals)
+        opening_total_difference = (
+            calculated_total - best_opening_total["amount"]
+            if best_opening_total is not None
+            else None
+        )
+        opening_total_status = (
+            "pass"
+            if best_opening_total is not None and abs(opening_total_difference) <= self.MONEY_TOLERANCE
+            else ("fail" if best_opening_total is not None else None)
+        )
+
+        matched_total = best_subtotal
+        matched_difference = subtotal_difference
+        overall_status = subtotal_status
+        if best_opening_total is not None:
+            matched_total = best_opening_total
+            matched_difference = opening_total_difference
+            if opening_total_status == "fail":
+                overall_status = "fail"
+
+        return self._build_sum_check_result(
+            status=overall_status,
+            calculated_total=calculated_total,
+            declared_total=matched_total["amount"],
+            difference=matched_difference,
+            matched_total_label=matched_total["label"],
+            total_mode="preferential_total",
+            preferential_total=(best_preferential_total or {}).get("amount"),
+            preferential_total_label=(best_preferential_total or {}).get("label"),
+            subtotal_total=best_subtotal["amount"],
+            subtotal_label=best_subtotal["label"],
+            subtotal_difference=subtotal_difference,
+            subtotal_status=subtotal_status,
+            opening_total=(best_opening_total or {}).get("amount"),
+            opening_total_label=(best_opening_total or {}).get("label"),
+            opening_total_difference=opening_total_difference,
+            opening_total_status=opening_total_status,
+        )
+
+    def _evaluate_sum_check(self, items: list[dict], totals: list[dict], *, preferential_mode: bool = False) -> dict:
+        calculated_total = self._sum_entry_amounts(items)
+        if len(items) < 2 or not totals:
+            return self._build_sum_check_result(
+                status="unknown" if items else "not_detected",
+                calculated_total=calculated_total if items else None,
+                total_mode="preferential_total" if preferential_mode else "standard",
+            )
+
         if preferential_mode:
-            subtotal_candidates = [item for item in totals if item.get("is_subtotal")]
-            preferential_candidates = [item for item in totals if item.get("is_preferential_total")]
-            if subtotal_candidates:
-                best_subtotal = min(
-                    subtotal_candidates,
-                    key=lambda item: abs(item["amount"] - calculated_total),
-                )
-                subtotal_difference = calculated_total - best_subtotal["amount"]
-                best_preferential_total = None
-                if preferential_candidates:
-                    best_preferential_total = min(
-                        preferential_candidates,
-                        key=lambda item: abs(item["amount"] - calculated_total),
-                    )
-                return {
-                    "status": "pass" if abs(subtotal_difference) <= self.MONEY_TOLERANCE else "fail",
-                    "calculated_total": self._format_decimal(calculated_total),
-                    "declared_total": self._format_decimal(best_subtotal["amount"]),
-                    "difference": self._format_decimal(subtotal_difference),
-                    "matched_total_label": best_subtotal["label"],
-                    "total_mode": "preferential_total",
-                    "preferential_total": (
-                        self._format_decimal(best_preferential_total["amount"])
-                        if best_preferential_total is not None
-                        else None
-                    ),
-                    "preferential_total_label": (
-                        best_preferential_total["label"]
-                        if best_preferential_total is not None
-                        else None
-                    ),
-                }
+            preferential_result = self._evaluate_preferential_sum_check(calculated_total, totals)
+            if preferential_result is not None:
+                return preferential_result
 
         best_total = min(
             totals,
@@ -1670,17 +2334,13 @@ class ItemizedPricingChecker:
             ),
         )
         difference = calculated_total - best_total["amount"]
-        status = "pass" if abs(difference) <= self.MONEY_TOLERANCE else "fail"
-        return {
-            "status": status,
-            "calculated_total": self._format_decimal(calculated_total),
-            "declared_total": self._format_decimal(best_total["amount"]),
-            "difference": self._format_decimal(difference),
-            "matched_total_label": best_total["label"],
-            "total_mode": "standard",
-            "preferential_total": None,
-            "preferential_total_label": None,
-        }
+        return self._build_sum_check_result(
+            status="pass" if abs(difference) <= self.MONEY_TOLERANCE else "fail",
+            calculated_total=calculated_total,
+            declared_total=best_total["amount"],
+            difference=difference,
+            matched_total_label=best_total["label"],
+        )
 
     # 下浮率模式列项抽取与对比
     # 从候选区段中抽取所有可识别的序号。
@@ -2086,8 +2746,9 @@ class ItemizedPricingChecker:
         serialized = []
         for entry in entries:
             normalized_entry = dict(entry)
-            if isinstance(normalized_entry.get("amount"), Decimal):
-                normalized_entry["amount"] = self._format_decimal(normalized_entry["amount"])
+            for key, value in list(normalized_entry.items()):
+                if isinstance(value, Decimal):
+                    normalized_entry[key] = self._format_decimal(value)
             serialized.append(normalized_entry)
         return serialized
 

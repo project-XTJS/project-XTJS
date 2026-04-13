@@ -13,6 +13,7 @@ from starlette.concurrency import run_in_threadpool
 from app.router.dependencies import get_text_analysis_service
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
+from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
 router = APIRouter()
@@ -107,13 +108,38 @@ def _build_public_native_table_value(value: Any) -> Any:
     return html.unescape(str(value))
 
 
-def _build_public_logical_tables(native_tables: list[dict] | None) -> list[dict]:
+def _build_public_logical_tables(tables: list[dict] | None) -> list[dict]:
     public_tables: list[dict] = []
-    for table in native_tables or []:
+    for table in tables or []:
         if not isinstance(table, dict):
             continue
         public_tables.append(_build_public_native_table_value(table))
     return public_tables
+
+
+def _rebuild_logical_tables_from_native(native_tables: list[dict] | None) -> list[dict]:
+    layout_sections: list[dict] = []
+    for table in native_tables or []:
+        if not isinstance(table, dict):
+            continue
+        block_content = str(table.get("block_content") or "").strip()
+        if "<table" not in block_content.lower():
+            continue
+        table_structure = build_table_structure(html_parts=[block_content], raw_text="")
+        if not isinstance(table_structure, dict):
+            continue
+        layout_sections.append(
+            {
+                "type": "table",
+                "page": table.get("page"),
+                "raw_text": block_content,
+                "html": block_content,
+                "table_structure": table_structure,
+            }
+        )
+    if not layout_sections:
+        return []
+    return build_logical_tables(layout_sections)
 
 
 def _build_analyze_file_response(
@@ -147,8 +173,10 @@ def _build_analyze_file_response(
         seal_recognition_enabled=extraction_result["seal_recognition_enabled"],
     )
     public_layout_sections = _build_public_sections(extraction_result["layout_sections"])
+    rebuilt_logical_tables = _rebuild_logical_tables_from_native(extraction_result.get("native_tables"))
+    public_native_tables = _build_public_logical_tables(extraction_result.get("native_tables"))
     public_logical_tables = _build_public_logical_tables(
-        extraction_result.get("native_tables") or extraction_result["logical_tables"]
+        rebuilt_logical_tables or extraction_result.get("logical_tables") or extraction_result.get("native_tables")
     )
 
     return {
@@ -159,6 +187,7 @@ def _build_analyze_file_response(
         "page_count": extraction_result["page_count"],
         "layout_sections": public_layout_sections,
         "logical_tables": public_logical_tables,
+        "native_tables": public_native_tables,
         "recognition": {
             "route": extraction_result["recognition_route"],
             "parser_engine": extraction_result["parser_engine"],
