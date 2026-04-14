@@ -311,6 +311,70 @@ class ItemizedPricingChecker:
             )
         return deduped
 
+    def _extract_structured_amount_only_item(
+        self,
+        cells: list[str],
+        *,
+        section_context: dict,
+        row_index: int,
+        column_map: dict,
+        title: str | None,
+    ) -> dict | None:
+        row_text = " ".join(cell for cell in cells if cell)
+        serial = self._structured_cell_value(cells, column_map.get("serial"))
+        label = self._build_structured_amount_only_label(
+            cells=cells,
+            label_columns=column_map.get("label_columns") or [],
+            serial=serial,
+            title=title,
+        )
+        amount_cell = self._structured_cell_value(cells, column_map.get("line_total"))
+        amount_candidates = self._extract_row_amounts(amount_cell) if amount_cell else []
+        if amount_candidates:
+            amount = amount_candidates[-1]
+            return {
+                "label": label,
+                "amount": amount,
+                "source": "structured_amount_only_row",
+                "declared_line_total": amount,
+                "relation_type": "amount_only_row",
+                **self._build_entry_context(section_context, serial=serial, line_index=row_index),
+            }
+        if label and serial and amount_cell:
+            return {
+                "_unresolved": True,
+                "serial": serial,
+                "label": label,
+                "text": row_text[:200],
+                "amount_cell": amount_cell,
+                "reason": "amount_not_parsed",
+                "reason_text": "该行已识别出分项标签和金额列，但金额列内容未能解析为合法金额。",
+                **self._build_entry_context(section_context, serial=serial, line_index=row_index),
+            }
+        return None
+
+    def _build_structured_amount_only_label(
+        self,
+        *,
+        cells: list[str],
+        label_columns: list[int],
+        serial: str | None,
+        title: str | None,
+    ) -> str:
+        parts = []
+        for index in label_columns:
+            cell = self._structured_cell_value(cells, index)
+            if cell and cell not in parts:
+                parts.append(cell)
+        label = " / ".join(parts)
+        if serial and label:
+            return f"{serial}:{label}"[:120]
+        if label:
+            return label[:120]
+        if serial and title:
+            return f"{serial}:{title}"[:120]
+        return (title or serial or "结构化分项")[:120]
+
     # 从 layout_sections 中定位锚点后的表格序列，优先使用结构化表格结果。
     def _find_layout_table_sections(self, payload: dict | None, anchors: tuple[str, ...]) -> list[dict]:
         layout_sections = self._get_layout_sections(payload)
@@ -453,6 +517,7 @@ class ItemizedPricingChecker:
             "unresolved_rows": [],
             "relation_rows": [],
             "group_checks": [],
+            "amount_only_item_count": 0,
             "used_tables": [],
         }
         if not isinstance(document, dict):
@@ -468,11 +533,12 @@ class ItemizedPricingChecker:
         unresolved_rows = []
         relation_rows = []
         group_checks = []
+        amount_only_item_count = 0
         used_tables = []
 
         for table_index, table in enumerate(logical_tables):
             headers = self._get_logical_table_headers(table)
-            column_map = self._resolve_structured_price_columns(headers)
+            column_map = self._resolve_structured_price_columns_for_table(table, headers=headers)
             if column_map is None:
                 continue
 
@@ -495,6 +561,7 @@ class ItemizedPricingChecker:
             unresolved_rows.extend(table_result["unresolved_rows"])
             relation_rows.extend(table_result["relation_rows"])
             group_checks.extend(table_result["group_checks"])
+            amount_only_item_count += int(table_result.get("amount_only_item_count") or 0)
             used_tables.append(
                 {
                     "table_id": table.get("id"),
@@ -512,6 +579,7 @@ class ItemizedPricingChecker:
             "unresolved_rows": unresolved_rows,
             "relation_rows": relation_rows,
             "group_checks": group_checks,
+            "amount_only_item_count": amount_only_item_count,
             "used_tables": used_tables,
         }
 
@@ -532,6 +600,195 @@ class ItemizedPricingChecker:
             return None
         return column_map
 
+    def _resolve_structured_price_columns_for_table(self, table: dict, *, headers: list[str] | None = None) -> dict | None:
+        headers = headers or self._get_logical_table_headers(table)
+        standard_map = self._resolve_structured_price_columns(headers)
+        if standard_map is not None:
+            standard_map = dict(standard_map)
+            standard_map["mode"] = "arithmetic"
+            standard_map["data_start_index"] = self._structured_table_data_start_index(table)
+            return standard_map
+        return self._infer_amount_only_column_map(table, headers=headers)
+
+    def _structured_table_data_start_index(self, table: dict) -> int:
+        rows = table.get("rows") or []
+        declared_header_row_count = int(table.get("header_row_count") or 0)
+        if declared_header_row_count > 0:
+            return min(len(rows), declared_header_row_count)
+
+        if rows:
+            first_row = [str(cell).strip() for cell in rows[0] if str(cell).strip()]
+            unique_first_row = []
+            for value in first_row:
+                if value not in unique_first_row:
+                    unique_first_row.append(value)
+            start_index = 1 if len(unique_first_row) == 1 and len(unique_first_row[0]) >= 4 else 0
+            if self._extract_row_based_table_headers({"rows": rows[start_index : start_index + 2]}):
+                start_index += 1
+            if start_index > 0:
+                return min(len(rows), start_index)
+
+        html_rows = self._parse_html_table_rows(table)
+        if not html_rows:
+            return 0
+
+        start_index = 0
+        if self._extract_html_title_row(html_rows):
+            start_index += 1
+        if self._extract_html_header_row(html_rows[start_index:]):
+            start_index += 1
+        return min(len(rows), start_index)
+
+    def _infer_amount_only_column_map(self, table: dict, *, headers: list[str]) -> dict | None:
+        rows = table.get("rows") or []
+        if not rows:
+            return None
+
+        data_start_index = self._structured_table_data_start_index(table)
+        data_rows = [row for row in rows[data_start_index:] if isinstance(row, list)]
+        if not data_rows:
+            return None
+
+        column_count = max(
+            len(headers),
+            max((len(row) for row in data_rows), default=0),
+        )
+        if column_count <= 1:
+            return None
+
+        serial_index = self._infer_structured_serial_column(data_rows, column_count)
+        excluded_indexes = {index for index in (serial_index,) if index is not None}
+        line_total_index = self._infer_structured_amount_column(
+            data_rows,
+            column_count,
+            excluded_indexes=excluded_indexes,
+        )
+        if line_total_index is None:
+            return None
+
+        label_columns = self._infer_structured_label_columns(
+            headers=headers,
+            data_rows=data_rows,
+            column_count=column_count,
+            excluded_indexes=excluded_indexes | {line_total_index},
+        )
+        if not label_columns:
+            return None
+
+        amount_hits = 0
+        serial_hits = 0
+        for row in data_rows:
+            if line_total_index < len(row) and self._extract_row_amounts(str(row[line_total_index]).strip()):
+                amount_hits += 1
+            if serial_index is not None and serial_index < len(row) and self._extract_row_serial(str(row[serial_index]).strip()):
+                serial_hits += 1
+
+        if amount_hits < 2:
+            return None
+        if serial_index is None and serial_hits == 0:
+            return None
+
+        return {
+            "mode": "amount_only",
+            "serial": serial_index,
+            "line_total": line_total_index,
+            "label_columns": label_columns,
+            "data_start_index": data_start_index,
+        }
+
+    def _infer_structured_serial_column(self, rows: list[list[object]], column_count: int) -> int | None:
+        best_index = None
+        best_score = -1
+        for index in range(column_count):
+            serial_hits = 0
+            nonempty_hits = 0
+            for row in rows:
+                if index >= len(row):
+                    continue
+                cell = str(row[index]).strip()
+                if not cell:
+                    continue
+                nonempty_hits += 1
+                if self._extract_row_serial(cell) or re.fullmatch(r"\d+(?:\.\d+)?", cell):
+                    serial_hits += 1
+            if serial_hits < 2:
+                continue
+            score = serial_hits * 10 - nonempty_hits
+            if best_index is None or score > best_score:
+                best_index = index
+                best_score = score
+        return best_index
+
+    def _infer_structured_amount_column(
+        self,
+        rows: list[list[object]],
+        column_count: int,
+        *,
+        excluded_indexes: set[int],
+    ) -> int | None:
+        best_index = None
+        best_score = -1
+        for index in range(column_count):
+            if index in excluded_indexes:
+                continue
+            amount_hits = 0
+            text_hits = 0
+            for row in rows:
+                if index >= len(row):
+                    continue
+                cell = str(row[index]).strip()
+                if not cell:
+                    continue
+                if self._extract_row_amounts(cell):
+                    amount_hits += 1
+                elif re.search(r"[\u4e00-\u9fffA-Za-z]", cell):
+                    text_hits += 1
+            if amount_hits < 2 or amount_hits <= text_hits:
+                continue
+            score = amount_hits * 10 - text_hits + index
+            if best_index is None or score > best_score:
+                best_index = index
+                best_score = score
+        return best_index
+
+    def _infer_structured_label_columns(
+        self,
+        *,
+        headers: list[str],
+        data_rows: list[list[object]],
+        column_count: int,
+        excluded_indexes: set[int],
+    ) -> list[int]:
+        label_columns = []
+        header_hints = ("名称", "项目", "功能", "内容", "描述", "说明", "参数", "配置", "规格", "型号", "品牌", "厂家")
+        for index in range(column_count):
+            if index in excluded_indexes:
+                continue
+
+            header = headers[index] if index < len(headers) else ""
+            normalized_header = self._normalize_label_key(header)
+            header_hit = any(keyword in normalized_header for keyword in header_hints)
+
+            text_hits = 0
+            amount_hits = 0
+            for row in data_rows:
+                if index >= len(row):
+                    continue
+                cell = str(row[index]).strip()
+                if not cell:
+                    continue
+                if self._extract_row_amounts(cell):
+                    amount_hits += 1
+                elif re.search(r"[\u4e00-\u9fffA-Za-z]", cell):
+                    text_hits += 1
+
+            if text_hits <= amount_hits and not header_hit:
+                continue
+            if text_hits == 0 and not header_hit:
+                continue
+            label_columns.append(index)
+        return label_columns
+
     # 在规范化表头列表中查找最贴近目标语义的列。
     def _match_structured_column_index(self, headers: list[str], aliases: list[str]) -> int | None:
         for index, header in enumerate(headers):
@@ -545,8 +802,7 @@ class ItemizedPricingChecker:
     def _analyze_structured_itemized_table(self, table: dict, *, table_index: int, column_map: dict) -> dict:
         headers = self._get_logical_table_headers(table)
         rows = table.get("rows") or []
-        header_row_count = int(table.get("header_row_count") or 0)
-        start_index = min(len(rows), header_row_count)
+        start_index = min(len(rows), int(column_map.get("data_start_index") or 0))
         pages = self._get_logical_table_pages(table)
         section_context = {
             "section_id": f"logical_table:{table.get('id') or table_index}",
@@ -555,8 +811,10 @@ class ItemizedPricingChecker:
         }
         carry = {"serial": None, "model": None, "brand": None}
         raw_relations = []
+        direct_items = []
         totals = []
         unresolved_rows = []
+        amount_only_item_count = 0
 
         for offset, row in enumerate(rows[start_index:], start=start_index):
             if not isinstance(row, list):
@@ -578,6 +836,23 @@ class ItemizedPricingChecker:
                 totals.append(total_entry)
                 continue
 
+            if column_map.get("mode") == "amount_only":
+                amount_only_item = self._extract_structured_amount_only_item(
+                    cells,
+                    section_context=section_context,
+                    row_index=offset,
+                    column_map=column_map,
+                    title=table.get("title"),
+                )
+                if amount_only_item is None:
+                    continue
+                if amount_only_item.pop("_unresolved", False):
+                    unresolved_rows.append(amount_only_item)
+                    continue
+                direct_items.append(amount_only_item)
+                amount_only_item_count += 1
+                continue
+
             relation = self._extract_structured_row_relation(
                 cells,
                 section_context=section_context,
@@ -595,12 +870,13 @@ class ItemizedPricingChecker:
 
         grouped_result = self._summarize_structured_relations(raw_relations)
         return {
-            "items": grouped_result["items"],
+            "items": direct_items + grouped_result["items"],
             "totals": totals,
             "row_issues": grouped_result["row_issues"],
             "unresolved_rows": unresolved_rows,
-            "relation_rows": grouped_result["relation_rows"],
+            "relation_rows": direct_items + grouped_result["relation_rows"],
             "group_checks": grouped_result["group_checks"],
+            "amount_only_item_count": amount_only_item_count,
         }
 
     # 统一结构化表格行长度，避免缺列时后续索引越界。
@@ -640,9 +916,16 @@ class ItemizedPricingChecker:
         amount_candidates = []
         total_index = column_map.get("line_total")
         if total_index is not None and total_index < len(cells):
-            amount_candidates = self._extract_row_amounts(cells[total_index])
+            total_text = cells[total_index]
+            amount_candidates = self._extract_row_amounts(total_text)
+            if not amount_candidates:
+                cleaned_total_text = re.sub(r"[（(][^）)]*(?:税|税率)[^）)]*[）)]", "", total_text)
+                amount_candidates = self._extract_row_amounts(cleaned_total_text)
         if not amount_candidates:
             amount_candidates = self._extract_row_amounts(row_text)
+        if not amount_candidates:
+            cleaned_row_text = re.sub(r"[（(][^）)]*(?:税|税率)[^）)]*[）)]", "", row_text)
+            amount_candidates = self._extract_row_amounts(cleaned_row_text)
         if not amount_candidates:
             return None
 
@@ -706,6 +989,11 @@ class ItemizedPricingChecker:
                     "serial": serial,
                     "label": label,
                     "text": row_text[:200],
+                    "quantity_cell": self._structured_cell_value(cells, column_map.get("quantity")),
+                    "unit_price_cell": self._structured_cell_value(cells, column_map.get("unit_price")),
+                    "line_total_cell": self._structured_cell_value(cells, column_map.get("line_total")),
+                    "reason": "pricing_fields_incomplete",
+                    "reason_text": "该行存在报价字段痕迹，但数量、单价、总价至少有一项未能完整识别。",
                     **self._build_entry_context(section_context, serial=serial, line_index=row_index),
                 }
             if label and (description or model or serial):
@@ -1012,15 +1300,44 @@ class ItemizedPricingChecker:
     # 提取 logical table 表头，必要时从 HTML 表格内容里反推。
     def _get_logical_table_headers(self, table: dict) -> list[str]:
         headers = [str(header).strip() for header in (table.get("headers") or []) if str(header).strip()]
-        if headers:
+        if headers and not all(re.fullmatch(r"col_\d+", header, re.IGNORECASE) for header in headers):
             return headers
+
+        row_headers = self._extract_row_based_table_headers(table)
+        if row_headers:
+            return row_headers
 
         html_rows = self._parse_html_table_rows(table)
         if len(html_rows) < 2:
-            return []
+            return headers
 
         header_row = self._extract_html_header_row(html_rows[1:])
-        return header_row or []
+        return header_row or headers
+
+    def _extract_row_based_table_headers(self, table: dict) -> list[str]:
+        rows = [row for row in (table.get("rows") or [])[:3] if isinstance(row, list)]
+        if not rows:
+            return []
+
+        start_index = 0
+        first_row = [str(cell).strip() for cell in rows[0] if str(cell).strip()]
+        unique_first_row = []
+        for value in first_row:
+            if value not in unique_first_row:
+                unique_first_row.append(value)
+        if len(unique_first_row) == 1 and len(rows) > 1:
+            start_index = 1
+
+        header_hints = ("序号", "编号", "名称", "项目", "功能", "内容", "描述", "说明", "参数", "规格", "型号", "金额", "总价", "合计")
+        for row in rows[start_index : start_index + 2]:
+            values = [str(cell).strip() for cell in row if str(cell).strip()]
+            if len(values) < 2:
+                continue
+            compact_values = {re.sub(r"\s+", "", value) for value in values}
+            header_hits = sum(1 for value in compact_values if any(hint in value for hint in header_hints))
+            if header_hits >= 2 and not any(self._extract_money_candidates(value) for value in values):
+                return values
+        return []
 
     # 生成表格预览文本，用于 layout 表格与 logical table 的匹配评分。
     def _logical_table_preview_lines(self, table: dict) -> list[str]:
@@ -1176,16 +1493,26 @@ class ItemizedPricingChecker:
         if not rows:
             return None
         values = [cell["text"] for cell in rows[0] if cell["text"]]
-        if len(values) == 1 and len(values[0]) >= 4:
-            return values[0]
+        unique_values = []
+        for value in values:
+            if value not in unique_values:
+                unique_values.append(value)
+        if len(unique_values) == 1 and len(unique_values[0]) >= 4:
+            return unique_values[0]
         return None
 
     # 识别 HTML 表格中真正的列表头。
     def _extract_html_header_row(self, rows: list[list[dict]]) -> list[str]:
-        for row in rows[:2]:
+        header_hints = ("序号", "编号", "名称", "项目", "功能", "内容", "描述", "说明", "参数", "规格", "型号", "金额", "总价", "合计")
+        for row in rows[:3]:
             values = [cell["text"] for cell in row if cell["text"]]
+            if len(values) < 2:
+                continue
             compact_values = {re.sub(r"\s+", "", value) for value in values}
             if {"序号", "单价", "合计"}.issubset(compact_values):
+                return values
+            header_hits = sum(1 for value in compact_values if any(hint in value for hint in header_hints))
+            if header_hits >= 2 and not any(self._extract_money_candidates(value) for value in values):
                 return values
         return []
 
@@ -1414,7 +1741,11 @@ class ItemizedPricingChecker:
     ) -> list[str]:
         details = []
         if structured_analysis["used_tables"]:
-            details.append(f"优先基于 {len(structured_analysis['used_tables'])} 张结构化表格进行单价、数量与小计校验。")
+            details.append(f"优先基于 {len(structured_analysis['used_tables'])} 张结构化表格进行分项金额与总价校验。")
+        if structured_analysis.get("amount_only_item_count"):
+            details.append(
+                f"其中 {structured_analysis['amount_only_item_count']} 条分项仅声明金额，已参与汇总校验，不执行单价乘数量校验。"
+            )
         if structured_analysis["group_checks"]:
             details.append(
                 f"识别到 {len(structured_analysis['group_checks'])} 组因合并单元格导致的组总价重复展示，汇总时已按分项明细去重。"
@@ -1534,6 +1865,8 @@ class ItemizedPricingChecker:
             unresolved_rows,
         )
         passed = self._status_to_passed(status)
+        serialized_total_candidates = self._serialize_entries(extracted_totals)
+        serialized_unresolved_rows = self._serialize_entries(unresolved_rows)
         details = self._build_normal_details(
             structured_analysis=structured_analysis,
             extracted_items=extracted_items,
@@ -1543,6 +1876,13 @@ class ItemizedPricingChecker:
             duplicate_items=duplicate_items,
             unresolved_rows=unresolved_rows,
             serial_gap_hints=serial_gap_hints,
+        )
+        manual_review = self._build_manual_review_payload(
+            status=status,
+            sum_check=sum_check,
+            total_candidates=serialized_total_candidates,
+            unresolved_rows=serialized_unresolved_rows,
+            row_issues=row_issues,
         )
 
         return {
@@ -1556,17 +1896,33 @@ class ItemizedPricingChecker:
                     "status": (
                         "fail"
                         if row_issues
-                        else ("unknown" if unresolved_rows else ("not_detected" if not table_detected else "pass"))
+                        else (
+                            "unknown"
+                            if unresolved_rows
+                            else (
+                                "skipped"
+                                if (
+                                    structured_analysis.get("amount_only_item_count")
+                                    and not structured_analysis["group_checks"]
+                                    and not any(
+                                        entry.get("relation_type") == "row_total"
+                                        for entry in (structured_analysis.get("relation_rows") or [])
+                                    )
+                                )
+                                else ("not_detected" if not table_detected else "pass")
+                            )
+                        )
                     ),
                     "issue_count": len(row_issues),
                     "issues": row_issues,
                     "unresolved_count": len(unresolved_rows),
-                    "unresolved_rows": unresolved_rows,
+                    "unresolved_rows": serialized_unresolved_rows,
+                    "skipped_count": int(structured_analysis.get("amount_only_item_count") or 0),
                     "group_check_count": len(structured_analysis["group_checks"]),
                     "group_checks": self._serialize_entries(structured_analysis["group_checks"]),
                 },
                 "sum_consistency": {
-                    "status": "unknown" if unresolved_rows and sum_check["status"] in {"pass", "fail"} else sum_check["status"],
+                    "status": "unknown" if unresolved_rows and sum_check["status"] == "pass" else sum_check["status"],
                     "calculated_total": sum_check["calculated_total"],
                     "declared_total": sum_check["declared_total"],
                     "difference": sum_check["difference"],
@@ -1604,9 +1960,10 @@ class ItemizedPricingChecker:
                 "structured_group_checks": self._serialize_entries(structured_analysis["group_checks"]),
                 "extracted_item_count": len(extracted_items),
                 "extracted_items": self._serialize_entries(extracted_items),
-                "total_candidates": self._serialize_entries(extracted_totals),
-                "unresolved_rows": unresolved_rows,
+                "total_candidates": serialized_total_candidates,
+                "unresolved_rows": serialized_unresolved_rows,
             },
+            "manual_review": manual_review,
             "details": details,
         }
 
@@ -1866,6 +2223,8 @@ class ItemizedPricingChecker:
                             "serial": block.get("serial"),
                             "label": self._extract_block_label(block),
                             "text": block_text[:160],
+                            "reason": "item_amount_missing",
+                            "reason_text": "该行看起来像分项行，但未识别到可用金额。",
                         }
                     )
                 continue
@@ -2579,8 +2938,6 @@ class ItemizedPricingChecker:
         if not table_detected:
             return "not_detected"
         if row_issues or sum_status == "fail" or duplicate_items:
-            if unresolved_rows and not (row_issues or duplicate_items):
-                return "unknown"
             return "fail"
         if unresolved_rows:
             return "unknown"
@@ -2609,8 +2966,6 @@ class ItemizedPricingChecker:
             return "未识别到可用于校验的分项报价表或报价一览表。"
         if status == "pass":
             return "分项报价检查通过。"
-        if unresolved_rows:
-            return "已识别到报价内容，但存在未完整识别的分项行，暂无法完成可靠校验。"
         if row_issues and sum_status == "fail":
             return "发现逐项算术错误，且分项汇总与声明总价不一致。"
         if row_issues:
@@ -2619,7 +2974,54 @@ class ItemizedPricingChecker:
             return "发现疑似重项。"
         if sum_status == "fail":
             return "分项汇总与声明总价不一致。"
+        if unresolved_rows:
+            return "已识别到报价内容，但存在未完整识别的分项行，暂无法完成可靠校验。"
         return "已识别到报价内容，但当前证据不足以完成完整校验。"
+
+    def _build_manual_review_payload(
+        self,
+        *,
+        status: str,
+        sum_check: dict,
+        total_candidates: list[dict],
+        unresolved_rows: list[dict],
+        row_issues: list[dict],
+    ) -> dict:
+        recognized_total = None
+        if sum_check.get("declared_total") is not None or sum_check.get("matched_total_label"):
+            recognized_total = {
+                "amount": sum_check.get("declared_total"),
+                "label": sum_check.get("matched_total_label"),
+                "difference": sum_check.get("difference"),
+                "total_mode": sum_check.get("total_mode"),
+            }
+
+        return {
+            "required": bool(status in {"fail", "unknown"} or unresolved_rows or row_issues),
+            "recognized_total": recognized_total,
+            "calculated_total": sum_check.get("calculated_total"),
+            "difference": sum_check.get("difference"),
+            "total_candidates": total_candidates,
+            "unclear_content_count": len(unresolved_rows),
+            "unclear_contents": self._build_manual_review_unclear_contents(unresolved_rows),
+            "row_issue_count": len(row_issues),
+            "row_issues": self._serialize_entries(row_issues),
+        }
+
+    def _build_manual_review_unclear_contents(self, unresolved_rows: list[dict]) -> list[dict]:
+        unclear_contents = []
+        for row in unresolved_rows:
+            content = (
+                row.get("amount_cell")
+                or row.get("quantity_cell")
+                or row.get("unit_price_cell")
+                or row.get("line_total_cell")
+                or row.get("text")
+                or row.get("label")
+            )
+            if content:
+                unclear_contents.append(str(content))
+        return unclear_contents
 
     # 生成下浮率模式下的摘要结论。
     def _build_downward_rate_summary(self, missing_item_status: str) -> str:
