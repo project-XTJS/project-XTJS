@@ -394,6 +394,7 @@ class ItemizedPricingChecker:
 
             lines = []
             pages = []
+            logical_table_refs = []
             table_started = False
             for follower in layout_sections[idx + 1:]:
                 section_type = str(follower.get("type") or "").lower()
@@ -404,8 +405,10 @@ class ItemizedPricingChecker:
                 if not table_started:
                     if section_type == "table":
                         table_started = True
-                        lines.extend(self._extract_layout_table_lines(follower, logical_tables))
-                        pages.append(follower.get("page"))
+                        table_payload = self._extract_layout_table_payload(follower, logical_tables)
+                        lines.extend(table_payload["lines"])
+                        pages.extend(table_payload["pages"])
+                        logical_table_refs.extend(table_payload["logical_table_refs"])
                         continue
                     if self._matches_other_anchor(section_text, anchors):
                         break
@@ -416,8 +419,10 @@ class ItemizedPricingChecker:
                 if section_type == "table":
                     if not self._should_attach_following_layout_table(section_text):
                         continue
-                    lines.extend(self._extract_layout_table_lines(follower, logical_tables))
-                    pages.append(follower.get("page"))
+                    table_payload = self._extract_layout_table_payload(follower, logical_tables)
+                    lines.extend(table_payload["lines"])
+                    pages.extend(table_payload["pages"])
+                    logical_table_refs.extend(table_payload["logical_table_refs"])
                     continue
                 if self._is_layout_bridge_text(section_text):
                     continue
@@ -433,6 +438,7 @@ class ItemizedPricingChecker:
                     continue
                 seen_pages.add(page)
                 deduped_pages.append(page)
+            deduped_table_refs = list(dict.fromkeys(str(ref) for ref in logical_table_refs if ref))
 
             sections.append(
                 {
@@ -443,6 +449,7 @@ class ItemizedPricingChecker:
                     "score": len(lines),
                     "source": "layout_table_sequence",
                     "pages": deduped_pages,
+                    "logical_table_refs": deduped_table_refs,
                     "section_id": (
                         f"layout:{matched_anchor}:{idx}:{'-'.join(str(page) for page in deduped_pages)}"
                         if deduped_pages
@@ -497,19 +504,46 @@ class ItemizedPricingChecker:
 
     # 将 layout 表格区段转换为逐行文本，必要时绑定对应 logical table。
     def _extract_layout_table_lines(self, section: dict, logical_tables: list[dict]) -> list[str]:
+        return self._extract_layout_table_payload(section, logical_tables)["lines"]
+
+    def _extract_layout_table_payload(self, section: dict, logical_tables: list[dict]) -> dict:
         logical_table_index = self._match_logical_table_index(section, logical_tables)
         if logical_table_index is not None:
             logical_lines = []
-            for idx, logical_table in enumerate(self._collect_logical_table_sequence(logical_tables, logical_table_index)):
-                logical_lines.extend(self._logical_table_to_lines(logical_table, include_headers=(idx == 0)))
+            logical_table_refs = []
+            logical_table_pages = []
+            for offset, logical_table in enumerate(
+                self._collect_logical_table_sequence(logical_tables, logical_table_index),
+            ):
+                table_index = logical_table_index + offset
+                logical_lines.extend(self._logical_table_to_lines(logical_table, include_headers=(offset == 0)))
+                logical_table_refs.append(self._logical_table_ref(logical_table, table_index))
+                logical_table_pages.extend(self._get_logical_table_pages(logical_table))
             if logical_lines:
-                return logical_lines
+                return {
+                    "lines": logical_lines,
+                    "logical_table_refs": logical_table_refs,
+                    "pages": logical_table_pages,
+                }
 
         section_text = self._get_section_text(section)
-        return self._split_lines(self._normalize_text(section_text))
+        section_page = section.get("page")
+        return {
+            "lines": self._split_lines(self._normalize_text(section_text)),
+            "logical_table_refs": [],
+            "pages": [section_page] if isinstance(section_page, int) else [],
+        }
+
+    def _logical_table_ref(self, table: dict, index: int) -> str:
+        return str(table.get("id") or f"table_index_{index}")
 
     # 优先从结构化 logical table 中抽取报价行关系，避免 OCR 展平后重复累计组总价。
-    def _extract_structured_itemized_entries(self, document: dict | None) -> dict:
+    def _extract_structured_itemized_entries(
+        self,
+        document: dict | None,
+        *,
+        item_sections: list[dict] | None = None,
+    ) -> dict:
         empty_result = {
             "items": [],
             "totals": [],
@@ -527,6 +561,7 @@ class ItemizedPricingChecker:
         if not logical_tables:
             return empty_result
 
+        allowed_table_refs = self._collect_itemized_logical_table_refs(item_sections)
         extracted_items = []
         extracted_totals = []
         row_issues = []
@@ -537,6 +572,9 @@ class ItemizedPricingChecker:
         used_tables = []
 
         for table_index, table in enumerate(logical_tables):
+            table_ref = self._logical_table_ref(table, table_index)
+            if allowed_table_refs and table_ref not in allowed_table_refs:
+                continue
             headers = self._get_logical_table_headers(table)
             column_map = self._resolve_structured_price_columns_for_table(table, headers=headers)
             if column_map is None:
@@ -564,6 +602,7 @@ class ItemizedPricingChecker:
             amount_only_item_count += int(table_result.get("amount_only_item_count") or 0)
             used_tables.append(
                 {
+                    "table_ref": table_ref,
                     "table_id": table.get("id"),
                     "title": table.get("title"),
                     "pages": self._get_logical_table_pages(table),
@@ -582,6 +621,14 @@ class ItemizedPricingChecker:
             "amount_only_item_count": amount_only_item_count,
             "used_tables": used_tables,
         }
+
+    def _collect_itemized_logical_table_refs(self, sections: list[dict] | None) -> set[str]:
+        refs = set()
+        for section in sections or []:
+            for ref in section.get("logical_table_refs") or []:
+                if ref:
+                    refs.add(str(ref))
+        return refs
 
     # 根据表头识别结构化报价表中的关键列。
     def _resolve_structured_price_columns(self, headers: list[str]) -> dict | None:
@@ -957,7 +1004,7 @@ class ItemizedPricingChecker:
         model = self._structured_cell_value(cells, column_map.get("model"))
         description = self._structured_cell_value(cells, column_map.get("description"))
         brand = self._structured_cell_value(cells, column_map.get("brand"))
-        quantity = self._to_decimal(self._structured_cell_value(cells, column_map.get("quantity")))
+        quantity = self._to_quantity_decimal(self._structured_cell_value(cells, column_map.get("quantity")))
         unit_price = self._to_decimal(self._structured_cell_value(cells, column_map.get("unit_price")))
         line_total = self._to_decimal(self._structured_cell_value(cells, column_map.get("line_total")))
 
@@ -1819,7 +1866,10 @@ class ItemizedPricingChecker:
         document: dict | None = None,
     ) -> dict:
         item_source_sections = item_sections or total_sections or candidate_sections
-        structured_analysis = self._extract_structured_itemized_entries(document)
+        structured_analysis = self._extract_structured_itemized_entries(
+            document,
+            item_sections=item_sections,
+        )
         extracted_items = list(structured_analysis["items"])
         extracted_totals = list(structured_analysis["totals"])
         row_issues = list(structured_analysis["row_issues"])
@@ -2505,7 +2555,7 @@ class ItemizedPricingChecker:
         )
         for matches in candidate_patterns:
             for match in reversed(list(matches)):
-                quantity = self._to_decimal(match.group("qty"))
+                quantity = self._to_quantity_decimal(match.group("qty"))
                 unit_price = self._to_decimal(match.group("unit_price"))
                 line_total = self._to_decimal(match.group("total"))
                 if quantity is None or unit_price is None or line_total is None:
@@ -3178,6 +3228,33 @@ class ItemizedPricingChecker:
             return Decimal(str(value).replace(",", "").replace("￥", "").replace("¥", "").strip())
         except (InvalidOperation, ValueError):
             return None
+
+    def _to_quantity_decimal(self, value: str | Decimal | None) -> Decimal | None:
+        quantity = self._to_decimal(value)
+        if quantity is not None:
+            return quantity
+        if value is None:
+            return None
+
+        normalized = str(value).replace(",", "").strip()
+        if not normalized:
+            return None
+
+        unit_pattern = "|".join(
+            sorted((re.escape(unit) for unit in self.UNIT_KEYWORDS if unit), key=len, reverse=True)
+        )
+        if not unit_pattern:
+            return None
+
+        unit_chunk = rf"(?:(?:{unit_pattern})+|[A-Za-z]+(?:\d+)?)"
+        match = re.fullmatch(
+            rf"(?P<number>[+-]?(?:\d+(?:\.\d+)?))\s*(?P<unit>{unit_chunk}(?:\s*(?:/|每)?\s*{unit_chunk})*)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return self._to_decimal(match.group("number"))
 
     # 把 Decimal 规范化为保留两位小数的字符串。
     def _format_decimal(self, value: Decimal | None) -> str | None:

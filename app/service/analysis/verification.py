@@ -27,7 +27,7 @@ class VerificationChecker:
     COMPANY_ANCHORS = ("投标人名称", "投标人", "供应商名称", "供应商", "单位名称", "公司名称", "企业名称", "声明人")
     OPTIONAL_MARKERS = ("如有", "可选", "如适用", "如需")
     EXCLUDE_ATTACHMENTS = ("拟派项目负责人情况表", "项目人员配置表", "人员配置表")
-    ATTACHMENT_RE = re.compile(r"附件\s*(?P<number>\d+(?:\s*-\s*\d+)*)")
+    ATTACHMENT_RE = re.compile(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?附件\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)")
     COMMON_ATTACHMENT_TITLES = (
         "投标保证书",
         "开标一览表",
@@ -70,13 +70,14 @@ class VerificationChecker:
         bid_by_no = {x["attachment_number"]: x for x in bid_sections if x.get("attachment_number")}
         required = self._required_attachments(tender, bid_by_no, bid_sections)
 
-        results, missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], []
+        results, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], []
         for item in required:
             section = self._match_attachment(item, bid_by_no, bid_sections)
             result = self._evaluate_attachment(item, section, deadline, bidder_name)
-            results.append(result)
             if not result["found"]:
-                missing_attachments.append(result["title"])
+                skipped_missing_attachments.append(result["title"])
+                continue
+            results.append(result)
             if result["signature_check"]["status"] == "fail":
                 missing_signatures.append(result["title"])
             if result["signature_check"]["status"] == "pending":
@@ -88,7 +89,8 @@ class VerificationChecker:
             if result["date_check"]["status"] == "late":
                 late_dates.append(result["title"])
 
-        if not required or deadline is None:
+        checked_count = len(results)
+        if checked_count <= 0 or deadline is None:
             compliance_status = "pending"
         elif any(x["status"] == "fail" for x in results):
             compliance_status = "fail"
@@ -98,10 +100,10 @@ class VerificationChecker:
             compliance_status = "pass"
 
         date_status = "missing_deadline" if deadline is None else ("fail" if missing_dates or late_dates else "pass")
-        position_status = "fail" if missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
+        position_status = "fail" if missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
         return {
             "mode": "tender_vs_bid",
-            "summary": self._pair_summary(len(required), deadline, compliance_status, missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
+            "summary": self._pair_summary(checked_count, deadline, compliance_status, [], missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
             "seal_detected": seal_bundle["detected"],
             "seal_count": seal_bundle["count"],
             "seal_contents": seal_bundle["texts"],
@@ -110,9 +112,11 @@ class VerificationChecker:
             "signature_contents": signature_bundle["texts"],
             "bidder_name": bidder_name,
             "required_attachment_count": len(required),
+            "checked_attachment_count": checked_count,
             "required_attachments": [x["title"] for x in required],
+            "skipped_missing_attachments": skipped_missing_attachments,
             "attachment_results": results,
-            "position_check": {"status": position_status, "missing_attachments": missing_attachments, "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
+            "position_check": {"status": position_status, "missing_attachments": [], "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
             "date_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "missing_date_attachments": missing_dates, "late_date_attachments": late_dates},
             "deadline_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "source": "tender_document"},
             "seal_company_check": self._seal_company_check(bidder_name, seal_bundle["texts"]),
@@ -401,6 +405,12 @@ class VerificationChecker:
         title = re.sub(r"\s+", "", title)
         return title.strip("：:；;，,。")
 
+    def _leading_title_key(self, text: str) -> str:
+        leading = str(text or "").strip()
+        leading = re.sub(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*|[一二三四五六七八九十百]+[、.])", "", leading)
+        leading = re.sub(r"\s+", "", leading)
+        return leading.strip("：:；;，,。")
+
     def _attachment_title_score(self, left: str, right: str) -> float:
         left_key = self._attachment_title_key(left)
         right_key = self._attachment_title_key(right)
@@ -458,6 +468,13 @@ class VerificationChecker:
             return matched_expected is not None if expected_attachments else True
         if expected_attachments is None:
             return False
+        if matched_expected is not None and section.get("type") == "text":
+            leading_title_key = self._leading_title_key(text)
+            expected_title_key = str(matched_expected.get("title_key") or "").strip()
+            if expected_title_key and not (
+                leading_title_key.startswith("附件") or leading_title_key.startswith(expected_title_key)
+            ):
+                return False
         if len(compact) > (64 if section.get("type") == "heading" else 36):
             return False
         return matched_expected is not None
@@ -595,9 +612,13 @@ class VerificationChecker:
     def _match_attachment(self, attachment: dict, bid_by_no: dict[str, dict], all_sections: list[dict]) -> dict | None:
         if attachment.get("attachment_number") in bid_by_no:
             return bid_by_no[attachment["attachment_number"]]
+        attachment_number = attachment.get("attachment_number")
         title = self._attachment_title(attachment["title"])
         best = None
         for section in all_sections:
+            section_number = section.get("attachment_number")
+            if attachment_number is not None and section_number not in (None, attachment_number):
+                continue
             score = self._attachment_title_score(title, section.get("title") or "")
             if best is None or score > best["score"]:
                 best = {"score": score, "section": section}
@@ -1030,13 +1051,24 @@ class VerificationChecker:
             return max(fallback_items, key=lambda x: x["date"])
 
         contextual_items = []
-        for section in (sections or [])[-8:]:
+        recent_sections = list(sections or [])[-8:]
+        context_anchors = self.DATE_FIELD_ANCHORS + self.SIGNATURE_MARKERS + self.SEAL_MARKERS + self.COMPANY_ANCHORS
+        for idx, section in enumerate(recent_sections):
             section_text = str(section.get("text") or "").strip()
             compact = self._compact(section_text)
             if not compact:
                 continue
-            if any(anchor in compact for anchor in self.DATE_FIELD_ANCHORS + self.SIGNATURE_MARKERS + self.SEAL_MARKERS):
-                contextual_items.extend(self._date_candidates(section_text))
+            section_candidates = self._date_candidates(section_text)
+            has_context_anchor = any(anchor in compact for anchor in context_anchors)
+            nearby_context = False
+            if section_candidates:
+                for neighbor in recent_sections[max(0, idx - 2): min(len(recent_sections), idx + 3)]:
+                    neighbor_compact = self._compact(str(neighbor.get("text") or "").strip())
+                    if any(anchor in neighbor_compact for anchor in context_anchors):
+                        nearby_context = True
+                        break
+            if has_context_anchor or (section_candidates and nearby_context):
+                contextual_items.extend(section_candidates)
         return max(contextual_items, key=lambda x: x["date"]) if contextual_items else None
 
     def _signature_values(self, text: str) -> list[dict]:
