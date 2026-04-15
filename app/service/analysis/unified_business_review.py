@@ -21,9 +21,11 @@ from app.service.postgresql_service import PostgreSQLService
 class UnifiedBusinessReviewService:
     RESULT_SCHEMA_VERSION = "1.0"
     DEFAULT_RESULT_KEY = "unified_business_review"
+    BUSINESS_RESULT_KEY = "business_bid_format_review"
 
     PAGE_KEYS = {"page", "page_no", "page_num", "page_index"}
     PAGE_LIST_KEYS = {"pages", "page_numbers", "page_nos"}
+    ATTACHMENT_REF_RE = re.compile(r"附件\s*\d+(?:\s*[-－]\s*\d+)?")
     BUSINESS_FILE_RE = re.compile(r"[\s_-]*商务标\s*$")
     TECHNICAL_FILE_RE = re.compile(r"[\s_-]*技术标\s*$")
 
@@ -100,6 +102,96 @@ class UnifiedBusinessReviewService:
             "result_key": result_key,
             "review": review,
             "result_record": result_record,
+        }
+
+    def persist_uploaded_business_review(
+        self,
+        *,
+        tender_file_name: str,
+        tender_payload: dict[str, Any],
+        tender_raw_bytes: bytes,
+        business_bid_documents: list[dict[str, Any]],
+        project_identifier: str | None = None,
+        result_key: str = BUSINESS_RESULT_KEY,
+    ) -> dict[str, Any]:
+        project = self._ensure_project(project_identifier)
+        review = self._review_uploaded_business_documents(
+            tender_file_name=tender_file_name,
+            tender_payload=tender_payload,
+            tender_raw_bytes=tender_raw_bytes,
+            business_bid_documents=business_bid_documents,
+            project_identifier=project["identifier_id"],
+        )
+        result_record = self.db_service.upsert_project_result_item(
+            project["identifier_id"],
+            result_key,
+            review,
+        )
+        return {
+            "project": project,
+            "result_key": result_key,
+            "review": review,
+            "result_record": result_record,
+        }
+
+    def _review_uploaded_business_documents(
+        self,
+        *,
+        tender_file_name: str,
+        tender_payload: dict[str, Any],
+        tender_raw_bytes: bytes,
+        business_bid_documents: list[dict[str, Any]],
+        project_identifier: str,
+    ) -> dict[str, Any]:
+        tender_document = self._load_uploaded_document(
+            file_name=tender_file_name,
+            raw_bytes=tender_raw_bytes,
+            payload=tender_payload,
+            role="tender",
+            bidder_key=None,
+        )
+
+        bidders: list[dict[str, Any]] = []
+        bidder_entries = []
+        for business_doc in business_bid_documents:
+            bidder_key = str(business_doc.get("bidder_key") or "").strip() or "unknown_bidder"
+            business_document = self._load_uploaded_document(
+                file_name=str(business_doc.get("file_name") or ""),
+                raw_bytes=business_doc["raw_bytes"],
+                payload=business_doc["payload"],
+                role="business",
+                bidder_key=bidder_key,
+            )
+            bidder_entries.append(
+                {
+                    "bidder_key": bidder_key,
+                    "business": business_document["meta"],
+                }
+            )
+            bidders.append(
+                self._review_business_bidder(
+                    tender_payload=tender_document["content"],
+                    tender_meta=tender_document["meta"],
+                    bidder_key=bidder_key,
+                    business_payload=business_document["content"],
+                    business_meta=business_document["meta"],
+                )
+            )
+
+        return {
+            "schema_version": self.RESULT_SCHEMA_VERSION,
+            "review_type": "business_bid_format_review",
+            "generated_at": self._utc_now_iso(),
+            "project_identifier_id": project_identifier,
+            "dataset": {
+                "input_mode": "uploaded_json_files",
+                "tender": tender_document["meta"],
+                "bidders": bidder_entries,
+                "file_count": 1 + len(bidder_entries),
+            },
+            "function_validation": self._summarize_function_validation(bidders),
+            "summary": self._summarize_review(bidders),
+            "bidders": bidders,
         }
 
     def _discover_dataset(self, dataset_dir: str | Path) -> dict[str, Any]:
@@ -187,6 +279,26 @@ class UnifiedBusinessReviewService:
             "meta": self._build_file_meta(path, role=role, bidder_key=bidder_key),
         }
 
+    def _load_uploaded_document(
+        self,
+        *,
+        file_name: str,
+        raw_bytes: bytes,
+        payload: dict[str, Any],
+        role: str,
+        bidder_key: str | None,
+    ) -> dict[str, Any]:
+        return {
+            "content": payload,
+            "meta": self._build_uploaded_file_meta(
+                file_name=file_name,
+                raw_bytes=raw_bytes,
+                payload=payload,
+                role=role,
+                bidder_key=bidder_key,
+            ),
+        }
+
     def _build_file_meta(self, path: Path, *, role: str, bidder_key: str | None) -> dict[str, Any]:
         raw_bytes = path.read_bytes()
         stat = path.stat()
@@ -205,6 +317,40 @@ class UnifiedBusinessReviewService:
             "page_count": self._page_count(data_node),
         }
 
+    def _build_uploaded_file_meta(
+        self,
+        *,
+        file_name: str,
+        raw_bytes: bytes,
+        payload: dict[str, Any],
+        role: str,
+        bidder_key: str | None,
+    ) -> dict[str, Any]:
+        data_node = self._data_node(payload)
+        return {
+            "role": role,
+            "bidder_key": bidder_key,
+            "file_name": file_name,
+            "file_path": None,
+            "file_size": len(raw_bytes),
+            "modified_at": self._utc_now_iso(),
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "layout_section_count": len(data_node.get("layout_sections", []) or []),
+            "logical_table_count": len(data_node.get("logical_tables", []) or []),
+            "native_table_count": len(data_node.get("native_tables", []) or []),
+            "page_count": self._page_count(data_node),
+            "source_type": "upload",
+        }
+
+    def _ensure_project(self, project_identifier: str | None) -> dict[str, Any]:
+        normalized_identifier = (project_identifier or "").strip()
+        if normalized_identifier:
+            existing = self.db_service.get_project_by_identifier(normalized_identifier)
+            if existing:
+                return existing
+            return self.db_service.create_project(normalized_identifier)
+        return self.db_service.create_project()
+
     def _review_bidder(
         self,
         *,
@@ -216,19 +362,21 @@ class UnifiedBusinessReviewService:
         technical_payload = bidder["technical"]["content"]
         combined_payload = self._merge_bid_documents(business_payload, technical_payload)
 
+        integrity_check = self._execute_check(
+            check_code="integrity_check",
+            check_name="商务标完整性审查",
+            runner=lambda: self.integrity_checker.check_integrity(tender_payload, business_payload),
+            normalizer=self._normalize_integrity,
+        )
+        consistency_check = self._execute_consistency_check(
+            tender_payload=tender_payload,
+            business_payload=business_payload,
+            integrity_check=integrity_check,
+        )
+
         checks = {
-            "integrity_check": self._execute_check(
-                check_code="integrity_check",
-                check_name="商务标完整性审查",
-                runner=lambda: self.integrity_checker.check_integrity(tender_payload, business_payload),
-                normalizer=self._normalize_integrity,
-            ),
-            "consistency_check": self._execute_check(
-                check_code="consistency_check",
-                check_name="模板一致性审查",
-                runner=lambda: self.consistency_checker.compare_raw_data(tender_payload, business_payload),
-                normalizer=self._normalize_consistency,
-            ),
+            "integrity_check": integrity_check,
+            "consistency_check": consistency_check,
             "pricing_check": self._execute_check(
                 check_code="pricing_check",
                 check_name="报价合理性审查",
@@ -280,6 +428,145 @@ class UnifiedBusinessReviewService:
             "checks": checks,
             "issues": aggregate_issues,
         }
+
+    def _review_business_bidder(
+        self,
+        *,
+        tender_payload: dict[str, Any],
+        tender_meta: dict[str, Any],
+        bidder_key: str,
+        business_payload: dict[str, Any],
+        business_meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        integrity_check = self._execute_check(
+            check_code="integrity_check",
+            check_name="商务标完整性审查",
+            runner=lambda: self.integrity_checker.check_integrity(tender_payload, business_payload),
+            normalizer=self._normalize_integrity,
+        )
+        consistency_check = self._execute_consistency_check(
+            tender_payload=tender_payload,
+            business_payload=business_payload,
+            integrity_check=integrity_check,
+        )
+
+        checks = {
+            "integrity_check": integrity_check,
+            "consistency_check": consistency_check,
+            "pricing_check": self._execute_check(
+                check_code="pricing_check",
+                check_name="报价合理性审查",
+                runner=lambda: {
+                    "self_check": self.reasonableness_checker.check_price_reasonableness(business_payload),
+                    "tender_limit_check": self.reasonableness_checker.check_bid_price_against_tender_limit(
+                        tender_payload,
+                        business_payload,
+                    ),
+                },
+                normalizer=self._normalize_pricing,
+            ),
+            "itemized_pricing_check": self._execute_check(
+                check_code="itemized_pricing_check",
+                check_name="分项报价表审查",
+                runner=lambda: self.itemized_checker.check_itemized_logic(
+                    business_payload,
+                    tender_text=tender_payload,
+                ),
+                normalizer=self._normalize_itemized,
+            ),
+            "verification_check": self._execute_check(
+                check_code="verification_check",
+                check_name="签字盖章日期审查",
+                runner=lambda: self.verification_checker.check_seal_and_date(tender_payload, business_payload),
+                normalizer=self._normalize_verification,
+            ),
+        }
+
+        bidder_name = self._extract_bidder_name(checks, bidder_key)
+        aggregate_issues = self._aggregate_bidder_issues(checks)
+        summary = self._summarize_bidder_checks(checks)
+
+        return {
+            "bidder_key": bidder_key,
+            "bidder_name": bidder_name,
+            "documents": {
+                "tender": tender_meta,
+                "business": business_meta,
+            },
+            "summary": summary,
+            "checks": checks,
+            "issues": aggregate_issues,
+        }
+
+    def _execute_consistency_check(
+        self,
+        *,
+        tender_payload: dict[str, Any],
+        business_payload: dict[str, Any],
+        integrity_check: dict[str, Any],
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        check_code = "consistency_check"
+        check_name = "模板一致性审查"
+        try:
+            raw_segments = self.consistency_checker.compare_raw_data(tender_payload, business_payload)
+            evaluated_segments, skipped_segments = self._filter_consistency_segments(
+                raw_segments,
+                integrity_check.get("raw_result"),
+            )
+            raw_result = {
+                "evaluated_segments": evaluated_segments,
+                "skipped_segments": skipped_segments,
+                "original_segment_count": len(raw_segments) if isinstance(raw_segments, list) else 0,
+            }
+            normalized = self._normalize_consistency(raw_result)
+            execution = {
+                "status": "ok",
+                "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+            return {
+                "check_code": check_code,
+                "check_name": check_name,
+                "execution": execution,
+                "validation": normalized["validation"],
+                "review": normalized["review"],
+                "metrics": normalized.get("metrics", {}),
+                "issues": normalized.get("issues", self._empty_issue_bucket()),
+                "raw_result": raw_result,
+            }
+        except Exception as exc:  # pragma: no cover - defensive wrapper
+            duration_ms = round((time.perf_counter() - started) * 1000, 2)
+            issue = self._issue(
+                status="fail",
+                title=f"{check_name}执行失败",
+                message=str(exc),
+                evidence={"error_type": exc.__class__.__name__},
+            )
+            return {
+                "check_code": check_code,
+                "check_name": check_name,
+                "execution": {
+                    "status": "error",
+                    "duration_ms": duration_ms,
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+                "validation": {
+                    "status": "failed",
+                    "reason": "审查模块执行异常，未产出可用结果。",
+                },
+                "review": {
+                    "status": "unclear",
+                    "summary": f"{check_name}执行失败，当前无法得出可靠结论。",
+                },
+                "metrics": {},
+                "issues": {
+                    "passed": [],
+                    "failed": [issue],
+                    "unclear": [],
+                },
+                "raw_result": None,
+            }
 
     def _execute_check(
         self,
@@ -344,11 +631,14 @@ class UnifiedBusinessReviewService:
     def _normalize_integrity(self, raw: dict[str, Any]) -> dict[str, Any]:
         details = raw.get("details", {}) if isinstance(raw, dict) else {}
         score = raw.get("integrity_score") if isinstance(raw, dict) else None
+        ignored_count = raw.get("ignored_item_count", 0) if isinstance(raw, dict) else 0
 
         passed = []
         failed = []
         for item_name, detail in details.items():
             detail = detail or {}
+            if not detail.get("scored", True):
+                continue
             preview = str(detail.get("preview") or "-")
             category = str(detail.get("category") or "")
             evidence = {
@@ -375,9 +665,15 @@ class UnifiedBusinessReviewService:
                     )
                 )
 
-        total = len(details)
+        total = (
+            raw.get("scored_item_count")
+            if isinstance(raw, dict) and isinstance(raw.get("scored_item_count"), int)
+            else len(passed) + len(failed)
+        )
         review_status = "pass" if not failed else "fail"
         summary = f"完整性得分 {score}，共校验 {total} 项，缺失 {len(failed)} 项。"
+        if ignored_count:
+            summary += f" 另有 {ignored_count} 个父级标题由子项覆盖，不单独计分。"
         return {
             "validation": {
                 "status": "correct" if isinstance(details, dict) else "failed",
@@ -392,6 +688,7 @@ class UnifiedBusinessReviewService:
                 "total_item_count": total,
                 "passed_item_count": len(passed),
                 "failed_item_count": len(failed),
+                "ignored_item_count": ignored_count,
             },
             "issues": {
                 "passed": passed,
@@ -401,7 +698,15 @@ class UnifiedBusinessReviewService:
         }
 
     def _normalize_consistency(self, raw: Any) -> dict[str, Any]:
-        segments = raw if isinstance(raw, list) else []
+        skipped_segments = []
+        original_segment_count = 0
+        if isinstance(raw, dict):
+            segments = raw.get("evaluated_segments", raw.get("segments", [])) or []
+            skipped_segments = raw.get("skipped_segments", []) or []
+            original_segment_count = int(raw.get("original_segment_count") or 0)
+        else:
+            segments = raw if isinstance(raw, list) else []
+            original_segment_count = len(segments)
         passed = []
         failed = []
 
@@ -430,18 +735,34 @@ class UnifiedBusinessReviewService:
                     )
                 )
 
-        validation_status = "correct" if segments else "unclear"
-        validation_reason = (
-            "模块返回了逐模板段的缺漏锚点结果。"
-            if segments
-            else "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
-        )
-        review_status = "pass" if segments and not failed else ("unclear" if not segments else "fail")
-        summary = (
-            f"共比对 {len(segments)} 个模板段，通过 {len(passed)} 个，存在缺漏 {len(failed)} 个。"
-            if segments
-            else "未提取到可比较的模板段。"
-        )
+        has_results = bool(segments or skipped_segments)
+        if skipped_segments:
+            validation_status = "correct"
+            validation_reason = "模块返回了逐模板段的一致性结果，并已根据完整性缺失跳过对应附件。"
+        else:
+            validation_status = "correct" if segments else "unclear"
+            validation_reason = (
+                "模块返回了逐模板段的缺漏锚点结果。"
+                if segments
+                else "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
+            )
+
+        if failed:
+            review_status = "fail"
+        elif has_results:
+            review_status = "pass"
+        else:
+            review_status = "unclear"
+
+        if has_results:
+            total_segments = original_segment_count or (len(segments) + len(skipped_segments))
+            summary = (
+                f"共比对 {total_segments} 个模板段，实际校验 {len(segments)} 个，"
+                f"因完整性缺失跳过 {len(skipped_segments)} 个，通过 {len(passed)} 个，"
+                f"存在缺漏 {len(failed)} 个。"
+            )
+        else:
+            summary = "未提取到可比较的模板段。"
 
         return {
             "validation": {
@@ -453,7 +774,9 @@ class UnifiedBusinessReviewService:
                 "summary": summary,
             },
             "metrics": {
-                "template_segment_count": len(segments),
+                "template_segment_count": original_segment_count or len(segments),
+                "evaluated_segment_count": len(segments),
+                "skipped_segment_count": len(skipped_segments),
                 "passed_segment_count": len(passed),
                 "failed_segment_count": len(failed),
             },
@@ -463,6 +786,105 @@ class UnifiedBusinessReviewService:
                 "unclear": [],
             },
         }
+
+    def _filter_consistency_segments(
+        self,
+        raw_segments: Any,
+        integrity_raw: Any,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        segments = raw_segments if isinstance(raw_segments, list) else []
+        evaluated: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+
+        for segment in segments:
+            skip_reason = self._match_integrity_failure_for_segment(segment, integrity_raw)
+            if skip_reason is None:
+                evaluated.append(segment)
+                continue
+            skipped.append(
+                {
+                    **copy.deepcopy(segment),
+                    "skip_reason": skip_reason,
+                }
+            )
+
+        return evaluated, skipped
+
+    def _match_integrity_failure_for_segment(
+        self,
+        segment: dict[str, Any],
+        integrity_raw: Any,
+    ) -> dict[str, Any] | None:
+        details = integrity_raw.get("details", {}) if isinstance(integrity_raw, dict) else {}
+        segment_title = str(segment.get("name") or "")
+        normalized_segment_title = self._normalize_match_text(segment_title)
+
+        for item_name, detail in details.items():
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("is_passed") or not detail.get("scored", True):
+                continue
+
+            missing_tokens = self._integrity_missing_tokens(item_name, detail)
+            if not missing_tokens:
+                continue
+
+            if any(token in normalized_segment_title for token in missing_tokens):
+                return {
+                    "integrity_item": item_name,
+                    "integrity_status": detail.get("status"),
+                    "matched_tokens": sorted(missing_tokens),
+                }
+
+        return None
+
+    def _integrity_missing_tokens(self, item_name: str, detail: dict[str, Any]) -> set[str]:
+        tokens: set[str] = set()
+        status_text = str(detail.get("status") or "")
+        normalized_item = self._normalize_match_text(item_name)
+        normalized_status = self._normalize_match_text(status_text)
+
+        for attachment_ref in self._extract_attachment_refs(item_name):
+            tokens.add(self._normalize_match_text(attachment_ref))
+
+        simplified_title = self._simplify_integrity_item_title(item_name)
+        if simplified_title:
+            tokens.add(self._normalize_match_text(simplified_title))
+
+        if "法定代表人" in normalized_item and "证明书" in normalized_item and "授权委托书" in normalized_item:
+            missing_certificate = "缺失证明书" in normalized_status or (
+                "缺失" in normalized_status and "证明书" in normalized_status and "授权" in normalized_status
+            )
+            missing_authorization = "缺失授权委托书" in normalized_status or (
+                "缺失" in normalized_status and "授权" in normalized_status and "证明书" in normalized_status
+            )
+            if missing_certificate:
+                tokens.add(self._normalize_match_text("附件 7-1"))
+                tokens.add(self._normalize_match_text("法定代表人资格证明书"))
+            if missing_authorization:
+                tokens.add(self._normalize_match_text("附件 7-2"))
+                tokens.add(self._normalize_match_text("法定代表人授权委托书"))
+
+        return {token for token in tokens if token}
+
+    def _extract_attachment_refs(self, text: str) -> list[str]:
+        refs = []
+        for match in self.ATTACHMENT_REF_RE.findall(str(text or "")):
+            refs.append(re.sub(r"\s+", " ", match).strip())
+        return refs
+
+    def _simplify_integrity_item_title(self, item_name: str) -> str:
+        text = str(item_name or "").strip()
+        text = re.sub(r"^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百]+)[.、]\s*", "", text)
+        text = re.sub(r"（.*?）|\(.*?\)", "", text).strip()
+        if not text or len(text) > 24:
+            return ""
+        if any(sep in text for sep in ("；", ";", "，", ",")):
+            return ""
+        return text
+
+    def _normalize_match_text(self, text: str) -> str:
+        return "".join(ch for ch in str(text or "") if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
     def _normalize_pricing(self, raw: dict[str, Any]) -> dict[str, Any]:
         self_check = raw.get("self_check", {}) if isinstance(raw, dict) else {}

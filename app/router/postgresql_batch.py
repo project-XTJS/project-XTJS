@@ -1,6 +1,9 @@
 """项目批量识别：1 份招标文件加 N 组商务标/技术标文件。"""
 
 import asyncio
+import json
+import re
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -20,6 +23,7 @@ from app.router.dependencies import (
     get_oss_service,
     get_text_analysis_service,
 )
+from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
 from app.service.document_ingest_service import upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -43,6 +47,73 @@ PROJECT_BATCH_MAX_BID_GROUPS = int(
         getattr(settings, "PROJECT_BATCH_MAX_BID_FILES", 0),
     )
 )
+
+BUSINESS_JSON_SUFFIX_RE = re.compile(r"[\s_-]*商务标\s*$", re.IGNORECASE)
+
+
+def _parse_optional_string_array_json(
+    raw_value: Optional[str],
+    *,
+    field_name: str,
+    expected_length: int,
+) -> Optional[list[str]]:
+    if raw_value is None or not str(raw_value).strip():
+        return None
+
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a valid JSON array.") from exc
+
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON array.")
+    if len(parsed) != expected_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} length must match the number of business_bid_json_files.",
+        )
+
+    return ["" if item is None else str(item).strip() for item in parsed]
+
+
+async def _read_uploaded_json_file(upload: UploadFile, *, field_name: str) -> dict[str, Any]:
+    file_name = str(upload.filename or "").strip() or field_name
+    raw_bytes = await upload.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail=f"{field_name} is empty.")
+
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be UTF-8 encoded JSON.") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} must contain valid JSON.") from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON object.")
+
+    return {
+        "file_name": file_name,
+        "raw_bytes": raw_bytes,
+        "payload": payload,
+    }
+
+
+def _derive_business_bidder_key(file_name: str, index: int) -> str:
+    stem = Path(str(file_name or "").strip()).stem.strip()
+    normalized = BUSINESS_JSON_SUFFIX_RE.sub("", stem).strip()
+    return normalized or f"bidder_{index + 1}"
+
+
+def _ensure_unique_bidder_key(candidate: str, used: set[str], index: int) -> str:
+    base = str(candidate or "").strip() or f"bidder_{index + 1}"
+    unique = base
+    suffix = 2
+    while unique in used:
+        unique = f"{base}_{suffix}"
+        suffix += 1
+    used.add(unique)
+    return unique
 
 
 async def _ensure_batch_project(
@@ -75,6 +146,80 @@ async def _ensure_batch_project(
 
     created = await run_in_threadpool(db_service.create_project)
     return created, True
+
+
+@router.post(
+    "/projects/business-bid-format-review/upload-json",
+    summary="上传 OCR JSON 并执行商务标格式审查",
+)
+async def upload_business_bid_format_review(
+    tender_json_file: UploadFile = File(..., description="招标文件 OCR 识别 JSON"),
+    business_bid_json_files: list[UploadFile] = File(
+        ...,
+        description="一份或多份投标文件商务标 OCR 识别 JSON。",
+    ),
+    project_identifier: Optional[str] = Form(
+        default=None,
+        description="可选项目标识；不传时自动创建项目并用于结果落库。",
+    ),
+    result_key: str = Form(
+        default=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+        description="写入 xtjs_result.result 的 JSON key。",
+    ),
+    bidder_keys_json: Optional[str] = Form(
+        default=None,
+        description="可选 JSON 数组，长度需与 business_bid_json_files 一致，用于指定每份商务标的 bidder_key。",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    uploads = [upload for upload in business_bid_json_files if upload is not None]
+    if not uploads:
+        raise HTTPException(status_code=400, detail="business_bid_json_files cannot be empty.")
+
+    tender_document = await _read_uploaded_json_file(
+        tender_json_file,
+        field_name="tender_json_file",
+    )
+    provided_bidder_keys = _parse_optional_string_array_json(
+        bidder_keys_json,
+        field_name="bidder_keys_json",
+        expected_length=len(uploads),
+    )
+
+    business_documents: list[dict[str, Any]] = []
+    used_bidder_keys: set[str] = set()
+    for index, upload in enumerate(uploads):
+        business_document = await _read_uploaded_json_file(
+            upload,
+            field_name=f"business_bid_json_files[{index}]",
+        )
+        candidate_key = (
+            provided_bidder_keys[index]
+            if provided_bidder_keys is not None
+            else _derive_business_bidder_key(business_document["file_name"], index)
+        )
+        business_document["bidder_key"] = _ensure_unique_bidder_key(
+            candidate_key,
+            used_bidder_keys,
+            index,
+        )
+        business_documents.append(business_document)
+
+    review_service = UnifiedBusinessReviewService(db_service=db_service)
+    try:
+        return await run_in_threadpool(
+            review_service.persist_uploaded_business_review,
+            tender_file_name=tender_document["file_name"],
+            tender_payload=tender_document["payload"],
+            tender_raw_bytes=tender_document["raw_bytes"],
+            business_bid_documents=business_documents,
+            project_identifier=project_identifier,
+            result_key=result_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
 @router.post("/projects/batch/recognize", summary="项目批量识别")

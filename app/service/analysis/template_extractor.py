@@ -3,20 +3,93 @@ import re
 class SectionClassifier:
     """专门负责识别文本类型的工具类，提供标题识别和目录排除功能"""
     # 增加对目录页宽容度的排除：匹配省略号、连续点、下划线或末尾带孤立数字
-    RE_TOC = re.compile(r'\.{3,}|…{2,}|_{3,}\s*\d+$|(?:\s\d+$)')
+    RE_TOC = re.compile(r'\.{3,}|…{2,}|_{3,}\s*\d+$')
+    RE_TOC_TRAILING_PAGE = re.compile(r'\s\d+$')
     
     # 标题识别标准
     RE_HEADING_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|[\(（]?\d+[\)）\.、])')
     RE_KEYWORD_TITLE = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照|招标文件|采购文件')
+    RE_ATTACHMENT_TITLE = re.compile(r'^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*')
+    ATTACHMENT_TITLE_KEYWORDS = (
+        "保证书",
+        "报价表",
+        "一览表",
+        "偏离表",
+        "情况表",
+        "业绩清单",
+        "清单",
+        "证明书",
+        "授权委托书",
+        "授权书",
+        "声明函",
+        "承诺书",
+        "营业执照",
+        "资格证明文件",
+    )
+    ATTACHMENT_BODY_MARKERS = (
+        "根据",
+        "此表",
+        "须与",
+        "一致",
+        "详见",
+        "提交",
+        "说明如下",
+        "我方",
+        "贵方",
+        "响应文件",
+    )
+    NON_TOC_FIELD_MARKERS = ("：", ":", "/", "／")
 
     @classmethod
     def is_heading(cls, text: str, is_strict=False) -> bool:
         """判断是否为有效标题"""
-        if cls.RE_TOC.search(text): 
+        if cls.is_toc_noise(text):
             return False
         if is_strict:
             return bool(cls.RE_HEADING_START.search(text) or cls.RE_KEYWORD_TITLE.search(text))
         return bool(cls.RE_HEADING_START.search(text) or (cls.RE_KEYWORD_TITLE.search(text) and len(text) < 60))
+
+    @classmethod
+    def is_attachment_heading_text(cls, text: str) -> bool:
+        if cls.is_toc_noise(text):
+            return False
+        raw_text = str(text or "").strip()
+        if not raw_text or len(raw_text) > 80:
+            return False
+        if not cls.RE_ATTACHMENT_TITLE.search(raw_text):
+            return False
+
+        compact = re.sub(r"\s+", "", raw_text)
+        if any(marker in compact for marker in cls.ATTACHMENT_BODY_MARKERS):
+            return False
+        if "。" in raw_text or "；" in raw_text or ";" in raw_text:
+            return False
+
+        body = cls.RE_ATTACHMENT_TITLE.sub("", raw_text, count=1).strip("：:（）()、.． ")
+        body = re.sub(r"[（(][^）)]{0,30}[）)]", "", body).strip()
+        compact_body = re.sub(r"\s+", "", body)
+        if not compact_body or len(compact_body) > 40:
+            return False
+
+        if any(keyword in compact_body for keyword in cls.ATTACHMENT_TITLE_KEYWORDS):
+            return True
+        return compact_body.endswith(("表", "书", "函", "照"))
+
+    @classmethod
+    def is_toc_noise(cls, text: str) -> bool:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return False
+
+        if cls.RE_TOC.search(raw_text):
+            return True
+
+        # 尾部页码判断只用于明显像目录的短行，避免误伤带字段名和数值的正文。
+        if len(raw_text) > 40:
+            return False
+        if any(marker in raw_text for marker in cls.NON_TOC_FIELD_MARKERS):
+            return False
+        return bool(cls.RE_TOC_TRAILING_PAGE.search(raw_text))
 
 
 class TemplateExtractor:
@@ -108,20 +181,33 @@ class TemplateExtractor:
         # 第二遍扫描：执行提权逻辑 (Text -> Heading)
         for sec in processed:
             text = sec['text']
-            if sec.get('type') == 'text' and not page_has_heading.get(sec.get('page'), False):
-                if SectionClassifier.is_heading(text):
+            page = sec.get('page')
+            if sec.get('type') == 'text':
+                should_promote = False
+                if not page_has_heading.get(page, False) and SectionClassifier.is_heading(text):
+                    should_promote = True
+                elif SectionClassifier.is_attachment_heading_text(text):
+                    should_promote = True
+
+                if should_promote:
                     sec['type'] = 'heading'
-                    page_has_heading[sec.get('page')] = True
+                    page_has_heading[page] = True
+                    clean_h = text.replace(' ', '')
+                    heading_counts[clean_h] = heading_counts.get(clean_h, 0) + 1
             final_processed.append(sec)
 
         global_headers = {t for t, c in heading_counts.items() if c > 2}
         return final_processed, global_headers
 
     @classmethod
-    def _is_noise(cls, text: str, headers: set) -> bool:
+    def _is_noise(cls, text: str, headers: set, section_type: str | None = None) -> bool:
         """判断是否为目录行或重复页眉"""
         clean = text.replace(' ', '')
-        return SectionClassifier.RE_TOC.search(text) or clean in headers
+        if clean in headers:
+            return True
+        if section_type == 'table':
+            return False
+        return SectionClassifier.is_toc_noise(text)
 
     @classmethod
     def extract_requirements(cls, model_raw_json: dict) -> list:
@@ -134,7 +220,7 @@ class TemplateExtractor:
 
         for sec in sections:
             text = sec['text']
-            if not text or cls._is_noise(text, headers): continue
+            if not text or cls._is_noise(text, headers, sec.get('type')): continue
 
             if sec['type'] == 'heading':
                 if stage == 0 and '文件' in text and '组成' in text: stage = 1; continue
@@ -167,7 +253,7 @@ class TemplateExtractor:
         templates, current, in_zone = [], None, False
         for sec in sections:
             text = sec['text']
-            if not text or cls._is_noise(text, headers): continue
+            if not text or cls._is_noise(text, headers, sec.get('type')): continue
             
             if sec['type'] == 'heading' and not in_zone:
                 if "部分格式附件" in text: in_zone = True; continue

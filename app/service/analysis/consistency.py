@@ -54,7 +54,7 @@ class DocumentProcessor:
 
         for sec in sections:
             text = sec['text']
-            if not text or TemplateExtractor._is_noise(text, headers) or (sec.get('type') == 'text' and text.strip().isdigit()): 
+            if not text or TemplateExtractor._is_noise(text, headers, sec.get('type')) or (sec.get('type') == 'text' and text.strip().isdigit()): 
                 continue
                 
             if sec['type'] == 'heading':
@@ -105,6 +105,27 @@ class DocumentProcessor:
 class ConsistencyChecker:
     """一致性校验器：比对正文细节差异"""
 
+    FORMAL_TITLE_LINE_RE = re.compile(
+        r"^\s*(?:"
+        r"(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*"
+        r"|第[一二三四五六七八九十百0-9]+[章节部分]"
+        r")"
+    )
+    NON_BODY_BLOCK_MARKERS = (
+        "与本项目有关的一切正式往来通讯请寄",
+        "正式往来通讯请寄",
+    )
+    NON_BODY_LINE_MARKERS = (
+        "参选人法定代表人",
+        "法定代表人或授权代表签字或盖章",
+        "法定代表人签字或盖章",
+        "授权委托人签字或盖章",
+        "参选人名称",
+        "供应商名称",
+        "日期",
+        "已签字",
+    )
+
     def __init__(self):
         # NORM_PATTERN: 用于最后比对时，过滤一切非核心字符
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
@@ -115,6 +136,66 @@ class ConsistencyChecker:
     def _normalize(self, text: str) -> str:
         if not text: return ""
         return "".join(self.NORM_PATTERN.findall(text))
+
+    def _normalize_title(self, text: str) -> str:
+        if not text:
+            return ""
+        no_brackets = re.sub(r'\(.*?\)|（.*?）', '', text)
+        clean = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', no_brackets)
+        return re.sub(r'^[\d一二三四五六七八九十百]+', '', clean)
+
+    def _is_formal_title_line(self, text: str) -> bool:
+        return bool(self.FORMAL_TITLE_LINE_RE.match(str(text or "").strip()))
+
+    def _strip_title_line(self, text: str, title: str) -> str:
+        if not text:
+            return ""
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+
+        first_line = lines[0].strip()
+        if not self._is_formal_title_line(first_line):
+            return "\n".join(lines).strip()
+
+        first_norm = self._normalize_title(first_line)
+        title_norm = self._normalize_title(title)
+        if first_norm and title_norm and (first_norm in title_norm or title_norm in first_norm):
+            lines = lines[1:]
+        return "\n".join(lines).strip()
+
+    def _is_non_body_line(self, normalized_line: str) -> bool:
+        return any(marker in normalized_line for marker in self.NON_BODY_LINE_MARKERS)
+
+    def _trim_non_body_lines(self, text: str) -> str:
+        if not text:
+            return ""
+
+        kept: list[str] = []
+        in_non_body_block = False
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            normalized_line = self._normalize(stripped)
+            if not normalized_line:
+                continue
+
+            if any(marker in normalized_line for marker in self.NON_BODY_BLOCK_MARKERS):
+                in_non_body_block = True
+                continue
+
+            if in_non_body_block:
+                continue
+
+            if self._is_non_body_line(normalized_line):
+                continue
+
+            kept.append(stripped)
+
+        return "\n".join(kept)
 
     def _get_anchors(self, text: str) -> List[str]:
         # 1. 抹平括号（防止文本粘连）
@@ -151,9 +232,8 @@ class ConsistencyChecker:
             m_txt = m_seg['text']
             t_txt = test_segments[i]['text']
 
-            # 剔除标题行（如果存在换行）
-            t_body = t_txt.split('\n', 1)[1] if '\n' in t_txt else ""
-            m_body = m_txt.split('\n', 1)[1] if '\n' in m_txt else ""
+            m_body = self._trim_non_body_lines(self._strip_title_line(m_txt, m_seg['title']))
+            t_body = self._trim_non_body_lines(self._strip_title_line(t_txt, m_seg['title']))
 
             # 将测试正文高度清洗压缩
             norm_t = self._normalize(t_body)
