@@ -81,18 +81,18 @@ def main():
     #     "./ocr_results/369/369-huolaiwo.json"
     # ]
     # # 配置路径
-    # tender_path = "./药品JSON识别结果/招标.JSON"
-    # bidder_files = [
-    #     "./药品JSON识别结果/宏银商务标.JSON",
-    #     "./药品JSON识别结果/戎元商务标.JSON",
-    #     "./药品JSON识别结果/舒源商务标.JSON",
-    # ]
-    # 配置路径
-    tender_path = "./出口退税/招标文件.json"
+    tender_path = "./药品JSON识别结果/招标.JSON"
     bidder_files = [
-        "./出口退税/征盛商务标.json",
-        "./出口退税/智税商务标.json",
+        "./药品JSON识别结果/宏银商务标.JSON",
+        "./药品JSON识别结果/戎元商务标.JSON",
+        "./药品JSON识别结果/舒源商务标.JSON",
     ]
+    # 配置路径
+    # tender_path = "./出口退税/招标文件.json"
+    # bidder_files = [
+    #     "./出口退税/征盛商务标.json",
+    #     "./出口退税/智税商务标.json",
+    # ]
     output_dir = "."
     os.makedirs(output_dir, exist_ok=True)
 
