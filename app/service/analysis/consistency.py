@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 from typing import List, Dict
 
 # 假设 TemplateExtractor 已在同目录下定义
@@ -7,21 +8,174 @@ from .template_extractor import TemplateExtractor
 class DocumentProcessor:
     """段落处理器：将文档切分为与模板对应的段落"""
 
+    TITLE_TOKEN_PATTERNS = (
+        "法定代表人授权委托书",
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+        "类似项目业绩清单",
+        "投标人基本情况介绍",
+        "供应商承诺声明函",
+        "不参与围标串标承诺书",
+        "保证金缴纳凭证",
+        "财务状况及税收社会保障资金缴纳情况声明函",
+        "财务状况声明函",
+        "社会保障资金缴纳情况声明函",
+        "制造商声明函",
+        "制造商授权书",
+        "原厂授权函",
+        "营业执照",
+        "法人登记证书",
+        "分项报价表",
+        "商务条款偏离表",
+        "技术条款偏离表",
+        "开标一览表",
+        "投标保证书",
+        "拟派项目负责人情况表",
+        "项目人员配置表",
+        "授权委托书",
+        "证明书",
+        "声明函",
+        "承诺书",
+        "保证书",
+        "一览表",
+        "报价表",
+        "偏离表",
+        "情况表",
+        "配置表",
+        "清单",
+        "凭证",
+        "执照",
+    )
+    TITLE_PREFIX_PATTERNS = (
+        r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
+        r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
+        r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
+        r'^\s*\d+[)）]\s*',
+    )
+    TITLE_NOISE_PATTERNS = (
+        r'附件|附表|附录|格式',
+        r'按要求加盖公章',
+        r'加盖公章',
+        r'后附证明材料',
+        r'直接投标的应提供',
+        r'委托授权人投标的应提供',
+        r'委托授权投标的应提供',
+        r'及被授权人身份证',
+        r'及身份证',
+        r'如为分支机构投标则须总公司唯一授权函',
+    )
+    TITLE_FRAGMENT_PATTERNS = (
+        "法定代表人",
+        "单位负责人",
+        "授权委托书",
+        "证明书",
+        "声明函",
+        "承诺书",
+        "保证书",
+        "一览表",
+        "报价表",
+        "偏离表",
+        "情况表",
+        "配置表",
+        "清单",
+        "凭证",
+        "执照",
+        "财务状况",
+        "社会保障资金",
+        "税收",
+        "保证金",
+        "投标人基本情况",
+        "类似项目业绩",
+        "营业执照",
+        "劳动合同",
+        "社保",
+    )
+
+    @classmethod
+    def _strip_title_prefix(cls, text: str) -> str:
+        value = str(text or "").strip()
+        previous = None
+        while value and value != previous:
+            previous = value
+            for pattern in cls.TITLE_PREFIX_PATTERNS:
+                value = re.sub(pattern, '', value).strip()
+        return value
+
+    @classmethod
+    def _normalize_title_key(cls, text: str) -> str:
+        value = cls._strip_title_prefix(text)
+        value = re.sub(r'\(.*?\)|（.*?）', ' ', value)
+        value = re.split(r'[；;。]', value, maxsplit=1)[0]
+        for pattern, repl in (
+            (r'法定代表人资格证明书', '法定代表人证明书'),
+            (r'法定代表人身份证明', '法定代表人证明书'),
+            (r'单位负责人身份证明', '单位负责人证明书'),
+            (r'授权委托书及被授权人身份证', '授权委托书'),
+        ):
+            value = re.sub(pattern, repl, value)
+        for pattern in cls.TITLE_NOISE_PATTERNS:
+            value = re.sub(pattern, '', value)
+        return re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', value)
+
+    @classmethod
+    def _title_tokens(cls, text: str) -> List[str]:
+        title_key = cls._normalize_title_key(text)
+        if not title_key:
+            return []
+        tokens = []
+        for token in cls.TITLE_TOKEN_PATTERNS:
+            compact = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', token)
+            if compact and compact in title_key and compact not in tokens:
+                tokens.append(compact)
+        for token in cls.TITLE_FRAGMENT_PATTERNS:
+            compact = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', token)
+            if compact and compact in title_key and compact not in tokens:
+                tokens.append(compact)
+        return tokens or [title_key]
+
+    @classmethod
+    def _title_match_score(cls, left: str, right: str) -> float:
+        left_key = cls._normalize_title_key(left)
+        right_key = cls._normalize_title_key(right)
+        if not left_key or not right_key:
+            return 0.0
+        if left_key == right_key:
+            return 1.0
+
+        score = SequenceMatcher(None, left_key, right_key).ratio()
+        if len(left_key) >= 4 and (left_key in right_key or right_key in left_key):
+            score = max(score, 0.92)
+
+        left_tokens = cls._title_tokens(left)
+        if left_tokens:
+            matched = sum(
+                1
+                for token in left_tokens
+                if token in right_key or (len(token) >= 4 and right_key in token)
+            )
+            coverage = matched / len(left_tokens)
+            if coverage >= 1:
+                score = max(score, 0.9 if len(left_tokens) >= 2 else 0.82)
+            elif coverage >= 0.6:
+                score = max(score, 0.76)
+        return min(score, 1.0)
+
     @classmethod
     def _compile_template_patterns(cls, templates: List[Dict]) -> None:
         """抽取独立方法：预编译模板匹配模式"""
         for temp in templates:
-            # 1. 剔除括号内的补充说明
-            title_no_brackets = re.sub(r'\(.*?\)|（.*?）', '', temp['title'])
-            # 2. 清除干扰词与标点
-            clean = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', title_no_brackets)
-            # 3. 剥离前缀序号
-            core = re.sub(r'^[\d一二三四五六七八九十百]+', '', clean)
-            
-            # 取核心前6个字符，允许中间穿插空白或横线
-            # 【核心修复点】：增加 ^.{0,25}? 限制，强制要求标题核心词必须出现在文本前25个字符内
-            # 防止在长段落（如说明须知）中偶然包含模板关键字（如"开标一览表"）导致被错误截断
-            temp['pattern'] = re.compile(r'^.{0,25}?' + r'[\s\-_]*'.join(list(core[:6])))
+            core = cls._normalize_title_key(temp['title'])
+            temp['title_key'] = core
+            temp['title_tokens'] = cls._title_tokens(temp['title'])
+            if core:
+                prefix = r'[\s\-_]*'.join(list(core[:min(6, len(core))]))
+                temp['pattern'] = re.compile(r'^.{0,30}?' + prefix)
+            else:
+                temp['pattern'] = None
             temp['buffer'] = []
             temp['extracted_text'] = ""
 
@@ -32,11 +186,16 @@ class DocumentProcessor:
         search_order = list(range(current_idx + 1, len(templates)))
         # 如果后面没找到，再回头从前面找（兼容乱序）
         search_order.extend(range(0, current_idx + 1))
-        
+
+        best = None
         for j in search_order:
-            if templates[j]['pattern'].search(clean_text):
-                return j
-        return -1
+            score = cls._title_match_score(templates[j].get('title') or "", clean_text)
+            pattern = templates[j].get('pattern')
+            if pattern is not None and pattern.search(clean_text):
+                score = max(score, 0.88)
+            if best is None or score > best['score']:
+                best = {"score": score, "index": j}
+        return best['index'] if best and best['score'] >= 0.76 else -1
 
     @classmethod
     def segment_document(cls, raw_json: dict, templates: list, is_test_file: bool = False) -> List[Dict]:
@@ -57,9 +216,20 @@ class DocumentProcessor:
             if not text or TemplateExtractor._is_noise(text, headers, sec.get('type')) or (sec.get('type') == 'text' and text.strip().isdigit()): 
                 continue
                 
-            if sec['type'] == 'heading':
-                clean_text = text.replace(' ', '')
-                is_potential_title = True if is_test_file else TemplateExtractor.RE_HEADING_START.search(text)
+            clean_text = re.sub(r'\s+', '', text)
+            short_text_candidate = (
+                sec['type'] == 'text'
+                and len(clean_text) <= 60
+                and any(
+                    marker in clean_text
+                    for marker in ("一览表", "报价表", "偏离表", "情况表", "配置表", "保证书", "证明书", "委托书", "声明函", "承诺书", "清单", "凭证", "执照", "介绍", "授权")
+                )
+            )
+
+            if sec['type'] == 'heading' or short_text_candidate:
+                is_potential_title = True if sec['type'] == 'heading' and is_test_file else (
+                    short_text_candidate or bool(TemplateExtractor.RE_HEADING_START.search(text))
+                )
 
                 if is_potential_title:
                     matched_idx = cls._find_matching_template_idx(clean_text, templates, current_idx)
@@ -241,6 +411,22 @@ class ConsistencyChecker:
                     "name": title,
                     "is_passed": passed,
                     "missing_anchors": [] if passed else ["[未检测到内容]"]
+                })
+                continue
+
+            if "法定代表人" in title and ("证明书" in title or "授权委托书" in title):
+                relaxed_anchors = ["法定代表人"]
+                if "证明书" in title:
+                    relaxed_anchors.append("证明书")
+                if "授权委托书" in title:
+                    relaxed_anchors.append("授权委托书")
+
+                norm_t = self._normalize(t_body)
+                missing = [a for a in relaxed_anchors if a not in norm_t]
+                results.append({
+                    "name": title,
+                    "is_passed": bool(t_body.strip()) and len(missing) == 0,
+                    "missing_anchors": missing if t_body.strip() else ["[未检测到内容]"]
                 })
                 continue
 

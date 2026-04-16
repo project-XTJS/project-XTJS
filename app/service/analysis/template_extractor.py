@@ -7,7 +7,16 @@ class SectionClassifier:
     RE_TOC_TRAILING_PAGE = re.compile(r'\s\d+$')
     
     # 标题识别标准
-    RE_HEADING_START = re.compile(r'^\s*[\(（]?(附件|附表|格式|第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.]|[\(（]?\d+[\)）\.、])')
+    RE_HEADING_START = re.compile(
+        r'^\s*(?:'
+        r'附件|附表|格式'
+        r'|第[一二三四五六七八九十百零\d]+[章节部分篇项]'
+        r'|[A-Z][、．\.]'
+        r'|[一二三四五六七八九十百零]+[、．\.]'
+        r'|[（(](?:[A-Z]|\d+|[一二三四五六七八九十百零]+)[）)]'
+        r'|\d+[)）\.、]'
+        r')'
+    )
     RE_KEYWORD_TITLE = re.compile(r'文件[的]?组成|商务文件|技术文件|部分格式附件|营业执照|招标文件|采购文件')
     RE_ATTACHMENT_TITLE = re.compile(r'^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*')
     ATTACHMENT_TITLE_KEYWORDS = (
@@ -96,6 +105,10 @@ class TemplateExtractor:
     """双雷达导航提取器：负责从招标文件中提取清单与模板基准"""
 
     RE_TAGS = re.compile(r'\\[a-zA-Z]+|[{}$]')
+    REQUIREMENT_SPLIT_RE = re.compile(
+        r'(?<![\dA-Z一二三四五六七八九十百零])'
+        r'(?=(?:\d+[．\.、)]|[A-Z][．\.、)]|[一二三四五六七八九十百零]+[、．\.]|[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]))'
+    )
 
     @classmethod
     def _format_logical_table(cls, tb: dict, is_template: bool = False) -> str:
@@ -210,6 +223,49 @@ class TemplateExtractor:
         return SectionClassifier.is_toc_noise(text)
 
     @classmethod
+    def _split_requirement_parts(cls, text: str) -> list[str]:
+        if not text:
+            return []
+        return [part.strip() for part in re.split(cls.REQUIREMENT_SPLIT_RE, text) if part and part.strip()]
+
+    @classmethod
+    def _parse_requirement_item(cls, text: str) -> tuple[str | None, str]:
+        raw = str(text or "").strip()
+        if not raw:
+            return None, ""
+
+        patterns = (
+            r'^(\d+)[．\.、)]\s*(.+)',
+            r'^([A-Z])[．\.、)]\s*(.+)',
+            r'^[（(](\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*(.+)',
+            r'^([一二三四五六七八九十百零]+)[、．\.]\s*(.+)',
+        )
+        for pattern in patterns:
+            match = re.match(pattern, raw)
+            if match:
+                return match.group(1), match.group(2)
+        return None, ""
+
+    @classmethod
+    def _looks_like_requirement_leaf(cls, text: str) -> bool:
+        compact = re.sub(r'\s+', '', cls._clean_label(text or ""))
+        if not compact:
+            return False
+        return any(marker in compact for marker in ("表", "书", "函", "清单", "凭证", "介绍", "执照", "证明", "委托", "授权", "承诺", "声明", "偏离", "合同"))
+
+    @classmethod
+    def _is_consistency_template_heading(cls, text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        if SectionClassifier.RE_ATTACHMENT_TITLE.search(raw):
+            return True
+        if re.match(r'^第[一二三四五六七八九十百零\d]+[章节部分篇项]', raw):
+            compact = re.sub(r'\s+', '', raw)
+            return len(compact) <= 48 and any(keyword in compact for keyword in SectionClassifier.ATTACHMENT_TITLE_KEYWORDS)
+        return False
+
+    @classmethod
     def extract_requirements(cls, model_raw_json: dict) -> tuple:
         """提取完整性清单：返回有序列表和序号到附件编号的映射"""
         data_node = model_raw_json.get('data', model_raw_json)
@@ -230,23 +286,13 @@ class TemplateExtractor:
 
             if stage == 2:
                 # 按照文本出现的先后顺序切分并压入同一个列表
-                parts = re.split(r'(?<![\dA-Z])(?=(?:\d+|[A-Z])[．\.]\s*)', text)
-                for part in filter(None, [p.strip() for p in parts]):
-                    # 提取序号
-                    m = re.match(r'^(\d+)[．\.]\s*(.+)', part)
-                    s = re.match(r'^([A-Z])[．\.]\s*(.+)', part)
-                    seq = None
-                    content = ""
-                    if m:
-                        seq = m.group(1)
-                        content = m.group(2)
-                        ordered_list.append(f"{seq}. {cls._clean_label(content)}")
-                    elif s:
-                        seq = s.group(1)
-                        content = s.group(2)
-                        ordered_list.append(f"{seq}. {cls._clean_label(content)}")
-                    else:
+                for part in cls._split_requirement_parts(text):
+                    seq, content = cls._parse_requirement_item(part)
+                    if not seq or not content:
                         continue
+                    if not cls._looks_like_requirement_leaf(content):
+                        continue
+                    ordered_list.append(f"{seq}. {cls._clean_label(content)}")
 
                     # 从内容中提取“格式参见本章附件X”中的附件编号
                     attach_refs = re.findall(r'格式参见本章附件\s*([\d\-—，,、\s]+)', content)
@@ -288,7 +334,7 @@ class TemplateExtractor:
             if in_zone:
                 if sec['type'] == 'heading':
                     if re.match(r'^第[一二三四五六七八九十百]+章', text) or "营业执照" in text: break
-                    if SectionClassifier.RE_HEADING_START.search(text):
+                    if cls._is_consistency_template_heading(text):
                         if current: templates.append(current)
                         current = {"title": cls._clean_label(text), "content": [text]}
                         continue

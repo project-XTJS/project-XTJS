@@ -25,15 +25,33 @@ class IntegrityChecker:
         "投标人认为需加以说明的其他内容",
         "应答人认为需加以说明的其他内容",
     )
+    PREFIX_PATTERNS = (
+        r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
+        r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
+        r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
+        r'^\s*\d+[)）]\s*',
+    )
 
     def __init__(self):
-        self.VALID_PREFIX = re.compile(r'^\s*([\(（]?附件|[一二三四五六七八九十]+[、.]|[\(（]?\d+[\)）\.、])')
+        self.VALID_PREFIX = re.compile(
+            r'^\s*(?:'
+            r'(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*'
+            r'|第[一二三四五六七八九十百零\d]+[章节部分篇项]'
+            r'|[A-Z][．\.、]'
+            r'|[一二三四五六七八九十百零]+[、．\.]'
+            r'|[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]'
+            r'|\d+[)）\.、]'
+            r')'
+        )
 
     def _strip_heading_prefix(self, name: str) -> str:
         text = str(name or "").strip()
-        text = re.sub(r'^\s*(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)?\s*', '', text)
-        text = re.sub(r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十]+)[．\.、]\s*', '', text)
-        text = re.sub(r'^\s*[\(（]\d+[\)）]\s*', '', text)
+        previous = None
+        while text and text != previous:
+            previous = text
+            for pattern in self.PREFIX_PATTERNS:
+                text = re.sub(pattern, '', text).strip()
         return text.strip()
 
     def _normalize_title_text(self, name: str) -> str:
@@ -73,7 +91,7 @@ class IntegrityChecker:
         return False
 
     def _is_sub_item(self, item: str) -> bool:
-        return bool(re.match(r'^[A-Z][．\.]|^[\(（]\d+[\)）]', item or ""))
+        return bool(re.match(r'^(?:[A-Z][．\.、]|[\(（](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[\)）])', item or ""))
 
     def _is_optional_item(self, item: str) -> bool:
         normalized = str(item or "").strip()
@@ -117,10 +135,12 @@ class IntegrityChecker:
             text = sec['text']
             if TemplateExtractor._is_noise(text, headers, sec.get('type')): continue
 
+            compact = re.sub(r'\s+', '', text)
             if self._smart_match(text, keyword):
                 # 特殊资质可以不依赖前缀编号
                 is_exempt = any(k in keyword for k in EXEMPT_KEYWORDS)
-                if is_exempt or self.VALID_PREFIX.search(text):
+                is_short_text_title = sec.get('type') == 'text' and len(compact) <= 60
+                if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title:
                     return text
         return None
 

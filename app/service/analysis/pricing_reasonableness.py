@@ -527,6 +527,16 @@ class ReasonablenessChecker:
         except ValueError:
             return None
 
+    def _strip_price_markup(self, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = str(text)
+        cleaned = re.sub(r'\\(?:underline|text)\s*\{', '', cleaned)
+        cleaned = cleaned.replace("{", " ").replace("}", " ")
+        cleaned = cleaned.replace("$", " ").replace("\\", " ")
+        cleaned = cleaned.replace("_", " ")
+        return re.sub(r"\s+", " ", cleaned).strip()
+
     def _parse_capital_integer(self, s: str) -> int:
         total = 0
         section = 0
@@ -590,7 +600,7 @@ class ReasonablenessChecker:
         if not section_text or not section_text.strip():
             return []
 
-        lines = [line.strip() for line in section_text.splitlines() if line.strip()]
+        lines = [self._strip_price_markup(line.strip()) for line in section_text.splitlines() if line.strip()]
         pairs = []
 
         current_small_str = None
@@ -889,26 +899,33 @@ class ReasonablenessChecker:
         if not bid_opening_text or not bid_opening_text.strip():
             return None
 
+        normalized_opening_text = self._strip_price_markup(bid_opening_text)
+
         direct_total_patterns = [
             r"(参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
             r"(参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)[^\n]{0,20}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
             r"小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
 
-        for pattern in direct_total_patterns:
-            for m in re.finditer(pattern, bid_opening_text):
-                raw_amount = m.group(2).strip() if len(m.groups()) >= 2 else m.group(1).strip()
-                amount = self._clean_small_price(raw_amount)
-                if amount is None:
-                    continue
-                return {
-                    "page": bid_page,
-                    "amount_yuan": round(amount, 2),
-                    "raw_amount": raw_amount,
-                    "context": bid_opening_text[:400],
-                }
+        search_texts = [normalized_opening_text]
+        if normalized_opening_text != bid_opening_text:
+            search_texts.append(bid_opening_text)
 
-        price_pairs = self._extract_direct_price_pairs(bid_opening_text)
+        for search_text in search_texts:
+            for pattern in direct_total_patterns:
+                for m in re.finditer(pattern, search_text):
+                    raw_amount = m.group(2).strip() if len(m.groups()) >= 2 else m.group(1).strip()
+                    amount = self._clean_small_price(raw_amount)
+                    if amount is None:
+                        continue
+                    return {
+                        "page": bid_page,
+                        "amount_yuan": round(amount, 2),
+                        "raw_amount": raw_amount,
+                        "context": normalized_opening_text[:400] or bid_opening_text[:400],
+                    }
+
+        price_pairs = self._extract_direct_price_pairs(normalized_opening_text)
         for pair in price_pairs:
             small_price = pair.get("small_price")
             if small_price is None:
@@ -923,18 +940,19 @@ class ReasonablenessChecker:
         line_patterns = [
             r"(合计)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
-        for pattern in line_patterns:
-            for m in re.finditer(pattern, bid_opening_text):
-                raw_amount = m.group(2).strip()
-                amount = self._clean_small_price(raw_amount)
-                if amount is None:
-                    continue
-                return {
-                    "page": bid_page,
-                    "amount_yuan": round(amount, 2),
-                    "raw_amount": raw_amount,
-                    "context": bid_opening_text[:400],
-                }
+        for search_text in search_texts:
+            for pattern in line_patterns:
+                for m in re.finditer(pattern, search_text):
+                    raw_amount = m.group(2).strip()
+                    amount = self._clean_small_price(raw_amount)
+                    if amount is None:
+                        continue
+                    return {
+                        "page": bid_page,
+                        "amount_yuan": round(amount, 2),
+                        "raw_amount": raw_amount,
+                        "context": normalized_opening_text[:400] or bid_opening_text[:400],
+                    }
 
         return None
 

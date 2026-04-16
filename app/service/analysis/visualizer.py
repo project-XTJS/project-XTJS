@@ -39,7 +39,7 @@ class ReportVisualizer:
             .file-switcher {
                 position: fixed;
                 top: 40%;
-                left: -260px;               /* 默认隐藏在左侧外 */
+                left: -230px;               /* 默认隐藏在左侧外 */
                 transform: translateY(-50%);
                 z-index: 10000;
                 display: flex;
@@ -507,7 +507,7 @@ class ReportVisualizer:
             {self.CSS_STYLE}
         </head>
         <body>
-            <a href="javascript:void(0);" onclick="window.history.back();" class="back-link">← 返回总览报告</a>
+            <a href="javascript:void(0);" onclick="window.history.back();" class="back-link">返回总览报告</a>
 
             <div class="container">
                 <div style="height: 40px;"></div>
@@ -696,9 +696,200 @@ class ReportVisualizer:
         </div>
         """
     
+    def _generate_verification_section(self, verification_report):
+        """Render signature, seal, and signing-date verification."""
+        if not verification_report:
+            return ""
+
+        overall_status = str(verification_report.get("compliance_status") or "pending")
+        status_map = {
+            "pass": ("tag-ok", "通过"),
+            "fail": ("tag-err", "未通过"),
+            "pending": ("tag-warning", "待复核"),
+        }
+        tag_cls, tag_text = status_map.get(overall_status, ("tag-missing", "未知"))
+
+        position_check = verification_report.get("position_check") or {}
+        date_check = verification_report.get("date_check") or {}
+        seal_company_check = verification_report.get("seal_company_check") or {}
+        attachment_results = verification_report.get("attachment_results") or []
+
+        summary_items = []
+        summary_text = str(verification_report.get("summary") or "").strip()
+        if summary_text:
+            summary_items.append(summary_text)
+
+        required_count = verification_report.get("required_attachment_count")
+        checked_count = verification_report.get("checked_attachment_count")
+        if required_count is not None:
+            if checked_count is not None:
+                summary_items.append(f"已核验附件 {checked_count} / {required_count} 个")
+            else:
+                summary_items.append(f"需核验附件 {required_count} 个")
+
+        deadline_date = date_check.get("deadline_date")
+        deadline_text = date_check.get("matched_deadline_text")
+        if deadline_date:
+            deadline_summary = f"招标截止日期：{deadline_date}"
+            if deadline_text:
+                deadline_summary += f"（依据：{deadline_text}）"
+            summary_items.append(deadline_summary)
+
+        bidder_name = str(verification_report.get("bidder_name") or "").strip()
+        seal_best_match = seal_company_check.get("best_match") or {}
+        if bidder_name:
+            seal_summary = f"投标人名称：{bidder_name}"
+            if seal_best_match.get("seal_text"):
+                seal_summary += f"，公章文本：{seal_best_match['seal_text']}"
+            if seal_best_match.get("score") is not None:
+                seal_summary += f"，匹配分值：{seal_best_match['score']}"
+            summary_items.append(seal_summary)
+
+        issue_groups = [
+            ("缺少签字", position_check.get("missing_signature_attachments") or []),
+            ("签字待复核", position_check.get("pending_signature_attachments") or []),
+            ("缺少盖章", position_check.get("missing_seal_attachments") or []),
+            ("缺少落款日期", date_check.get("missing_date_attachments") or []),
+            ("落款晚于截止日期", date_check.get("late_date_attachments") or []),
+        ]
+        issue_panels = []
+        for label, items in issue_groups:
+            if not items:
+                continue
+            items_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in items)
+            issue_panels.append(f"""
+            <div style="margin-top:12px; background:#f9fafc; border:1px solid #eee; padding:12px; border-radius:6px;">
+                <div style="font-weight:bold; margin-bottom:6px; color:var(--text-main);">{html.escape(label)}（{len(items)}）</div>
+                <ul style="margin:0; padding-left:20px; color:var(--text-regular); font-size:13px;">
+                    {items_html}
+                </ul>
+            </div>
+            """)
+
+        sub_status_map = {
+            "pass": ("tag-ok", "通过"),
+            "fail": ("tag-err", "缺失"),
+            "pending": ("tag-warning", "待复核"),
+            "late": ("tag-err", "晚于截止"),
+            "missing_date": ("tag-err", "缺少日期"),
+            "missing_deadline": ("tag-warning", "缺截止日期"),
+            "not_required": ("tag-missing", "不要求"),
+        }
+
+        def render_sub_status(status):
+            sub_tag_cls, sub_tag_text = sub_status_map.get(str(status or ""), ("tag-missing", str(status or "未知")))
+            return f'<span class="status-tag {sub_tag_cls}">{html.escape(sub_tag_text)}</span>'
+
+        def build_attachment_note(item):
+            notes = []
+            signature_check = item.get("signature_check") or {}
+            seal_check = item.get("seal_check") or {}
+            sign_date_check = item.get("date_check") or {}
+
+            filled_values = signature_check.get("filled_values") or []
+            if filled_values:
+                values = [str(x.get("value") or x.get("line") or "").strip() for x in filled_values]
+                values = [value for value in values if value]
+                if values:
+                    notes.append("签字值：" + "；".join(values))
+
+            pending_fields = signature_check.get("pending_fields") or []
+            if pending_fields:
+                values = [str(x.get("line") or "").strip() for x in pending_fields]
+                values = [value for value in values if value]
+                if values:
+                    notes.append("待复核签字位：" + "；".join(values))
+
+            empty_fields = signature_check.get("empty_fields") or []
+            if empty_fields:
+                values = [str(x.get("line") or "").strip() for x in empty_fields]
+                values = [value for value in values if value]
+                if values:
+                    notes.append("空签字位：" + "；".join(values))
+
+            best_match = seal_check.get("best_match") or {}
+            if best_match.get("seal_text"):
+                notes.append(f"公章：{best_match['seal_text']}")
+
+            matched_sign_text = sign_date_check.get("matched_sign_text")
+            if matched_sign_text:
+                notes.append(f"落款日期：{matched_sign_text}")
+
+            if sign_date_check.get("status") == "late" and sign_date_check.get("deadline_date"):
+                notes.append(f"晚于截止日期 {sign_date_check['deadline_date']}")
+
+            return "；".join(notes) or "-"
+
+        rows_html = ""
+        for item in attachment_results:
+            signature_check = item.get("signature_check") or {}
+            seal_check = item.get("seal_check") or {}
+            sign_date_check = item.get("date_check") or {}
+            note_text = build_attachment_note(item)
+            pages = item.get("pages") or []
+            page_text = "、".join(f"P{page}" for page in pages if page is not None) or "-"
+            rows_html += f"""
+                <tr>
+                    <td><div class="cell-truncate" title="{html.escape(str(item.get('title') or '-'))}">{html.escape(str(item.get('title') or '-'))}</div></td>
+                    <td>{html.escape(page_text)}</td>
+                    <td>{render_sub_status(signature_check.get('status'))}</td>
+                    <td>{render_sub_status(seal_check.get('status'))}</td>
+                    <td>{render_sub_status(sign_date_check.get('status'))}</td>
+                    <td><div class="cell-truncate preview-truncate" title="{html.escape(note_text)}">{html.escape(note_text)}</div></td>
+                </tr>
+            """
+
+        summary_html = "".join(f"<li>{html.escape(str(item))}</li>" for item in summary_items) or "<li>未返回摘要信息</li>"
+
+        seal_company_status_html = ""
+        if seal_company_check:
+            company_tag_cls, company_tag_text = sub_status_map.get(
+                str(seal_company_check.get("status") or ""),
+                ("tag-missing", str(seal_company_check.get("status") or "未知")),
+            )
+            seal_company_status_html = f"""
+            <div style="margin-top:15px; display:flex; justify-content:space-between; align-items:center; background:#f9fafc; border:1px solid #eee; padding:12px; border-radius:6px;">
+                <div style="font-size:13px; color:var(--text-regular);">
+                    公章与投标人匹配：{html.escape(str(seal_company_check.get('reason') or ''))}
+                </div>
+                <span class="status-tag {company_tag_cls}">{html.escape(company_tag_text)}</span>
+            </div>
+            """
+
+        return f"""
+        <div class="card">
+            <h2 style="display:flex; justify-content:space-between;">
+                <span>✍️ 签字盖章日期审查</span>
+                <span class="status-tag {tag_cls}">{html.escape(tag_text)}</span>
+            </h2>
+            <div style="background:#fefefe; border:1px solid #eee; padding:15px; border-radius:8px; margin-bottom:15px; font-size:13px;">
+                <ul style="margin:0; padding-left:20px; color:var(--text-regular);">
+                    {summary_html}
+                </ul>
+            </div>
+            {''.join(issue_panels)}
+            {seal_company_status_html}
+            <table class="it-table" style="margin-top:15px;">
+                <thead>
+                    <tr>
+                        <th width="28%">附件</th>
+                        <th width="10%">页码</th>
+                        <th width="12%">签字</th>
+                        <th width="12%">盖章</th>
+                        <th width="12%">日期</th>
+                        <th>识别说明</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html if rows_html else '<tr><td colspan="6" class="empty-text">未识别到需要核验的签字盖章附件</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+        """
+
     def generate_html(self, integrity_report, consistency_report, test_segments, model_segments,
                       deviation_report=None, pricing_report=None, reasonableness_report=None,
-                      file_switcher_info=None):
+                      verification_report=None, file_switcher_info=None):
         """
         生成全维度 HTML 报告，可选左侧悬浮文件切换菜单。
 
@@ -735,6 +926,7 @@ class ReportVisualizer:
         deviation_html = self._generate_deviation_section(deviation_report)
         pricing_html = self._generate_pricing_section(pricing_report)
         reasonableness_html = self._generate_reasonableness_section(reasonableness_report)
+        verification_html = self._generate_verification_section(verification_report)
 
         # ---------- 左侧悬浮菜单 HTML 构建 ----------
         switcher_html = ""
@@ -861,10 +1053,6 @@ class ReportVisualizer:
             <div class="container">
                 <div class="card header-card">
                     <h1>标书全维度智能审查报告</h1>
-                    <div style="text-align: right;">
-                        <div style="font-size: 13px; color: var(--text-light); margin-bottom: 4px;">合规性核验得分</div>
-                        <div class="score-value">{integrity_report.get('integrity_score', 0)}</div>
-                    </div>
                 </div>
 
                 <div class="card">
@@ -1009,6 +1197,7 @@ class ReportVisualizer:
                     {deviation_html}
                     {pricing_html}
                     {reasonableness_html}
+                    {verification_html}
 
                 </div>
 

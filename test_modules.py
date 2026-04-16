@@ -7,6 +7,7 @@ from app.service.analysis.visualizer import ReportVisualizer
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.itemized_pricing import ItemizedPricingChecker
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
+from app.service.analysis.verification import VerificationChecker
 
 def generate_report_for_bidder(tender_json, bidder_json_path, output_html_path, all_bidder_infos):
     """
@@ -39,6 +40,10 @@ def generate_report_for_bidder(tender_json, bidder_json_path, output_html_path, 
     compliance_report = reason_checker.check_price_compliance(bidder_json)
     reasonableness_final = [limit_report, compliance_report]
 
+    # 签字、盖章、落款日期
+    verification_checker = VerificationChecker(None)
+    verification_report = verification_checker.check_seal_and_date(tender_json, bidder_json)
+
     # 提取分段文本
     temps = TemplateExtractor.extract_consistency_templates(tender_json)
     m_segs = [{"title": t['title'], "text": "\n".join(t['content'])} for t in temps]
@@ -60,6 +65,7 @@ def generate_report_for_bidder(tender_json, bidder_json_path, output_html_path, 
         deviation_report=deviation_report,
         pricing_report=pricing_report,
         reasonableness_report=reasonableness_final,
+        verification_report=verification_report,
         file_switcher_info=switcher_info
     )
 
@@ -69,12 +75,25 @@ def generate_report_for_bidder(tender_json, bidder_json_path, output_html_path, 
 
 def main():
     # 配置路径
-    tender_path = "./ocr_results/369/369-model.json"
+    # tender_path = "./ocr_results/369/369-model.json"
+    # bidder_files = [
+    #     "./ocr_results/369/369-sangwu.json",
+    #     "./ocr_results/369/369-huolaiwo.json"
+    # ]
+    # # 配置路径
+    # tender_path = "./药品JSON识别结果/招标.JSON"
+    # bidder_files = [
+    #     "./药品JSON识别结果/宏银商务标.JSON",
+    #     "./药品JSON识别结果/戎元商务标.JSON",
+    #     "./药品JSON识别结果/舒源商务标.JSON",
+    # ]
+    # 配置路径
+    tender_path = "./出口退税/招标文件.json"
     bidder_files = [
-        "./ocr_results/369/369-sangwu.json",
-        "./ocr_results/369/369-huolaiwo.json"
+        "./出口退税/征盛商务标.json",
+        "./出口退税/智税商务标.json",
     ]
-    output_dir = "./reports"
+    output_dir = "."
     os.makedirs(output_dir, exist_ok=True)
 
     if not os.path.exists(tender_path):
@@ -116,7 +135,7 @@ def main():
 
         generate_report_for_bidder(tender_json, bf, output_html, infos_for_this)
 
-    print("\n✅ 全部报告生成完成！")
+    print("\n全部报告生成完成。")
     print(f"报告目录: {output_dir}")
     print("打开任意报告，左侧悬浮菜单可快速切换不同投标文件。")
 

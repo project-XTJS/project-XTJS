@@ -28,6 +28,92 @@ class VerificationChecker:
     OPTIONAL_MARKERS = ("如有", "可选", "如适用", "如需")
     EXCLUDE_ATTACHMENTS = ("拟派项目负责人情况表", "项目人员配置表", "人员配置表")
     ATTACHMENT_RE = re.compile(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?附件\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)")
+    ATTACHMENT_TITLE_PREFIX_PATTERNS = (
+        r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
+        r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
+        r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
+        r'^\s*\d+[)）]\s*',
+    )
+    ATTACHMENT_TITLE_NOISE_PATTERNS = (
+        r'附件|附表|附录|格式',
+        r'按要求加盖公章',
+        r'加盖公章',
+        r'后附证明材料',
+        r'直接投标的应提供',
+        r'委托授权人投标的应提供',
+        r'委托授权投标的应提供',
+        r'及被授权人身份证',
+        r'及身份证',
+        r'如为分支机构投标则须总公司唯一授权函',
+    )
+    ATTACHMENT_TITLE_FRAGMENT_PATTERNS = (
+        "法定代表人",
+        "单位负责人",
+        "授权委托书",
+        "证明书",
+        "声明函",
+        "承诺书",
+        "保证书",
+        "一览表",
+        "报价表",
+        "偏离表",
+        "情况表",
+        "配置表",
+        "清单",
+        "凭证",
+        "执照",
+        "财务状况",
+        "社会保障资金",
+        "税收",
+        "保证金",
+        "投标人基本情况",
+        "类似项目业绩",
+        "营业执照",
+        "劳动合同",
+        "社保",
+    )
+    ATTACHMENT_TITLE_TOKEN_PATTERNS = (
+        "法定代表人授权委托书",
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+        "类似项目业绩清单",
+        "投标人基本情况介绍",
+        "供应商承诺声明函",
+        "不参与围标串标承诺书",
+        "保证金缴纳凭证",
+        "财务状况及税收社会保障资金缴纳情况声明函",
+        "财务状况声明函",
+        "社会保障资金缴纳情况声明函",
+        "制造商声明函",
+        "制造商授权书",
+        "原厂授权函",
+        "营业执照",
+        "法人登记证书",
+        "分项报价表",
+        "商务条款偏离表",
+        "技术条款偏离表",
+        "开标一览表",
+        "投标保证书",
+        "拟派项目负责人情况表",
+        "项目人员配置表",
+        "授权委托书",
+        "证明书",
+        "声明函",
+        "承诺书",
+        "保证书",
+        "一览表",
+        "报价表",
+        "偏离表",
+        "情况表",
+        "配置表",
+        "清单",
+        "凭证",
+        "执照",
+    )
     COMMON_ATTACHMENT_TITLES = (
         "投标保证书",
         "开标一览表",
@@ -90,7 +176,10 @@ class VerificationChecker:
                 late_dates.append(result["title"])
 
         checked_count = len(results)
-        if checked_count <= 0 or deadline is None:
+        required_count = len(required)
+        if skipped_missing_attachments:
+            compliance_status = "fail"
+        elif checked_count <= 0 or deadline is None:
             compliance_status = "pending"
         elif any(x["status"] == "fail" for x in results):
             compliance_status = "fail"
@@ -100,10 +189,10 @@ class VerificationChecker:
             compliance_status = "pass"
 
         date_status = "missing_deadline" if deadline is None else ("fail" if missing_dates or late_dates else "pass")
-        position_status = "fail" if missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
+        position_status = "fail" if skipped_missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
         return {
             "mode": "tender_vs_bid",
-            "summary": self._pair_summary(checked_count, deadline, compliance_status, [], missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
+            "summary": self._pair_summary(required_count, deadline, compliance_status, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
             "seal_detected": seal_bundle["detected"],
             "seal_count": seal_bundle["count"],
             "seal_contents": seal_bundle["texts"],
@@ -116,7 +205,7 @@ class VerificationChecker:
             "required_attachments": [x["title"] for x in required],
             "skipped_missing_attachments": skipped_missing_attachments,
             "attachment_results": results,
-            "position_check": {"status": position_status, "missing_attachments": [], "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
+            "position_check": {"status": position_status, "missing_attachments": skipped_missing_attachments, "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
             "date_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "missing_date_attachments": missing_dates, "late_date_attachments": late_dates},
             "deadline_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "source": "tender_document"},
             "seal_company_check": self._seal_company_check(bidder_name, seal_bundle["texts"]),
@@ -398,18 +487,48 @@ class VerificationChecker:
         text = text[idx:] if idx >= 0 else text
         return re.sub(r"\s+", " ", text).strip("：:；;，,。")
 
+    def _strip_attachment_title_prefix(self, text: str) -> str:
+        value = str(text or "").strip()
+        previous = None
+        while value and value != previous:
+            previous = value
+            for pattern in self.ATTACHMENT_TITLE_PREFIX_PATTERNS:
+                value = re.sub(pattern, "", value).strip()
+        return value
+
     def _attachment_title_key(self, text: str) -> str:
-        title = self._attachment_title(text)
-        title = re.sub(r"^\s*附件\s*\d+(?:\s*[-－]\s*\d+)*[、.)）．]?\s*", "", title)
+        title = self._strip_attachment_title_prefix(self._attachment_title(text))
+        title = re.split(r"[；;。]", title, maxsplit=1)[0]
         title = re.sub(r"[（(][^）)]{0,30}(?:格式|自拟|如有|说明|盖章|签字|样式|模板|原件|复印件)[^）)]*[）)]", "", title)
-        title = re.sub(r"\s+", "", title)
+        for pattern, repl in (
+            (r"法定代表人资格证明书", "法定代表人证明书"),
+            (r"法定代表人身份证明", "法定代表人证明书"),
+            (r"单位负责人身份证明", "单位负责人证明书"),
+            (r"授权委托书及被授权人身份证", "授权委托书"),
+        ):
+            title = re.sub(pattern, repl, title)
+        for pattern in self.ATTACHMENT_TITLE_NOISE_PATTERNS:
+            title = re.sub(pattern, "", title)
+        title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
         return title.strip("：:；;，,。")
 
+    def _attachment_title_tokens(self, text: str) -> list[str]:
+        title_key = self._attachment_title_key(text)
+        if not title_key:
+            return []
+        tokens = []
+        for token in self.ATTACHMENT_TITLE_TOKEN_PATTERNS:
+            compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", token)
+            if compact and compact in title_key and compact not in tokens:
+                tokens.append(compact)
+        for token in self.ATTACHMENT_TITLE_FRAGMENT_PATTERNS:
+            compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", token)
+            if compact and compact in title_key and compact not in tokens:
+                tokens.append(compact)
+        return tokens or [title_key]
+
     def _leading_title_key(self, text: str) -> str:
-        leading = str(text or "").strip()
-        leading = re.sub(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*|[一二三四五六七八九十百]+[、.])", "", leading)
-        leading = re.sub(r"\s+", "", leading)
-        return leading.strip("：:；;，,。")
+        return self._attachment_title_key(text)
 
     def _attachment_title_score(self, left: str, right: str) -> float:
         left_key = self._attachment_title_key(left)
@@ -418,9 +537,23 @@ class VerificationChecker:
             return 0.0
         if left_key == right_key:
             return 1.0
-        ratio = SequenceMatcher(None, left_key, right_key).ratio()
-        bonus = 0.35 if len(left_key) >= 5 and len(right_key) >= 5 and (left_key in right_key or right_key in left_key) else 0.0
-        return min(ratio + bonus, 1.0)
+        score = SequenceMatcher(None, left_key, right_key).ratio()
+        if len(left_key) >= 4 and (left_key in right_key or right_key in left_key):
+            score = max(score, 0.92)
+
+        left_tokens = self._attachment_title_tokens(left)
+        if left_tokens:
+            matched = sum(
+                1
+                for token in left_tokens
+                if token in right_key or (len(token) >= 4 and right_key in token)
+            )
+            coverage = matched / len(left_tokens)
+            if coverage >= 1:
+                score = max(score, 0.9 if len(left_tokens) >= 2 else 0.82)
+            elif coverage >= 0.6:
+                score = max(score, 0.76)
+        return min(score, 1.0)
 
     def _attachment_title_hints(self, attachments: list[dict] | None = None) -> list[dict]:
         result, seen = [], set()
@@ -445,10 +578,10 @@ class VerificationChecker:
             return None
         best = None
         for item in expected_attachments or []:
-            score = self._attachment_title_score(title_key, item.get("title_key") or item.get("title") or "")
+            score = self._attachment_title_score(item.get("title") or item.get("title_key") or "", text)
             if best is None or score > best["score"]:
                 best = {"score": score, "item": item}
-        return best["item"] if best and best["score"] >= 0.78 else None
+        return best["item"] if best and best["score"] >= 0.74 else None
 
     def _is_attachment_heading(self, section: dict, expected_attachments: list[dict] | None = None) -> bool:
         if section.get("type") not in {"heading", "text"}:
@@ -475,7 +608,7 @@ class VerificationChecker:
                 leading_title_key.startswith("附件") or leading_title_key.startswith(expected_title_key)
             ):
                 return False
-        if len(compact) > (64 if section.get("type") == "heading" else 36):
+        if len(compact) > (120 if section.get("type") == "heading" else 36):
             return False
         return matched_expected is not None
 
