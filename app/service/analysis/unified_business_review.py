@@ -26,8 +26,17 @@ class UnifiedBusinessReviewService:
     PAGE_KEYS = {"page", "page_no", "page_num", "page_index"}
     PAGE_LIST_KEYS = {"pages", "page_numbers", "page_nos"}
     ATTACHMENT_REF_RE = re.compile(r"附件\s*\d+(?:\s*[-－]\s*\d+)?")
+    PAGE_REF_RE = re.compile(r"第\s*\d+\s*页")
     BUSINESS_FILE_RE = re.compile(r"[\s_-]*商务标\s*$")
     TECHNICAL_FILE_RE = re.compile(r"[\s_-]*技术标\s*$")
+    CHECK_DISPLAY_ORDER = (
+        "integrity_check",
+        "consistency_check",
+        "pricing_check",
+        "itemized_pricing_check",
+        "deviation_check",
+        "verification_check",
+    )
 
     def __init__(self, db_service: PostgreSQLService | None = None) -> None:
         self.db_service = db_service or PostgreSQLService()
@@ -57,6 +66,11 @@ class UnifiedBusinessReviewService:
                 )
             )
 
+        reading_guide = self._build_review_reading_guide(
+            tender_meta=dataset["tender"]["meta"],
+            bidders=bidders,
+        )
+
         return {
             "schema_version": self.RESULT_SCHEMA_VERSION,
             "review_type": "unified_business_review",
@@ -75,6 +89,7 @@ class UnifiedBusinessReviewService:
                 ],
                 "file_count": 1 + len(dataset["bidders"]) * 2,
             },
+            "reading_guide": reading_guide,
             "function_validation": self._summarize_function_validation(bidders),
             "summary": self._summarize_review(bidders),
             "bidders": bidders,
@@ -100,6 +115,7 @@ class UnifiedBusinessReviewService:
         return {
             "project": project,
             "result_key": result_key,
+            "overview": self._build_response_overview(review),
             "review": review,
             "result_record": result_record,
         }
@@ -130,6 +146,7 @@ class UnifiedBusinessReviewService:
         return {
             "project": project,
             "result_key": result_key,
+            "overview": self._build_response_overview(review),
             "review": review,
             "result_record": result_record,
         }
@@ -178,6 +195,11 @@ class UnifiedBusinessReviewService:
                 )
             )
 
+        reading_guide = self._build_review_reading_guide(
+            tender_meta=tender_document["meta"],
+            bidders=bidders,
+        )
+
         return {
             "schema_version": self.RESULT_SCHEMA_VERSION,
             "review_type": "business_bid_format_review",
@@ -189,6 +211,7 @@ class UnifiedBusinessReviewService:
                 "bidders": bidder_entries,
                 "file_count": 1 + len(bidder_entries),
             },
+            "reading_guide": reading_guide,
             "function_validation": self._summarize_function_validation(bidders),
             "summary": self._summarize_review(bidders),
             "bidders": bidders,
@@ -415,10 +438,20 @@ class UnifiedBusinessReviewService:
         bidder_name = self._extract_bidder_name(checks, bidder["bidder_key"])
         aggregate_issues = self._aggregate_bidder_issues(checks)
         summary = self._summarize_bidder_checks(checks)
+        reading_guide = self._build_bidder_reading_guide(
+            bidder_key=bidder["bidder_key"],
+            bidder_name=bidder_name,
+            summary=summary,
+            checks=checks,
+            tender_meta=tender_meta,
+            business_meta=bidder["business"]["meta"],
+            technical_meta=bidder["technical"]["meta"],
+        )
 
         return {
             "bidder_key": bidder["bidder_key"],
             "bidder_name": bidder_name,
+            "reading_guide": reading_guide,
             "documents": {
                 "tender": tender_meta,
                 "business": bidder["business"]["meta"],
@@ -485,10 +518,19 @@ class UnifiedBusinessReviewService:
         bidder_name = self._extract_bidder_name(checks, bidder_key)
         aggregate_issues = self._aggregate_bidder_issues(checks)
         summary = self._summarize_bidder_checks(checks)
+        reading_guide = self._build_bidder_reading_guide(
+            bidder_key=bidder_key,
+            bidder_name=bidder_name,
+            summary=summary,
+            checks=checks,
+            tender_meta=tender_meta,
+            business_meta=business_meta,
+        )
 
         return {
             "bidder_key": bidder_key,
             "bidder_name": bidder_name,
+            "reading_guide": reading_guide,
             "documents": {
                 "tender": tender_meta,
                 "business": business_meta,
@@ -1314,6 +1356,319 @@ class UnifiedBusinessReviewService:
                 entry["validation_status_counts"][check["validation"]["status"]] += 1
                 entry["review_status_counts"][check["review"]["status"]] += 1
         return function_summary
+
+    def _build_response_overview(self, review: dict[str, Any]) -> dict[str, Any]:
+        guide = review.get("reading_guide") or {}
+        bidder_overview = guide.get("bidder_overview") or []
+        return {
+            "review_type": review.get("review_type"),
+            "project_identifier_id": review.get("project_identifier_id"),
+            "tender_file_name": guide.get("tender_file_name"),
+            "bidder_count": len(bidder_overview),
+            "review_status_counts": (review.get("summary") or {}).get("review_status_counts"),
+            "recommended_fields": [
+                "overview.bidder_overview",
+                "review.reading_guide",
+                "review.bidders[].reading_guide.check_navigation",
+                "review.bidders[].checks",
+            ],
+            "bidder_overview": bidder_overview,
+        }
+
+    def _build_review_reading_guide(
+        self,
+        *,
+        tender_meta: dict[str, Any],
+        bidders: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        bidder_overview = []
+        for bidder in bidders:
+            documents = bidder.get("documents") or {}
+            business_meta = documents.get("business") or {}
+            technical_meta = documents.get("technical") or {}
+            checks = bidder.get("checks") or {}
+            failed_check_codes = [
+                check_code
+                for check_code, check in checks.items()
+                if (check.get("review") or {}).get("status") == "fail"
+            ]
+            bidder_overview.append(
+                {
+                    "bidder_key": bidder.get("bidder_key"),
+                    "bidder_name": bidder.get("bidder_name"),
+                    "business_file_name": business_meta.get("file_name"),
+                    "technical_file_name": technical_meta.get("file_name"),
+                    "overall_review_status": (bidder.get("summary") or {}).get("overall_review_status"),
+                    "failed_check_codes": failed_check_codes,
+                    "failed_check_names": [
+                        checks[check_code].get("check_name")
+                        for check_code in failed_check_codes
+                        if check_code in checks
+                    ],
+                }
+            )
+
+        bidder_overview.sort(
+            key=lambda item: (
+                self._review_status_sort_key(item.get("overall_review_status")),
+                str(item.get("bidder_key") or ""),
+            )
+        )
+        return {
+            "tender_file_name": tender_meta.get("file_name"),
+            "bidder_count": len(bidders),
+            "recommended_reading_order": [
+                "1) overview.bidder_overview",
+                "2) review.bidders[].reading_guide.check_navigation",
+                "3) review.bidders[].checks.<check_code>.source_context",
+                "4) review.bidders[].checks.<check_code>.issues",
+            ],
+            "bidder_overview": bidder_overview,
+        }
+
+    def _build_bidder_reading_guide(
+        self,
+        *,
+        bidder_key: str,
+        bidder_name: str,
+        summary: dict[str, Any],
+        checks: dict[str, Any],
+        tender_meta: dict[str, Any],
+        business_meta: dict[str, Any],
+        technical_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        check_navigation = []
+        for check_code in self.CHECK_DISPLAY_ORDER:
+            check = checks.get(check_code)
+            if not isinstance(check, dict):
+                continue
+            source_context = self._build_check_source_context(
+                check_code=check_code,
+                tender_meta=tender_meta,
+                business_meta=business_meta,
+                technical_meta=technical_meta,
+            )
+            focus_sections = self._collect_check_focus_sections(check)
+            source_context["focus_sections"] = focus_sections
+            check["source_context"] = source_context
+            check_navigation.append(
+                {
+                    "check_code": check_code,
+                    "check_name": check.get("check_name"),
+                    "status": (check.get("review") or {}).get("status"),
+                    "summary": (check.get("review") or {}).get("summary"),
+                    "source_documents": source_context["source_documents"],
+                    "focus_scope": source_context["focus_scope"],
+                    "focus_sections": focus_sections,
+                    "top_findings": self._select_issue_highlights(check),
+                }
+            )
+
+        check_navigation.sort(
+            key=lambda item: (
+                self._review_status_sort_key(item.get("status")),
+                self._check_display_index(item.get("check_code")),
+            )
+        )
+        return {
+            "bidder_key": bidder_key,
+            "bidder_name": bidder_name,
+            "business_file_name": business_meta.get("file_name"),
+            "technical_file_name": (technical_meta or {}).get("file_name"),
+            "tender_file_name": tender_meta.get("file_name"),
+            "overall_review_status": summary.get("overall_review_status"),
+            "check_status_counts": summary.get("review_status_counts"),
+            "check_navigation": check_navigation,
+        }
+
+    def _build_check_source_context(
+        self,
+        *,
+        check_code: str,
+        tender_meta: dict[str, Any],
+        business_meta: dict[str, Any],
+        technical_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if check_code == "integrity_check":
+            return {
+                "focus_scope": "对照招标文件中的商务标要求，检查商务标 OCR 结果里是否识别到必备附件和资格证明材料。",
+                "source_documents": [
+                    self._document_source_brief(tender_meta, purpose="requirement_source"),
+                    self._document_source_brief(business_meta, purpose="recognized_business_content"),
+                ],
+            }
+        if check_code == "consistency_check":
+            return {
+                "focus_scope": "对照招标文件模板锚点，检查商务标对应附件的模板一致性。",
+                "source_documents": [
+                    self._document_source_brief(tender_meta, purpose="template_source"),
+                    self._document_source_brief(business_meta, purpose="recognized_attachment_content"),
+                ],
+            }
+        if check_code == "pricing_check":
+            return {
+                "focus_scope": "检查商务标报价页和招标限价条款，确认总价书写与限价对比结果。",
+                "source_documents": [
+                    self._document_source_brief(business_meta, purpose="quoted_price_source"),
+                    self._document_source_brief(tender_meta, purpose="tender_limit_reference"),
+                ],
+            }
+        if check_code == "itemized_pricing_check":
+            return {
+                "focus_scope": "检查商务标分项报价表中的单价、数量、合计和汇总一致性。",
+                "source_documents": [
+                    self._document_source_brief(business_meta, purpose="itemized_pricing_source"),
+                    self._document_source_brief(tender_meta, purpose="missing_item_reference"),
+                ],
+            }
+        if check_code == "deviation_check":
+            source_documents = [
+                self._document_source_brief(tender_meta, purpose="requirement_source"),
+                self._document_source_brief(business_meta, purpose="business_response_context"),
+            ]
+            if technical_meta:
+                source_documents.append(
+                    self._document_source_brief(technical_meta, purpose="technical_response_source")
+                )
+            return {
+                "focus_scope": "对照招标文件要求，检查商务标/技术标中的响应与偏离情况。",
+                "source_documents": source_documents,
+            }
+        return {
+            "focus_scope": "检查商务标中的签字、盖章、落款日期，并对照招标截止时间。",
+            "source_documents": [
+                self._document_source_brief(business_meta, purpose="signature_seal_source"),
+                self._document_source_brief(tender_meta, purpose="deadline_reference"),
+            ],
+        }
+
+    def _document_source_brief(self, meta: dict[str, Any], *, purpose: str) -> dict[str, Any]:
+        return {
+            "role": meta.get("role"),
+            "file_name": meta.get("file_name"),
+            "bidder_key": meta.get("bidder_key"),
+            "page_count": meta.get("page_count"),
+            "purpose": purpose,
+        }
+
+    def _collect_check_focus_sections(self, check: dict[str, Any], *, max_items: int = 6) -> list[str]:
+        focus_sections: list[str] = []
+        focus_sections.extend(self._extract_focus_tokens((check.get("review") or {}).get("summary")))
+
+        issues = check.get("issues") or {}
+        ordered_issues = (
+            list(issues.get("failed") or [])
+            + list(issues.get("unclear") or [])
+            + list(issues.get("passed") or [])
+        )
+        for issue in ordered_issues:
+            focus_sections.extend(self._extract_focus_tokens(issue.get("title")))
+            focus_sections.extend(self._extract_focus_tokens(issue.get("message")))
+            focus_sections.extend(self._extract_focus_tokens_from_evidence(issue.get("evidence")))
+            simplified_title = self._simplify_issue_title(issue.get("title"))
+            if simplified_title:
+                focus_sections.append(simplified_title)
+
+        return self._unique_texts(focus_sections)[:max_items]
+
+    def _extract_focus_tokens_from_evidence(self, evidence: Any) -> list[str]:
+        tokens: list[str] = []
+        if isinstance(evidence, dict):
+            for key in (
+                "preview",
+                "summary",
+                "attachment",
+                "matched_deadline_text",
+                "missing_attachments",
+                "missing_signature_attachments",
+                "pending_signature_attachments",
+                "missing_seal_attachments",
+                "missing_date_attachments",
+                "late_date_attachments",
+            ):
+                if key in evidence:
+                    tokens.extend(self._extract_focus_tokens(evidence.get(key)))
+        elif isinstance(evidence, list):
+            for item in evidence:
+                tokens.extend(self._extract_focus_tokens(item))
+        else:
+            tokens.extend(self._extract_focus_tokens(evidence))
+        return tokens
+
+    def _extract_focus_tokens(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            tokens: list[str] = []
+            for item in value:
+                tokens.extend(self._extract_focus_tokens(item))
+            return tokens
+
+        text = str(value).strip()
+        if not text:
+            return []
+
+        tokens = []
+        tokens.extend(self._extract_attachment_refs(text))
+        tokens.extend(match.strip() for match in self.PAGE_REF_RE.findall(text))
+        return tokens
+
+    def _select_issue_highlights(self, check: dict[str, Any], *, max_items: int = 2) -> list[dict[str, Any]]:
+        issues = check.get("issues") or {}
+        ordered_issues = (
+            list(issues.get("failed") or [])
+            + list(issues.get("unclear") or [])
+            + list(issues.get("passed") or [])
+        )
+        highlights = []
+        for issue in ordered_issues[:max_items]:
+            highlights.append(
+                {
+                    "status": issue.get("status"),
+                    "title": issue.get("title"),
+                    "message": self._trim_text(issue.get("message"), max_length=120),
+                }
+            )
+        return highlights
+
+    def _simplify_issue_title(self, title: Any) -> str:
+        text = self._simplify_integrity_item_title(str(title or ""))
+        if text:
+            return text
+        raw_text = str(title or "").strip()
+        raw_text = re.sub(r"^\s*(?:\d+|[A-Z])[.、\s]*", "", raw_text)
+        raw_text = re.sub(r"[（(].*?[）)]", "", raw_text).strip()
+        if 2 <= len(raw_text) <= 24:
+            return raw_text
+        return ""
+
+    def _unique_texts(self, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique.append(normalized)
+        return unique
+
+    def _trim_text(self, value: Any, *, max_length: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= max_length:
+            return text
+        return f"{text[: max_length - 3].rstrip()}..."
+
+    def _check_display_index(self, check_code: Any) -> int:
+        text = str(check_code or "")
+        if text in self.CHECK_DISPLAY_ORDER:
+            return self.CHECK_DISPLAY_ORDER.index(text)
+        return len(self.CHECK_DISPLAY_ORDER)
+
+    def _review_status_sort_key(self, status: Any) -> int:
+        text = str(status or "").strip().lower()
+        order = {"fail": 0, "unclear": 1, "pass": 2}
+        return order.get(text, 3)
 
     def _merge_bid_documents(self, business_payload: dict[str, Any], technical_payload: dict[str, Any]) -> dict[str, Any]:
         business_data = self._data_node(business_payload)

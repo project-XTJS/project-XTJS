@@ -151,6 +151,11 @@ async def _ensure_batch_project(
 @router.post(
     "/projects/business-bid-format-review/upload-json",
     summary="上传 OCR JSON 并执行商务标格式审查",
+    description=(
+        "返回结果新增 `overview`、`review.reading_guide`、"
+        "`review.bidders[].reading_guide` 和 `checks.*.source_context`，"
+        "用于先查看“来自哪份文件、主要看哪几个附件/页码”的摘要导航。"
+    ),
 )
 async def upload_business_bid_format_review(
     tender_json_file: UploadFile = File(..., description="招标文件 OCR 识别 JSON"),

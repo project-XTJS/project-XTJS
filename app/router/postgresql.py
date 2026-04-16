@@ -85,7 +85,6 @@ def _run_project_bid_document_review(
         document_types=document_types,
     )
     db_service.upsert_project_result_item(
-        project_identifier_id=identifier_id,
         result_key="bid_document_review",
         result_value=review_result,
     )
