@@ -210,13 +210,14 @@ class TemplateExtractor:
         return SectionClassifier.is_toc_noise(text)
 
     @classmethod
-    def extract_requirements(cls, model_raw_json: dict) -> list:
-        """提取完整性清单：改为返回单一顺序列表，保留主子项的相对位置"""
+    def extract_requirements(cls, model_raw_json: dict) -> tuple:
+        """提取完整性清单：返回有序列表和序号到附件编号的映射"""
         data_node = model_raw_json.get('data', model_raw_json)
         sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
-        
-        ordered_list = [] # 改用单一列表存储所有项
-        stage = 0 
+    
+        ordered_list = []
+        attachment_mapping = {}  # 序号 -> [附件编号列表]
+        stage = 0
 
         for sec in sections:
             text = sec['text']
@@ -231,12 +232,38 @@ class TemplateExtractor:
                 # 按照文本出现的先后顺序切分并压入同一个列表
                 parts = re.split(r'(?<![\dA-Z])(?=(?:\d+|[A-Z])[．\.]\s*)', text)
                 for part in filter(None, [p.strip() for p in parts]):
-                    if m := re.match(r'^(\d+)[．\.]\s*(.+)', part):
-                        ordered_list.append(f"{m.group(1)}. {cls._clean_label(m.group(2))}")
-                    elif s := re.match(r'^([A-Z])[．\.]\s*(.+)', part):
-                        ordered_list.append(f"{s.group(1)}. {cls._clean_label(s.group(2))}")
-        
-        return ordered_list
+                    # 提取序号
+                    m = re.match(r'^(\d+)[．\.]\s*(.+)', part)
+                    s = re.match(r'^([A-Z])[．\.]\s*(.+)', part)
+                    seq = None
+                    content = ""
+                    if m:
+                        seq = m.group(1)
+                        content = m.group(2)
+                        ordered_list.append(f"{seq}. {cls._clean_label(content)}")
+                    elif s:
+                        seq = s.group(1)
+                        content = s.group(2)
+                        ordered_list.append(f"{seq}. {cls._clean_label(content)}")
+                    else:
+                        continue
+
+                    # 从内容中提取“格式参见本章附件X”中的附件编号
+                    attach_refs = re.findall(r'格式参见本章附件\s*([\d\-—，,、\s]+)', content)
+                    attach_numbers = []
+                    if attach_refs:
+                        # 处理可能多个编号，如 "8-1、8-2" 或 "8-1,8-2"
+                        raw = attach_refs[0]
+                        # 按逗号、顿号、空格分割
+                        nums = re.split(r'[，,、\s]+', raw)
+                        for num in nums:
+                            num = num.strip().strip('—－-')
+                            if num:
+                                attach_numbers.append(num)
+                    if attach_numbers:
+                        attachment_mapping[seq] = attach_numbers
+
+        return ordered_list, attachment_mapping
 
     @classmethod
     def extract_consistency_templates(cls, model_raw_json: dict) -> list:

@@ -90,7 +90,7 @@ class IntegrityChecker:
             child_all_passed = all((details.get(child) or {}).get("is_passed") for child in child_items)
             details[current_main] = {
                 **main_detail,
-                "status": "子项覆盖（子附件齐全）" if child_all_passed else "子项覆盖（不单独计分）",
+                "status": "子附件齐全" if child_all_passed else "子附件不齐全",
                 "preview": "；".join(child_items),
                 "is_passed": child_all_passed,
                 "scored": False,
@@ -126,7 +126,7 @@ class IntegrityChecker:
 
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:
         # reqs 现在接收的是一个按文档物理顺序排列的单一列表 List[str]
-        reqs = TemplateExtractor.extract_requirements(model_json)
+        reqs, attachment_mapping = TemplateExtractor.extract_requirements(model_json)
         data_node = test_json.get('data', test_json)
         sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
         
@@ -191,4 +191,5 @@ class IntegrityChecker:
             "details": all_details,
             "scored_item_count": total,
             "ignored_item_count": len(all_details) - total,
+            "attachment_mapping": attachment_mapping,  # 新增字段
         }

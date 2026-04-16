@@ -219,12 +219,10 @@ class ConsistencyChecker:
                 
         return anchors
 
+    # 在 compare_raw_data 方法中增加特殊附件判断
     def compare_raw_data(self, model_json: dict, test_json: dict) -> List[Dict]:
-        # 获取模板文本
         temps = TemplateExtractor.extract_consistency_templates(model_json)
         model_segments = [{"title": t['title'], "text": "\n".join(t['content'])} for t in temps]
-        
-        # 获取测试文件文本
         test_segments = DocumentProcessor.segment_document(test_json, temps, is_test_file=True)
 
         results = []
@@ -235,18 +233,24 @@ class ConsistencyChecker:
             m_body = self._trim_non_body_lines(self._strip_title_line(m_txt, m_seg['title']))
             t_body = self._trim_non_body_lines(self._strip_title_line(t_txt, m_seg['title']))
 
-            # 将测试正文高度清洗压缩
+            title = m_seg['title']
+            # 特殊附件：只要存在内容即通过
+            if "制造商声明函" in title or "制造商授权书" in title or "原厂授权函" in title:
+                passed = bool(t_body.strip())
+                results.append({
+                    "name": title,
+                    "is_passed": passed,
+                    "missing_anchors": [] if passed else ["[未检测到内容]"]
+                })
+                continue
+
             norm_t = self._normalize(t_body)
-            # 提取模板锚点
             anchors = self._get_anchors(m_body)
-            
-            # O(N) 级别的高效比对
             missing = [a for a in anchors if a not in norm_t]
-            
+
             results.append({
-                "name": m_seg['title'], 
-                "is_passed": len(missing) == 0, 
+                "name": title,
+                "is_passed": len(missing) == 0,
                 "missing_anchors": missing
             })
-            
         return results
