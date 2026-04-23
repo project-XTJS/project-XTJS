@@ -379,6 +379,11 @@ class BidDocumentReviewService:
         re.compile(r"(?:项目名称|采购项目名称|项目编号|标段名称|包件名称)\s*[:：]\s*([^\n]{2,80})"),
         re.compile(r"(?:投标人|供应商|申请人|单位名称|公司名称)\s*[:：]\s*([^\n]{2,80})"),
         re.compile(r"(?:接口名称|接口名|API名称|API)\s*[:：]\s*([^\n]{2,80})"),
+        re.compile(
+            r"(?:姓名|缴费人名称|缴费人识别号|身份证号|证件号码|联系人|"
+            r"开户银行|银行账号|银行帐号|账号|帐号|账户名称|帐户名称)"
+            r"\s*[:：]?\s*([^\n]{1,80})"
+        ),
     )
     TYPO_REJECT_REPLACEMENT_PAIRS = {
         ("余", "馀"),
@@ -400,6 +405,19 @@ class BidDocumentReviewService:
         ("须", "需"),
         ("法", "运"),
     }
+    TYPO_CONTEXTUAL_REJECT_PATTERNS = (
+        ("倒", "到", re.compile(r"倒推")),
+        ("以", "已", re.compile(r"可以")),
+        ("偏", "变", re.compile(r"偏离")),
+        ("家", "加", re.compile(r"国家")),
+        ("误", "逾", re.compile(r"误期")),
+        ("力", "利", re.compile(r"权力|约束力|公司权力")),
+        ("它", "他", re.compile(r"其它")),
+        ("简", "概", re.compile(r"简述")),
+        ("位", "为", re.compile(r"广告位")),
+        ("检", "监", re.compile(r"检测")),
+        ("黄桑", "黄枭", re.compile(r"缴费人名称|识别号|姓名")),
+    )
     TYPO_MAX_REPLACEMENT_SPAN = 4
     TYPO_MAX_CHANGED_SPAN_COUNT = 1
     TYPO_MAX_CHANGED_CHAR_COUNT = 2
@@ -475,23 +493,6 @@ class BidDocumentReviewService:
         "\u6cd5\u5b9a\u4ee3\u8868\u4eba\u7b7e\u5b57",
         "\u6388\u6743\u4ee3\u8868\u7b7e\u5b57",
     )
-    KNOWN_TYPO_MAP = {
-        "釆用": "采用",
-        "釆购": "采购",
-        "按装": "安装",
-        "部暑": "部署",
-        "侯选": "候选",
-        "帐户": "账户",
-        "帐号": "账号",
-        "现厂": "现场",
-        "録入": "录入",
-        "录相": "录像",
-        "迳行": "径行",
-        "拚装": "拼装",
-        "优於": "优于",
-        "缐上": "线上",
-        "萤幕": "屏幕",
-    }
     SKIP_REASON_MISSING_CONTENT = "missing_or_unusable_ocr_content"
 
     def __init__(self) -> None:
@@ -598,7 +599,7 @@ class BidDocumentReviewService:
             "project": project or {"identifier_id": project_identifier},
             "config": {
                 "document_types": list(requested_types),
-                "typo_detection_engine": "rule_filter_plus_macbert",
+                "typo_detection_engine": "macbert_candidate_review",
                 "typo_model_name": _ChineseTypoCorrector.DEFAULT_MODEL_NAME,
                 "typo_model_threshold": _ChineseTypoCorrector.DEFAULT_THRESHOLD,
                 "typo_stopword_dictionary_enabled": True,
@@ -750,15 +751,15 @@ class BidDocumentReviewService:
         )
         model_available = _ChineseTypoCorrector.is_available()
         notes = [
-            "Typo detection runs as rule-filtered MacBERT candidate review.",
-            "Only single-char or same-length replacements are accepted, and protected spans stay blocked.",
+            "Typo detection runs as MacBERT candidate review without a built-in typo dictionary.",
+            "Only single-char or same-length replacements are accepted, protected spans stay blocked, and domain-safe phrases are filtered.",
         ]
         if model_available:
             notes.append(
                 f"Enabled pycorrector + MacBERT model: {_ChineseTypoCorrector.DEFAULT_MODEL_NAME}"
             )
         else:
-            notes.append("MacBERT is unavailable, fallback to rule-based typo detection.")
+            notes.append("MacBERT is unavailable; only non-model consistency checks can report issues.")
             if _ChineseTypoCorrector.load_error():
                 notes.append(f"Model load error: {_ChineseTypoCorrector.load_error()}")
 
@@ -767,7 +768,7 @@ class BidDocumentReviewService:
             "issue_count": total_issue_count,
             "shared_issue_count": len(shared_issues),
             "suspicious_document_count": len(document_issue_items),
-            "engine": "rule_filter_plus_macbert" if model_available else "rule_based_fallback",
+            "engine": "macbert_candidate_review" if model_available else "model_unavailable",
             "documents": document_issue_items,
             "shared_issues": shared_issues,
             "notes": notes,
@@ -848,19 +849,6 @@ class BidDocumentReviewService:
         issues: list[dict[str, Any]] = []
         seen_keys: set[tuple[Any, ...]] = set()
         typo_sentences = self._iter_typo_sentences(document)
-
-        for sentence in typo_sentences:
-            for issue in self._find_known_typo_matches(sentence, document):
-                key = (
-                    issue.get("issue_type"),
-                    issue.get("issue_key"),
-                    issue.get("page"),
-                    issue.get("matched_text"),
-                )
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                issues.append(issue)
 
         for issue in self._find_model_typo_matches(typo_sentences, document):
             key = (
@@ -1111,6 +1099,8 @@ class BidDocumentReviewService:
             return False
         if (source_span, target_span) in self.TYPO_REJECT_REPLACEMENT_PAIRS:
             return False
+        if self._is_contextual_model_typo_reject(sentence, source_span, target_span):
+            return False
         if not re.fullmatch(r"[\u4e00-\u9fa5]+", source_span):
             return False
         if not re.fullmatch(r"[\u4e00-\u9fa5]+", target_span):
@@ -1124,6 +1114,21 @@ class BidDocumentReviewService:
         if re.search(r"[A-Za-z0-9]", context):
             return False
         return True
+
+    def _is_contextual_model_typo_reject(
+        self,
+        sentence: str,
+        source_span: str,
+        target_span: str,
+    ) -> bool:
+        compact = self._compact(sentence)
+        if not compact:
+            return False
+
+        for source, target, pattern in self.TYPO_CONTEXTUAL_REJECT_PATTERNS:
+            if source_span == source and target_span == target and pattern.search(compact):
+                return True
+        return False
 
     def _collect_typo_protected_spans(self, text: str) -> list[tuple[int, int]]:
         spans: list[tuple[int, int]] = []
@@ -1168,33 +1173,6 @@ class BidDocumentReviewService:
             if start < protected_end and end > protected_start:
                 return True
         return False
-
-    def _find_known_typo_matches(
-        self,
-        sentence: dict[str, Any],
-        document: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        issues: list[dict[str, Any]] = []
-        text = str(sentence.get("text") or "")
-        compact = self._compact(text)
-        for typo_form, suggestion in self.KNOWN_TYPO_MAP.items():
-            if typo_form not in compact:
-                continue
-            issues.append(
-                {
-                    "issue_type": "known_typo",
-                    "issue_key": typo_form,
-                    "matched_text": typo_form,
-                    "suggestion": suggestion,
-                    "page": sentence.get("page"),
-                    "bbox": sentence.get("bbox"),
-                    "text": text,
-                    "document_identifier_id": document["identifier_id"],
-                    "relation_id": document.get("relation_id"),
-                    "file_name": document.get("file_name"),
-                }
-            )
-        return issues
 
     def _find_person_name_mismatch_issues(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         events = self._build_person_name_events(document)

@@ -1,0 +1,1921 @@
+{
+  "generated_at": "2026-04-23T22:32:30",
+  "scope": "Current OCR JSON files with layout_sections, excluding env/cache/git/report directories.",
+  "benchmark_note": "本版已移除内置错字表，不再把“不在字典中”当作误报。报告只展示 MacBERT 高置信候选和人名一致性风险，均需结合原文复核。",
+  "input_file_count": 44,
+  "input_files": [
+    "ocr_results\\0925\\0925-chongqing.json",
+    "ocr_results\\0925\\0925-chongqinghading.json",
+    "ocr_results\\0925\\0925-model.json",
+    "ocr_results\\0925\\0925-shanghai.json",
+    "ocr_results\\0925\\0925-suzhou.json",
+    "ocr_results\\369\\369-huolaiwo.json",
+    "ocr_results\\369\\369-model.json",
+    "ocr_results\\369\\369-sangwu.json",
+    "ocr_results\\369\\shangwu.json",
+    "ocr_results\\369\\投标2（商务标文件）.json",
+    "ocr_results\\369\\新response.json",
+    "ocr_results\\427\\427-hongyin.json",
+    "ocr_results\\427\\427-model.json",
+    "ocr_results\\427\\427-rongyuan.json",
+    "ocr_results\\427\\427-shuyuan.json",
+    "ocr_results\\450\\450-liankun.json",
+    "ocr_results\\450\\450-model.json",
+    "ocr_results\\450\\450-zhengsheng.json",
+    "ocr_results\\450\\450-zhisui.json",
+    "ocr_results\\price\\1.json",
+    "ocr_results\\price\\2.json",
+    "ocr_results\\price\\3.json",
+    "ocr_results\\price\\4.json",
+    "ocr_results\\price\\5.json",
+    "ocr_results\\price\\6.json",
+    "ocr_results\\price\\7.json",
+    "ocr_results\\price\\8.json",
+    "ocr_results\\price\\9.json",
+    "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+    "ocr_results\\船体广告\\亚元.json",
+    "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+    "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+    "ocr_results\\船体广告\\阳生文化1109.json",
+    "出口退税\\征盛商务标.json",
+    "出口退税\\招标文件.json",
+    "出口退税\\智税商务标.json",
+    "出口退税\\链坤商务标.json",
+    "药品JSON识别结果\\宏银商务标.JSON",
+    "药品JSON识别结果\\宏银技术标.JSON",
+    "药品JSON识别结果\\戎元商务标.JSON",
+    "药品JSON识别结果\\戎元技术标.JSON",
+    "药品JSON识别结果\\招标.JSON",
+    "药品JSON识别结果\\舒源商务标.JSON",
+    "药品JSON识别结果\\舒源技术标.JSON"
+  ],
+  "service_summary": {
+    "requested_document_types": [
+      "business_bid",
+      "technical_bid"
+    ],
+    "document_count": 44,
+    "skipped_document_count": 0,
+    "typo_issue_count": 19,
+    "shared_typo_issue_count": 4,
+    "suspicious_typo_document_count": 13,
+    "personnel_count": 0,
+    "reused_name_count": 0,
+    "suspicious": true
+  },
+  "typo_engine": {
+    "business": "macbert_candidate_review",
+    "technical": "macbert_candidate_review"
+  },
+  "counts": {
+    "candidate_count": 19,
+    "model_typo_candidate_count": 18,
+    "person_name_mismatch_count": 1,
+    "affected_file_count": 13
+  },
+  "by_file": [
+    {
+      "file": "ocr_results\\0925\\0925-model.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\0925\\0925-shanghai.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\369\\369-huolaiwo.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\369\\369-model.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\369\\369-sangwu.json",
+      "model_typo": 2,
+      "person_name_mismatch": 0,
+      "total": 2
+    },
+    {
+      "file": "ocr_results\\369\\shangwu.json",
+      "model_typo": 2,
+      "person_name_mismatch": 0,
+      "total": 2
+    },
+    {
+      "file": "ocr_results\\369\\投标2（商务标文件）.json",
+      "model_typo": 2,
+      "person_name_mismatch": 0,
+      "total": 2
+    },
+    {
+      "file": "ocr_results\\427\\427-rongyuan.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\450\\450-liankun.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\price\\5.json",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+      "model_typo": 4,
+      "person_name_mismatch": 0,
+      "total": 4
+    },
+    {
+      "file": "药品JSON识别结果\\戎元技术标.JSON",
+      "model_typo": 1,
+      "person_name_mismatch": 0,
+      "total": 1
+    },
+    {
+      "file": "药品JSON识别结果\\舒源技术标.JSON",
+      "model_typo": 0,
+      "person_name_mismatch": 1,
+      "total": 1
+    }
+  ],
+  "cases": {
+    "model_typo_candidates": [
+      {
+        "issue_type": "model_typo",
+        "issue_key": "改->该",
+        "matched_text": "改",
+        "suggestion": "该",
+        "page": 20,
+        "bbox": null,
+        "text": "培训相关费用应改包含在合同总价中。",
+        "corrected_text": "培训相关费用应该包含在合同总价中。",
+        "change_start": 7,
+        "change_end": 8,
+        "document_identifier_id": "ocr_results\\0925\\0925-model.json",
+        "relation_id": "ocr_results\\0925\\0925-model.json",
+        "file_name": "ocr_results\\0925\\0925-model.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "改->该",
+        "matched_text": "改",
+        "suggestion": "该",
+        "page": 34,
+        "bbox": null,
+        "text": "培训相关费用应改包含在合同总价中。",
+        "corrected_text": "培训相关费用应该包含在合同总价中。",
+        "change_start": 7,
+        "change_end": 8,
+        "document_identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+        "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+        "file_name": "ocr_results\\0925\\0925-shanghai.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "改->该",
+        "matched_text": "改",
+        "suggestion": "该",
+        "page": 20,
+        "bbox": null,
+        "text": "培训相关费用应改包含在合同总价中。",
+        "corrected_text": "培训相关费用应该包含在合同总价中。",
+        "change_start": 7,
+        "change_end": 8,
+        "document_identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+        "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+        "file_name": "ocr_results\\369\\369-huolaiwo.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "改->该",
+        "matched_text": "改",
+        "suggestion": "该",
+        "page": 21,
+        "bbox": null,
+        "text": "培训相关费用应改包含在合同总价中。",
+        "corrected_text": "培训相关费用应该包含在合同总价中。",
+        "change_start": 7,
+        "change_end": 8,
+        "document_identifier_id": "ocr_results\\369\\369-model.json",
+        "relation_id": "ocr_results\\369\\369-model.json",
+        "file_name": "ocr_results\\369\\369-model.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "己->已",
+        "matched_text": "己",
+        "suggestion": "已",
+        "page": 218,
+        "bbox": null,
+        "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "change_start": 4,
+        "change_end": 5,
+        "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+        "relation_id": "ocr_results\\369\\369-sangwu.json",
+        "file_name": "ocr_results\\369\\369-sangwu.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "波->予",
+        "matched_text": "波",
+        "suggestion": "予",
+        "page": 237,
+        "bbox": null,
+        "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "change_start": 34,
+        "change_end": 35,
+        "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+        "relation_id": "ocr_results\\369\\369-sangwu.json",
+        "file_name": "ocr_results\\369\\369-sangwu.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "己->已",
+        "matched_text": "己",
+        "suggestion": "已",
+        "page": 218,
+        "bbox": null,
+        "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "change_start": 4,
+        "change_end": 5,
+        "document_identifier_id": "ocr_results\\369\\shangwu.json",
+        "relation_id": "ocr_results\\369\\shangwu.json",
+        "file_name": "ocr_results\\369\\shangwu.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "波->予",
+        "matched_text": "波",
+        "suggestion": "予",
+        "page": 237,
+        "bbox": null,
+        "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "change_start": 34,
+        "change_end": 35,
+        "document_identifier_id": "ocr_results\\369\\shangwu.json",
+        "relation_id": "ocr_results\\369\\shangwu.json",
+        "file_name": "ocr_results\\369\\shangwu.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "己->已",
+        "matched_text": "己",
+        "suggestion": "已",
+        "page": 218,
+        "bbox": null,
+        "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+        "change_start": 4,
+        "change_end": 5,
+        "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+        "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+        "file_name": "ocr_results\\369\\投标2（商务标文件）.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "波->予",
+        "matched_text": "波",
+        "suggestion": "予",
+        "page": 237,
+        "bbox": null,
+        "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+        "change_start": 34,
+        "change_end": 35,
+        "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+        "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+        "file_name": "ocr_results\\369\\投标2（商务标文件）.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "讲->将",
+        "matched_text": "讲",
+        "suggestion": "将",
+        "page": 26,
+        "bbox": null,
+        "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+        "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+        "change_start": 22,
+        "change_end": 23,
+        "document_identifier_id": "ocr_results\\427\\427-rongyuan.json",
+        "relation_id": "ocr_results\\427\\427-rongyuan.json",
+        "file_name": "ocr_results\\427\\427-rongyuan.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "品->活",
+        "matched_text": "品",
+        "suggestion": "活",
+        "page": 21,
+        "bbox": null,
+        "text": "一般项目：技术服务，技术开发，技术咨询、技术交位、技术转让，技术推广：数据处理股务，软件开发，计算机系统服务：信息系统集成服务物联技术服务：供应健管理务：信总咨询服务（不含许可类信咨询服务）：网络技术服务：图文设计制作：工业设计服务：专业设计务：信总技术咨询联务：企业管理咨询：市场营销策划，品牌管理，广传制作：广告设计，代理：广告发布，企业管理，企业形象划，社会经济咨询服务：市场调查（不含沙外调）：会议及展览服务：组织文化艺术交流品动，计算机软硬件及助设备零售。",
+        "corrected_text": "一般项目：技术服务，技术开发，技术咨询、技术交位、技术转让，技术推广：数据处理股务，软件开发，计算机系统服务：信息系统集成服务物联技术服务：供应健管理务：信总咨询服务（不含许可类信咨询服务）：网络技术服务：图文设计制作：工业设计服务：专业设计务：信总技术咨询联务：企业管理咨询：市场营销策划，品牌管理，广传制作：广告设计，代理：广告发布，企业管理，企业形象划，社会经济咨询服务：市场调查（不含沙外调）：会议及展览服务：组织文化艺术交流活动，计算机软硬件及助设备零售。",
+        "change_start": 217,
+        "change_end": 218,
+        "document_identifier_id": "ocr_results\\450\\450-liankun.json",
+        "relation_id": "ocr_results\\450\\450-liankun.json",
+        "file_name": "ocr_results\\450\\450-liankun.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "级->包",
+        "matched_text": "级",
+        "suggestion": "包",
+        "page": 10,
+        "bbox": null,
+        "text": "施工总承包市政公用工程二级施工承包电子和智能化工程二级专业承级专业承包建筑机电安装工程三级",
+        "corrected_text": "施工总承包市政公用工程二级施工承包电子和智能化工程二级专业承包专业承包建筑机电安装工程三级",
+        "change_start": 30,
+        "change_end": 31,
+        "document_identifier_id": "ocr_results\\price\\5.json",
+        "relation_id": "ocr_results\\price\\5.json",
+        "file_name": "ocr_results\\price\\5.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "籍->藉",
+        "matched_text": "籍",
+        "suggestion": "藉",
+        "page": 5,
+        "bbox": [
+          50,
+          695,
+          491,
+          39
+        ],
+        "text": "籍此释放品牌对世界的影响力，代表中国品牌向世界发声。",
+        "corrected_text": "藉此释放品牌对世界的影响力，代表中国品牌向世界发声。",
+        "change_start": 0,
+        "change_end": 1,
+        "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "厂->广",
+        "matched_text": "厂",
+        "suggestion": "广",
+        "page": 6,
+        "bbox": [
+          84,
+          583,
+          179,
+          18
+        ],
+        "text": "（二）、厂告物料制作安装方案",
+        "corrected_text": "（二）、广告物料制作安装方案",
+        "change_start": 4,
+        "change_end": 5,
+        "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "做->作",
+        "matched_text": "做",
+        "suggestion": "作",
+        "page": 8,
+        "bbox": [
+          48,
+          441,
+          491,
+          133
+        ],
+        "text": "灯串在制做中须注意正、负极的正确联接。",
+        "corrected_text": "灯串在制作中须注意正、负极的正确联接。",
+        "change_start": 4,
+        "change_end": 5,
+        "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "受->授",
+        "matched_text": "受",
+        "suggestion": "授",
+        "page": 24,
+        "bbox": [
+          59,
+          775,
+          480,
+          35
+        ],
+        "text": "监督并全面负责指挥公司应急预案的全面实施和执行，关键时候受权或调动一切资源保障。",
+        "corrected_text": "监督并全面负责指挥公司应急预案的全面实施和执行，关键时候授权或调动一切资源保障。",
+        "change_start": 28,
+        "change_end": 29,
+        "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+        "document_type": "business_bid"
+      },
+      {
+        "issue_type": "model_typo",
+        "issue_key": "讲->将",
+        "matched_text": "讲",
+        "suggestion": "将",
+        "page": 1,
+        "bbox": [
+          47,
+          500,
+          515,
+          35
+        ],
+        "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+        "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+        "change_start": 22,
+        "change_end": 23,
+        "document_identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+        "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+        "file_name": "药品JSON识别结果\\戎元技术标.JSON",
+        "document_type": "business_bid"
+      }
+    ],
+    "person_name_mismatch": [
+      {
+        "issue_type": "person_name_mismatch",
+        "issue_key": "黄枭->黄桑",
+        "matched_text": "黄桑",
+        "suggestion": "黄枭",
+        "page": 16,
+        "bbox": [
+          54,
+          180,
+          187,
+          15
+        ],
+        "text": "缴费人名称：黄桑 缴费人识别号：310104198902114411",
+        "source": "field_name",
+        "reference_page": 15,
+        "reference_text": "2. 黄枭",
+        "document_identifier_id": "药品JSON识别结果\\舒源技术标.JSON",
+        "relation_id": "药品JSON识别结果\\舒源技术标.JSON",
+        "file_name": "药品JSON识别结果\\舒源技术标.JSON",
+        "document_type": "business_bid"
+      }
+    ]
+  },
+  "raw_review_result": {
+    "project": {
+      "identifier_id": "all-current-json",
+      "name": "Current OCR JSON typo candidate review"
+    },
+    "config": {
+      "document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "typo_detection_engine": "macbert_candidate_review",
+      "typo_model_name": "shibing624/macbert4csc-base-chinese",
+      "typo_model_threshold": 0.9,
+      "typo_stopword_dictionary_enabled": true,
+      "personnel_reuse_scope": "per_document_type",
+      "personnel_table_extraction_engine": "required_attachment_name_column",
+      "personnel_text_extraction_engine": "attachment_hanlp_ner",
+      "business_bid_personnel_scope": "required_attachments_only",
+      "technical_bid_personnel_scope": "disabled"
+    },
+    "groups": {
+      "business_bid": {
+        "documents": [
+          {
+            "identifier_id": "ocr_results\\0925\\0925-chongqing.json",
+            "relation_id": "ocr_results\\0925\\0925-chongqing.json",
+            "file_name": "ocr_results\\0925\\0925-chongqing.json",
+            "page_count": 46,
+            "layout_section_count": 471,
+            "table_count": 28,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\0925\\0925-chongqinghading.json",
+            "relation_id": "ocr_results\\0925\\0925-chongqinghading.json",
+            "file_name": "ocr_results\\0925\\0925-chongqinghading.json",
+            "page_count": 35,
+            "layout_section_count": 366,
+            "table_count": 13,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\0925\\0925-model.json",
+            "relation_id": "ocr_results\\0925\\0925-model.json",
+            "file_name": "ocr_results\\0925\\0925-model.json",
+            "page_count": 53,
+            "layout_section_count": 579,
+            "table_count": 20,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+            "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+            "file_name": "ocr_results\\0925\\0925-shanghai.json",
+            "page_count": 56,
+            "layout_section_count": 256,
+            "table_count": 34,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\0925\\0925-suzhou.json",
+            "relation_id": "ocr_results\\0925\\0925-suzhou.json",
+            "file_name": "ocr_results\\0925\\0925-suzhou.json",
+            "page_count": 52,
+            "layout_section_count": 330,
+            "table_count": 36,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+            "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+            "file_name": "ocr_results\\369\\369-huolaiwo.json",
+            "page_count": 207,
+            "layout_section_count": 2911,
+            "table_count": 79,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\369-model.json",
+            "relation_id": "ocr_results\\369\\369-model.json",
+            "file_name": "ocr_results\\369\\369-model.json",
+            "page_count": 54,
+            "layout_section_count": 632,
+            "table_count": 15,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\369-sangwu.json",
+            "relation_id": "ocr_results\\369\\369-sangwu.json",
+            "file_name": "ocr_results\\369\\369-sangwu.json",
+            "page_count": 297,
+            "layout_section_count": 3788,
+            "table_count": 258,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\shangwu.json",
+            "relation_id": "ocr_results\\369\\shangwu.json",
+            "file_name": "ocr_results\\369\\shangwu.json",
+            "page_count": 297,
+            "layout_section_count": 3788,
+            "table_count": 258,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+            "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+            "file_name": "ocr_results\\369\\投标2（商务标文件）.json",
+            "page_count": 297,
+            "layout_section_count": 3788,
+            "table_count": 258,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\369\\新response.json",
+            "relation_id": "ocr_results\\369\\新response.json",
+            "file_name": "ocr_results\\369\\新response.json",
+            "page_count": 5,
+            "layout_section_count": 36,
+            "table_count": 4,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\427\\427-hongyin.json",
+            "relation_id": "ocr_results\\427\\427-hongyin.json",
+            "file_name": "ocr_results\\427\\427-hongyin.json",
+            "page_count": 21,
+            "layout_section_count": 197,
+            "table_count": 10,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\427\\427-model.json",
+            "relation_id": "ocr_results\\427\\427-model.json",
+            "file_name": "ocr_results\\427\\427-model.json",
+            "page_count": 47,
+            "layout_section_count": 534,
+            "table_count": 14,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\427\\427-rongyuan.json",
+            "relation_id": "ocr_results\\427\\427-rongyuan.json",
+            "file_name": "ocr_results\\427\\427-rongyuan.json",
+            "page_count": 32,
+            "layout_section_count": 362,
+            "table_count": 16,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\427\\427-shuyuan.json",
+            "relation_id": "ocr_results\\427\\427-shuyuan.json",
+            "file_name": "ocr_results\\427\\427-shuyuan.json",
+            "page_count": 41,
+            "layout_section_count": 459,
+            "table_count": 30,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\450\\450-liankun.json",
+            "relation_id": "ocr_results\\450\\450-liankun.json",
+            "file_name": "ocr_results\\450\\450-liankun.json",
+            "page_count": 33,
+            "layout_section_count": 309,
+            "table_count": 22,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\450\\450-model.json",
+            "relation_id": "ocr_results\\450\\450-model.json",
+            "file_name": "ocr_results\\450\\450-model.json",
+            "page_count": 74,
+            "layout_section_count": 740,
+            "table_count": 28,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\450\\450-zhengsheng.json",
+            "relation_id": "ocr_results\\450\\450-zhengsheng.json",
+            "file_name": "ocr_results\\450\\450-zhengsheng.json",
+            "page_count": 37,
+            "layout_section_count": 286,
+            "table_count": 24,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\450\\450-zhisui.json",
+            "relation_id": "ocr_results\\450\\450-zhisui.json",
+            "file_name": "ocr_results\\450\\450-zhisui.json",
+            "page_count": 37,
+            "layout_section_count": 281,
+            "table_count": 26,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\1.json",
+            "relation_id": "ocr_results\\price\\1.json",
+            "file_name": "ocr_results\\price\\1.json",
+            "page_count": 1,
+            "layout_section_count": 7,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\2.json",
+            "relation_id": "ocr_results\\price\\2.json",
+            "file_name": "ocr_results\\price\\2.json",
+            "page_count": 1,
+            "layout_section_count": 10,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\3.json",
+            "relation_id": "ocr_results\\price\\3.json",
+            "file_name": "ocr_results\\price\\3.json",
+            "page_count": 7,
+            "layout_section_count": 52,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\4.json",
+            "relation_id": "ocr_results\\price\\4.json",
+            "file_name": "ocr_results\\price\\4.json",
+            "page_count": 7,
+            "layout_section_count": 44,
+            "table_count": 3,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\5.json",
+            "relation_id": "ocr_results\\price\\5.json",
+            "file_name": "ocr_results\\price\\5.json",
+            "page_count": 18,
+            "layout_section_count": 227,
+            "table_count": 4,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\6.json",
+            "relation_id": "ocr_results\\price\\6.json",
+            "file_name": "ocr_results\\price\\6.json",
+            "page_count": 2,
+            "layout_section_count": 17,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\7.json",
+            "relation_id": "ocr_results\\price\\7.json",
+            "file_name": "ocr_results\\price\\7.json",
+            "page_count": 2,
+            "layout_section_count": 30,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\8.json",
+            "relation_id": "ocr_results\\price\\8.json",
+            "file_name": "ocr_results\\price\\8.json",
+            "page_count": 1,
+            "layout_section_count": 13,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\price\\9.json",
+            "relation_id": "ocr_results\\price\\9.json",
+            "file_name": "ocr_results\\price\\9.json",
+            "page_count": 1,
+            "layout_section_count": 11,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+            "relation_id": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+            "file_name": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+            "page_count": 87,
+            "layout_section_count": 878,
+            "table_count": 33,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\船体广告\\亚元.json",
+            "relation_id": "ocr_results\\船体广告\\亚元.json",
+            "file_name": "ocr_results\\船体广告\\亚元.json",
+            "page_count": 42,
+            "layout_section_count": 500,
+            "table_count": 22,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+            "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+            "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+            "page_count": 101,
+            "layout_section_count": 1337,
+            "table_count": 39,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+            "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+            "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+            "page_count": 105,
+            "layout_section_count": 1298,
+            "table_count": 25,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "ocr_results\\船体广告\\阳生文化1109.json",
+            "relation_id": "ocr_results\\船体广告\\阳生文化1109.json",
+            "file_name": "ocr_results\\船体广告\\阳生文化1109.json",
+            "page_count": 38,
+            "layout_section_count": 472,
+            "table_count": 19,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "出口退税\\征盛商务标.json",
+            "relation_id": "出口退税\\征盛商务标.json",
+            "file_name": "出口退税\\征盛商务标.json",
+            "page_count": 41,
+            "layout_section_count": 392,
+            "table_count": 11,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "出口退税\\招标文件.json",
+            "relation_id": "出口退税\\招标文件.json",
+            "file_name": "出口退税\\招标文件.json",
+            "page_count": 58,
+            "layout_section_count": 681,
+            "table_count": 18,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "出口退税\\智税商务标.json",
+            "relation_id": "出口退税\\智税商务标.json",
+            "file_name": "出口退税\\智税商务标.json",
+            "page_count": 29,
+            "layout_section_count": 351,
+            "table_count": 12,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "出口退税\\链坤商务标.json",
+            "relation_id": "出口退税\\链坤商务标.json",
+            "file_name": "出口退税\\链坤商务标.json",
+            "page_count": 33,
+            "layout_section_count": 380,
+            "table_count": 13,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\宏银商务标.JSON",
+            "relation_id": "药品JSON识别结果\\宏银商务标.JSON",
+            "file_name": "药品JSON识别结果\\宏银商务标.JSON",
+            "page_count": 26,
+            "layout_section_count": 378,
+            "table_count": 21,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\宏银技术标.JSON",
+            "relation_id": "药品JSON识别结果\\宏银技术标.JSON",
+            "file_name": "药品JSON识别结果\\宏银技术标.JSON",
+            "page_count": 6,
+            "layout_section_count": 60,
+            "table_count": 9,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\戎元商务标.JSON",
+            "relation_id": "药品JSON识别结果\\戎元商务标.JSON",
+            "file_name": "药品JSON识别结果\\戎元商务标.JSON",
+            "page_count": 25,
+            "layout_section_count": 366,
+            "table_count": 21,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+            "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+            "file_name": "药品JSON识别结果\\戎元技术标.JSON",
+            "page_count": 7,
+            "layout_section_count": 122,
+            "table_count": 11,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\招标.JSON",
+            "relation_id": "药品JSON识别结果\\招标.JSON",
+            "file_name": "药品JSON识别结果\\招标.JSON",
+            "page_count": 44,
+            "layout_section_count": 583,
+            "table_count": 23,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\舒源商务标.JSON",
+            "relation_id": "药品JSON识别结果\\舒源商务标.JSON",
+            "file_name": "药品JSON识别结果\\舒源商务标.JSON",
+            "page_count": 23,
+            "layout_section_count": 434,
+            "table_count": 21,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "药品JSON识别结果\\舒源技术标.JSON",
+            "relation_id": "药品JSON识别结果\\舒源技术标.JSON",
+            "file_name": "药品JSON识别结果\\舒源技术标.JSON",
+            "page_count": 18,
+            "layout_section_count": 165,
+            "table_count": 47,
+            "personnel_entry_count": 0
+          }
+        ],
+        "skipped_documents": [],
+        "typo_check": {
+          "document_count": 44,
+          "issue_count": 19,
+          "shared_issue_count": 4,
+          "suspicious_document_count": 13,
+          "engine": "macbert_candidate_review",
+          "documents": [
+            {
+              "identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "issue_count": 4,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "籍->藉",
+                  "matched_text": "籍",
+                  "suggestion": "藉",
+                  "page": 5,
+                  "bbox": [
+                    50,
+                    695,
+                    491,
+                    39
+                  ],
+                  "text": "籍此释放品牌对世界的影响力，代表中国品牌向世界发声。",
+                  "corrected_text": "藉此释放品牌对世界的影响力，代表中国品牌向世界发声。",
+                  "change_start": 0,
+                  "change_end": 1,
+                  "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "厂->广",
+                  "matched_text": "厂",
+                  "suggestion": "广",
+                  "page": 6,
+                  "bbox": [
+                    84,
+                    583,
+                    179,
+                    18
+                  ],
+                  "text": "（二）、厂告物料制作安装方案",
+                  "corrected_text": "（二）、广告物料制作安装方案",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "做->作",
+                  "matched_text": "做",
+                  "suggestion": "作",
+                  "page": 8,
+                  "bbox": [
+                    48,
+                    441,
+                    491,
+                    133
+                  ],
+                  "text": "灯串在制做中须注意正、负极的正确联接。",
+                  "corrected_text": "灯串在制作中须注意正、负极的正确联接。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "受->授",
+                  "matched_text": "受",
+                  "suggestion": "授",
+                  "page": 24,
+                  "bbox": [
+                    59,
+                    775,
+                    480,
+                    35
+                  ],
+                  "text": "监督并全面负责指挥公司应急预案的全面实施和执行，关键时候受权或调动一切资源保障。",
+                  "corrected_text": "监督并全面负责指挥公司应急预案的全面实施和执行，关键时候授权或调动一切资源保障。",
+                  "change_start": 28,
+                  "change_end": 29,
+                  "document_identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+                  "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+              "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+              "file_name": "ocr_results\\369\\投标2（商务标文件）.json",
+              "issue_count": 2,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "file_name": "ocr_results\\369\\投标2（商务标文件）.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "file_name": "ocr_results\\369\\投标2（商务标文件）.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\369\\shangwu.json",
+              "relation_id": "ocr_results\\369\\shangwu.json",
+              "file_name": "ocr_results\\369\\shangwu.json",
+              "issue_count": 2,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\shangwu.json",
+                  "relation_id": "ocr_results\\369\\shangwu.json",
+                  "file_name": "ocr_results\\369\\shangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\shangwu.json",
+                  "relation_id": "ocr_results\\369\\shangwu.json",
+                  "file_name": "ocr_results\\369\\shangwu.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-sangwu.json",
+              "relation_id": "ocr_results\\369\\369-sangwu.json",
+              "file_name": "ocr_results\\369\\369-sangwu.json",
+              "issue_count": 2,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+                  "relation_id": "ocr_results\\369\\369-sangwu.json",
+                  "file_name": "ocr_results\\369\\369-sangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+                  "relation_id": "ocr_results\\369\\369-sangwu.json",
+                  "file_name": "ocr_results\\369\\369-sangwu.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\舒源技术标.JSON",
+              "relation_id": "药品JSON识别结果\\舒源技术标.JSON",
+              "file_name": "药品JSON识别结果\\舒源技术标.JSON",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "person_name_mismatch",
+                  "issue_key": "黄枭->黄桑",
+                  "matched_text": "黄桑",
+                  "suggestion": "黄枭",
+                  "page": 16,
+                  "bbox": [
+                    54,
+                    180,
+                    187,
+                    15
+                  ],
+                  "text": "缴费人名称：黄桑 缴费人识别号：310104198902114411",
+                  "source": "field_name",
+                  "reference_page": 15,
+                  "reference_text": "2. 黄枭",
+                  "document_identifier_id": "药品JSON识别结果\\舒源技术标.JSON",
+                  "relation_id": "药品JSON识别结果\\舒源技术标.JSON",
+                  "file_name": "药品JSON识别结果\\舒源技术标.JSON"
+                }
+              ]
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+              "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+              "file_name": "药品JSON识别结果\\戎元技术标.JSON",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "讲->将",
+                  "matched_text": "讲",
+                  "suggestion": "将",
+                  "page": 1,
+                  "bbox": [
+                    47,
+                    500,
+                    515,
+                    35
+                  ],
+                  "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "change_start": 22,
+                  "change_end": 23,
+                  "document_identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+                  "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+                  "file_name": "药品JSON识别结果\\戎元技术标.JSON"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\price\\5.json",
+              "relation_id": "ocr_results\\price\\5.json",
+              "file_name": "ocr_results\\price\\5.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "级->包",
+                  "matched_text": "级",
+                  "suggestion": "包",
+                  "page": 10,
+                  "bbox": null,
+                  "text": "施工总承包市政公用工程二级施工承包电子和智能化工程二级专业承级专业承包建筑机电安装工程三级",
+                  "corrected_text": "施工总承包市政公用工程二级施工承包电子和智能化工程二级专业承包专业承包建筑机电安装工程三级",
+                  "change_start": 30,
+                  "change_end": 31,
+                  "document_identifier_id": "ocr_results\\price\\5.json",
+                  "relation_id": "ocr_results\\price\\5.json",
+                  "file_name": "ocr_results\\price\\5.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\450\\450-liankun.json",
+              "relation_id": "ocr_results\\450\\450-liankun.json",
+              "file_name": "ocr_results\\450\\450-liankun.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "品->活",
+                  "matched_text": "品",
+                  "suggestion": "活",
+                  "page": 21,
+                  "bbox": null,
+                  "text": "一般项目：技术服务，技术开发，技术咨询、技术交位、技术转让，技术推广：数据处理股务，软件开发，计算机系统服务：信息系统集成服务物联技术服务：供应健管理务：信总咨询服务（不含许可类信咨询服务）：网络技术服务：图文设计制作：工业设计服务：专业设计务：信总技术咨询联务：企业管理咨询：市场营销策划，品牌管理，广传制作：广告设计，代理：广告发布，企业管理，企业形象划，社会经济咨询服务：市场调查（不含沙外调）：会议及展览服务：组织文化艺术交流品动，计算机软硬件及助设备零售。",
+                  "corrected_text": "一般项目：技术服务，技术开发，技术咨询、技术交位、技术转让，技术推广：数据处理股务，软件开发，计算机系统服务：信息系统集成服务物联技术服务：供应健管理务：信总咨询服务（不含许可类信咨询服务）：网络技术服务：图文设计制作：工业设计服务：专业设计务：信总技术咨询联务：企业管理咨询：市场营销策划，品牌管理，广传制作：广告设计，代理：广告发布，企业管理，企业形象划，社会经济咨询服务：市场调查（不含沙外调）：会议及展览服务：组织文化艺术交流活动，计算机软硬件及助设备零售。",
+                  "change_start": 217,
+                  "change_end": 218,
+                  "document_identifier_id": "ocr_results\\450\\450-liankun.json",
+                  "relation_id": "ocr_results\\450\\450-liankun.json",
+                  "file_name": "ocr_results\\450\\450-liankun.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\427\\427-rongyuan.json",
+              "relation_id": "ocr_results\\427\\427-rongyuan.json",
+              "file_name": "ocr_results\\427\\427-rongyuan.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "讲->将",
+                  "matched_text": "讲",
+                  "suggestion": "将",
+                  "page": 26,
+                  "bbox": null,
+                  "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "change_start": 22,
+                  "change_end": 23,
+                  "document_identifier_id": "ocr_results\\427\\427-rongyuan.json",
+                  "relation_id": "ocr_results\\427\\427-rongyuan.json",
+                  "file_name": "ocr_results\\427\\427-rongyuan.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-model.json",
+              "relation_id": "ocr_results\\369\\369-model.json",
+              "file_name": "ocr_results\\369\\369-model.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 21,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\369\\369-model.json",
+                  "relation_id": "ocr_results\\369\\369-model.json",
+                  "file_name": "ocr_results\\369\\369-model.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+              "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+              "file_name": "ocr_results\\369\\369-huolaiwo.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 20,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+                  "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+                  "file_name": "ocr_results\\369\\369-huolaiwo.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+              "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+              "file_name": "ocr_results\\0925\\0925-shanghai.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 34,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+                  "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+                  "file_name": "ocr_results\\0925\\0925-shanghai.json"
+                }
+              ]
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-model.json",
+              "relation_id": "ocr_results\\0925\\0925-model.json",
+              "file_name": "ocr_results\\0925\\0925-model.json",
+              "issue_count": 1,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 20,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\0925\\0925-model.json",
+                  "relation_id": "ocr_results\\0925\\0925-model.json",
+                  "file_name": "ocr_results\\0925\\0925-model.json"
+                }
+              ]
+            }
+          ],
+          "shared_issues": [
+            {
+              "issue_key": "改->该",
+              "issue_type": "model_typo",
+              "matched_text": "改",
+              "suggestion": "该",
+              "document_count": 4,
+              "occurrence_count": 4,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 20,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\0925\\0925-model.json",
+                  "relation_id": "ocr_results\\0925\\0925-model.json",
+                  "file_name": "ocr_results\\0925\\0925-model.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 34,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+                  "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+                  "file_name": "ocr_results\\0925\\0925-shanghai.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 20,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+                  "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+                  "file_name": "ocr_results\\369\\369-huolaiwo.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "改->该",
+                  "matched_text": "改",
+                  "suggestion": "该",
+                  "page": 21,
+                  "bbox": null,
+                  "text": "培训相关费用应改包含在合同总价中。",
+                  "corrected_text": "培训相关费用应该包含在合同总价中。",
+                  "change_start": 7,
+                  "change_end": 8,
+                  "document_identifier_id": "ocr_results\\369\\369-model.json",
+                  "relation_id": "ocr_results\\369\\369-model.json",
+                  "file_name": "ocr_results\\369\\369-model.json"
+                }
+              ]
+            },
+            {
+              "issue_key": "波->予",
+              "issue_type": "model_typo",
+              "matched_text": "波",
+              "suggestion": "予",
+              "document_count": 3,
+              "occurrence_count": 3,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+                  "relation_id": "ocr_results\\369\\369-sangwu.json",
+                  "file_name": "ocr_results\\369\\369-sangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\shangwu.json",
+                  "relation_id": "ocr_results\\369\\shangwu.json",
+                  "file_name": "ocr_results\\369\\shangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "波->予",
+                  "matched_text": "波",
+                  "suggestion": "予",
+                  "page": 237,
+                  "bbox": null,
+                  "text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让波了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "corrected_text": "在合同开始日，本公司评估合同是否为租赁或者包含租赁，如果合同中一方让予了在一定期间内控制一项或多项已识别资产使用的权利以换取对价，则该合同为租赁或者包含租赁。",
+                  "change_start": 34,
+                  "change_end": 35,
+                  "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "file_name": "ocr_results\\369\\投标2（商务标文件）.json"
+                }
+              ]
+            },
+            {
+              "issue_key": "己->已",
+              "issue_type": "model_typo",
+              "matched_text": "己",
+              "suggestion": "已",
+              "document_count": 3,
+              "occurrence_count": 3,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\369-sangwu.json",
+                  "relation_id": "ocr_results\\369\\369-sangwu.json",
+                  "file_name": "ocr_results\\369\\369-sangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\shangwu.json",
+                  "relation_id": "ocr_results\\369\\shangwu.json",
+                  "file_name": "ocr_results\\369\\shangwu.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "己->已",
+                  "matched_text": "己",
+                  "suggestion": "已",
+                  "page": 218,
+                  "bbox": null,
+                  "text": "基于我们己执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "corrected_text": "基于我们已执行的工作，如果我们确定其他信息存在重大错报，我们应当报告该事实。",
+                  "change_start": 4,
+                  "change_end": 5,
+                  "document_identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+                  "file_name": "ocr_results\\369\\投标2（商务标文件）.json"
+                }
+              ]
+            },
+            {
+              "issue_key": "讲->将",
+              "issue_type": "model_typo",
+              "matched_text": "讲",
+              "suggestion": "将",
+              "document_count": 2,
+              "occurrence_count": 2,
+              "items": [
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "讲->将",
+                  "matched_text": "讲",
+                  "suggestion": "将",
+                  "page": 26,
+                  "bbox": null,
+                  "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "change_start": 22,
+                  "change_end": 23,
+                  "document_identifier_id": "ocr_results\\427\\427-rongyuan.json",
+                  "relation_id": "ocr_results\\427\\427-rongyuan.json",
+                  "file_name": "ocr_results\\427\\427-rongyuan.json"
+                },
+                {
+                  "issue_type": "model_typo",
+                  "issue_key": "讲->将",
+                  "matched_text": "讲",
+                  "suggestion": "将",
+                  "page": 1,
+                  "bbox": [
+                    47,
+                    500,
+                    515,
+                    35
+                  ],
+                  "text": "人员补充：如在合同期内出现人员离职情况，我司讲尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "corrected_text": "人员补充：如在合同期内出现人员离职情况，我司将尽快配置相同技能人员进行补充，确保运维工作的正常开展",
+                  "change_start": 22,
+                  "change_end": 23,
+                  "document_identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+                  "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+                  "file_name": "药品JSON识别结果\\戎元技术标.JSON"
+                }
+              ]
+            }
+          ],
+          "notes": [
+            "Typo detection runs as MacBERT candidate review without a built-in typo dictionary.",
+            "Only single-char or same-length replacements are accepted, protected spans stay blocked, and domain-safe phrases are filtered.",
+            "Enabled pycorrector + MacBERT model: shibing624/macbert4csc-base-chinese"
+          ]
+        },
+        "personnel_reuse_check": {
+          "document_count": 44,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "documents": [
+            {
+              "identifier_id": "药品JSON识别结果\\舒源技术标.JSON",
+              "relation_id": "药品JSON识别结果\\舒源技术标.JSON",
+              "file_name": "药品JSON识别结果\\舒源技术标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\舒源商务标.JSON",
+              "relation_id": "药品JSON识别结果\\舒源商务标.JSON",
+              "file_name": "药品JSON识别结果\\舒源商务标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\招标.JSON",
+              "relation_id": "药品JSON识别结果\\招标.JSON",
+              "file_name": "药品JSON识别结果\\招标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\戎元技术标.JSON",
+              "relation_id": "药品JSON识别结果\\戎元技术标.JSON",
+              "file_name": "药品JSON识别结果\\戎元技术标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\戎元商务标.JSON",
+              "relation_id": "药品JSON识别结果\\戎元商务标.JSON",
+              "file_name": "药品JSON识别结果\\戎元商务标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\宏银技术标.JSON",
+              "relation_id": "药品JSON识别结果\\宏银技术标.JSON",
+              "file_name": "药品JSON识别结果\\宏银技术标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "药品JSON识别结果\\宏银商务标.JSON",
+              "relation_id": "药品JSON识别结果\\宏银商务标.JSON",
+              "file_name": "药品JSON识别结果\\宏银商务标.JSON",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "出口退税\\链坤商务标.json",
+              "relation_id": "出口退税\\链坤商务标.json",
+              "file_name": "出口退税\\链坤商务标.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "出口退税\\智税商务标.json",
+              "relation_id": "出口退税\\智税商务标.json",
+              "file_name": "出口退税\\智税商务标.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "出口退税\\招标文件.json",
+              "relation_id": "出口退税\\招标文件.json",
+              "file_name": "出口退税\\招标文件.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "出口退税\\征盛商务标.json",
+              "relation_id": "出口退税\\征盛商务标.json",
+              "file_name": "出口退税\\征盛商务标.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\船体广告\\阳生文化1109.json",
+              "relation_id": "ocr_results\\船体广告\\阳生文化1109.json",
+              "file_name": "ocr_results\\船体广告\\阳生文化1109.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（技术标）1108.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+              "relation_id": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+              "file_name": "ocr_results\\船体广告\\翡翠公主号-投标文件（商务标）1108.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\船体广告\\亚元.json",
+              "relation_id": "ocr_results\\船体广告\\亚元.json",
+              "file_name": "ocr_results\\船体广告\\亚元.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+              "relation_id": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+              "file_name": "ocr_results\\船体广告\\上海浦江游览船体广告位采购项目-善元.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\9.json",
+              "relation_id": "ocr_results\\price\\9.json",
+              "file_name": "ocr_results\\price\\9.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\8.json",
+              "relation_id": "ocr_results\\price\\8.json",
+              "file_name": "ocr_results\\price\\8.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\7.json",
+              "relation_id": "ocr_results\\price\\7.json",
+              "file_name": "ocr_results\\price\\7.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\6.json",
+              "relation_id": "ocr_results\\price\\6.json",
+              "file_name": "ocr_results\\price\\6.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\5.json",
+              "relation_id": "ocr_results\\price\\5.json",
+              "file_name": "ocr_results\\price\\5.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\4.json",
+              "relation_id": "ocr_results\\price\\4.json",
+              "file_name": "ocr_results\\price\\4.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\3.json",
+              "relation_id": "ocr_results\\price\\3.json",
+              "file_name": "ocr_results\\price\\3.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\2.json",
+              "relation_id": "ocr_results\\price\\2.json",
+              "file_name": "ocr_results\\price\\2.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\price\\1.json",
+              "relation_id": "ocr_results\\price\\1.json",
+              "file_name": "ocr_results\\price\\1.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\450\\450-zhisui.json",
+              "relation_id": "ocr_results\\450\\450-zhisui.json",
+              "file_name": "ocr_results\\450\\450-zhisui.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\450\\450-zhengsheng.json",
+              "relation_id": "ocr_results\\450\\450-zhengsheng.json",
+              "file_name": "ocr_results\\450\\450-zhengsheng.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\450\\450-model.json",
+              "relation_id": "ocr_results\\450\\450-model.json",
+              "file_name": "ocr_results\\450\\450-model.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\450\\450-liankun.json",
+              "relation_id": "ocr_results\\450\\450-liankun.json",
+              "file_name": "ocr_results\\450\\450-liankun.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\427\\427-shuyuan.json",
+              "relation_id": "ocr_results\\427\\427-shuyuan.json",
+              "file_name": "ocr_results\\427\\427-shuyuan.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\427\\427-rongyuan.json",
+              "relation_id": "ocr_results\\427\\427-rongyuan.json",
+              "file_name": "ocr_results\\427\\427-rongyuan.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\427\\427-model.json",
+              "relation_id": "ocr_results\\427\\427-model.json",
+              "file_name": "ocr_results\\427\\427-model.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\427\\427-hongyin.json",
+              "relation_id": "ocr_results\\427\\427-hongyin.json",
+              "file_name": "ocr_results\\427\\427-hongyin.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\新response.json",
+              "relation_id": "ocr_results\\369\\新response.json",
+              "file_name": "ocr_results\\369\\新response.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\投标2（商务标文件）.json",
+              "relation_id": "ocr_results\\369\\投标2（商务标文件）.json",
+              "file_name": "ocr_results\\369\\投标2（商务标文件）.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\shangwu.json",
+              "relation_id": "ocr_results\\369\\shangwu.json",
+              "file_name": "ocr_results\\369\\shangwu.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-sangwu.json",
+              "relation_id": "ocr_results\\369\\369-sangwu.json",
+              "file_name": "ocr_results\\369\\369-sangwu.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-model.json",
+              "relation_id": "ocr_results\\369\\369-model.json",
+              "file_name": "ocr_results\\369\\369-model.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\369\\369-huolaiwo.json",
+              "relation_id": "ocr_results\\369\\369-huolaiwo.json",
+              "file_name": "ocr_results\\369\\369-huolaiwo.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-suzhou.json",
+              "relation_id": "ocr_results\\0925\\0925-suzhou.json",
+              "file_name": "ocr_results\\0925\\0925-suzhou.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-shanghai.json",
+              "relation_id": "ocr_results\\0925\\0925-shanghai.json",
+              "file_name": "ocr_results\\0925\\0925-shanghai.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-model.json",
+              "relation_id": "ocr_results\\0925\\0925-model.json",
+              "file_name": "ocr_results\\0925\\0925-model.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-chongqinghading.json",
+              "relation_id": "ocr_results\\0925\\0925-chongqinghading.json",
+              "file_name": "ocr_results\\0925\\0925-chongqinghading.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "ocr_results\\0925\\0925-chongqing.json",
+              "relation_id": "ocr_results\\0925\\0925-chongqing.json",
+              "file_name": "ocr_results\\0925\\0925-chongqing.json",
+              "personnel_count": 0
+            }
+          ],
+          "items": [],
+          "notes": [
+            "先按招标文件要求锁定商务标附件范围，再只在这些附件的表格里按“姓名”列向下提取成员姓名。",
+            "正文继续仅在法定代表人授权委托书、法定代表人资格证明书中使用 HanLP 识别人名，并排除身份证与签字盖章区域。",
+            "同名人员跨不同文档重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ]
+        },
+        "summary": {
+          "document_count": 44,
+          "skipped_document_count": 0,
+          "typo_issue_count": 19,
+          "shared_typo_issue_count": 4,
+          "suspicious_typo_document_count": 13,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "suspicious": true
+        }
+      },
+      "technical_bid": {
+        "documents": [],
+        "skipped_documents": [],
+        "typo_check": {
+          "document_count": 0,
+          "issue_count": 0,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 0,
+          "engine": "macbert_candidate_review",
+          "documents": [],
+          "shared_issues": [],
+          "notes": [
+            "Typo detection runs as MacBERT candidate review without a built-in typo dictionary.",
+            "Only single-char or same-length replacements are accepted, protected spans stay blocked, and domain-safe phrases are filtered.",
+            "Enabled pycorrector + MacBERT model: shibing624/macbert4csc-base-chinese"
+          ]
+        },
+        "personnel_reuse_check": {
+          "document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "documents": [],
+          "items": [],
+          "notes": [
+            "先按招标文件要求锁定商务标附件范围，再只在这些附件的表格里按“姓名”列向下提取成员姓名。",
+            "正文继续仅在法定代表人授权委托书、法定代表人资格证明书中使用 HanLP 识别人名，并排除身份证与签字盖章区域。",
+            "同名人员跨不同文档重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ]
+        },
+        "summary": {
+          "document_count": 0,
+          "skipped_document_count": 0,
+          "typo_issue_count": 0,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "suspicious": false
+        }
+      }
+    },
+    "summary": {
+      "requested_document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "document_count": 44,
+      "skipped_document_count": 0,
+      "typo_issue_count": 19,
+      "shared_typo_issue_count": 4,
+      "suspicious_typo_document_count": 13,
+      "personnel_count": 0,
+      "reused_name_count": 0,
+      "suspicious": true
+    }
+  }
+}
