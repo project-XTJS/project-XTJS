@@ -270,10 +270,6 @@ class BidDocumentReviewService:
         DOCUMENT_TYPE_TECHNICAL_BID,
     )
     SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])|[\r\n]+")
-    NUMBERED_NAME_HEADING_PATTERN = re.compile(r"^\s*\d+\s*[.、]?\s*([\u4e00-\u9fa5A-Za-z]{2,20})\s*$")
-    FIELD_NAME_PATTERN = re.compile(
-        r"(?:姓名|缴费人名称|法定代表人|授权代表|授权委托人|委托代理人|被授权人)[^：:\n]{0,12}[：:]\s*([A-Za-z\u4e00-\u9fa5\[\]【】()（）]{2,30})"
-    )
     PERSONNEL_SECTION_HINTS = (
         "项目人员情况",
         "人员组成名单",
@@ -759,7 +755,7 @@ class BidDocumentReviewService:
                 f"Enabled pycorrector + MacBERT model: {_ChineseTypoCorrector.DEFAULT_MODEL_NAME}"
             )
         else:
-            notes.append("MacBERT is unavailable; only non-model consistency checks can report issues.")
+            notes.append("MacBERT is unavailable; typo review will not emit typo issues.")
             if _ChineseTypoCorrector.load_error():
                 notes.append(f"Model load error: {_ChineseTypoCorrector.load_error()}")
 
@@ -851,18 +847,6 @@ class BidDocumentReviewService:
         typo_sentences = self._iter_typo_sentences(document)
 
         for issue in self._find_model_typo_matches(typo_sentences, document):
-            key = (
-                issue.get("issue_type"),
-                issue.get("issue_key"),
-                issue.get("page"),
-                issue.get("matched_text"),
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            issues.append(issue)
-
-        for issue in self._find_person_name_mismatch_issues(document):
             key = (
                 issue.get("issue_type"),
                 issue.get("issue_key"),
@@ -1173,106 +1157,6 @@ class BidDocumentReviewService:
             if start < protected_end and end > protected_start:
                 return True
         return False
-
-    def _find_person_name_mismatch_issues(self, document: dict[str, Any]) -> list[dict[str, Any]]:
-        events = self._build_person_name_events(document)
-        issues: list[dict[str, Any]] = []
-        current_heading: dict[str, Any] | None = None
-
-        for event in events:
-            if event["event_type"] == "heading_name":
-                current_heading = event
-                continue
-            if current_heading is None:
-                continue
-            if int(event.get("page") or 0) - int(current_heading.get("page") or 0) > 2:
-                continue
-
-            heading_name = str(current_heading.get("name") or "").strip()
-            observed_name = str(event.get("name") or "").strip()
-            if not self._is_name_mismatch_candidate(heading_name, observed_name):
-                continue
-
-            issues.append(
-                {
-                    "issue_type": "person_name_mismatch",
-                    "issue_key": f"{heading_name}->{observed_name}",
-                    "matched_text": observed_name,
-                    "suggestion": heading_name,
-                    "page": event.get("page"),
-                    "bbox": event.get("bbox"),
-                    "text": str(event.get("text") or ""),
-                    "source": event.get("event_type"),
-                    "reference_page": current_heading.get("page"),
-                    "reference_text": current_heading.get("text"),
-                    "document_identifier_id": document["identifier_id"],
-                    "relation_id": document.get("relation_id"),
-                    "file_name": document.get("file_name"),
-                }
-            )
-        return issues
-
-    def _build_person_name_events(self, document: dict[str, Any]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-
-        for section in document.get("sections") or []:
-            text = str(section.get("text") or "").strip()
-            if not text:
-                continue
-
-            heading_match = self.NUMBERED_NAME_HEADING_PATTERN.match(text)
-            if heading_match:
-                name = self._clean_person_name(heading_match.group(1))
-                if name:
-                    events.append(
-                        {
-                            "event_type": "heading_name",
-                            "name": name,
-                            "page": section.get("page"),
-                            "bbox": section.get("bbox"),
-                            "text": text,
-                            "sort_y": self._bbox_top(section.get("bbox")),
-                        }
-                    )
-
-            for match in self.FIELD_NAME_PATTERN.finditer(text):
-                name = self._clean_person_name(match.group(1))
-                if not name:
-                    continue
-                events.append(
-                    {
-                        "event_type": "field_name",
-                        "name": name,
-                        "page": section.get("page"),
-                        "bbox": section.get("bbox"),
-                        "text": text,
-                        "sort_y": self._bbox_top(section.get("bbox")),
-                    }
-                )
-
-        for table in document.get("tables") or []:
-            extracted = self._extract_resume_identity_from_table(table)
-            if not extracted.get("name"):
-                continue
-            events.append(
-                {
-                    "event_type": "resume_table_name",
-                    "name": extracted["name"],
-                    "page": table.get("page"),
-                    "bbox": table.get("bbox"),
-                    "text": extracted.get("text") or "",
-                    "sort_y": self._bbox_top(table.get("bbox")),
-                }
-            )
-
-        events.sort(
-            key=lambda item: (
-                int(item.get("page") or 0),
-                int(item.get("sort_y") or 0),
-                0 if item.get("event_type") == "heading_name" else 1,
-            )
-        )
-        return events
 
     def _extract_personnel_entries(
         self,
@@ -1654,26 +1538,6 @@ class BidDocumentReviewService:
                 )
         return entries
 
-    def _extract_resume_identity_from_table(self, table: dict[str, Any]) -> dict[str, str]:
-        rows = self._parse_html_table_rows(table)
-        if not rows:
-            return {}
-
-        header_match = self._locate_name_column_header(rows)
-        if header_match is None:
-            return {}
-
-        header_row_index, name_indexes = header_match
-        for row in rows[header_row_index + 1:]:
-            evidence_text = " | ".join(cell for cell in row if str(cell or "").strip())
-            if not evidence_text:
-                continue
-            for name_index in name_indexes:
-                name = self._clean_person_name(self._safe_list_get(row, name_index))
-                if name:
-                    return {"name": name, "text": evidence_text}
-        return {}
-
     def _locate_name_column_header(
         self,
         rows: list[list[str]],
@@ -1861,19 +1725,6 @@ class BidDocumentReviewService:
         if document_count >= 3:
             return "high"
         return "medium"
-
-    def _is_name_mismatch_candidate(self, expected: str, observed: str) -> bool:
-        if not expected or not observed or expected == observed:
-            return False
-        if len(expected) != len(observed):
-            return False
-        if expected[0] != observed[0]:
-            return False
-        difference_count = sum(1 for left, right in zip(expected, observed) if left != right)
-        if difference_count <= 0:
-            return False
-        similarity = SequenceMatcher(None, expected, observed).ratio()
-        return difference_count <= 2 and similarity >= 0.3
 
     def _find_header_index(self, header: list[str], keywords: tuple[str, ...]) -> int | None:
         for index, value in enumerate(header):
