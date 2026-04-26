@@ -1,0 +1,565 @@
+{
+  "schema_version": "1.0",
+  "review_type": "local_full_business_pipeline",
+  "generated_at": "2026-04-24T15:11:22.332216+00:00",
+  "project_identifier_id": "all_projects_price",
+  "dataset_dir": "D:\\Desktop\\code-XTJS\\project-XTJS\\ocr_results\\price",
+  "discovery": {
+    "dataset_dir": "D:\\Desktop\\code-XTJS\\project-XTJS\\ocr_results\\price",
+    "file_count": 9,
+    "tender_file": null,
+    "explicit_business_file_count": 0,
+    "explicit_technical_file_count": 0,
+    "warnings": [
+      "no tender JSON candidate found; format review and tender-template exclusion may be skipped",
+      "treated unclassified JSON file as 商务标: 1.json",
+      "treated unclassified JSON file as 商务标: 2.json",
+      "treated unclassified JSON file as 商务标: 3.json",
+      "treated unclassified JSON file as 商务标: 4.json",
+      "treated unclassified JSON file as 商务标: 5.json",
+      "treated unclassified JSON file as 商务标: 6.json",
+      "treated unclassified JSON file as 商务标: 7.json",
+      "treated unclassified JSON file as 商务标: 8.json",
+      "treated unclassified JSON file as 商务标: 9.json"
+    ],
+    "documents": [
+      {
+        "file_name": "1.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "1",
+        "identifier_id": "local_business_bid_2f6fa7a103fc",
+        "page_count": 1
+      },
+      {
+        "file_name": "2.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "2",
+        "identifier_id": "local_business_bid_7db647e18ca8",
+        "page_count": 1
+      },
+      {
+        "file_name": "3.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "3",
+        "identifier_id": "local_business_bid_43280f0f5847",
+        "page_count": 8
+      },
+      {
+        "file_name": "4.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "4",
+        "identifier_id": "local_business_bid_59f8a29264a3",
+        "page_count": 7
+      },
+      {
+        "file_name": "5.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "5",
+        "identifier_id": "local_business_bid_4bc3b37b8f40",
+        "page_count": 18
+      },
+      {
+        "file_name": "6.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "6",
+        "identifier_id": "local_business_bid_22ba1907e477",
+        "page_count": 2
+      },
+      {
+        "file_name": "7.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "7",
+        "identifier_id": "local_business_bid_ae5e04a4c050",
+        "page_count": 2
+      },
+      {
+        "file_name": "8.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "8",
+        "identifier_id": "local_business_bid_2ecdd49edf94",
+        "page_count": 1
+      },
+      {
+        "file_name": "9.json",
+        "role": "business_bid",
+        "role_label": "商务标",
+        "bidder_key": "9",
+        "identifier_id": "local_business_bid_d4f0e89b1d12",
+        "page_count": 1
+      }
+    ]
+  },
+  "format_review": {
+    "skipped": true,
+    "reason": "missing_tender_json"
+  },
+  "business_duplicate_check": {
+    "project": {
+      "identifier_id": "all_projects_price"
+    },
+    "config": {
+      "detection_mode": "exact_only",
+      "document_types": [
+        "business_bid"
+      ],
+      "max_evidence_sections": 5,
+      "max_pairs_per_type": 0,
+      "template_exclusion_enabled": true,
+      "template_exclusion_source": "tender_document",
+      "block_matching_unit": "sentence"
+    },
+    "groups": {
+      "business_bid": {
+        "document_count": 2,
+        "pair_count": 1,
+        "reported_pair_count": 1,
+        "suspicious_pair_count": 0,
+        "high_risk_pair_count": 0,
+        "medium_risk_pair_count": 0,
+        "documents": [
+          {
+            "identifier_id": "local_business_bid_59f8a29264a3",
+            "relation_id": "local_relation_4",
+            "file_name": "4.json",
+            "section_count": 3,
+            "block_count": 7,
+            "table_count": 2
+          },
+          {
+            "identifier_id": "local_business_bid_4bc3b37b8f40",
+            "relation_id": "local_relation_5",
+            "file_name": "5.json",
+            "section_count": 1,
+            "block_count": 3,
+            "table_count": 1
+          }
+        ],
+        "skipped_documents": [
+          {
+            "identifier_id": "local_business_bid_2f6fa7a103fc",
+            "relation_id": "local_relation_1",
+            "file_name": "1.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_7db647e18ca8",
+            "relation_id": "local_relation_2",
+            "file_name": "2.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_43280f0f5847",
+            "relation_id": "local_relation_3",
+            "file_name": "3.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_22ba1907e477",
+            "relation_id": "local_relation_6",
+            "file_name": "6.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_ae5e04a4c050",
+            "relation_id": "local_relation_7",
+            "file_name": "7.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_2ecdd49edf94",
+            "relation_id": "local_relation_8",
+            "file_name": "8.json",
+            "reason": "missing_business_duplicate_scope_content"
+          },
+          {
+            "identifier_id": "local_business_bid_d4f0e89b1d12",
+            "relation_id": "local_relation_9",
+            "file_name": "9.json",
+            "reason": "missing_business_duplicate_scope_content"
+          }
+        ],
+        "items": [
+          {
+            "left_document_identifier": "local_business_bid_59f8a29264a3",
+            "right_document_identifier": "local_business_bid_4bc3b37b8f40",
+            "left_relation_id": "local_relation_4",
+            "right_relation_id": "local_relation_5",
+            "left_file_name": "4.json",
+            "right_file_name": "5.json",
+            "document_type": "business_bid",
+            "exact_duplicate": false,
+            "exact_match_score": 0.0,
+            "risk_level": "none",
+            "suspicious": false,
+            "metrics": {
+              "exact_block_count": 0,
+              "exact_section_count": 0,
+              "exact_table_count": 0,
+              "exact_block_overlap_ratio": 0.0,
+              "exact_section_overlap_ratio": 0.0,
+              "exact_table_overlap_ratio": 0.0
+            },
+            "duplicate_blocks": [],
+            "duplicate_sections": [],
+            "duplicate_tables": [],
+            "notes": []
+          }
+        ]
+      }
+    },
+    "summary": {
+      "requested_document_types": [
+        "business_bid"
+      ],
+      "document_count": 2,
+      "pair_count": 1,
+      "reported_pair_count": 1,
+      "suspicious_pair_count": 0,
+      "high_risk_pair_count": 0,
+      "medium_risk_pair_count": 0
+    }
+  },
+  "technical_duplicate_check": {
+    "project": {
+      "identifier_id": "all_projects_price"
+    },
+    "config": {
+      "detection_mode": "exact_only",
+      "document_types": [
+        "technical_bid"
+      ],
+      "max_evidence_sections": 5,
+      "max_pairs_per_type": 0,
+      "template_exclusion_enabled": true,
+      "template_exclusion_source": "tender_document",
+      "block_matching_unit": "sentence"
+    },
+    "groups": {
+      "technical_bid": {
+        "document_count": 0,
+        "pair_count": 0,
+        "reported_pair_count": 0,
+        "suspicious_pair_count": 0,
+        "high_risk_pair_count": 0,
+        "medium_risk_pair_count": 0,
+        "documents": [],
+        "skipped_documents": [],
+        "items": []
+      }
+    },
+    "summary": {
+      "requested_document_types": [
+        "technical_bid"
+      ],
+      "document_count": 0,
+      "pair_count": 0,
+      "reported_pair_count": 0,
+      "suspicious_pair_count": 0,
+      "high_risk_pair_count": 0,
+      "medium_risk_pair_count": 0
+    }
+  },
+  "bid_document_review": {
+    "project": {
+      "identifier_id": "all_projects_price"
+    },
+    "config": {
+      "document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "typo_detection_engine": "model_unavailable",
+      "typo_model_name": "shibing624/macbert4csc-base-chinese",
+      "typo_model_threshold": 0.9,
+      "typo_stopword_dictionary_enabled": true,
+      "personnel_reuse_scope": "per_document_type",
+      "personnel_table_extraction_engine": "required_attachment_name_column",
+      "personnel_text_extraction_engine": "attachment_hanlp_ner",
+      "business_bid_personnel_scope": "required_attachments_only",
+      "technical_bid_personnel_scope": "disabled",
+      "typo_engine_statuses": [
+        "model_unavailable"
+      ],
+      "typo_model_load_error": "ModuleNotFoundError: No module named 'pycorrector'"
+    },
+    "groups": {
+      "business_bid": {
+        "documents": [
+          {
+            "identifier_id": "local_business_bid_2f6fa7a103fc",
+            "relation_id": "local_relation_1",
+            "file_name": "1.json",
+            "page_count": 1,
+            "layout_section_count": 7,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_7db647e18ca8",
+            "relation_id": "local_relation_2",
+            "file_name": "2.json",
+            "page_count": 1,
+            "layout_section_count": 10,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_43280f0f5847",
+            "relation_id": "local_relation_3",
+            "file_name": "3.json",
+            "page_count": 7,
+            "layout_section_count": 52,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_59f8a29264a3",
+            "relation_id": "local_relation_4",
+            "file_name": "4.json",
+            "page_count": 7,
+            "layout_section_count": 44,
+            "table_count": 3,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_4bc3b37b8f40",
+            "relation_id": "local_relation_5",
+            "file_name": "5.json",
+            "page_count": 18,
+            "layout_section_count": 227,
+            "table_count": 4,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_22ba1907e477",
+            "relation_id": "local_relation_6",
+            "file_name": "6.json",
+            "page_count": 2,
+            "layout_section_count": 17,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_ae5e04a4c050",
+            "relation_id": "local_relation_7",
+            "file_name": "7.json",
+            "page_count": 2,
+            "layout_section_count": 30,
+            "table_count": 1,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_2ecdd49edf94",
+            "relation_id": "local_relation_8",
+            "file_name": "8.json",
+            "page_count": 1,
+            "layout_section_count": 13,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          },
+          {
+            "identifier_id": "local_business_bid_d4f0e89b1d12",
+            "relation_id": "local_relation_9",
+            "file_name": "9.json",
+            "page_count": 1,
+            "layout_section_count": 11,
+            "table_count": 2,
+            "personnel_entry_count": 0
+          }
+        ],
+        "skipped_documents": [],
+        "typo_check": {
+          "document_count": 9,
+          "issue_count": 0,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 0,
+          "engine": "model_unavailable",
+          "documents": [],
+          "shared_issues": [],
+          "notes": [
+            "Typo detection runs as MacBERT candidate review without a built-in typo dictionary.",
+            "Only single-char or same-length replacements are accepted, protected spans stay blocked, and domain-safe phrases are filtered.",
+            "MacBERT is unavailable; typo review will not emit typo issues.",
+            "Model load error: ModuleNotFoundError: No module named 'pycorrector'"
+          ]
+        },
+        "personnel_reuse_check": {
+          "document_count": 9,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "documents": [
+            {
+              "identifier_id": "local_business_bid_d4f0e89b1d12",
+              "relation_id": "local_relation_9",
+              "file_name": "9.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_ae5e04a4c050",
+              "relation_id": "local_relation_7",
+              "file_name": "7.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_7db647e18ca8",
+              "relation_id": "local_relation_2",
+              "file_name": "2.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_59f8a29264a3",
+              "relation_id": "local_relation_4",
+              "file_name": "4.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_4bc3b37b8f40",
+              "relation_id": "local_relation_5",
+              "file_name": "5.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_43280f0f5847",
+              "relation_id": "local_relation_3",
+              "file_name": "3.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_2f6fa7a103fc",
+              "relation_id": "local_relation_1",
+              "file_name": "1.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_2ecdd49edf94",
+              "relation_id": "local_relation_8",
+              "file_name": "8.json",
+              "personnel_count": 0
+            },
+            {
+              "identifier_id": "local_business_bid_22ba1907e477",
+              "relation_id": "local_relation_6",
+              "file_name": "6.json",
+              "personnel_count": 0
+            }
+          ],
+          "items": [],
+          "notes": [
+            "先按招标文件要求锁定商务标附件范围，再只在这些附件的表格里按“姓名”列向下提取成员姓名。",
+            "正文继续仅在法定代表人授权委托书、法定代表人资格证明书中使用 HanLP 识别人名，并排除身份证与签字盖章区域。",
+            "同名人员跨不同文档重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ]
+        },
+        "summary": {
+          "document_count": 9,
+          "skipped_document_count": 0,
+          "typo_issue_count": 0,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "suspicious": false
+        }
+      },
+      "technical_bid": {
+        "documents": [],
+        "skipped_documents": [],
+        "typo_check": {
+          "document_count": 0,
+          "issue_count": 0,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 0,
+          "engine": "model_unavailable",
+          "documents": [],
+          "shared_issues": [],
+          "notes": [
+            "Typo detection runs as MacBERT candidate review without a built-in typo dictionary.",
+            "Only single-char or same-length replacements are accepted, protected spans stay blocked, and domain-safe phrases are filtered.",
+            "MacBERT is unavailable; typo review will not emit typo issues.",
+            "Model load error: ModuleNotFoundError: No module named 'pycorrector'"
+          ]
+        },
+        "personnel_reuse_check": {
+          "document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "documents": [],
+          "items": [],
+          "notes": [
+            "先按招标文件要求锁定商务标附件范围，再只在这些附件的表格里按“姓名”列向下提取成员姓名。",
+            "正文继续仅在法定代表人授权委托书、法定代表人资格证明书中使用 HanLP 识别人名，并排除身份证与签字盖章区域。",
+            "同名人员跨不同文档重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ]
+        },
+        "summary": {
+          "document_count": 0,
+          "skipped_document_count": 0,
+          "typo_issue_count": 0,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0,
+          "suspicious": false
+        }
+      }
+    },
+    "summary": {
+      "requested_document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "document_count": 9,
+      "skipped_document_count": 0,
+      "typo_issue_count": 0,
+      "shared_typo_issue_count": 0,
+      "suspicious_typo_document_count": 0,
+      "personnel_count": 0,
+      "reused_name_count": 0,
+      "suspicious": false
+    }
+  },
+  "steps": [
+    {
+      "name": "business_format_review",
+      "status": "ok",
+      "started_at": "2026-04-24T15:11:22.332216+00:00",
+      "finished_at": "2026-04-24T15:11:22.332216+00:00"
+    },
+    {
+      "name": "business_duplicate_check",
+      "status": "ok",
+      "started_at": "2026-04-24T15:11:22.332216+00:00",
+      "finished_at": "2026-04-24T15:11:22.364185+00:00"
+    },
+    {
+      "name": "technical_duplicate_check",
+      "status": "ok",
+      "started_at": "2026-04-24T15:11:22.364185+00:00",
+      "finished_at": "2026-04-24T15:11:22.364185+00:00"
+    },
+    {
+      "name": "bid_document_review_typo_and_personnel",
+      "status": "ok",
+      "started_at": "2026-04-24T15:11:22.364185+00:00",
+      "finished_at": "2026-04-24T15:11:22.402862+00:00"
+    }
+  ],
+  "summary": {
+    "step_status_counts": {
+      "ok": 4,
+      "error": 0
+    },
+    "business_duplicate_suspicious_pair_count": 0,
+    "technical_duplicate_suspicious_pair_count": 0,
+    "typo_issue_count": 0,
+    "personnel_reused_name_count": 0
+  }
+}

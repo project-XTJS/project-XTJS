@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
   "review_type": "local_full_business_pipeline",
-  "generated_at": "2026-04-24T14:18:18.255287+00:00",
-  "project_identifier_id": "drug_full_pipeline_local",
+  "generated_at": "2026-04-24T15:11:42.443999+00:00",
+  "project_identifier_id": "all_projects_药品JSON识别结果",
   "dataset_dir": "D:\\Desktop\\code-XTJS\\project-XTJS\\ocr_results\\药品JSON识别结果",
   "discovery": {
     "dataset_dir": "D:\\Desktop\\code-XTJS\\project-XTJS\\ocr_results\\药品JSON识别结果",
@@ -73,8 +73,8 @@
   "format_review": {
     "schema_version": "1.1",
     "review_type": "unified_business_review",
-    "generated_at": "2026-04-24T14:18:22.047486+00:00",
-    "project_identifier_id": "drug_full_pipeline_local",
+    "generated_at": "2026-04-24T15:11:46.110749+00:00",
+    "project_identifier_id": "all_projects_药品JSON识别结果",
     "dataset": {
       "base_dir": "D:\\Desktop\\code-XTJS\\project-XTJS\\ocr_results\\药品JSON识别结果",
       "tender": {
@@ -4833,7 +4833,7 @@
             "check_name": "商务标完整性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 29.94
+              "duration_ms": 27.86
             },
             "validation": {
               "status": "correct",
@@ -5162,7 +5162,7 @@
             "check_name": "模板一致性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 477.43
+              "duration_ms": 415.24
             },
             "validation": {
               "status": "correct",
@@ -5402,7 +5402,7 @@
             "check_name": "报价合理性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 19.53
+              "duration_ms": 15.03
             },
             "validation": {
               "status": "correct",
@@ -5502,7 +5502,7 @@
             "check_name": "分项报价表审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 17.9
+              "duration_ms": 6.06
             },
             "validation": {
               "status": "correct",
@@ -5904,7 +5904,7 @@
             "check_name": "偏离条款审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 70.55
+              "duration_ms": 44.04
             },
             "validation": {
               "status": "correct",
@@ -6033,7 +6033,7 @@
             "check_name": "签字盖章日期审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 630.25
+              "duration_ms": 595.06
             },
             "validation": {
               "status": "correct",
@@ -8255,7 +8255,7 @@
             "check_name": "商务标完整性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 24.76
+              "duration_ms": 24.69
             },
             "validation": {
               "status": "correct",
@@ -8584,7 +8584,7 @@
             "check_name": "模板一致性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 420.58
+              "duration_ms": 418.15
             },
             "validation": {
               "status": "correct",
@@ -8828,7 +8828,7 @@
             "check_name": "报价合理性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 14.92
+              "duration_ms": 15.3
             },
             "validation": {
               "status": "correct",
@@ -8927,7 +8927,7 @@
             "check_name": "分项报价表审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 7.57
+              "duration_ms": 6.32
             },
             "validation": {
               "status": "correct",
@@ -9534,7 +9534,7 @@
             "check_name": "偏离条款审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 47.12
+              "duration_ms": 49.41
             },
             "validation": {
               "status": "correct",
@@ -9663,7 +9663,7 @@
             "check_name": "签字盖章日期审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 587.97
+              "duration_ms": 585.5
             },
             "validation": {
               "status": "correct",
@@ -12047,7 +12047,7 @@
             "check_name": "商务标完整性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 31.22
+              "duration_ms": 26.35
             },
             "validation": {
               "status": "correct",
@@ -12376,7 +12376,7 @@
             "check_name": "模板一致性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 472.25
+              "duration_ms": 475.64
             },
             "validation": {
               "status": "correct",
@@ -12620,7 +12620,7 @@
             "check_name": "报价合理性审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 16.79
+              "duration_ms": 16.61
             },
             "validation": {
               "status": "correct",
@@ -12720,7 +12720,7 @@
             "check_name": "分项报价表审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 7.12
+              "duration_ms": 6.97
             },
             "validation": {
               "status": "correct",
@@ -13098,7 +13098,7 @@
             "check_name": "偏离条款审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 84.38
+              "duration_ms": 91.34
             },
             "validation": {
               "status": "correct",
@@ -13227,7 +13227,7 @@
             "check_name": "签字盖章日期审查",
             "execution": {
               "status": "ok",
-              "duration_ms": 688.22
+              "duration_ms": 708.68
             },
             "validation": {
               "status": "correct",
@@ -15363,7 +15363,7 @@
   },
   "business_duplicate_check": {
     "project": {
-      "identifier_id": "drug_full_pipeline_local"
+      "identifier_id": "all_projects_药品JSON识别结果"
     },
     "config": {
       "detection_mode": "exact_only",
@@ -15390,15 +15390,15 @@
             "relation_id": "local_relation_1",
             "file_name": "宏银商务标.JSON",
             "section_count": 2,
-            "block_count": 20,
+            "block_count": 15,
             "table_count": 2
           },
           {
             "identifier_id": "local_business_bid_baf9bf09e49c",
             "relation_id": "local_relation_3",
             "file_name": "戎元商务标.JSON",
-            "section_count": 5,
-            "block_count": 24,
+            "section_count": 4,
+            "block_count": 20,
             "table_count": 2
           },
           {
@@ -15406,7 +15406,7 @@
             "relation_id": "local_relation_5",
             "file_name": "舒源商务标.JSON",
             "section_count": 2,
-            "block_count": 6,
+            "block_count": 3,
             "table_count": 2
           }
         ],
@@ -15504,7 +15504,7 @@
   },
   "technical_duplicate_check": {
     "project": {
-      "identifier_id": "drug_full_pipeline_local"
+      "identifier_id": "all_projects_药品JSON识别结果"
     },
     "config": {
       "detection_mode": "exact_only",
@@ -15645,14 +15645,14 @@
   },
   "bid_document_review": {
     "project": {
-      "identifier_id": "drug_full_pipeline_local"
+      "identifier_id": "all_projects_药品JSON识别结果"
     },
     "config": {
       "document_types": [
         "business_bid",
         "technical_bid"
       ],
-      "typo_detection_engine": "macbert_candidate_review",
+      "typo_detection_engine": "model_unavailable",
       "typo_model_name": "shibing624/macbert4csc-base-chinese",
       "typo_model_threshold": 0.9,
       "typo_stopword_dictionary_enabled": true,
@@ -15660,7 +15660,11 @@
       "personnel_table_extraction_engine": "required_attachment_name_column",
       "personnel_text_extraction_engine": "attachment_hanlp_ner",
       "business_bid_personnel_scope": "required_attachments_only",
-      "technical_bid_personnel_scope": "disabled"
+      "technical_bid_personnel_scope": "disabled",
+      "typo_engine_statuses": [
+        "model_unavailable"
+      ],
+      "typo_model_load_error": "ModuleNotFoundError: No module named 'pycorrector'"
     },
     "groups": {
       "business_bid": {
@@ -15859,26 +15863,26 @@
     {
       "name": "business_format_review",
       "status": "ok",
-      "started_at": "2026-04-24T14:18:18.255287+00:00",
-      "finished_at": "2026-04-24T14:18:22.048494+00:00"
+      "started_at": "2026-04-24T15:11:42.445014+00:00",
+      "finished_at": "2026-04-24T15:11:46.110749+00:00"
     },
     {
       "name": "business_duplicate_check",
       "status": "ok",
-      "started_at": "2026-04-24T14:18:22.048494+00:00",
-      "finished_at": "2026-04-24T14:18:22.146544+00:00"
+      "started_at": "2026-04-24T15:11:46.110749+00:00",
+      "finished_at": "2026-04-24T15:11:46.211975+00:00"
     },
     {
       "name": "technical_duplicate_check",
       "status": "ok",
-      "started_at": "2026-04-24T14:18:22.146544+00:00",
-      "finished_at": "2026-04-24T14:18:22.194060+00:00"
+      "started_at": "2026-04-24T15:11:46.211975+00:00",
+      "finished_at": "2026-04-24T15:11:46.258488+00:00"
     },
     {
       "name": "bid_document_review_typo_and_personnel",
       "status": "ok",
-      "started_at": "2026-04-24T14:18:22.194060+00:00",
-      "finished_at": "2026-04-24T14:18:25.089313+00:00"
+      "started_at": "2026-04-24T15:11:46.258488+00:00",
+      "finished_at": "2026-04-24T15:11:46.606091+00:00"
     }
   ],
   "summary": {

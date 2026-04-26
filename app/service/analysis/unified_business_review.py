@@ -457,6 +457,10 @@ class UnifiedBusinessReviewService:
                 normalizer=self._normalize_verification,
             ),
         }
+        checks["verification_check"] = self._suppress_integrity_duplicates_in_verification(
+            verification_check=checks["verification_check"],
+            integrity_check=integrity_check,
+        )
 
         bidder_name = self._extract_bidder_name(checks, bidder["bidder_key"])
         aggregate_issues = self._aggregate_bidder_issues(checks)
@@ -537,6 +541,10 @@ class UnifiedBusinessReviewService:
                 normalizer=self._normalize_verification,
             ),
         }
+        checks["verification_check"] = self._suppress_integrity_duplicates_in_verification(
+            verification_check=checks["verification_check"],
+            integrity_check=integrity_check,
+        )
 
         bidder_name = self._extract_bidder_name(checks, bidder_key)
         aggregate_issues = self._aggregate_bidder_issues(checks)
@@ -1370,6 +1378,169 @@ class UnifiedBusinessReviewService:
                 "raw_result": None,
             }
 
+    def _suppress_integrity_duplicates_in_verification(
+        self,
+        *,
+        verification_check: dict[str, Any],
+        integrity_check: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_result = verification_check.get("raw_result")
+        integrity_raw = integrity_check.get("raw_result")
+        if not isinstance(raw_result, dict) or not isinstance(integrity_raw, dict):
+            return verification_check
+
+        filtered_raw = self._filter_verification_raw_result(raw_result, integrity_raw)
+        if filtered_raw == raw_result:
+            return verification_check
+
+        normalized = self._normalize_verification(filtered_raw)
+        return {
+            **verification_check,
+            "validation": normalized["validation"],
+            "review": normalized["review"],
+            "metrics": normalized.get("metrics", {}),
+            "issues": normalized.get("issues", self._empty_issue_bucket()),
+            "raw_result": filtered_raw,
+        }
+
+    def _filter_verification_raw_result(
+        self,
+        raw_result: dict[str, Any],
+        integrity_raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        filtered = copy.deepcopy(raw_result)
+        suppressed: list[dict[str, Any]] = []
+
+        def filter_titles(values: Any, source: str) -> list[str]:
+            kept: list[str] = []
+            seen: set[str] = set()
+            for value in values or []:
+                title = str(value or "").strip()
+                if not title or title in seen:
+                    continue
+                seen.add(title)
+                skip_reason = self._verification_skip_reason_from_integrity(title, integrity_raw)
+                if skip_reason is None:
+                    kept.append(title)
+                    continue
+                suppressed.append(
+                    {
+                        "attachment": title,
+                        "source": source,
+                        **skip_reason,
+                    }
+                )
+            return kept
+
+        position_check = filtered.get("position_check")
+        if not isinstance(position_check, dict):
+            position_check = {}
+            filtered["position_check"] = position_check
+        date_check = filtered.get("date_check")
+        if not isinstance(date_check, dict):
+            date_check = {}
+            filtered["date_check"] = date_check
+
+        position_check["missing_attachments"] = filter_titles(
+            position_check.get("missing_attachments"),
+            "position_check.missing_attachments",
+        )
+        position_check["missing_signature_attachments"] = filter_titles(
+            position_check.get("missing_signature_attachments"),
+            "position_check.missing_signature_attachments",
+        )
+        position_check["pending_signature_attachments"] = filter_titles(
+            position_check.get("pending_signature_attachments"),
+            "position_check.pending_signature_attachments",
+        )
+        position_check["missing_seal_attachments"] = filter_titles(
+            position_check.get("missing_seal_attachments"),
+            "position_check.missing_seal_attachments",
+        )
+        date_check["missing_date_attachments"] = filter_titles(
+            date_check.get("missing_date_attachments"),
+            "date_check.missing_date_attachments",
+        )
+        date_check["late_date_attachments"] = filter_titles(
+            date_check.get("late_date_attachments"),
+            "date_check.late_date_attachments",
+        )
+        filtered["skipped_missing_attachments"] = filter_titles(
+            filtered.get("skipped_missing_attachments"),
+            "skipped_missing_attachments",
+        )
+
+        if not suppressed:
+            return filtered
+
+        position_check["status"] = self._recompute_verification_position_status(position_check)
+        date_check["status"] = self._recompute_verification_date_status(date_check)
+        filtered["compliance_status"] = self._recompute_verification_compliance_status(filtered)
+        filtered["suppressed_by_integrity"] = suppressed
+
+        summary_text = str(filtered.get("summary") or "").strip()
+        suffix = f"已排除与完整性缺失重复的 {len(suppressed)} 项附件核验。"
+        filtered["summary"] = f"{summary_text} {suffix}".strip() if summary_text else suffix
+        return filtered
+
+    def _verification_skip_reason_from_integrity(
+        self,
+        attachment_title: str,
+        integrity_raw: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        return self._match_integrity_failure_for_segment({"name": attachment_title}, integrity_raw)
+
+    def _recompute_verification_position_status(self, position_check: dict[str, Any]) -> str:
+        missing_attachments = position_check.get("missing_attachments") or []
+        missing_signature = position_check.get("missing_signature_attachments") or []
+        pending_signature = position_check.get("pending_signature_attachments") or []
+        missing_seal = position_check.get("missing_seal_attachments") or []
+        if missing_attachments or missing_signature or missing_seal:
+            return "fail"
+        if pending_signature:
+            return "pending"
+        return "pass"
+
+    def _recompute_verification_date_status(self, date_check: dict[str, Any]) -> str:
+        missing_date = date_check.get("missing_date_attachments") or []
+        late_date = date_check.get("late_date_attachments") or []
+        if missing_date or late_date:
+            return "fail"
+
+        original_status = str(date_check.get("status") or "").strip().lower()
+        if original_status in {"missing_deadline", "not_required"}:
+            return original_status
+        return "pass"
+
+    def _recompute_verification_compliance_status(self, raw_result: dict[str, Any]) -> str:
+        position_check = raw_result.get("position_check") or {}
+        date_check = raw_result.get("date_check") or {}
+        seal_company_check = raw_result.get("seal_company_check") or {}
+        attachment_results = raw_result.get("attachment_results") or []
+
+        attachment_statuses = {
+            str(item.get("status") or "").strip().lower()
+            for item in attachment_results
+            if isinstance(item, dict)
+        }
+        if (
+            position_check.get("status") == "fail"
+            or date_check.get("status") == "fail"
+            or seal_company_check.get("status") == "fail"
+            or "fail" in attachment_statuses
+        ):
+            return "fail"
+
+        if (
+            position_check.get("status") == "pending"
+            or date_check.get("status") == "missing_deadline"
+            or seal_company_check.get("status") == "pending"
+            or "pending" in attachment_statuses
+        ):
+            return "pending"
+
+        return "pass"
+
     def _execute_check(
         self,
         *,
@@ -1599,6 +1770,10 @@ class UnifiedBusinessReviewService:
         skipped: list[dict[str, Any]] = []
 
         for segment in segments:
+            existing_skip_reason = segment.get("skip_reason") if isinstance(segment, dict) else None
+            if existing_skip_reason is not None:
+                skipped.append(copy.deepcopy(segment))
+                continue
             skip_reason = self._match_integrity_failure_for_segment(segment, integrity_raw)
             if skip_reason is None:
                 evaluated.append(segment)

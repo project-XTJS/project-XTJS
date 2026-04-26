@@ -4,6 +4,7 @@ from typing import List, Dict
 
 # 假设 TemplateExtractor 已在同目录下定义
 from .template_extractor import TemplateExtractor 
+from .verification import VerificationChecker
 
 class DocumentProcessor:
     """段落处理器：将文档切分为与模板对应的段落"""
@@ -295,17 +296,23 @@ class ConsistencyChecker:
         "日期",
         "已签字",
     )
-
+    NOTE_LEAD_RE = re.compile(r"^\s*(?:注|说明)\s*[:：]?\s*$")
     def __init__(self):
         # NORM_PATTERN: 用于最后比对时，过滤一切非核心字符
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
         
         # GAP_PATTERN: 匹配一切非中文、非字母、非数字的字符
         self.GAP_PATTERN = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9]+')
+        self._verification_checker = VerificationChecker(None)
 
     def _normalize(self, text: str) -> str:
-        if not text: return ""
-        return "".join(self.NORM_PATTERN.findall(text))
+        if not text:
+            return ""
+        normalized = str(text)
+        for token in ("underline", "underset", "cdot", "text"):
+            normalized = normalized.replace(token, "")
+        normalized = normalized.replace("需要说明的", "")
+        return "".join(self.NORM_PATTERN.findall(normalized))
 
     def _normalize_title(self, text: str) -> str:
         if not text:
@@ -367,6 +374,104 @@ class ConsistencyChecker:
 
         return "\n".join(kept)
 
+    def _trim_instruction_note_block(self, text: str) -> str:
+        if not text:
+            return ""
+
+        kept: list[str] = []
+        in_note_block = False
+        note_end_markers = self.NON_BODY_LINE_MARKERS + ("盖章", "签字", "参选人名称")
+
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            normalized_line = self._normalize(stripped)
+            if not normalized_line:
+                continue
+
+            if self.NOTE_LEAD_RE.match(stripped):
+                in_note_block = True
+                continue
+
+            if in_note_block:
+                if (
+                    self._is_formal_title_line(stripped)
+                    or self._is_non_body_line(normalized_line)
+                    or any(marker in normalized_line for marker in note_end_markers)
+                ):
+                    in_note_block = False
+                else:
+                    continue
+
+            kept.append(stripped)
+
+        return "\n".join(kept)
+
+    def _build_attachment_lookup(self, test_json: dict, templates: List[Dict]) -> tuple[dict[str, dict], list[dict]]:
+        expected_attachments = []
+        seen = set()
+        for temp in templates:
+            title = str(temp.get("title") or "").strip()
+            attachment_number = self._verification_checker._attachment_number(title)
+            normalized_title = self._verification_checker._attachment_title(title)
+            key = attachment_number or normalized_title
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            expected_attachments.append(
+                {
+                    "attachment_number": attachment_number,
+                    "title": normalized_title,
+                    "title_key": self._verification_checker._attachment_title_key(normalized_title),
+                }
+            )
+
+        sections = self._verification_checker._attachment_sections(
+            test_json,
+            [],
+            [],
+            expected_attachments,
+        )
+        merged_sections: list[dict] = []
+        by_number: dict[str, dict] = {}
+        for item in sections:
+            attachment_number = item.get("attachment_number")
+            if not attachment_number:
+                merged_sections.append(item)
+                continue
+            existing = by_number.get(attachment_number)
+            if existing is None:
+                copied = {
+                    **item,
+                    "pages": list(item.get("pages") or []),
+                    "seal_texts": list(item.get("seal_texts") or []),
+                    "signature_texts": list(item.get("signature_texts") or []),
+                    "sections": list(item.get("sections") or []),
+                    "seal_locations": list(item.get("seal_locations") or []),
+                    "signature_locations": list(item.get("signature_locations") or []),
+                }
+                by_number[attachment_number] = copied
+                merged_sections.append(copied)
+                continue
+
+            existing["pages"] = list(dict.fromkeys((existing.get("pages") or []) + (item.get("pages") or [])))
+            existing["seal_texts"] = list(dict.fromkeys((existing.get("seal_texts") or []) + (item.get("seal_texts") or [])))
+            existing["signature_texts"] = list(dict.fromkeys((existing.get("signature_texts") or []) + (item.get("signature_texts") or [])))
+            existing["sections"] = list(existing.get("sections") or []) + list(item.get("sections") or [])
+            existing["seal_locations"] = self._verification_checker._dedupe_locations(
+                list(existing.get("seal_locations") or []) + list(item.get("seal_locations") or [])
+            )
+            existing["signature_locations"] = self._verification_checker._dedupe_locations(
+                list(existing.get("signature_locations") or []) + list(item.get("signature_locations") or [])
+            )
+            part = str(item.get("text") or "").strip()
+            if part:
+                prefix = str(existing.get("text") or "").strip()
+                existing["text"] = f"{prefix}\n{part}".strip() if prefix else part
+        return by_number, merged_sections
+
     def _get_anchors(self, text: str) -> List[str]:
         # 1. 抹平括号（防止文本粘连）
         text = re.sub(r'\(.*?\)|（.*?）', ' ', text)
@@ -394,16 +499,43 @@ class ConsistencyChecker:
         temps = TemplateExtractor.extract_consistency_templates(model_json)
         model_segments = [{"title": t['title'], "text": "\n".join(t['content'])} for t in temps]
         test_segments = DocumentProcessor.segment_document(test_json, temps, is_test_file=True)
+        bid_by_no, bid_sections = self._build_attachment_lookup(test_json, model_segments)
 
         results = []
         for i, m_seg in enumerate(model_segments):
             m_txt = m_seg['text']
-            t_txt = test_segments[i]['text']
-
-            m_body = self._trim_non_body_lines(self._strip_title_line(m_txt, m_seg['title']))
-            t_body = self._trim_non_body_lines(self._strip_title_line(t_txt, m_seg['title']))
-
             title = m_seg['title']
+            fallback_txt = test_segments[i]['text']
+            attachment_probe = {
+                "attachment_number": self._verification_checker._attachment_number(title),
+                "title": self._verification_checker._attachment_title(title),
+            }
+            matched_section = self._verification_checker._match_attachment(attachment_probe, bid_by_no, bid_sections)
+            if matched_section is not None:
+                t_txt = matched_section.get("text") or ""
+            else:
+                t_txt = fallback_txt
+                if attachment_probe["attachment_number"] is not None and not str(t_txt or "").strip():
+                    results.append(
+                        {
+                            "name": title,
+                            "is_passed": False,
+                            "missing_anchors": [],
+                            "skip_reason": {
+                                "type": "attachment_not_found",
+                                "attachment_number": attachment_probe["attachment_number"],
+                            },
+                        }
+                    )
+                    continue
+
+            m_body = self._trim_instruction_note_block(
+                self._trim_non_body_lines(self._strip_title_line(m_txt, title))
+            )
+            t_body = self._trim_instruction_note_block(
+                self._trim_non_body_lines(self._strip_title_line(t_txt, title))
+            )
+
             # 特殊附件：只要存在内容即通过
             if "制造商声明函" in title or "制造商授权书" in title or "原厂授权函" in title:
                 passed = bool(t_body.strip())
@@ -421,12 +553,12 @@ class ConsistencyChecker:
                 if "授权委托书" in title:
                     relaxed_anchors.append("授权委托书")
 
-                norm_t = self._normalize(t_body)
+                norm_t = self._normalize(t_txt)
                 missing = [a for a in relaxed_anchors if a not in norm_t]
                 results.append({
                     "name": title,
-                    "is_passed": bool(t_body.strip()) and len(missing) == 0,
-                    "missing_anchors": missing if t_body.strip() else ["[未检测到内容]"]
+                    "is_passed": bool(t_txt.strip()) and len(missing) == 0,
+                    "missing_anchors": missing if t_txt.strip() else ["[未检测到内容]"]
                 })
                 continue
 

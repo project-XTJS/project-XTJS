@@ -679,6 +679,71 @@ class VerificationChecker:
                     "requirements": merged_req,
                 }
             )
+        return self._apply_alternative_attachment_rules(result, bid_by_no, bid_sections)
+
+    def _apply_alternative_attachment_rules(
+        self,
+        attachments: list[dict],
+        bid_by_no: dict[str, dict] | None = None,
+        bid_sections: list[dict] | None = None,
+    ) -> list[dict]:
+        if not attachments:
+            return attachments
+
+        bid_by_no = bid_by_no or {}
+        bid_sections = bid_sections or []
+
+        certificate_idx = None
+        authorization_idx = None
+        for idx, item in enumerate(attachments):
+            title_key = self._attachment_title_key(item.get("title") or "")
+            if not title_key:
+                continue
+            if certificate_idx is None and "法定代表人证明书" in title_key:
+                certificate_idx = idx
+            if authorization_idx is None and "授权委托书" in title_key:
+                authorization_idx = idx
+
+        if certificate_idx is None or authorization_idx is None:
+            return attachments
+
+        certificate_attachment = attachments[certificate_idx]
+        authorization_attachment = attachments[authorization_idx]
+        certificate_found = self._match_attachment(certificate_attachment, bid_by_no, bid_sections) is not None
+        authorization_found = self._match_attachment(authorization_attachment, bid_by_no, bid_sections) is not None
+
+        if certificate_found and authorization_found:
+            return attachments
+
+        if certificate_found != authorization_found:
+            drop_idx = authorization_idx if certificate_found else certificate_idx
+            return [item for idx, item in enumerate(attachments) if idx != drop_idx]
+
+        merged = {
+            "attachment_number": None,
+            "title": "法定代表人资格证明书/授权委托书",
+            "text": "\n".join(
+                part
+                for part in (
+                    str(certificate_attachment.get("text") or "").strip(),
+                    str(authorization_attachment.get("text") or "").strip(),
+                )
+                if part
+            ),
+            "requirements": self._merge_requirements(
+                certificate_attachment.get("requirements"),
+                authorization_attachment.get("requirements"),
+            ),
+        }
+
+        result: list[dict] = []
+        for idx, item in enumerate(attachments):
+            if idx == certificate_idx:
+                result.append(merged)
+                continue
+            if idx == authorization_idx:
+                continue
+            result.append(item)
         return result
 
     def _merge_requirements(self, primary: dict | None, secondary: dict | None) -> dict:

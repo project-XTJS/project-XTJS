@@ -25,11 +25,11 @@
 <body>
   <header>
     <h1>全业务审查结果</h1>
-    <div class="meta">drug_full_pipeline_local | 2026-04-24T14:18:18.255287+00:00</div>
+    <div class="meta">all_projects_427 | 2026-04-24T15:11:15.204734+00:00</div>
   </header>
   <main>
     <section class="grid">
-      <div class="card"><div class="label">JSON 文件数</div><div class="value">7</div></div>
+      <div class="card"><div class="label">JSON 文件数</div><div class="value">4</div></div>
       <div class="card"><div class="label">形式审查投标人数</div><div class="value">3</div></div>
       <div class="card"><div class="label">商务查重可疑对</div><div class="value">0</div></div>
       <div class="card"><div class="label">技术查重可疑对</div><div class="value">0</div></div>
@@ -38,27 +38,25 @@
     </section>
 
     <h2>文件识别</h2>
-    <table><thead><tr><th>角色</th><th>文件</th><th>投标人键</th><th>页数</th></tr></thead><tbody><tr><td>商务标</td><td>宏银商务标.JSON</td><td>宏银</td><td>26</td></tr><tr><td>技术标</td><td>宏银技术标.JSON</td><td>宏银</td><td>6</td></tr><tr><td>商务标</td><td>戎元商务标.JSON</td><td>戎元</td><td>25</td></tr><tr><td>技术标</td><td>戎元技术标.JSON</td><td>戎元</td><td>7</td></tr><tr><td>招标文件</td><td>招标.JSON</td><td>-</td><td>47</td></tr><tr><td>商务标</td><td>舒源商务标.JSON</td><td>舒源</td><td>23</td></tr><tr><td>技术标</td><td>舒源技术标.JSON</td><td>舒源</td><td>18</td></tr></tbody></table>
+    <table><thead><tr><th>角色</th><th>文件</th><th>投标人键</th><th>页数</th></tr></thead><tbody><tr><td>商务标</td><td>427-hongyin.json</td><td>427-hongyin</td><td>21</td></tr><tr><td>招标文件</td><td>427-model.json</td><td>-</td><td>47</td></tr><tr><td>商务标</td><td>427-rongyuan.json</td><td>427-rongyuan</td><td>32</td></tr><tr><td>商务标</td><td>427-shuyuan.json</td><td>427-shuyuan</td><td>41</td></tr></tbody></table>
     <h2>运行提示</h2>
-    <ul><li>无</li></ul>
+    <ul><li>treated unclassified JSON file as 商务标: 427-hongyin.json</li><li>treated unclassified JSON file as 商务标: 427-rongyuan.json</li><li>treated unclassified JSON file as 商务标: 427-shuyuan.json</li><li>商务标错别字模型不可用，当前不会输出错别字候选；Model load error: ModuleNotFoundError: No module named &#x27;pycorrector&#x27;</li><li>技术标错别字模型不可用，当前不会输出错别字候选；Model load error: ModuleNotFoundError: No module named &#x27;pycorrector&#x27;</li></ul>
 
     <h2>形式审查概览</h2>
     <table><tbody>
-      <tr><th>运行模式</th><td>native_dataset_discovery</td></tr>
-      <tr><th>审查状态统计</th><td>pass: 15 / fail: 3 / unclear: 0</td></tr>
-      <tr><th>校验状态统计</th><td>correct: 18 / failed: 0 / unclear: 0</td></tr>
-      <tr><th>跳过原因</th><td>-</td></tr>
+      <tr><th>运行模式</th><td>fallback_local_discovery</td></tr>
+      <tr><th>审查状态统计</th><td>pass: 9 / fail: 6 / unclear: 0</td></tr>
+      <tr><th>校验状态统计</th><td>correct: 15 / failed: 0 / unclear: 0</td></tr>
+      <tr><th>跳过原因</th><td>ValueError: expected exactly one tender JSON file, found 0 under D:\Desktop\code-XTJS\project-XTJS\ocr_results\427</td></tr>
     </tbody></table>
 
     <h2>商务标查重</h2>
-    <table><thead><tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>重复句</th><th>重复表</th></tr></thead><tbody><tr><td>none</td><td>0</td><td>宏银商务标.JSON</td><td>戎元商务标.JSON</td><td>0</td><td>0</td></tr>
-<tr><td>none</td><td>0</td><td>宏银商务标.JSON</td><td>舒源商务标.JSON</td><td>0</td><td>0</td></tr>
-<tr><td>none</td><td>0</td><td>戎元商务标.JSON</td><td>舒源商务标.JSON</td><td>0</td><td>0</td></tr></tbody></table>
+    <table><thead><tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>重复句</th><th>重复表</th></tr></thead><tbody><tr><td>none</td><td>0</td><td>427-hongyin.json</td><td>427-rongyuan.json</td><td>0</td><td>0</td></tr>
+<tr><td>none</td><td>0</td><td>427-hongyin.json</td><td>427-shuyuan.json</td><td>0</td><td>0</td></tr>
+<tr><td>none</td><td>0</td><td>427-rongyuan.json</td><td>427-shuyuan.json</td><td>0</td><td>0</td></tr></tbody></table>
 
     <h2>技术标查重</h2>
-    <table><thead><tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>重复句</th><th>重复表</th></tr></thead><tbody><tr><td>none</td><td>0</td><td>宏银技术标.JSON</td><td>戎元技术标.JSON</td><td>0</td><td>0</td></tr>
-<tr><td>none</td><td>0</td><td>宏银技术标.JSON</td><td>舒源技术标.JSON</td><td>0</td><td>0</td></tr>
-<tr><td>none</td><td>0</td><td>戎元技术标.JSON</td><td>舒源技术标.JSON</td><td>0</td><td>0</td></tr></tbody></table>
+    <table><thead><tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>重复句</th><th>重复表</th></tr></thead><tbody><tr><td colspan='6'>无可疑查重对</td></tr></tbody></table>
 
     <h2>一人多用</h2>
     <table><thead><tr><th>姓名</th><th>风险</th><th>涉及文件数</th><th>文件</th><th>页码</th></tr></thead><tbody><tr><td colspan='5'>未发现一人多用</td></tr></tbody></table>

@@ -156,30 +156,34 @@ class IntegrityChecker:
             # 动态判断当前项是子项还是主项
             is_sub = self._is_sub_item(item)
             cat = "资格证明子项" if is_sub else "商务标主项"
+            item_key_match = re.match(r'^\s*([A-Za-z0-9一二三四五六七八九十]+)\s*\.', item)
+            item_refs = attachment_mapping.get(item_key_match.group(1), []) if item_key_match else []
 
-            # 特例处理：法定代表人证明书和授权委托书通常成对出现，且文本特征明显，单独设计逻辑进行匹配
-            if "法定代表人" in item and "证明书" in item and "授权委托书" in item:
-                zm_match, sq_match = None, None
-                
-                for sec in sections:
-                    if sec.get('type') != 'heading': continue
-                    text = sec['text']
-                    if TemplateExtractor._is_noise(text, headers, sec.get('type')): continue
-                    clean_text = text.replace(' ', '')
-                    
-                    if ("法定代表人" in clean_text or "法人" in clean_text) and "证明" in clean_text:
-                        zm_match = text
-                    if ("法定代表人" in clean_text or "法人" in clean_text or "委托" in clean_text) and "授权" in clean_text:
-                        sq_match = text
+            # 特例处理：法定代表人证明书和授权委托书是两种参选路径，命中其一即可满足该项
+            if "法定代表人" in item and "证明书" in item:
+                zm_match = self._find_heading(sections, headers, "法定代表人证明书")
+                sq_match = self._find_heading(sections, headers, "授权委托书")
+
+                if not zm_match or not sq_match:
+                    for sec in sections:
+                        text = sec['text']
+                        if TemplateExtractor._is_noise(text, headers, sec.get('type')):
+                            continue
+                        clean_text = text.replace(' ', '')
+
+                        if not zm_match and ("法定代表人" in clean_text or "法人" in clean_text) and "证明" in clean_text:
+                            zm_match = text
+                        if not sq_match and ("法定代表人" in clean_text or "法人" in clean_text or "委托" in clean_text) and "授权" in clean_text:
+                            sq_match = text
                         
                 if zm_match and sq_match:
-                    status, preview, is_passed = "已找到", f"{zm_match} | {sq_match}", True
+                    status, preview, is_passed = "已找到证明书及授权委托书", f"{zm_match} | {sq_match}", True
                 elif zm_match:
-                    status, preview, is_passed = "缺失授权委托书", zm_match, False
+                    status, preview, is_passed = "已找到法定代表人证明书", zm_match, True
                 elif sq_match:
-                    status, preview, is_passed = "缺失证明书", sq_match, False
+                    status, preview, is_passed = "已找到法定代表人授权委托书", sq_match, True
                 else:
-                    status, preview, is_passed = "缺失证明书及授权书", "-", False
+                    status, preview, is_passed = "缺失法定代表人证明书/授权委托书", "-", False
                     
                 all_details[item] = {
                     "status": status, "preview": preview, "is_passed": is_passed, "category": cat, "scored": True

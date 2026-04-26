@@ -59,6 +59,61 @@ class DuplicateCheckService:
     BUSINESS_SCOPE_SKIP_REASON = "missing_business_duplicate_scope_content"
     TEMPLATE_EXCLUDED_SKIP_REASON = "content_fully_covered_by_tender_template"
     MIN_SENTENCE_COMPACT_LENGTH = 10
+    COMMON_DUPLICATE_HEADER_TOKENS = (
+        "序号",
+        "项目名称",
+        "招标编号",
+        "项目编号",
+        "招标文件",
+        "采购文件",
+        "投标文件",
+        "响应文件",
+        "采购规格",
+        "响应规格",
+        "偏离说明",
+        "商务条款",
+        "技术条款",
+        "分项名称",
+        "分项说明",
+        "单价",
+        "合计",
+        "备注",
+        "对应投标文件所在页",
+    )
+    COMMON_DUPLICATE_REQUIREMENT_TOKENS = (
+        "提供复印件",
+        "项目管理经验",
+        "相关领域",
+        "工程师认证证书",
+        "认证证书",
+        "毕业时间为准",
+        "投标人送交",
+        "第三方进行计量",
+        "提供证书",
+        "招标人提供",
+        "培训相关费用",
+        "合同总价",
+        "正式验收",
+        "现场初验收",
+        "试运行及终验",
+    )
+    DEVIATION_RESPONSE_TOKENS = (
+        "我方",
+        "我公司",
+        "响应",
+        "偏离",
+        "详见",
+        "技术文件",
+        "商务文件",
+        "技术分册",
+        "商务分册",
+        "技术册",
+        "商务册",
+    )
+    COMMON_DUPLICATE_TEMPLATE_PATTERNS = (
+        re.compile(r"^(?:项目名称|项目编号|招标编号|采购编号|招标人|采购人|投标人|供应商)\s*[:：_]"),
+        re.compile(r"^(?:GB|GJB|ISO|IEC|YD/T|SJ/T)[A-Z0-9./ -]*[;；。]?$", re.IGNORECASE),
+    )
 
     def __init__(self) -> None:
         self._itemized_checker = ItemizedPricingChecker()
@@ -557,6 +612,7 @@ class DuplicateCheckService:
         if not isinstance(raw_lines, list) or not raw_lines:
             raw_lines = self.SPLIT_LINE_PATTERN.split(str(section.get("text") or ""))
         lines = self._normalize_scope_lines(self._trim_deviation_section_lines(raw_lines))
+        lines = [line for line in lines if self._is_deviation_response_line(line)]
         if not lines:
             return None
 
@@ -619,12 +675,66 @@ class DuplicateCheckService:
             text = self._normalize_plain_text(value)
             if not text:
                 continue
+            if self._is_common_duplicate_scope_line(text):
+                continue
             key = self._compact_raw_text(text)
             if not key or key in seen:
                 continue
             seen.add(key)
             normalized.append(text)
         return normalized
+
+    def _is_common_duplicate_scope_line(self, text: str) -> bool:
+        compact = self._compact_raw_text(text)
+        if not compact:
+            return True
+
+        for pattern in self.COMMON_DUPLICATE_TEMPLATE_PATTERNS:
+            if pattern.search(text) or pattern.search(compact):
+                return True
+
+        token_hits = sum(1 for token in self.COMMON_DUPLICATE_HEADER_TOKENS if token in compact)
+        if compact in {
+            "投标文件的响应情况",
+            "投标文件的响应",
+            "响应情况",
+            "偏离说明",
+            "对应材料投标文件所在页",
+        }:
+            return True
+        if "序号" in compact and token_hits >= 4:
+            return True
+        if token_hits >= 5 and len(compact) <= 80:
+            return True
+        if compact.endswith("偏离表") and len(compact) <= 30:
+            return True
+
+        if "无偏离" in compact and ("与招标文件" in compact or "与采购文件" in compact):
+            return True
+        if "与招标文件条款相同" in compact or "与采购文件条款相同" in compact:
+            return True
+
+        if any(token in compact for token in self.COMMON_DUPLICATE_REQUIREMENT_TOKENS):
+            return True
+
+        if 4 <= len(compact) <= 32 and "项目" in compact:
+            return True
+
+        if re.fullmatch(r"[（(]?\d+[）)]?[\u4e00-\u9fa5]{0,8}[;；。]?", compact):
+            return True
+        return False
+
+    def _is_deviation_response_line(self, text: str) -> bool:
+        compact = self._compact_raw_text(text)
+        if not compact:
+            return False
+        if any(token in compact for token in self.DEVIATION_RESPONSE_TOKENS):
+            return True
+        if re.search(r"(?:^|[^A-Za-z])P\d+", compact, re.IGNORECASE):
+            return True
+        if re.search(r"第\d+页", compact):
+            return True
+        return False
 
     def _dedupe_scoped_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
@@ -1254,7 +1364,7 @@ class DuplicateCheckService:
             return "medium"
         if exact_block_count >= 5 or exact_block_overlap_ratio >= 0.15:
             return "medium"
-        if exact_section_count >= 1 or exact_block_count >= 1:
+        if exact_block_count >= 1:
             return "low"
         return "none"
 
