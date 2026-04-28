@@ -182,11 +182,19 @@ class OCRService:
                 )
 
     def _init_engine(self) -> None:
-        try:
-            # On Windows, importing torch first avoids a DLL search-order issue
-            # triggered when paddleocr/modelscope pulls torch in later.
-            import torch  # noqa: F401
+        if os.name == "nt":
+            try:
+                # On Windows, importing torch first can avoid a DLL search-order issue
+                # triggered when paddleocr/modelscope pulls torch in later.
+                import torch  # noqa: F401
+            except Exception as exc:
+                print(
+                    "OCRService: optional torch preload skipped on Windows "
+                    f"(reason: {exc})",
+                    flush=True,
+                )
 
+        try:
             self._patch_paddle_tensor_int()
             from paddleocr import PaddleOCRVL
         except Exception as exc:
@@ -1707,43 +1715,32 @@ class OCRService:
         page_no: int,
     ) -> dict[str, Any]:
         signature_info = {"count": 0, "texts": [], "locations": []}
-        section_by_bbox: dict[tuple[int, int, int, int] | None, dict[str, Any]] = {}
+        seen_bbox_keys: set[tuple[int, int, int, int] | None] = set()
+
         for section in page_sections:
             if str(section.get("type") or "").strip().lower() != "signature":
                 continue
-            section_by_bbox[self._bbox_signature_key(section.get("bbox"))] = section
-
-        for block in page_blocks:
-            if str(block.get("type") or "").strip().lower() != "signature":
-                continue
             signature_info["count"] += 1
-
-            bbox = self._bbox_to_xywh(block.get("bbox"))
-            resolved_section = section_by_bbox.get(self._bbox_signature_key(block.get("bbox")))
-            text = self._normalize_section_text(
-                (resolved_section or {}).get("text") or block.get("text") or ""
-            )
+            bbox_key = self._bbox_signature_key(section.get("bbox"))
+            seen_bbox_keys.add(bbox_key)
+            text = self._normalize_section_text(section.get("text") or "")
+            bbox = self._bbox_to_xywh(section.get("bbox"))
             if text:
                 signature_info["texts"].append(text)
             if bbox is not None:
                 signature_info["locations"].append({"page": page_no, "box": bbox})
 
-        signature_info["texts"] = self._dedupe_text_parts(signature_info["texts"])
-        return signature_info
+        for block in page_blocks:
+            if str(block.get("type") or "").strip().lower() != "signature":
+                continue
 
-    def _extract_page_signatures(
-        self,
-        page_sections: list[dict[str, Any]],
-        page_no: int,
-    ) -> dict[str, Any]:
-        signature_info = {"count": 0, "texts": [], "locations": []}
-        for section in page_sections:
-            if str(section.get("type") or "").strip().lower() != "signature":
+            bbox_key = self._bbox_signature_key(block.get("bbox"))
+            if bbox_key in seen_bbox_keys:
                 continue
 
             signature_info["count"] += 1
-            text = self._normalize_section_text(section.get("text") or "")
-            bbox = self._bbox_to_xywh(section.get("bbox"))
+            text = self._normalize_section_text(block.get("text") or "")
+            bbox = self._bbox_to_xywh(block.get("bbox"))
             if text:
                 signature_info["texts"].append(text)
             if bbox is not None:
@@ -1831,7 +1828,7 @@ class OCRService:
             coordinate_context,
         )
         page_signatures = self._project_detection_info_for_output(
-            self._extract_page_signatures(page_sections, page_no),
+            self._extract_page_signatures(page_blocks, page_sections, page_no),
             coordinate_context,
         )
         page_sections_output = [
