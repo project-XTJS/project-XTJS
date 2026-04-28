@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID
 from app.service.analysis.consistency import ConsistencyChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.integrity import IntegrityChecker
@@ -160,6 +161,43 @@ class UnifiedBusinessReviewService:
             "result_record": result_record,
         }
 
+    def review_project_business_documents(
+        self,
+        *,
+        project_identifier: str,
+    ) -> dict[str, Any]:
+        payload_data = self.db_service.get_project_documents_for_duplicate_check(project_identifier)
+        if not payload_data:
+            raise ValueError(f"project not found: {project_identifier}")
+        return self._review_project_business_documents(
+            project_identifier=project_identifier,
+            payload_data=payload_data,
+        )
+
+    def persist_project_business_review(
+        self,
+        *,
+        project_identifier: str,
+        result_key: str = BUSINESS_RESULT_KEY,
+    ) -> dict[str, Any]:
+        project = self.db_service.get_project_by_identifier(project_identifier)
+        if not project:
+            raise ValueError(f"project not found: {project_identifier}")
+
+        review = self.review_project_business_documents(project_identifier=project_identifier)
+        result_record = self.db_service.upsert_project_result_item(
+            project_identifier,
+            result_key,
+            review,
+        )
+        return {
+            "project": project,
+            "result_key": result_key,
+            "overview": self._build_response_overview(review),
+            "review": review,
+            "result_record": result_record,
+        }
+
     def _review_uploaded_business_documents(
         self,
         *,
@@ -230,6 +268,126 @@ class UnifiedBusinessReviewService:
             "dataset": {
                 "input_mode": "uploaded_json_files",
                 "tender": tender_document["meta"],
+                "bidders": bidder_entries,
+                "file_count": 1 + len(bidder_entries),
+            },
+            "reading_guide": reading_guide,
+            "extraction_tables": extraction_tables,
+            "function_validation": self._summarize_function_validation(bidders),
+            "summary": self._summarize_review(bidders),
+            "bidders": bidders,
+        }
+
+    def _review_project_business_documents(
+        self,
+        *,
+        project_identifier: str,
+        payload_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        document_records = list(payload_data.get("documents") or [])
+        if not document_records:
+            raise ValueError(f"project has no bound documents: {project_identifier}")
+
+        tender_record = next(
+            (
+                record
+                for record in document_records
+                if isinstance(self._coerce_stored_payload(record.get("tender_content")), dict)
+                and self._coerce_stored_payload(record.get("tender_content"))
+            ),
+            None,
+        )
+        if not tender_record:
+            raise ValueError(f"project has no tender content: {project_identifier}")
+
+        tender_payload = self._coerce_stored_payload(tender_record.get("tender_content"))
+        tender_meta = self._build_project_record_meta(
+            record=tender_record,
+            payload=tender_payload,
+            role="tender",
+            bidder_key=None,
+            file_name_key="tender_file_name",
+            file_url_key="tender_file_url",
+            identifier_key="tender_identifier_id",
+        )
+
+        bidders: list[dict[str, Any]] = []
+        bidder_entries: list[dict[str, Any]] = []
+        bidder_sources: list[dict[str, Any]] = []
+        used_bidder_keys: set[str] = set()
+        seen_business_documents: set[str] = set()
+
+        for record in document_records:
+            if self._normalize_project_document_role(record.get("relation_role")) != DOCUMENT_TYPE_BUSINESS_BID:
+                continue
+
+            business_identifier = str(record.get("identifier_id") or "").strip()
+            if not business_identifier or business_identifier in seen_business_documents:
+                continue
+            seen_business_documents.add(business_identifier)
+
+            business_payload = self._coerce_stored_payload(record.get("content"))
+            bidder_key = self._ensure_project_bidder_key(
+                self._derive_project_bidder_key(record.get("file_name"), business_identifier),
+                used_bidder_keys,
+            )
+            business_meta = self._build_project_record_meta(
+                record=record,
+                payload=business_payload,
+                role="business",
+                bidder_key=bidder_key,
+                file_name_key="file_name",
+                file_url_key="file_url",
+                identifier_key="identifier_id",
+            )
+
+            bidder_entries.append(
+                {
+                    "bidder_key": bidder_key,
+                    "business": business_meta,
+                }
+            )
+            bidder_sources.append(
+                {
+                    "bidder_key": bidder_key,
+                    "business": {
+                        "content": business_payload,
+                        "meta": business_meta,
+                    },
+                }
+            )
+            bidders.append(
+                self._review_business_bidder(
+                    tender_payload=tender_payload,
+                    tender_meta=tender_meta,
+                    bidder_key=bidder_key,
+                    business_payload=business_payload,
+                    business_meta=business_meta,
+                )
+            )
+
+        if not bidders:
+            raise ValueError(f"project has no business bid documents: {project_identifier}")
+
+        extraction_tables = self._build_review_extraction_tables(
+            tender_payload=tender_payload,
+            tender_meta=tender_meta,
+            bidder_sources=bidder_sources,
+            bidder_reviews=bidders,
+        )
+        reading_guide = self._build_review_reading_guide(
+            tender_meta=tender_meta,
+            bidders=bidders,
+        )
+
+        return {
+            "schema_version": self.RESULT_SCHEMA_VERSION,
+            "review_type": "business_bid_format_review",
+            "generated_at": self._utc_now_iso(),
+            "project_identifier_id": project_identifier,
+            "dataset": {
+                "input_mode": "project_documents",
+                "tender": tender_meta,
                 "bidders": bidder_entries,
                 "file_count": 1 + len(bidder_entries),
             },
@@ -387,6 +545,69 @@ class UnifiedBusinessReviewService:
             "page_count": self._page_count(data_node),
             "source_type": "upload",
         }
+
+    def _build_project_record_meta(
+        self,
+        *,
+        record: dict[str, Any],
+        payload: dict[str, Any],
+        role: str,
+        bidder_key: str | None,
+        file_name_key: str,
+        file_url_key: str,
+        identifier_key: str,
+    ) -> dict[str, Any]:
+        data_node = self._data_node(payload)
+        raw_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        return {
+            "role": role,
+            "bidder_key": bidder_key,
+            "identifier_id": str(record.get(identifier_key) or "").strip() or None,
+            "file_name": str(record.get(file_name_key) or "").strip() or None,
+            "file_path": str(record.get(file_url_key) or "").strip() or None,
+            "file_size": len(raw_bytes),
+            "modified_at": self._utc_now_iso(),
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "layout_section_count": len(data_node.get("layout_sections", []) or []),
+            "logical_table_count": len(data_node.get("logical_tables", []) or []),
+            "native_table_count": len(data_node.get("native_tables", []) or []),
+            "page_count": self._page_count(data_node),
+            "source_type": "stored_document",
+        }
+
+    def _coerce_stored_payload(self, value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return {}
+                return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    def _normalize_project_document_role(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"business", "business_bid"}:
+            return DOCUMENT_TYPE_BUSINESS_BID
+        return normalized
+
+    def _derive_project_bidder_key(self, file_name: Any, fallback: str) -> str:
+        stem = Path(str(file_name or "").strip()).stem.strip()
+        normalized = self.BUSINESS_FILE_RE.sub("", stem).strip()
+        return normalized or stem or fallback
+
+    def _ensure_project_bidder_key(self, candidate: str, used: set[str]) -> str:
+        base = str(candidate or "").strip() or "unknown_bidder"
+        unique = base
+        suffix = 2
+        while unique in used:
+            unique = f"{base}_{suffix}"
+            suffix += 1
+        used.add(unique)
+        return unique
 
     def _ensure_project(self, project_identifier: str | None) -> dict[str, Any]:
         normalized_identifier = (project_identifier or "").strip()

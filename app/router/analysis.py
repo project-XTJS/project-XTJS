@@ -1,4 +1,4 @@
-"""Text analysis routes for OCR extraction and rule-based analysis."""
+"""OCR 抽取与规则分析路由。"""
 
 import html
 import json
@@ -223,7 +223,7 @@ def _coerce_source_path(raw_value: Any) -> Path | None:
     if not os.path.isabs(path_text):
         raise HTTPException(
             status_code=400,
-            detail="source_paths_json must contain absolute file paths.",
+            detail="source_paths_json 必须填写绝对路径。",
         )
     return Path(path_text)
 
@@ -243,14 +243,14 @@ def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list
             return [_coerce_source_path(raw_text)]
         raise HTTPException(
             status_code=400,
-            detail="source_paths_json must be a JSON array aligned with uploaded files.",
+            detail="source_paths_json 必须是与上传文件一一对应的 JSON 数组。",
         ) from None
 
     if isinstance(parsed, list):
         if len(parsed) != expected_count:
             raise HTTPException(
                 status_code=400,
-                detail="source_paths_json length must match the number of uploaded files.",
+                detail="source_paths_json 的长度必须与上传文件数量一致。",
             )
         return [_coerce_source_path(item) for item in parsed]
 
@@ -259,7 +259,7 @@ def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list
 
     raise HTTPException(
         status_code=400,
-        detail="source_paths_json must be a JSON array when uploading multiple files.",
+        detail="上传多个文件时，source_paths_json 必须是 JSON 数组。",
     )
 
 
@@ -299,20 +299,20 @@ def _save_analyze_file_json(
     if not enabled:
         return _build_save_result(
             "disabled",
-            message="JSON persistence is disabled for this request.",
+            message="当前请求未启用 JSON 保存。",
         )
 
     if source_path is None:
         return _build_save_result(
             "skipped",
-            message="Source path is unavailable, so the analyzed JSON was not saved.",
+            message="未提供可用的源文件路径，因此未保存解析后的 JSON。",
         )
 
     target_path = source_path.with_suffix(".json")
     save_result = _build_save_result(
         "saved",
         json_path=target_path,
-        message="Analyzed JSON saved beside the source file.",
+        message="解析后的 JSON 已保存到源文件同目录。",
     )
     serialized_payload = dict(payload)
 
@@ -346,8 +346,8 @@ async def _analyze_single_upload(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unsupported file type: {file_extension}. "
-                f"Supported types: {', '.join(sorted(allowed_extensions))}."
+                f"不支持的文件类型：{file_extension}。"
+                f"支持的类型：{', '.join(sorted(allowed_extensions))}。"
             ),
         )
 
@@ -382,23 +382,22 @@ async def analyze_file(
     source_paths_json: str | None = Form(
         default=None,
         description=(
-            "Optional JSON string or JSON array aligned with the uploaded files. "
-            "Each path is used to save the analyzed JSON beside the source file."
+            "可选的 JSON 字符串或 JSON 数组，需要与上传文件一一对应。"
+            "每个路径都会用于将解析后的 JSON 保存到对应源文件同目录。"
         ),
     ),
     save_json_to_source: bool = Form(
         default=True,
         description=(
-            "Whether to save each analyzed JSON beside the source file when a source "
-            "path is available."
+            "当存在可用源文件路径时，是否将每个解析结果 JSON 保存到源文件同目录。"
         ),
     ),
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """Analyze one or more uploaded files and optionally save the JSON beside each source."""
+    """解析一个或多个上传文件，并可选择将 JSON 保存到源文件同目录。"""
     uploads = [upload for upload in file if upload is not None]
     if not uploads:
-        raise HTTPException(status_code=400, detail="No files were uploaded.")
+        raise HTTPException(status_code=400, detail="未上传任何文件。")
 
     source_paths = _parse_source_paths_json(source_paths_json, len(uploads))
 
@@ -488,7 +487,7 @@ async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """Dispatch text to the requested rule-based analysis module."""
+    """将文本分发到指定的规则分析模块。"""
     raw_text = payload.text or ""
     text = preprocess_text(raw_text)
 
@@ -503,4 +502,4 @@ async def run_text_analysis(
     if payload.task_type == "full_analysis":
         return analysis_service.run_full_analysis(text, extraction_meta={})
 
-    raise HTTPException(status_code=400, detail=f"Unsupported task type: {payload.task_type}")
+    raise HTTPException(status_code=400, detail=f"不支持的任务类型：{payload.task_type}")

@@ -183,6 +183,10 @@ class OCRService:
 
     def _init_engine(self) -> None:
         try:
+            # On Windows, importing torch first avoids a DLL search-order issue
+            # triggered when paddleocr/modelscope pulls torch in later.
+            import torch  # noqa: F401
+
             self._patch_paddle_tensor_int()
             from paddleocr import PaddleOCRVL
         except Exception as exc:

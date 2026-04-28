@@ -38,6 +38,45 @@ app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresq
 app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["postgresql"])
 
 
+def _inject_string_choices(schema: dict, choices: list[str]) -> None:
+    if not choices or not isinstance(schema, dict):
+        return
+
+    if schema.get("type") == "string":
+        schema["enum"] = choices
+        schema["default"] = choices[0]
+        return
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list):
+        string_variant = next(
+            (item for item in any_of if isinstance(item, dict) and item.get("type") == "string"),
+            None,
+        )
+        if string_variant is not None:
+            schema.pop("anyOf", None)
+            schema["type"] = "string"
+            schema["nullable"] = True
+            schema["enum"] = choices
+            schema["default"] = choices[0]
+
+
+def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict | None:
+    if not isinstance(schema, dict):
+        return None
+
+    reference = schema.get("$ref")
+    if reference and reference.startswith("#/components/schemas/"):
+        schema_name = reference.rsplit("/", 1)[-1]
+        return (
+            openapi_schema.get("components", {})
+            .get("schemas", {})
+            .get(schema_name)
+        )
+
+    return schema
+
+
 def _inject_project_identifier_choices(openapi_schema: dict) -> dict:
     try:
         project_identifiers = PostgreSQLService().list_project_identifiers()
@@ -45,21 +84,35 @@ def _inject_project_identifier_choices(openapi_schema: dict) -> dict:
         project_identifiers = []
 
     paths = openapi_schema.get("paths", {})
-    for path in (
-        "/api/postgresql/projects/duplicate-check",
-        "/api/postgresql/projects/bid-document-review",
-    ):
-        operation = paths.get(path, {}).get("post")
-        if not operation:
+    project_path_prefix = "/api/postgresql/projects"
+
+    for path, path_item in paths.items():
+        if not str(path).startswith(project_path_prefix):
             continue
-        for parameter in operation.get("parameters", []):
-            if parameter.get("name") != "identifier_id" or parameter.get("in") != "query":
+
+        for method in ("get", "post", "put", "delete", "patch"):
+            operation = path_item.get(method)
+            if not isinstance(operation, dict):
                 continue
-            schema = parameter.setdefault("schema", {"type": "string"})
-            if project_identifiers:
-                schema["enum"] = project_identifiers
-                schema["default"] = project_identifiers[0]
-            break
+
+            for parameter in operation.get("parameters", []):
+                if parameter.get("name") != "identifier_id":
+                    continue
+                if parameter.get("in") not in {"query", "path"}:
+                    continue
+                schema = parameter.setdefault("schema", {"type": "string"})
+                _inject_string_choices(schema, project_identifiers)
+
+            request_body = operation.get("requestBody") or {}
+            content = request_body.get("content") or {}
+            for media_type in content.values():
+                schema = _resolve_schema_reference(openapi_schema, media_type.get("schema"))
+                if not isinstance(schema, dict):
+                    continue
+                properties = schema.get("properties") or {}
+                project_identifier_schema = properties.get("project_identifier")
+                if isinstance(project_identifier_schema, dict):
+                    _inject_string_choices(project_identifier_schema, project_identifiers)
 
     return openapi_schema
 
@@ -89,6 +142,10 @@ if __name__ == "__main__":
     import webbrowser
     
     # 启动服务器后自动打开Swagger UI
-    swagger_url = "http://127.0.0.1:8080/docs"
-    threading.Timer(1.5, lambda: webbrowser.open(swagger_url)).start()
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=True)
+    host = "127.0.0.1"
+    port = 8080
+    swagger_url = f"http://{host}:{port}/docs"
+    browser_timer = threading.Timer(1.5, lambda: webbrowser.open(swagger_url))
+    browser_timer.daemon = True
+    browser_timer.start()
+    uvicorn.run("app.main:app", host=host, port=port, reload=False)

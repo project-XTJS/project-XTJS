@@ -1,5 +1,5 @@
 # app/router/dependencies.py
-"""Reusable route dependencies."""
+"""可复用的路由依赖。"""
 
 from dataclasses import dataclass
 
@@ -11,7 +11,7 @@ from app.service.postgresql_service import PostgreSQLService
 
 @dataclass(frozen=True)
 class RecognitionOptions:
-    """Legacy placeholder kept only to avoid touching unrelated route signatures."""
+    """历史占位对象，仅用于避免改动无关路由签名。"""
 
     def as_kwargs(self) -> dict:
         return {}

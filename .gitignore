@@ -17,6 +17,9 @@ __pycache__/
 .paddlex/
 ~/.paddlex/
 .ocr_runtime/
+.ocr_runtime*/
+ocr_runtime/
+ocr_runtime*/
 
 # 5. 本地运行生成的临时文件和输出结果
 output_seals/

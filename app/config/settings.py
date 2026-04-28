@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 from pathlib import Path
 from typing import Set
 
@@ -6,6 +7,18 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _default_ocr_storage_root() -> Path:
+    local_appdata = str(os.getenv("LOCALAPPDATA", "") or "").strip()
+    if local_appdata:
+        return Path(local_appdata) / "XTJS" / "ocr_runtime"
+
+    xdg_cache_home = str(os.getenv("XDG_CACHE_HOME", "") or "").strip()
+    if xdg_cache_home:
+        return Path(xdg_cache_home) / "xtjs" / "ocr_runtime"
+
+    return Path.home() / ".cache" / "xtjs" / "ocr_runtime"
 
 
 class Settings(BaseSettings):
@@ -31,7 +44,7 @@ class Settings(BaseSettings):
             if ext.strip()
         }
 
-    OCR_STORAGE_ROOT: Path = PROJECT_ROOT / ".ocr_runtime"
+    OCR_STORAGE_ROOT: Path = Field(default_factory=_default_ocr_storage_root)
     PADDLE_PDX_CACHE_HOME: Path | None = None
     OCR_RUNTIME_TEMP_DIR: Path | None = None
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: bool = True
