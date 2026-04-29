@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import hashlib
 import html
 import json
@@ -59,6 +60,10 @@ class DuplicateCheckService:
     BUSINESS_SCOPE_SKIP_REASON = "missing_business_duplicate_scope_content"
     TEMPLATE_EXCLUDED_SKIP_REASON = "content_fully_covered_by_tender_template"
     MIN_SENTENCE_COMPACT_LENGTH = 10
+    BUSINESS_SIMILARITY_MIN_KEY_LENGTH = 8
+    BUSINESS_BLOCK_SIMILARITY_THRESHOLD = 0.78
+    BUSINESS_SECTION_SIMILARITY_THRESHOLD = 0.72
+    BUSINESS_TABLE_SIMILARITY_THRESHOLD = 0.72
     COMMON_DUPLICATE_HEADER_TOKENS = (
         "序号",
         "项目名称",
@@ -233,13 +238,14 @@ class DuplicateCheckService:
         return {
             "project": project or {"identifier_id": project_identifier},
             "config": {
-                "detection_mode": "exact_only",
+                "detection_mode": "exact_plus_similarity",
                 "document_types": list(requested_types),
                 "max_evidence_sections": int(max_evidence_sections),
                 "max_pairs_per_type": int(max_pairs_per_type),
                 "template_exclusion_enabled": True,
                 "template_exclusion_source": "tender_document",
                 "block_matching_unit": "sentence",
+                "business_similarity_enabled": True,
             },
             "groups": groups,
             "summary": {
@@ -279,7 +285,10 @@ class DuplicateCheckService:
         return (
             self._risk_rank(item.get("risk_level")),
             bool(item.get("exact_duplicate")),
-            float(item.get("exact_match_score") or 0.0),
+            float(item.get("match_score") or item.get("exact_match_score") or 0.0),
+            int(metrics.get("similar_table_count") or 0),
+            int(metrics.get("similar_section_count") or 0),
+            int(metrics.get("similar_block_count") or 0),
             int(metrics.get("exact_table_count") or 0),
             int(metrics.get("exact_section_count") or 0),
             int(metrics.get("exact_block_count") or 0),
@@ -675,6 +684,9 @@ class DuplicateCheckService:
             text = self._normalize_plain_text(value)
             if not text:
                 continue
+            text = self._strip_scope_serial_prefix(text)
+            if not text:
+                continue
             if self._is_common_duplicate_scope_line(text):
                 continue
             key = self._compact_raw_text(text)
@@ -683,6 +695,17 @@ class DuplicateCheckService:
             seen.add(key)
             normalized.append(text)
         return normalized
+
+    def _strip_scope_serial_prefix(self, text: str) -> str:
+        normalized = self._normalize_plain_text(text)
+        if not normalized:
+            return ""
+        stripped = re.sub(
+            r"^\s*(?:[(（]?\d{1,4}[)）]?[.、:：]?|[一二三四五六七八九十百千]+[、.．])\s+",
+            "",
+            normalized,
+        )
+        return stripped.strip()
 
     def _is_common_duplicate_scope_line(self, text: str) -> bool:
         compact = self._compact_raw_text(text)
@@ -1130,6 +1153,335 @@ class DuplicateCheckService:
             )
         return sections
 
+    def _business_similarity_key(self, value: Any) -> str:
+        text = self._strip_scope_serial_prefix(self._normalize_plain_text(value))
+        if not text:
+            return ""
+        text = re.sub(r"第\s*\d+\s*页", " <PAGE> ", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?:P|p)\s*\d+(?:\s*-\s*(?:P|p)?\s*\d+)?", " <PAGE> ", text)
+        text = re.sub(r"[¥￥]?\d[\d,，.．]*", " <NUM> ", text)
+        text = re.sub(r"[()（）【】\[\]{}<>《》:：;；,，、/\\|]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip().lower()
+        text = re.sub(r"(?:<num>\s*){2,}", "<num> ", text)
+        text = re.sub(r"(?:<page>\s*){2,}", "<page> ", text)
+        return text.strip()
+
+    def _similarity_ratio(self, left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        if left == right:
+            return 1.0
+        return SequenceMatcher(None, left, right).ratio()
+
+    def _build_business_similarity_block_units(
+        self,
+        document: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        units: list[dict[str, Any]] = []
+        for block in document.get("blocks") or []:
+            if str(block.get("type") or "") == "heading":
+                continue
+            similarity_key = self._business_similarity_key(block.get("text") or "")
+            if len(self._compact_raw_text(similarity_key)) < self.BUSINESS_SIMILARITY_MIN_KEY_LENGTH:
+                continue
+            units.append(
+                {
+                    "page": block.get("page"),
+                    "type": block.get("type"),
+                    "text": str(block.get("text") or ""),
+                    "exact_hash": str(block.get("exact_hash") or ""),
+                    "similarity_key": similarity_key,
+                }
+            )
+        return units
+
+    def _build_business_similarity_section_units(
+        self,
+        document: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        units: list[dict[str, Any]] = []
+        for section in document.get("sections") or []:
+            similarity_key = self._business_similarity_key(section.get("text") or "")
+            if len(self._compact_raw_text(similarity_key)) < self.BUSINESS_SIMILARITY_MIN_KEY_LENGTH:
+                continue
+            units.append(
+                {
+                    "title": str(section.get("title") or ""),
+                    "pages": list(section.get("pages") or []),
+                    "preview": str(section.get("preview") or ""),
+                    "text": str(section.get("text") or ""),
+                    "exact_hash": str(section.get("exact_hash") or ""),
+                    "similarity_key": similarity_key,
+                }
+            )
+        return units
+
+    def _build_business_similarity_table_units(
+        self,
+        document: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        units: list[dict[str, Any]] = []
+        for table in document.get("tables") or []:
+            rows = self._normalize_scope_lines(table.get("rows") or [])
+            if not rows:
+                continue
+            similarity_rows = [
+                self._business_similarity_key(row)
+                for row in rows
+                if self._business_similarity_key(row)
+            ]
+            similarity_rows = [
+                row for row in similarity_rows
+                if len(self._compact_raw_text(row)) >= self.BUSINESS_SIMILARITY_MIN_KEY_LENGTH
+            ]
+            if not similarity_rows:
+                continue
+            units.append(
+                {
+                    "pages": list(table.get("pages") or []),
+                    "rows": rows,
+                    "exact_hash": str(table.get("exact_hash") or ""),
+                    "similarity_rows": similarity_rows,
+                    "similarity_key": "\n".join(similarity_rows),
+                }
+            )
+        return units
+
+    def _match_similarity_units(
+        self,
+        left_units: list[dict[str, Any]],
+        right_units: list[dict[str, Any]],
+        *,
+        threshold: float,
+        key_getter,
+        exact_match_getter=None,
+    ) -> list[tuple[float, dict[str, Any], dict[str, Any]]]:
+        candidates: list[tuple[float, int, int]] = []
+        for left_index, left_unit in enumerate(left_units):
+            left_key = str(key_getter(left_unit) or "")
+            if not left_key:
+                continue
+            for right_index, right_unit in enumerate(right_units):
+                if exact_match_getter and exact_match_getter(left_unit) == exact_match_getter(right_unit):
+                    continue
+                right_key = str(key_getter(right_unit) or "")
+                if not right_key:
+                    continue
+                ratio = self._similarity_ratio(left_key, right_key)
+                if ratio >= threshold:
+                    candidates.append((ratio, left_index, right_index))
+
+        candidates.sort(reverse=True)
+        selected: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+        used_left: set[int] = set()
+        used_right: set[int] = set()
+        for ratio, left_index, right_index in candidates:
+            if left_index in used_left or right_index in used_right:
+                continue
+            used_left.add(left_index)
+            used_right.add(right_index)
+            selected.append((ratio, left_units[left_index], right_units[right_index]))
+        return selected
+
+    def _compare_business_similarity_blocks(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        *,
+        max_evidence_sections: int,
+    ) -> dict[str, Any]:
+        left_units = self._build_business_similarity_block_units(left)
+        right_units = self._build_business_similarity_block_units(right)
+        matches = self._match_similarity_units(
+            left_units,
+            right_units,
+            threshold=self.BUSINESS_BLOCK_SIMILARITY_THRESHOLD,
+            key_getter=lambda item: item.get("similarity_key"),
+            exact_match_getter=lambda item: item.get("exact_hash"),
+        )
+        matched_count = len(matches)
+        overlap_ratio = matched_count / max(1, min(len(left_units), len(right_units)))
+        items = []
+        for ratio, left_unit, right_unit in matches[:max_evidence_sections]:
+            items.append(
+                {
+                    "page": left_unit.get("page"),
+                    "left_page": left_unit.get("page"),
+                    "right_page": right_unit.get("page"),
+                    "type": "similar_sentence",
+                    "left_type": left_unit.get("type"),
+                    "right_type": right_unit.get("type"),
+                    "left_text": self._clip(left_unit.get("text") or "", 160),
+                    "right_text": self._clip(right_unit.get("text") or "", 160),
+                    "similarity": round(ratio, 4),
+                }
+            )
+        return {
+            "similar_overlap_ratio": overlap_ratio,
+            "similar_shared_count": matched_count,
+            "items": items,
+        }
+
+    def _compare_business_similarity_sections(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        *,
+        max_evidence_sections: int,
+    ) -> dict[str, Any]:
+        left_units = self._build_business_similarity_section_units(left)
+        right_units = self._build_business_similarity_section_units(right)
+        matches = self._match_similarity_units(
+            left_units,
+            right_units,
+            threshold=self.BUSINESS_SECTION_SIMILARITY_THRESHOLD,
+            key_getter=lambda item: item.get("similarity_key"),
+            exact_match_getter=lambda item: item.get("exact_hash"),
+        )
+        matched_count = len(matches)
+        overlap_ratio = matched_count / max(1, min(len(left_units), len(right_units)))
+        items = []
+        for ratio, left_unit, right_unit in matches[:max_evidence_sections]:
+            items.append(
+                {
+                    "left_title": left_unit.get("title"),
+                    "right_title": right_unit.get("title"),
+                    "left_pages": left_unit.get("pages", []),
+                    "right_pages": right_unit.get("pages", []),
+                    "exact": False,
+                    "similarity": round(ratio, 4),
+                    "left_preview": left_unit.get("preview"),
+                    "right_preview": right_unit.get("preview"),
+                }
+            )
+        return {
+            "similar_match_count": matched_count,
+            "similar_match_ratio": overlap_ratio,
+            "items": items,
+        }
+
+    def _table_similarity_ratio(self, left_rows: list[str], right_rows: list[str]) -> float:
+        if not left_rows or not right_rows:
+            return 0.0
+        matches = self._match_similarity_units(
+            [{"similarity_key": row, "exact_hash": row} for row in left_rows],
+            [{"similarity_key": row, "exact_hash": row} for row in right_rows],
+            threshold=self.BUSINESS_BLOCK_SIMILARITY_THRESHOLD,
+            key_getter=lambda item: item.get("similarity_key"),
+            exact_match_getter=None,
+        )
+        return len(matches) / max(1, min(len(left_rows), len(right_rows)))
+
+    def _compare_business_similarity_tables(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        *,
+        max_evidence_sections: int,
+    ) -> dict[str, Any]:
+        left_units = self._build_business_similarity_table_units(left)
+        right_units = self._build_business_similarity_table_units(right)
+        candidates: list[tuple[float, int, int]] = []
+        for left_index, left_unit in enumerate(left_units):
+            for right_index, right_unit in enumerate(right_units):
+                if left_unit.get("exact_hash") == right_unit.get("exact_hash"):
+                    continue
+                text_ratio = self._similarity_ratio(
+                    str(left_unit.get("similarity_key") or ""),
+                    str(right_unit.get("similarity_key") or ""),
+                )
+                row_ratio = self._table_similarity_ratio(
+                    list(left_unit.get("similarity_rows") or []),
+                    list(right_unit.get("similarity_rows") or []),
+                )
+                score = max(text_ratio, row_ratio)
+                if score >= self.BUSINESS_TABLE_SIMILARITY_THRESHOLD:
+                    candidates.append((score, left_index, right_index))
+
+        candidates.sort(reverse=True)
+        selected: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+        used_left: set[int] = set()
+        used_right: set[int] = set()
+        for score, left_index, right_index in candidates:
+            if left_index in used_left or right_index in used_right:
+                continue
+            used_left.add(left_index)
+            used_right.add(right_index)
+            selected.append((score, left_units[left_index], right_units[right_index]))
+
+        matched_count = len(selected)
+        overlap_ratio = matched_count / max(1, min(len(left_units), len(right_units)))
+        items = []
+        for score, left_unit, right_unit in selected[:max_evidence_sections]:
+            items.append(
+                {
+                    "left_pages": left_unit.get("pages", []),
+                    "right_pages": right_unit.get("pages", []),
+                    "exact": False,
+                    "similarity": round(score, 4),
+                    "left_sample_rows": [self._clip(row, 160) for row in list(left_unit.get("rows") or [])[:3]],
+                    "right_sample_rows": [self._clip(row, 160) for row in list(right_unit.get("rows") or [])[:3]],
+                }
+            )
+        return {
+            "similar_match_count": matched_count,
+            "similar_match_ratio": overlap_ratio,
+            "items": items,
+        }
+
+    def _business_similarity_match_score(
+        self,
+        *,
+        similar_block_overlap_ratio: float,
+        similar_section_match_ratio: float,
+        similar_table_match_ratio: float,
+    ) -> float:
+        score = (
+            (0.45 * similar_section_match_ratio)
+            + (0.35 * similar_block_overlap_ratio)
+            + (0.20 * similar_table_match_ratio)
+        )
+        return min(round(score, 4), 0.9999)
+
+    def _business_risk_level(
+        self,
+        *,
+        exact_duplicate: bool,
+        exact_match_score: float,
+        exact_block_count: int,
+        exact_section_count: int,
+        exact_table_count: int,
+        exact_block_overlap_ratio: float,
+        similar_match_score: float,
+        similar_block_count: int,
+        similar_section_count: int,
+        similar_table_count: int,
+        similar_block_overlap_ratio: float,
+        similar_section_overlap_ratio: float,
+        similar_table_overlap_ratio: float,
+    ) -> str:
+        exact_risk = self._exact_risk_level(
+            exact_duplicate=exact_duplicate,
+            exact_match_score=exact_match_score,
+            exact_block_count=exact_block_count,
+            exact_section_count=exact_section_count,
+            exact_table_count=exact_table_count,
+            exact_block_overlap_ratio=exact_block_overlap_ratio,
+        )
+        if self._risk_rank(exact_risk) >= self._risk_rank("medium"):
+            return exact_risk
+        if similar_table_count >= 1 and similar_section_count >= 1:
+            return "high"
+        if similar_match_score >= 0.6 and similar_block_count >= 3:
+            return "high"
+        if similar_section_count >= 1 and similar_block_count >= 2:
+            return "medium"
+        if similar_table_count >= 1 or similar_block_overlap_ratio >= 0.45:
+            return "medium"
+        if similar_block_count >= 1 or similar_section_overlap_ratio >= 0.3 or similar_table_overlap_ratio >= 0.3:
+            return "low"
+        return exact_risk
+
     def _fallback_text(self, container: dict[str, Any]) -> str:
         for key in ("content", "text", "full_text"):
             value = container.get(key)
@@ -1167,14 +1519,69 @@ class DuplicateCheckService:
             exact_section_match_ratio=float(section_metrics["exact_match_ratio"]),
             exact_table_match_ratio=float(table_metrics["exact_match_ratio"]),
         )
-        risk_level = self._exact_risk_level(
-            exact_duplicate=exact_duplicate,
-            exact_match_score=exact_match_score,
-            exact_block_count=int(block_metrics["exact_shared_count"]),
-            exact_section_count=int(section_metrics["exact_match_count"]),
-            exact_table_count=int(table_metrics["exact_match_count"]),
-            exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
-        )
+        similar_block_metrics = {
+            "similar_overlap_ratio": 0.0,
+            "similar_shared_count": 0,
+            "items": [],
+        }
+        similar_section_metrics = {
+            "similar_match_ratio": 0.0,
+            "similar_match_count": 0,
+            "items": [],
+        }
+        similar_table_metrics = {
+            "similar_match_ratio": 0.0,
+            "similar_match_count": 0,
+            "items": [],
+        }
+        similar_match_score = 0.0
+        if role == DOCUMENT_TYPE_BUSINESS_BID:
+            similar_block_metrics = self._compare_business_similarity_blocks(
+                left,
+                right,
+                max_evidence_sections=max_evidence_sections,
+            )
+            similar_section_metrics = self._compare_business_similarity_sections(
+                left,
+                right,
+                max_evidence_sections=max_evidence_sections,
+            )
+            similar_table_metrics = self._compare_business_similarity_tables(
+                left,
+                right,
+                max_evidence_sections=max_evidence_sections,
+            )
+            similar_match_score = self._business_similarity_match_score(
+                similar_block_overlap_ratio=float(similar_block_metrics["similar_overlap_ratio"]),
+                similar_section_match_ratio=float(similar_section_metrics["similar_match_ratio"]),
+                similar_table_match_ratio=float(similar_table_metrics["similar_match_ratio"]),
+            )
+            risk_level = self._business_risk_level(
+                exact_duplicate=exact_duplicate,
+                exact_match_score=exact_match_score,
+                exact_block_count=int(block_metrics["exact_shared_count"]),
+                exact_section_count=int(section_metrics["exact_match_count"]),
+                exact_table_count=int(table_metrics["exact_match_count"]),
+                exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
+                similar_match_score=similar_match_score,
+                similar_block_count=int(similar_block_metrics["similar_shared_count"]),
+                similar_section_count=int(similar_section_metrics["similar_match_count"]),
+                similar_table_count=int(similar_table_metrics["similar_match_count"]),
+                similar_block_overlap_ratio=float(similar_block_metrics["similar_overlap_ratio"]),
+                similar_section_overlap_ratio=float(similar_section_metrics["similar_match_ratio"]),
+                similar_table_overlap_ratio=float(similar_table_metrics["similar_match_ratio"]),
+            )
+        else:
+            risk_level = self._exact_risk_level(
+                exact_duplicate=exact_duplicate,
+                exact_match_score=exact_match_score,
+                exact_block_count=int(block_metrics["exact_shared_count"]),
+                exact_section_count=int(section_metrics["exact_match_count"]),
+                exact_table_count=int(table_metrics["exact_match_count"]),
+                exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
+            )
+
+        match_score = max(exact_match_score, similar_match_score)
 
         notes = []
         if not left["tables"] or not right["tables"]:
@@ -1192,6 +1599,8 @@ class DuplicateCheckService:
             "document_type": role,
             "exact_duplicate": exact_duplicate,
             "exact_match_score": round(exact_match_score, 4),
+            "similarity_match_score": round(similar_match_score, 4),
+            "match_score": round(match_score, 4),
             "risk_level": risk_level,
             "suspicious": risk_level != "none",
             "metrics": {
@@ -1201,10 +1610,19 @@ class DuplicateCheckService:
                 "exact_block_overlap_ratio": round(float(block_metrics["exact_overlap_ratio"]), 4),
                 "exact_section_overlap_ratio": round(float(section_metrics["exact_match_ratio"]), 4),
                 "exact_table_overlap_ratio": round(float(table_metrics["exact_match_ratio"]), 4),
+                "similar_block_count": int(similar_block_metrics["similar_shared_count"]),
+                "similar_section_count": int(similar_section_metrics["similar_match_count"]),
+                "similar_table_count": int(similar_table_metrics["similar_match_count"]),
+                "similar_block_overlap_ratio": round(float(similar_block_metrics["similar_overlap_ratio"]), 4),
+                "similar_section_overlap_ratio": round(float(similar_section_metrics["similar_match_ratio"]), 4),
+                "similar_table_overlap_ratio": round(float(similar_table_metrics["similar_match_ratio"]), 4),
             },
             "duplicate_blocks": block_metrics["items"],
             "duplicate_sections": section_metrics["items"],
             "duplicate_tables": table_metrics["items"],
+            "similar_blocks": similar_block_metrics["items"],
+            "similar_sections": similar_section_metrics["items"],
+            "similar_tables": similar_table_metrics["items"],
             "notes": notes,
         }
 
