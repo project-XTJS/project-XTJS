@@ -1215,16 +1215,16 @@ class VerificationChecker:
 
     def _date_check(self, attachment: dict, bid_section: dict | None, deadline: dict | None) -> dict:
         if not attachment["requirements"].get("requires_date"):
-            return {"status": "not_required", "sign_date": None, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_sign_text": None, "matched_deadline_text": deadline["text"] if deadline else None}
+            return {"status": "not_required", "sign_date": None, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"] if deadline else None, "matched_deadline_page": deadline.get("page") if isinstance(deadline, dict) else None}
         if bid_section is None:
-            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_sign_text": None, "matched_deadline_text": deadline["text"] if deadline else None}
+            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"] if deadline else None, "matched_deadline_page": deadline.get("page") if isinstance(deadline, dict) else None}
         if deadline is None:
-            return {"status": "missing_deadline", "sign_date": None, "deadline_date": None, "matched_sign_text": None, "matched_deadline_text": None}
+            return {"status": "missing_deadline", "sign_date": None, "deadline_date": None, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": None, "matched_deadline_page": None}
         sign_date = self._section_date(bid_section.get("text") or "", bid_section.get("sections") or [])
         if sign_date is None:
-            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_deadline_text": deadline["text"]}
+            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page")}
         ok = sign_date["date"] <= deadline["date"]
-        return {"status": "pass" if ok else "late", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_deadline_text": deadline["text"], "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days}
+        return {"status": "pass" if ok else "late", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days}
 
     def _section_date(self, text: str, sections: list[dict] | None = None) -> dict | None:
         items, lines = [], self._lines(text)
@@ -1235,7 +1235,13 @@ class VerificationChecker:
             if not items and i + 1 < len(lines):
                 items.extend(self._date_candidates(lines[i + 1]))
         if items:
-            return max(items, key=lambda x: x["date"])
+            best = max(items, key=lambda x: x["date"])
+            for section in sections or []:
+                section_text = str(section.get("text") or "").strip()
+                if best.get("text") and best["text"] in section_text:
+                    page = section.get("page") if isinstance(section.get("page"), int) else None
+                    return {**best, "page": page}
+            return best
 
         fallback_items = []
         for section in sections or []:
@@ -1244,7 +1250,8 @@ class VerificationChecker:
             if not compact or str(section.get("type") or "").strip().lower() == "seal":
                 continue
             if any(anchor in compact for anchor in self.DATE_FIELD_ANCHORS):
-                fallback_items.extend(self._date_candidates(section_text))
+                for candidate in self._date_candidates(section_text):
+                    fallback_items.append({**candidate, "page": section.get("page") if isinstance(section.get("page"), int) else None})
         if fallback_items:
             return max(fallback_items, key=lambda x: x["date"])
 
@@ -1266,7 +1273,8 @@ class VerificationChecker:
                         nearby_context = True
                         break
             if has_context_anchor or (section_candidates and nearby_context):
-                contextual_items.extend(section_candidates)
+                for candidate in section_candidates:
+                    contextual_items.append({**candidate, "page": section.get("page") if isinstance(section.get("page"), int) else None})
         return max(contextual_items, key=lambda x: x["date"]) if contextual_items else None
 
     def _signature_values(self, text: str) -> list[dict]:

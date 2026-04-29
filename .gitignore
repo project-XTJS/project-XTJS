@@ -43,3 +43,7 @@ wheels/paddlepaddle_gpu-3.3.0-cp312-cp312-linux_x86_64.whl
 # 8. 其他不需要版本控制的文件
 output_seals/
 output_signatures/
+
+
+ocr_results/
+test_reports/

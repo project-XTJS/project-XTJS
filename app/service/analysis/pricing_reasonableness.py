@@ -231,19 +231,66 @@ class ReasonablenessChecker:
         except Exception:
             return None
 
-    def _build_result(self, result_text: str, price_type: str, summary: List[str]) -> Dict:
+    def _build_result(
+        self,
+        result_text: str,
+        price_type: str,
+        summary: List[str],
+        *,
+        pages: Optional[List[int]] = None,
+        locations: Optional[List[Dict]] = None,
+    ) -> Dict:
+        normalized_pages = []
+        seen_pages = set()
+        for page in pages or []:
+            if not isinstance(page, int) or page in seen_pages:
+                continue
+            seen_pages.add(page)
+            normalized_pages.append(page)
+
+        normalized_locations = []
+        seen_locations = set()
+        for location in locations or []:
+            if not isinstance(location, dict):
+                continue
+            page = location.get("page") if isinstance(location.get("page"), int) else None
+            label = str(location.get("label") or "").strip()
+            document = str(location.get("document") or "").strip()
+            key = (document, page, label)
+            if key in seen_locations:
+                continue
+            seen_locations.add(key)
+            normalized_locations.append(
+                {
+                    "page": page,
+                    "label": label,
+                    "text": str(location.get("text") or "").strip()[:120],
+                    "document": document,
+                }
+            )
+
         return {
             "result": result_text,
             "type": price_type,
-            "summary": summary
+            "summary": summary,
+            "pages": normalized_pages,
+            "locations": normalized_locations,
         }
 
-    def _build_fail_result(self, reason: str) -> Dict:
-        return {
-            "result": "失败",
-            "type": "未识别",
-            "summary": [reason]
-        }
+    def _build_fail_result(
+        self,
+        reason: str,
+        *,
+        pages: Optional[List[int]] = None,
+        locations: Optional[List[Dict]] = None,
+    ) -> Dict:
+        return self._build_result(
+            "失败",
+            "未识别",
+            [reason],
+            pages=pages,
+            locations=locations,
+        )
 
     # =========================================================
     # 2. 输入解析：支持 OCR JSON / JSON 字符串 / 纯文本
@@ -962,15 +1009,24 @@ class ReasonablenessChecker:
             return {
                 "result": "失败",
                 "type": "最高限价校验",
-                "summary": ["未在招标文件中识别到最高限价/预算/控制价相关金额"]
+                "summary": ["未在招标文件中识别到最高限价/预算/控制价相关金额"],
+                "pages": [],
+                "locations": [],
             }
 
         bid_total = self._extract_bid_total_amount(bid_source)
         if not bid_total:
+            tender_page = tender_limit.get("page")
             return {
                 "result": "失败",
                 "type": "最高限价校验",
-                "summary": ["未在投标文件中识别到投标总金额/参选总价/报价总价"]
+                "summary": ["未在投标文件中识别到投标总金额/参选总价/报价总价"],
+                "pages": [tender_page] if isinstance(tender_page, int) else [],
+                "locations": (
+                    [{"page": tender_page, "label": "招标限价", "document": "tender"}]
+                    if isinstance(tender_page, int)
+                    else []
+                ),
             }
 
         tender_amount = tender_limit["amount_yuan"]
@@ -987,10 +1043,22 @@ class ReasonablenessChecker:
             f"比较结果：投标总金额 {'<=' if passed else '>'} 招标最高限价，差额 {self._format_amount_yuan(diff)}，{'合格' if passed else '不合格'}"
         ]
 
+        pages = []
+        locations = []
+        if isinstance(tender_page, int):
+            pages.append(tender_page)
+            locations.append({"page": tender_page, "label": "招标限价", "document": "tender"})
+        if isinstance(bid_page, int):
+            if bid_page not in pages:
+                pages.append(bid_page)
+            locations.append({"page": bid_page, "label": "投标总价", "document": "bidder"})
+
         return {
             "result": "合格" if passed else "失败",
             "type": "最高限价校验",
             "summary": summary,
+            "pages": pages,
+            "locations": locations,
         }
 
     # =========================================================
@@ -1267,6 +1335,11 @@ class ReasonablenessChecker:
     def _extract_float_rate_rows_from_record_table(self, tb: Dict) -> List[Dict]:
         rows = []
         records = tb.get("records", []) or []
+        table_pages = [page for page in (tb.get("pages") or []) if isinstance(page, int)]
+        if not table_pages:
+            page = tb.get("page")
+            if isinstance(page, int):
+                table_pages = [page]
 
         for rec in records:
             if not isinstance(rec, dict):
@@ -1300,7 +1373,8 @@ class ReasonablenessChecker:
                 "tax_rate": self._clean_percent(rec.get(tax_key)) if tax_key else None,
                 "float_rate": float_rate,
                 "bid_price": self._clean_number(bid_raw) if bid_raw is not None else None,
-                "raw_line": json.dumps(rec, ensure_ascii=False)
+                "raw_line": json.dumps(rec, ensure_ascii=False),
+                "pages": table_pages,
             })
 
         return rows
@@ -1323,6 +1397,11 @@ class ReasonablenessChecker:
         raw_rows = tb.get("rows", []) or []
         if not raw_rows:
             return rows
+        table_pages = [page for page in (tb.get("pages") or []) if isinstance(page, int)]
+        if not table_pages:
+            page = tb.get("page")
+            if isinstance(page, int):
+                table_pages = [page]
 
         data_start = self._find_logical_table_data_start(raw_rows)
 
@@ -1415,6 +1494,7 @@ class ReasonablenessChecker:
                 "float_rate": float_rate,
                 "bid_price": bid_price,
                 "raw_line": " | ".join(non_empty),
+                "pages": table_pages,
             })
 
         return rows
@@ -1488,7 +1568,12 @@ class ReasonablenessChecker:
             "bid_price": bid_price,
         }
 
-    def _extract_float_rate_rows_from_flat_text(self, bid_opening_text: str, rules: Dict[str, Dict]) -> List[Dict]:
+    def _extract_float_rate_rows_from_flat_text(
+        self,
+        bid_opening_text: str,
+        rules: Dict[str, Dict],
+        bid_page: Optional[int] = None,
+    ) -> List[Dict]:
         if not bid_opening_text or not bid_opening_text.strip():
             return []
 
@@ -1586,6 +1671,7 @@ class ReasonablenessChecker:
                     "float_rate": parsed["float_rate"],
                     "bid_price": parsed["bid_price"],
                     "raw_line": segment,
+                    "pages": [bid_page] if isinstance(bid_page, int) else [],
                 })
 
         dedup = {}
@@ -1604,7 +1690,7 @@ class ReasonablenessChecker:
             return rows
 
         # 2) 再从扁平表格文本兜底
-        rows = self._extract_float_rate_rows_from_flat_text(bid_opening_text, rules)
+        rows = self._extract_float_rate_rows_from_flat_text(bid_opening_text, rules, bid_page=bid_page)
         return rows
 
     def _check_float_rate_rows_compliance(self, rows: List[Dict], rules: Dict[str, Dict]) -> Tuple[bool, List[str]]:
@@ -1736,9 +1822,15 @@ class ReasonablenessChecker:
     def check_price_compliance(self, source: Any) -> Dict:
         parsed = self._parse_input(source)
         bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
+        fallback_pages = [bid_page] if isinstance(bid_page, int) else []
+        fallback_locations = [{"page": bid_page, "label": "开标一览表", "document": "bidder"}] if isinstance(bid_page, int) else []
 
         if not bid_opening_text:
-            return self._build_fail_result("未找到开标/报价/投标一览表正文")
+            return self._build_fail_result(
+                "未找到开标/报价/投标一览表正文",
+                pages=fallback_pages,
+                locations=fallback_locations,
+            )
 
         # 1) 直接报价 —— 保持你的原逻辑
         price_pairs = self._extract_direct_price_pairs(bid_opening_text)
@@ -1768,7 +1860,9 @@ class ReasonablenessChecker:
             return self._build_result(
                 result_text="合格" if all_match else "失败",
                 price_type="直接报价",
-                summary=summary
+                summary=summary,
+                pages=fallback_pages,
+                locations=fallback_locations,
             )
 
         # 2) 下浮率报价
@@ -1777,10 +1871,30 @@ class ReasonablenessChecker:
 
         if rows:
             passed, summary = self._check_float_rate_rows_compliance(rows, rules)
+            row_pages = []
+            seen_pages = set()
+            row_locations = []
+            for row in rows:
+                for page in row.get("pages") or []:
+                    if not isinstance(page, int):
+                        continue
+                    if page not in seen_pages:
+                        seen_pages.add(page)
+                        row_pages.append(page)
+                    row_locations.append(
+                        {
+                            "page": page,
+                            "label": str(row.get("biz_name_raw") or row.get("biz_name") or "下浮率报价"),
+                            "text": str(row.get("raw_line") or ""),
+                            "document": "bidder",
+                        }
+                    )
             return self._build_result(
                 result_text="合格" if passed else "失败",
                 price_type="下浮率报价",
-                summary=summary
+                summary=summary,
+                pages=row_pages,
+                locations=row_locations,
             )
 
         # 3) 单一下浮率兜底
@@ -1808,10 +1922,16 @@ class ReasonablenessChecker:
             return self._build_result(
                 result_text="合格" if passed else "失败",
                 price_type="下浮率报价",
-                summary=summary
+                summary=summary,
+                pages=fallback_pages,
+                locations=fallback_locations,
             )
 
-        return self._build_fail_result("一览表中未找到直接报价或下浮率报价信息")
+        return self._build_fail_result(
+            "一览表中未找到直接报价或下浮率报价信息",
+            pages=fallback_pages,
+            locations=fallback_locations,
+        )
 
     def check_price_reasonableness(self, source: Any) -> Dict:
         return self.check_price_compliance(source)

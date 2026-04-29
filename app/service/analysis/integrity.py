@@ -1,4 +1,5 @@
 import re
+from typing import Any
 from .template_extractor import TemplateExtractor
 
 class IntegrityChecker:
@@ -127,7 +128,22 @@ class IntegrityChecker:
 
         finalize_current()
 
-    def _find_heading(self, sections: list, headers: set, keyword: str) -> str:
+    def _location_from_section(self, section: dict | None) -> dict[str, Any] | None:
+        if not isinstance(section, dict):
+            return None
+        bbox = section.get("bbox") or section.get("box")
+        normalized_bbox = None
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and all(isinstance(item, (int, float)) for item in bbox[:4]):
+            normalized_bbox = [int(round(float(item))) for item in bbox[:4]]
+        page = section.get("page") if isinstance(section.get("page"), int) else None
+        text = str(section.get("text") or "").strip()
+        return {
+            "page": page,
+            "bbox": normalized_bbox,
+            "text": text[:120] if text else "",
+        }
+
+    def _find_heading_section(self, sections: list, headers: set, keyword: str) -> dict | None:
         EXEMPT_KEYWORDS = ["营业执照", "社会保险"] # 特例：这两类资质常见无编号或前缀，且具有较强的文本特征，可以放宽前缀要求
 
         for sec in sections:
@@ -141,8 +157,12 @@ class IntegrityChecker:
                 is_exempt = any(k in keyword for k in EXEMPT_KEYWORDS)
                 is_short_text_title = sec.get('type') == 'text' and len(compact) <= 60
                 if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title:
-                    return text
+                    return sec
         return None
+
+    def _find_heading(self, sections: list, headers: set, keyword: str) -> str:
+        section = self._find_heading_section(sections, headers, keyword)
+        return str(section.get("text") or "") if isinstance(section, dict) else None
 
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:
         # reqs 现在接收的是一个按文档物理顺序排列的单一列表 List[str]
@@ -161,8 +181,10 @@ class IntegrityChecker:
 
             # 特例处理：法定代表人证明书和授权委托书是两种参选路径，命中其一即可满足该项
             if "法定代表人" in item and "证明书" in item:
-                zm_match = self._find_heading(sections, headers, "法定代表人证明书")
-                sq_match = self._find_heading(sections, headers, "授权委托书")
+                zm_section = self._find_heading_section(sections, headers, "法定代表人证明书")
+                sq_section = self._find_heading_section(sections, headers, "授权委托书")
+                zm_match = str(zm_section.get("text") or "") if isinstance(zm_section, dict) else None
+                sq_match = str(sq_section.get("text") or "") if isinstance(sq_section, dict) else None
 
                 if not zm_match or not sq_match:
                     for sec in sections:
@@ -172,8 +194,10 @@ class IntegrityChecker:
                         clean_text = text.replace(' ', '')
 
                         if not zm_match and ("法定代表人" in clean_text or "法人" in clean_text) and "证明" in clean_text:
+                            zm_section = sec
                             zm_match = text
                         if not sq_match and ("法定代表人" in clean_text or "法人" in clean_text or "委托" in clean_text) and "授权" in clean_text:
+                            sq_section = sec
                             sq_match = text
                         
                 if zm_match and sq_match:
@@ -186,12 +210,25 @@ class IntegrityChecker:
                     status, preview, is_passed = "缺失法定代表人证明书/授权委托书", "-", False
                     
                 all_details[item] = {
-                    "status": status, "preview": preview, "is_passed": is_passed, "category": cat, "scored": True
+                    "status": status,
+                    "preview": preview,
+                    "is_passed": is_passed,
+                    "category": cat,
+                    "scored": True,
+                    "locations": [
+                        location
+                        for location in (
+                            self._location_from_section(zm_section),
+                            self._location_from_section(sq_section),
+                        )
+                        if location is not None
+                    ],
                 }
                 continue
 
             norm_item = self._normalize_target(item)
-            match = self._find_heading(sections, headers, norm_item)
+            match_section = self._find_heading_section(sections, headers, norm_item)
+            match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
             is_optional = self._is_optional_item(item)
             all_details[item] = {
                 "status": (
@@ -203,6 +240,7 @@ class IntegrityChecker:
                 "is_passed": bool(match) or is_optional,
                 "category": cat,
                 "scored": True,
+                "locations": [self._location_from_section(match_section)] if match_section else [],
             }
 
         self._apply_parent_relaxation(reqs, all_details)

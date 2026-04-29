@@ -4,7 +4,6 @@ import html
 import json
 import re
 from collections import defaultdict
-from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from typing import Any
 
@@ -398,7 +397,7 @@ class BidDocumentReviewService:
             "documents": document_issue_items,
             "shared_issues": shared_issues,
             "notes": [
-                "当前环境未启用 LanguageTool，本次使用内置错别字词典和人员姓名不一致规则识别。",
+                "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。",
             ],
         }
 
@@ -496,18 +495,6 @@ class BidDocumentReviewService:
                 seen_keys.add(key)
                 issues.append(issue)
 
-        for issue in self._find_person_name_mismatch_issues(document):
-            key = (
-                issue.get("issue_type"),
-                issue.get("issue_key"),
-                issue.get("page"),
-                issue.get("matched_text"),
-            )
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            issues.append(issue)
-
         issues.sort(
             key=lambda item: (
                 int(item.get("page") or 0),
@@ -591,106 +578,6 @@ class BidDocumentReviewService:
             )
         return issues
 
-    def _find_person_name_mismatch_issues(self, document: dict[str, Any]) -> list[dict[str, Any]]:
-        events = self._build_person_name_events(document)
-        issues: list[dict[str, Any]] = []
-        current_heading: dict[str, Any] | None = None
-
-        for event in events:
-            if event["event_type"] == "heading_name":
-                current_heading = event
-                continue
-            if current_heading is None:
-                continue
-            if int(event.get("page") or 0) - int(current_heading.get("page") or 0) > 2:
-                continue
-
-            heading_name = str(current_heading.get("name") or "").strip()
-            observed_name = str(event.get("name") or "").strip()
-            if not self._is_name_mismatch_candidate(heading_name, observed_name):
-                continue
-
-            issues.append(
-                {
-                    "issue_type": "person_name_mismatch",
-                    "issue_key": f"{heading_name}->{observed_name}",
-                    "matched_text": observed_name,
-                    "suggestion": heading_name,
-                    "page": event.get("page"),
-                    "bbox": event.get("bbox"),
-                    "text": str(event.get("text") or ""),
-                    "source": event.get("event_type"),
-                    "reference_page": current_heading.get("page"),
-                    "reference_text": current_heading.get("text"),
-                    "document_identifier_id": document["identifier_id"],
-                    "relation_id": document.get("relation_id"),
-                    "file_name": document.get("file_name"),
-                }
-            )
-        return issues
-
-    def _build_person_name_events(self, document: dict[str, Any]) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-
-        for section in document.get("sections") or []:
-            text = str(section.get("text") or "").strip()
-            if not text:
-                continue
-
-            heading_match = self.NUMBERED_NAME_HEADING_PATTERN.match(text)
-            if heading_match:
-                name = self._clean_person_name(heading_match.group(1))
-                if name:
-                    events.append(
-                        {
-                            "event_type": "heading_name",
-                            "name": name,
-                            "page": section.get("page"),
-                            "bbox": section.get("bbox"),
-                            "text": text,
-                            "sort_y": self._bbox_top(section.get("bbox")),
-                        }
-                    )
-
-            for match in self.FIELD_NAME_PATTERN.finditer(text):
-                name = self._clean_person_name(match.group(1))
-                if not name:
-                    continue
-                events.append(
-                    {
-                        "event_type": "field_name",
-                        "name": name,
-                        "page": section.get("page"),
-                        "bbox": section.get("bbox"),
-                        "text": text,
-                        "sort_y": self._bbox_top(section.get("bbox")),
-                    }
-                )
-
-        for table in document.get("tables") or []:
-            extracted = self._extract_resume_identity_from_table(table)
-            if not extracted.get("name"):
-                continue
-            events.append(
-                {
-                    "event_type": "resume_table_name",
-                    "name": extracted["name"],
-                    "page": table.get("page"),
-                    "bbox": table.get("bbox"),
-                    "text": extracted.get("text") or "",
-                    "sort_y": self._bbox_top(table.get("bbox")),
-                }
-            )
-
-        events.sort(
-            key=lambda item: (
-                int(item.get("page") or 0),
-                int(item.get("sort_y") or 0),
-                0 if item.get("event_type") == "heading_name" else 1,
-            )
-        )
-        return events
-
     def _extract_personnel_entries(
         self,
         *,
@@ -767,20 +654,6 @@ class BidDocumentReviewService:
                     )
                 )
             return entries
-
-        identity = self._extract_resume_identity_from_table(table)
-        if identity.get("name"):
-            entries.append(
-                self._build_personnel_entry(
-                    record=record,
-                    name=identity["name"],
-                    role=self._normalize_role(identity.get("role") or ""),
-                    page=table.get("page"),
-                    bbox=table.get("bbox"),
-                    evidence_text=identity.get("text") or "",
-                    source_type="resume_table",
-                )
-            )
         return entries
 
     def _extract_personnel_entries_from_section(
@@ -835,29 +708,6 @@ class BidDocumentReviewService:
             "relation_id": record.get("relation_id"),
             "file_name": record.get("file_name"),
         }
-
-    def _extract_resume_identity_from_table(self, table: dict[str, Any]) -> dict[str, str]:
-        rows = self._parse_html_table_rows(table)
-        if not rows:
-            return {}
-
-        name = None
-        role = None
-        for row in rows[:6]:
-            for index, cell in enumerate(row):
-                compact = self._compact(cell)
-                if not compact:
-                    continue
-                if "姓名" in compact and name is None:
-                    name = self._clean_person_name(self._safe_list_get(row, index + 1))
-                if ("职位" in compact or any(token in compact for token in self.ROLE_HEADER_HINTS)) and role is None:
-                    role = self._normalize_role(self._safe_list_get(row, index + 1))
-
-        if not name:
-            return {}
-
-        flat_text = " | ".join(cell for row in rows[:6] for cell in row if cell)
-        return {"name": name, "role": role or "", "text": flat_text}
 
     def _parse_html_table_rows(self, table: dict[str, Any]) -> list[list[str]]:
         block_content = str(table.get("block_content") or table.get("html") or "").strip()
@@ -937,19 +787,6 @@ class BidDocumentReviewService:
         if any(role in {"项目经理", "项目负责人", "总负责人", "技术负责人"} for role in roles):
             return "high"
         return "medium"
-
-    def _is_name_mismatch_candidate(self, expected: str, observed: str) -> bool:
-        if not expected or not observed or expected == observed:
-            return False
-        if len(expected) != len(observed):
-            return False
-        if expected[0] != observed[0]:
-            return False
-        difference_count = sum(1 for left, right in zip(expected, observed) if left != right)
-        if difference_count <= 0:
-              return False
-        similarity = SequenceMatcher(None, expected, observed).ratio()
-        return difference_count <= 2 and similarity >= 0.3
 
     def _find_header_index(self, header: list[str], keywords: tuple[str, ...]) -> int | None:
         for index, value in enumerate(header):

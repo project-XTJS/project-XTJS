@@ -1148,6 +1148,15 @@ class ItemizedPricingChecker:
                             "expected_total": self._format_decimal(expected_group_total),
                             "difference": self._format_decimal(group_difference),
                             "row_count": len(group),
+                            **self._build_entry_context(
+                                {
+                                    "section_id": representative.get("section_id"),
+                                    "anchor": representative.get("section_anchor"),
+                                    "pages": representative.get("section_pages"),
+                                },
+                                serial=representative.get("serial"),
+                                line_index=representative.get("line_index"),
+                            ),
                         }
                     )
 
@@ -1219,6 +1228,15 @@ class ItemizedPricingChecker:
                             "line_total": self._format_decimal(relation["line_total"]),
                             "expected_total": self._format_decimal(relation["expected_total"]),
                             "difference": self._format_decimal(difference),
+                            **self._build_entry_context(
+                                {
+                                    "section_id": relation.get("section_id"),
+                                    "anchor": relation.get("section_anchor"),
+                                    "pages": relation.get("section_pages"),
+                                },
+                                serial=relation.get("serial"),
+                                line_index=relation.get("line_index"),
+                            ),
                         }
                     )
 
@@ -2275,6 +2293,11 @@ class ItemizedPricingChecker:
                             "text": block_text[:160],
                             "reason": "item_amount_missing",
                             "reason_text": "该行看起来像分项行，但未识别到可用金额。",
+                            **self._build_entry_context(
+                                section_context,
+                                serial=block.get("serial"),
+                                line_index=block.get("start_index"),
+                            ),
                         }
                     )
                 continue
@@ -2307,6 +2330,11 @@ class ItemizedPricingChecker:
                         "line_total": self._format_decimal(arithmetic_info["line_total"]),
                         "expected_total": self._format_decimal(expected_total),
                         "difference": self._format_decimal(difference),
+                        **self._build_entry_context(
+                            section_context,
+                            serial=block.get("serial"),
+                            line_index=block.get("start_index"),
+                        ),
                     }
                 )
 

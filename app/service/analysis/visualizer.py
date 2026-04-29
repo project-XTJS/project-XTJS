@@ -1,5 +1,6 @@
 import re
 import html
+import json
 import os
 import random
 import string
@@ -10,6 +11,7 @@ class ReportVisualizer:
 
     def __init__(self):
         self.CONTENT_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
+        self._document_preview_config = None
 
         self.CSS_STYLE = """
         <style>
@@ -429,7 +431,9 @@ class ReportVisualizer:
                 'title': title,
                 'missing': rec.get('missing_anchors', []),
                 'bidder_text': test_dict.get(title, ""),
-                'idx': idx
+                'idx': idx,
+                'pages': list(rec.get('pages') or []),
+                'locations': list(rec.get('locations') or []),
             }
         return info_map
 
@@ -444,11 +448,513 @@ class ReportVisualizer:
             return (f"⚠️ 缺失 {total_missing} 项", "tag-err")
         return ("✨ 格式匹配", "tag-ok")
 
-    def _generate_detail_card(self, title, missing, bidder_text, model_text, checker):
+    def _normalize_bbox(self, bbox):
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            return None
+        if not all(isinstance(item, (int, float)) for item in bbox[:4]):
+            return None
+        x0, y0, x1, y1 = [int(round(float(item))) for item in bbox[:4]]
+        if x1 < x0 or y1 < y0:
+            if x1 > 0 and y1 > 0:
+                x1 = x0 + x1
+                y1 = y0 + y1
+        normalized = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+        return normalized
+
+    def _format_bbox_text(self, bbox):
+        normalized = self._normalize_bbox(bbox)
+        if not normalized:
+            return ""
+        return "[" + ", ".join(str(item) for item in normalized) + "]"
+
+    def _coalesce_page_ranges(self, pages):
+        normalized = sorted({page for page in pages or [] if isinstance(page, int)})
+        if not normalized:
+            return []
+        ranges = []
+        start = normalized[0]
+        end = start
+        for page in normalized[1:]:
+            if page == end + 1:
+                end = page
+                continue
+            ranges.append((start, end))
+            start = page
+            end = page
+        ranges.append((start, end))
+        return ranges
+
+    def _render_location_summary(self, locations=None, pages=None, limit=4, default_document="bidder"):
+        entries = []
+        seen = set()
+        seen_pages = set()
+        for location in locations or []:
+            if not isinstance(location, dict):
+                continue
+            page = location.get("page") if isinstance(location.get("page"), int) else None
+            bbox = self._normalize_bbox(location.get("bbox"))
+            bbox_text = self._format_bbox_text(bbox)
+            note = str(
+                location.get("label")
+                or location.get("note")
+                or location.get("section_anchor")
+                or ""
+            ).strip()
+            document = str(location.get("document") or default_document or "bidder").strip() or "bidder"
+            label = f"P{page}" if page is not None else "P?"
+            if bbox_text:
+                label = f"{label} {bbox_text}"
+            if note:
+                label = f"{note} {label}".strip()
+            bbox_key = (
+                tuple(int(round(value / 3)) for value in bbox if isinstance(value, (int, float)))
+                if bbox
+                else None
+            )
+            key = (document, note, page, bbox_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            if page is not None:
+                seen_pages.add(page)
+            entries.append(
+                {
+                    "label": label,
+                    "page": page,
+                    "page_end": page,
+                    "bbox": bbox if isinstance(bbox, (list, tuple)) else None,
+                    "document": document,
+                }
+            )
+        remaining_pages = [
+            page for page in (pages or [])
+            if isinstance(page, int) and page not in seen_pages
+        ]
+        for start_page, end_page in self._coalesce_page_ranges(remaining_pages):
+            key = (default_document or "bidder", "", start_page, end_page)
+            if key in seen:
+                continue
+            seen.add(key)
+            label = f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}"
+            entries.append(
+                {
+                    "label": label,
+                    "page": start_page,
+                    "page_end": end_page,
+                    "bbox": None,
+                    "document": default_document or "bidder",
+                }
+            )
+        if not entries:
+            return "<span class='status-tag tag-missing'>-</span>"
+        chips = []
+        for entry in entries[:limit]:
+            label = html.escape(str(entry.get("label") or "-"))
+            page = entry.get("page")
+            page_end = entry.get("page_end")
+            bbox = entry.get("bbox")
+            document = html.escape(str(entry.get("document") or default_document or "bidder"))
+            if page is not None:
+                bbox_attr = ""
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    bbox_attr = ",".join(str(int(round(float(item)))) for item in bbox[:4] if isinstance(item, (int, float)))
+                chips.append(
+                    f"<button type='button' class='locator-chip locator-open' data-document='{document}' data-page='{page}' data-page-end='{page_end if isinstance(page_end, int) else page}' data-bbox='{html.escape(bbox_attr)}' data-label='{label}'>{label}</button>"
+                )
+            else:
+                chips.append(f"<div class='locator-chip'>{label}</div>")
+        if len(entries) > limit:
+            chips.append("<div style='font-size:12px; color:#909399;'>...</div>")
+        return "".join(chips)
+
+    def _entry_locations(self, entry, default_label=None):
+        if not isinstance(entry, dict):
+            return []
+        label_parts = []
+        base_label = str(default_label or "").strip()
+        if base_label:
+            label_parts.append(base_label)
+        anchor = str(entry.get("section_anchor") or "").strip()
+        if anchor and anchor not in {"logical_table", "layout"}:
+            label_parts.append(anchor)
+        label = " / ".join(label_parts)
+        pages = [page for page in (entry.get("section_pages") or []) if isinstance(page, int)]
+        if not pages and isinstance(entry.get("page"), int):
+            pages = [entry.get("page")]
+        return [{"page": page, "label": label} for page in pages]
+
+    def _build_locator_support_style(self):
+        return """
+        <style>
+            .locator-chip {
+                margin: 2px 0;
+                padding: 2px 6px;
+                border-radius: 10px;
+                background: #eef1ed;
+                color: #4f5a52;
+                font-size: 12px;
+                white-space: nowrap;
+                border: 1px solid #d9ded8;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            button.locator-chip {
+                font: inherit;
+            }
+            .locator-chip:hover {
+                background: #e3ebff;
+                border-color: #b8cdf5;
+                color: #2457b2;
+            }
+            .locator-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(17, 24, 39, 0.45);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 30000;
+                padding: 20px;
+            }
+            .locator-overlay.visible {
+                display: flex;
+            }
+            .locator-dialog {
+                width: min(1180px, calc(100vw - 40px));
+                height: min(92vh, 920px);
+                background: #fff;
+                border-radius: 14px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .locator-toolbar {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 18px;
+                border-bottom: 1px solid var(--border-color);
+                background: #f8fafc;
+            }
+            .locator-title {
+                font-size: 16px;
+                font-weight: 600;
+                color: var(--text-main);
+            }
+            .locator-subtitle {
+                margin-top: 4px;
+                font-size: 12px;
+                color: var(--text-light);
+            }
+            .locator-close {
+                border: 1px solid var(--border-color);
+                background: #fff;
+                color: var(--text-regular);
+                border-radius: 8px;
+                padding: 6px 12px;
+                cursor: pointer;
+                font-size: 13px;
+            }
+            .locator-close:hover {
+                color: var(--primary-color);
+                border-color: #bfd6ff;
+            }
+            .locator-actions {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .locator-source {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid #bfd6ff;
+                background: #f4f8ff;
+                color: #2457b2;
+                border-radius: 8px;
+                padding: 6px 12px;
+                cursor: pointer;
+                font-size: 13px;
+                text-decoration: none;
+            }
+            .locator-source:hover {
+                background: #eaf1ff;
+            }
+            .locator-stage {
+                flex: 1;
+                overflow: auto;
+                padding: 18px;
+                background: #f5f7fa;
+            }
+            .locator-empty {
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: var(--text-light);
+                font-size: 14px;
+                text-align: center;
+            }
+            .locator-page-wrap {
+                position: relative;
+                margin: 0 auto;
+                display: inline-block;
+                background: #fff;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+            }
+            .locator-page-image {
+                display: block;
+                max-width: 100%;
+                height: auto;
+            }
+            .locator-box {
+                position: absolute;
+                border: 3px solid #ef4444;
+                background: rgba(239, 68, 68, 0.14);
+                box-shadow: 0 0 0 1px rgba(255,255,255,0.6) inset;
+                pointer-events: none;
+                display: none;
+            }
+            .locator-box.visible {
+                display: block;
+            }
+            .locator-note {
+                margin-top: 12px;
+                color: var(--text-regular);
+                font-size: 13px;
+            }
+        </style>
+        """
+
+    def _build_locator_support_markup(self):
+        return """
+        <div id="locator-overlay" class="locator-overlay">
+            <div class="locator-dialog" role="dialog" aria-modal="true" aria-label="定位预览">
+                <div class="locator-toolbar">
+                    <div>
+                        <div id="locator-title" class="locator-title">定位预览</div>
+                        <div id="locator-subtitle" class="locator-subtitle">请选择页码定位</div>
+                    </div>
+                    <div class="locator-actions">
+                        <a id="locator-source" class="locator-source" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">打开原文件</a>
+                        <button type="button" id="locator-close" class="locator-close">关闭</button>
+                    </div>
+                </div>
+                <div class="locator-stage">
+                    <div id="locator-empty" class="locator-empty">当前没有可用的页面预览资源。</div>
+                    <div id="locator-page-wrap" class="locator-page-wrap" style="display:none;">
+                        <img id="locator-page-image" class="locator-page-image" alt="定位预览页">
+                        <div id="locator-box" class="locator-box"></div>
+                    </div>
+                    <div id="locator-note" class="locator-note" style="display:none;"></div>
+                </div>
+            </div>
+        </div>
+        """
+
+    def _build_locator_support_script(self):
+        config_json = json.dumps(self._document_preview_config or {"documents": {}}, ensure_ascii=False)
+        return f"""
+        <script>
+            (function() {{
+                const locatorPreviewConfig = {config_json};
+                const overlay = document.getElementById('locator-overlay');
+                const closeBtn = document.getElementById('locator-close');
+                const sourceLink = document.getElementById('locator-source');
+                const titleNode = document.getElementById('locator-title');
+                const subtitleNode = document.getElementById('locator-subtitle');
+                const emptyNode = document.getElementById('locator-empty');
+                const pageWrap = document.getElementById('locator-page-wrap');
+                const imageNode = document.getElementById('locator-page-image');
+                const boxNode = document.getElementById('locator-box');
+                const noteNode = document.getElementById('locator-note');
+
+                function hideLocator() {{
+                    if (!overlay) return;
+                    overlay.classList.remove('visible');
+                    imageNode.removeAttribute('src');
+                    imageNode.onload = null;
+                    boxNode.classList.remove('visible');
+                    pageWrap.style.display = 'none';
+                    emptyNode.style.display = 'flex';
+                    noteNode.style.display = 'none';
+                    noteNode.textContent = '';
+                    if (sourceLink) {{
+                        sourceLink.style.display = 'none';
+                        sourceLink.setAttribute('href', '#');
+                    }}
+                }}
+
+                function parseBbox(raw) {{
+                    if (!raw) return null;
+                    const values = String(raw).split(',').map(Number).filter(Number.isFinite);
+                    if (values.length < 4) return null;
+                    return values.slice(0, 4);
+                }}
+
+                function resolvePagePreview(documentKey, page) {{
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[documentKey];
+                    if (!docConfig) return null;
+                    const pageConfig = (docConfig.pages || {{}})[String(page)];
+                    if (!pageConfig) return null;
+                    return {{
+                        docConfig,
+                        pageConfig,
+                    }};
+                }}
+
+                function sourceKindLabel(kind) {{
+                    if (kind === 'pdf') return 'PDF预览';
+                    if (kind === 'image') return '图片预览';
+                    if (kind === 'synthetic') return '合成预览';
+                    return '页面预览';
+                }}
+
+                function sourceHint(docConfig) {{
+                    if (!docConfig) return '';
+                    if (docConfig.source_kind === 'synthetic') {{
+                        return '未找到原始PDF/图片，当前使用OCR结果生成的定位预览。';
+                    }}
+                    if (docConfig.source_kind === 'pdf') {{
+                        return '当前预览页由真实PDF渲染生成，可用于定位原文位置。';
+                    }}
+                    if (docConfig.source_kind === 'image') {{
+                        return '当前预览页来自原始图片文件。';
+                    }}
+                    return '';
+                }}
+
+                function renderBox(bbox, pageConfig) {{
+                    if (!bbox || !pageConfig) {{
+                        boxNode.classList.remove('visible');
+                        return;
+                    }}
+                    const naturalWidth = Number(pageConfig.width) || imageNode.naturalWidth || imageNode.width;
+                    const naturalHeight = Number(pageConfig.height) || imageNode.naturalHeight || imageNode.height;
+                    if (!naturalWidth || !naturalHeight) {{
+                        boxNode.classList.remove('visible');
+                        return;
+                    }}
+                    const scaleX = imageNode.clientWidth / naturalWidth;
+                    const scaleY = imageNode.clientHeight / naturalHeight;
+                    const left = bbox[0] * scaleX;
+                    const top = bbox[1] * scaleY;
+                    const width = Math.max((bbox[2] - bbox[0]) * scaleX, 6);
+                    const height = Math.max((bbox[3] - bbox[1]) * scaleY, 6);
+                    boxNode.style.left = left + 'px';
+                    boxNode.style.top = top + 'px';
+                    boxNode.style.width = width + 'px';
+                    boxNode.style.height = height + 'px';
+                    boxNode.classList.add('visible');
+                }}
+
+                function openLocator(button) {{
+                    if (!overlay) return;
+                    const documentKey = button.dataset.document || 'bidder';
+                    const page = Number(button.dataset.page || 0);
+                    const pageEnd = Number(button.dataset.pageEnd || button.dataset.page || 0);
+                    const label = button.dataset.label || button.textContent || '定位预览';
+                    const bbox = parseBbox(button.dataset.bbox);
+                    const resolved = resolvePagePreview(documentKey, page);
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[documentKey] || {{}};
+                    const pageRangeText = pageEnd && pageEnd > page ? `${{page}}-${{pageEnd}}` : `${{page || '?'}}`;
+                    titleNode.textContent = label;
+                    subtitleNode.textContent = `${{docConfig.title || documentKey}} - 第 ${{pageRangeText}} 页 · ${{sourceKindLabel(docConfig.source_kind)}}`;
+                    const extraHint = sourceHint(docConfig);
+                    const rangeHint = pageEnd && pageEnd > page ? `连续页范围：${{page}}-${{pageEnd}}。` : '';
+                    if (bbox && extraHint) {{
+                        noteNode.textContent = `坐标：[${{bbox.join(', ')}}]  ·  ${{rangeHint}}${{extraHint}}`;
+                    }} else if (bbox) {{
+                        noteNode.textContent = rangeHint ? `坐标：[${{bbox.join(', ')}}]  ·  ${{rangeHint}}` : `坐标：[${{bbox.join(', ')}}]`;
+                    }} else if (rangeHint && extraHint) {{
+                        noteNode.textContent = `${{rangeHint}}${{extraHint}}`;
+                    }} else if (rangeHint) {{
+                        noteNode.textContent = rangeHint;
+                    }} else {{
+                        noteNode.textContent = extraHint || '';
+                    }}
+                    noteNode.style.display = noteNode.textContent ? 'block' : 'none';
+                    if (sourceLink) {{
+                        const rawSourceUrl = docConfig.source_url || '';
+                        sourceLink.textContent = pageEnd && pageEnd > page ? `打开原文件（第 ${{pageRangeText}} 页）` : '打开原文件';
+                        if (rawSourceUrl) {{
+                            let finalUrl = rawSourceUrl;
+                            if (docConfig.source_kind === 'pdf' && page) {{
+                                finalUrl = `${{rawSourceUrl}}#page=${{page}}`;
+                            }}
+                            sourceLink.setAttribute('href', finalUrl);
+                            sourceLink.style.display = 'inline-flex';
+                        }} else {{
+                            sourceLink.style.display = 'none';
+                            sourceLink.setAttribute('href', '#');
+                        }}
+                    }}
+
+                    if (!resolved) {{
+                        pageWrap.style.display = 'none';
+                        boxNode.classList.remove('visible');
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = '当前缺少该页的预览资源。';
+                        overlay.classList.add('visible');
+                        return;
+                    }}
+
+                    const pageConfig = resolved.pageConfig;
+                    emptyNode.style.display = 'none';
+                    pageWrap.style.display = 'inline-block';
+                    overlay.classList.add('visible');
+                    imageNode.onload = function() {{
+                        renderBox(bbox, pageConfig);
+                    }};
+                    imageNode.src = pageConfig.image_url;
+                    if (imageNode.complete) {{
+                        renderBox(bbox, pageConfig);
+                    }}
+                }}
+
+                function bindLocatorChips() {{
+                    document.querySelectorAll('.locator-open').forEach((button) => {{
+                        if (button.dataset.locatorBound === '1') return;
+                        button.dataset.locatorBound = '1';
+                        button.addEventListener('click', function() {{
+                            openLocator(this);
+                        }});
+                    }});
+                }}
+
+                if (closeBtn) {{
+                    closeBtn.addEventListener('click', hideLocator);
+                }}
+                if (overlay) {{
+                    overlay.addEventListener('click', function(event) {{
+                        if (event.target === overlay) {{
+                            hideLocator();
+                        }}
+                    }});
+                }}
+                document.addEventListener('keydown', function(event) {{
+                    if (event.key === 'Escape') {{
+                        hideLocator();
+                    }}
+                }});
+
+                bindLocatorChips();
+                window.__bindLocatorChips = bindLocatorChips;
+            }})();
+        </script>
+        """
+
+    def _generate_detail_card(self, title, missing, bidder_text, model_text, checker, pages=None, locations=None):
+        location_html = self._render_location_summary(locations=locations, pages=pages)
         if not bidder_text:
             return f"""
                 <div class="card">
                     <h2 style="color: var(--primary-color); border: none; margin-bottom: 15px;">■ {title}</h2>
+                    <div style='margin-bottom: 12px;'><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
                     <div class='empty-text'>[ ⚠️ 投标文件中未检测到该部分内容，请重点核实 ]</div>
                 </div>
             """
@@ -478,6 +984,7 @@ class ReportVisualizer:
             <div style='margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center;'>
                 {status_badge}
             </div>
+            <div style='margin-bottom: 12px;'><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
             <div class="content-box {collapse_class}" id="content-{uid}">
                 {highlighted}
             </div>
@@ -495,7 +1002,15 @@ class ReportVisualizer:
             missing = info['missing']
             bidder_text = info['bidder_text']
             model_text = model_dict.get(title, "")
-            card = self._generate_detail_card(title, missing, bidder_text, model_text, checker)
+            card = self._generate_detail_card(
+                title,
+                missing,
+                bidder_text,
+                model_text,
+                checker,
+                pages=info.get("pages"),
+                locations=info.get("locations"),
+            )
             detail_cards.append(card)
 
         combined_html = f"""
@@ -505,8 +1020,10 @@ class ReportVisualizer:
             <meta charset="UTF-8">
             <title>合并附件详情 - 审查报告</title>
             {self.CSS_STYLE}
+            {self._build_locator_support_style()}
         </head>
         <body>
+            {self._build_locator_support_markup()}
             <a href="javascript:void(0);" onclick="window.history.back();" class="back-link">返回总览报告</a>
 
             <div class="container">
@@ -551,6 +1068,7 @@ class ReportVisualizer:
                     bindExpandButtons();
                 }})();
             </script>
+            {self._build_locator_support_script()}
         </body>
         </html>
         """
@@ -582,13 +1100,29 @@ class ReportVisualizer:
             tag_cls, tag_text = type_map.get(d_type, ('tag-missing', '未知'))
             
             evidence = item.get('response_evidence', '-')
-            page_info = f" (P{item['response_page']})" if item.get('response_page') else ""
+            page = item.get("response_page")
+            line_number = item.get("response_line_number")
+            if page or line_number:
+                location_html = self._render_location_summary(
+                    locations=[
+                        {
+                            "page": page if isinstance(page, int) else None,
+                            "label": f"L{line_number}" if line_number else "响应位置",
+                            "document": "bidder",
+                        }
+                    ],
+                    pages=[page] if isinstance(page, int) else None,
+                    limit=2,
+                )
+            else:
+                location_html = "-"
             
             rows_html += f"""
                 <tr>
                     <td><div class="cell-truncate" title="{html.escape(item['requirement'])}">{html.escape(item['requirement'])}</div></td>
                     <td><span class="status-tag {tag_cls}">{tag_text}</span></td>
-                    <td><div class="cell-truncate preview-truncate" title="{html.escape(evidence)}">{html.escape(evidence)}{page_info}</div></td>
+                    <td>{location_html}</td>
+                    <td><div class="cell-truncate preview-truncate" title="{html.escape(evidence)}">{html.escape(evidence)}</div></td>
                 </tr>
             """
 
@@ -611,11 +1145,12 @@ class ReportVisualizer:
                     <tr>
                         <th width="45%">招标要求 (★)</th>
                         <th width="15%">偏离状态</th>
-                        <th>响应证据 / 所在位置</th>
+                        <th width="12%">定位</th>
+                        <th>响应证据</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {rows_html if rows_html else '<tr><td colspan="3" class="empty-text">未检测到带 ★ 的强制性要求</td></tr>'}
+                    {rows_html if rows_html else '<tr><td colspan="4" class="empty-text">未检测到带 ★ 的强制性要求</td></tr>'}
                 </tbody>
             </table>
         </div>
@@ -627,11 +1162,24 @@ class ReportVisualizer:
         status = pricing_report.get('status', 'unknown')
         summary = pricing_report.get('summary', '未提取到报价信息')
         details = pricing_report.get('details', [])
-        sum_check = pricing_report.get('checks', {}).get('sum_consistency', {})
+        checks = pricing_report.get('checks', {}) or {}
+        evidence = pricing_report.get('evidence', {}) or {}
+        sum_check = checks.get('sum_consistency', {})
+        row_arithmetic = checks.get("row_arithmetic", {}) or {}
+        extracted_items = evidence.get("extracted_items") or []
+        total_candidates = evidence.get("total_candidates") or []
         
         status_map = {'pass': ('tag-ok', '逻辑一致'), 'fail': ('tag-err', '存在疑点'), 'unknown': ('tag-warning', '待人工核实')}
         tag_cls, tag_text = status_map.get(status, ('tag-missing', '未知'))
         details_html = "".join([f"<li>{html.escape(d)}</li>" for d in details])
+
+        overview_locations = []
+        for entry in total_candidates[:6]:
+            overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "总价"))
+        if not overview_locations:
+            for entry in extracted_items[:6]:
+                overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "分项金额"))
+        location_html = self._render_location_summary(locations=overview_locations, limit=6)
         
         sum_panel = ""
         if sum_check.get('calculated_total') is not None:
@@ -645,6 +1193,68 @@ class ReportVisualizer:
             </div>
             """
 
+        issue_panel = ""
+        row_issues = row_arithmetic.get("issues") or []
+        unresolved_rows = row_arithmetic.get("unresolved_rows") or []
+        if row_issues:
+            issue_rows_html = ""
+            for issue in row_issues[:10]:
+                issue_location_html = self._render_location_summary(
+                    locations=self._entry_locations(
+                        issue,
+                        default_label=issue.get("serial") or issue.get("label") or "算术疑点",
+                    ),
+                    limit=2,
+                )
+                issue_rows_html += f"""
+                <tr>
+                    <td>{html.escape(str(issue.get('label') or '-'))}</td>
+                    <td>{html.escape(str(issue.get('line_total') or issue.get('declared_group_total') or '-'))}</td>
+                    <td>{html.escape(str(issue.get('expected_total') or '-'))}</td>
+                    <td>{html.escape(str(issue.get('difference') or '-'))}</td>
+                    <td>{issue_location_html}</td>
+                </tr>
+                """
+            issue_panel += f"""
+            <div style="margin-top:15px;">
+                <div style="font-size:13px; font-weight:bold; color:var(--text-main); margin-bottom:8px;">算术疑点定位</div>
+                <table class="it-table">
+                    <thead>
+                        <tr><th>条目</th><th>声明值</th><th>计算值</th><th>偏差</th><th>定位</th></tr>
+                    </thead>
+                    <tbody>{issue_rows_html}</tbody>
+                </table>
+            </div>
+            """
+        if unresolved_rows:
+            unresolved_rows_html = ""
+            for item in unresolved_rows[:10]:
+                unresolved_location_html = self._render_location_summary(
+                    locations=self._entry_locations(
+                        item,
+                        default_label=item.get("serial") or item.get("label") or "未完整识别",
+                    ),
+                    limit=2,
+                )
+                unresolved_rows_html += f"""
+                <tr>
+                    <td>{html.escape(str(item.get('label') or '-'))}</td>
+                    <td>{html.escape(str(item.get('reason_text') or item.get('reason') or '-'))}</td>
+                    <td>{unresolved_location_html}</td>
+                </tr>
+                """
+            issue_panel += f"""
+            <div style="margin-top:15px;">
+                <div style="font-size:13px; font-weight:bold; color:var(--text-main); margin-bottom:8px;">未完整识别条目</div>
+                <table class="it-table">
+                    <thead>
+                        <tr><th>条目</th><th>原因</th><th>定位</th></tr>
+                    </thead>
+                    <tbody>{unresolved_rows_html}</tbody>
+                </table>
+            </div>
+            """
+
         return f"""
         <div class="card">
             <h2 style="display:flex; justify-content:space-between;">
@@ -654,8 +1264,10 @@ class ReportVisualizer:
             <div style="background:#fefefe; border:1px solid #eee; padding:15px; border-radius:8px; margin-bottom:15px; font-size:13px;">
                 <div style="font-weight:bold; margin-bottom:8px; color:var(--text-main);">{html.escape(summary)}</div>
                 <ul style="margin:0; padding-left:20px; color:var(--text-regular);">{details_html}</ul>
+                <div style="margin-top:12px;"><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
             </div>
             {sum_panel}
+            {issue_panel}
         </div>
         """
 
@@ -671,6 +1283,11 @@ class ReportVisualizer:
             status = report.get('result', '失败')
             type_text = report.get('type', '报价检查')
             summary_list = report.get('summary', [])
+            location_html = self._render_location_summary(
+                locations=report.get("locations"),
+                pages=None if report.get("locations") else report.get("pages"),
+                limit=6,
+            )
             
             tag_cls = 'tag-ok' if status == '合格' else 'tag-err'
             findings_html = "".join([f"<li>{html.escape(s)}</li>" for s in summary_list])
@@ -685,6 +1302,7 @@ class ReportVisualizer:
                     <ul style="margin:0; padding-left:20px; font-size:13px; color:var(--text-regular);">
                         {findings_html}
                     </ul>
+                    <div style="margin-top:12px;"><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
                 </div>
             </div>
             """
@@ -792,6 +1410,18 @@ class ReportVisualizer:
                 values = [value for value in values if value]
                 if values:
                     notes.append("签字值：" + "；".join(values))
+                location_values = []
+                for value in filled_values:
+                    signature_page = value.get("signature_page") or value.get("seal_page") or value.get("evidence_page") or value.get("page")
+                    bbox = value.get("signature_box") or value.get("seal_box")
+                    bbox_text = self._format_bbox_text(bbox)
+                    if signature_page is not None or bbox_text:
+                        label = f"P{signature_page}" if signature_page is not None else "P?"
+                        if bbox_text:
+                            label += f" {bbox_text}"
+                        location_values.append(label)
+                if location_values:
+                    notes.append("签字定位：" + "；".join(location_values))
 
             pending_fields = signature_check.get("pending_fields") or []
             if pending_fields:
@@ -810,10 +1440,24 @@ class ReportVisualizer:
             best_match = seal_check.get("best_match") or {}
             if best_match.get("seal_text"):
                 notes.append(f"公章：{best_match['seal_text']}")
+            seal_locations = seal_check.get("seal_locations") or []
+            if seal_locations:
+                location_values = []
+                for value in seal_locations[:3]:
+                    page = value.get("page")
+                    bbox_text = self._format_bbox_text(value.get("box") or value.get("bbox"))
+                    label = f"P{page}" if page is not None else "P?"
+                    if bbox_text:
+                        label += f" {bbox_text}"
+                    location_values.append(label)
+                if location_values:
+                    notes.append("盖章定位：" + "；".join(location_values))
 
             matched_sign_text = sign_date_check.get("matched_sign_text")
             if matched_sign_text:
                 notes.append(f"落款日期：{matched_sign_text}")
+            if sign_date_check.get("matched_sign_page") is not None:
+                notes.append(f"日期定位：P{sign_date_check['matched_sign_page']}")
 
             if sign_date_check.get("status") == "late" and sign_date_check.get("deadline_date"):
                 notes.append(f"晚于截止日期 {sign_date_check['deadline_date']}")
@@ -827,11 +1471,46 @@ class ReportVisualizer:
             sign_date_check = item.get("date_check") or {}
             note_text = build_attachment_note(item)
             pages = item.get("pages") or []
-            page_text = "、".join(f"P{page}" for page in pages if page is not None) or "-"
+            location_entries = []
+            for value in signature_check.get("signature_locations") or []:
+                if not isinstance(value, dict):
+                    continue
+                location_entries.append(
+                    {
+                        "page": value.get("page"),
+                        "bbox": value.get("box") or value.get("bbox"),
+                        "label": "签字",
+                        "document": "bidder",
+                    }
+                )
+            for value in seal_check.get("seal_locations") or []:
+                if not isinstance(value, dict):
+                    continue
+                location_entries.append(
+                    {
+                        "page": value.get("page"),
+                        "bbox": value.get("box") or value.get("bbox"),
+                        "label": "盖章",
+                        "document": "bidder",
+                    }
+                )
+            if sign_date_check.get("matched_sign_page") is not None:
+                location_entries.append(
+                    {
+                        "page": sign_date_check.get("matched_sign_page"),
+                        "label": "落款日期",
+                        "document": "bidder",
+                    }
+                )
+            page_html = self._render_location_summary(
+                locations=location_entries,
+                pages=pages,
+                limit=5,
+            )
             rows_html += f"""
                 <tr>
                     <td><div class="cell-truncate" title="{html.escape(str(item.get('title') or '-'))}">{html.escape(str(item.get('title') or '-'))}</div></td>
-                    <td>{html.escape(page_text)}</td>
+                    <td>{page_html}</td>
                     <td>{render_sub_status(signature_check.get('status'))}</td>
                     <td>{render_sub_status(seal_check.get('status'))}</td>
                     <td>{render_sub_status(sign_date_check.get('status'))}</td>
@@ -873,7 +1552,7 @@ class ReportVisualizer:
                 <thead>
                     <tr>
                         <th width="28%">附件</th>
-                        <th width="10%">页码</th>
+                        <th width="18%">定位</th>
                         <th width="12%">签字</th>
                         <th width="12%">盖章</th>
                         <th width="12%">日期</th>
@@ -889,7 +1568,9 @@ class ReportVisualizer:
 
     def generate_html(self, integrity_report, consistency_report, test_segments, model_segments,
                       deviation_report=None, pricing_report=None, reasonableness_report=None,
-                      verification_report=None, file_switcher_info=None):
+                      verification_report=None, file_switcher_info=None,
+                      detail_dir="details", detail_href_prefix=None,
+                      document_preview_config=None):
         """
         生成全维度 HTML 报告，可选左侧悬浮文件切换菜单。
 
@@ -915,6 +1596,7 @@ class ReportVisualizer:
         # 预处理基础数据
         model_dict = {item['title']: item['text'] for item in model_segments}
         test_dict = {item['title']: item['text'] for item in test_segments}
+        self._document_preview_config = document_preview_config or {"documents": {}}
 
         from .consistency import ConsistencyChecker
         checker = ConsistencyChecker()
@@ -961,6 +1643,7 @@ class ReportVisualizer:
             <meta charset="UTF-8">
             <title>标书全维度智能审查报告</title>
             {self.CSS_STYLE}
+            {self._build_locator_support_style()}
             <!-- 追加悬浮菜单专用样式 -->
             <style>
                 /* 左侧悬浮文件切换菜单 */
@@ -1049,6 +1732,7 @@ class ReportVisualizer:
             </style>
         </head>
         <body>
+            {self._build_locator_support_markup()}
             {switcher_html}
             <div class="container">
                 <div class="card header-card">
@@ -1061,9 +1745,10 @@ class ReportVisualizer:
                         <thead>
                             <tr>
                                 <th width="5%"></th>
-                                <th width="30%">审查项目名称 (悬浮查看完整)</th>
+                                <th width="26%">审查项目名称 (悬浮查看完整)</th>
                                 <th width="12%">完整性状态</th>
                                 <th width="15%">一致性详情</th>
+                                <th width="18%">定位</th>
                                 <th>内容定位预览</th>
                             </tr>
                         </thead>
@@ -1071,7 +1756,8 @@ class ReportVisualizer:
         """
 
         # 创建详情目录
-        details_dir = "details"
+        details_dir = detail_dir or "details"
+        detail_href_prefix = detail_href_prefix or str(details_dir).replace("\\", "/")
         os.makedirs(details_dir, exist_ok=True)
 
         # 生成主表各行
@@ -1105,6 +1791,7 @@ class ReportVisualizer:
 
             # 构建一致性状态列
             consistency_html = ""
+            infos = []
             if len(child_items) > 0:
                 consistency_html = f'<span class="status-tag tag-warning consistency-toggle" data-group="{group_id}">⚠️ 查看子附件情况<span class="toggle-icon">▼</span></span>'
             else:
@@ -1113,9 +1800,9 @@ class ReportVisualizer:
                 if infos:
                     s_label, s_tag = self._get_status_for_single_item(infos)
                     if len(infos) == 1:
-                        consistency_html = f'<a class="status-tag {s_tag}" href="details/detail_{infos[0]["idx"]}.html">{s_label}</a>'
+                        consistency_html = f'<a class="status-tag {s_tag}" href="{detail_href_prefix}/detail_{infos[0]["idx"]}.html">{s_label}</a>'
                     else:
-                        path = f"details/detail_combined_{combined_page_counter}.html"
+                        path = f"{detail_href_prefix}/detail_combined_{combined_page_counter}.html"
                         self._generate_combined_detail_page(
                             infos,
                             os.path.join(details_dir, f"detail_combined_{combined_page_counter}.html"),
@@ -1127,6 +1814,13 @@ class ReportVisualizer:
                 else:
                     consistency_html = '<span class="status-tag tag-missing">无附件模版</span>'
 
+            main_pages = []
+            main_locations = list(info.get("locations") or [])
+            for attachment_info in infos:
+                main_pages.extend(attachment_info.get("pages") or [])
+                main_locations.extend(attachment_info.get("locations") or [])
+            location_html = self._render_location_summary(locations=main_locations, pages=main_pages)
+
             # 主项行
             main_html += f"""
                                 <tr class="main-item-row group-row" data-group-id="{group_id}">
@@ -1134,6 +1828,7 @@ class ReportVisualizer:
                                     <td><div class="cell-truncate name-truncate" title="{html.escape(name)}">{html.escape(name)}</div></td>
                                     <td><span class="status-tag {tag_cls}">{display_status}</span></td>
                                     <td>{consistency_html}</td>
+                                    <td>{location_html}</td>
                                     <td><div class="cell-truncate preview-truncate">{info.get('preview', '-')}</div></td>
                                 </tr>
             """
@@ -1148,9 +1843,9 @@ class ReportVisualizer:
                 if c_infos:
                     sl, st = self._get_status_for_single_item(c_infos)
                     if len(c_infos) == 1:
-                        c_consistency = f'<a class="status-tag {st}" href="details/detail_{c_infos[0]["idx"]}.html">{sl}</a>'
+                        c_consistency = f'<a class="status-tag {st}" href="{detail_href_prefix}/detail_{c_infos[0]["idx"]}.html">{sl}</a>'
                     else:
-                        c_path = f"details/detail_combined_{combined_page_counter}.html"
+                        c_path = f"{detail_href_prefix}/detail_combined_{combined_page_counter}.html"
                         self._generate_combined_detail_page(
                             c_infos,
                             os.path.join(details_dir, f"detail_combined_{combined_page_counter}.html"),
@@ -1160,12 +1855,20 @@ class ReportVisualizer:
                         c_consistency = f'<a class="status-tag {st}" href="{c_path}">{sl}</a>'
                         combined_page_counter += 1
 
+                c_pages = []
+                c_locations = list(c_info.get("locations") or [])
+                for attachment_info in c_infos:
+                    c_pages.extend(attachment_info.get("pages") or [])
+                    c_locations.extend(attachment_info.get("locations") or [])
+                c_location_html = self._render_location_summary(locations=c_locations, pages=c_pages)
+
                 main_html += f"""
                                 <tr class="sub-item-row child-row" data-parent="{group_id}">
                                     <td></td>
                                     <td><div class="cell-truncate name-truncate" title="{html.escape(c_name)}">{html.escape(c_name)}</div></td>
                                     <td><span class="status-tag {"tag-ok" if c_info.get("is_passed") else "tag-err"}">{c_info['status']}</span></td>
                                     <td>{c_consistency}</td>
+                                    <td>{c_location_html}</td>
                                     <td><div class="cell-truncate preview-truncate">{c_info.get('preview', '-')}</div></td>
                                 </tr>
                 """
@@ -1176,13 +1879,22 @@ class ReportVisualizer:
         for idx, rec in enumerate(consistency_report):
             title, missing = rec['name'], rec.get('missing_anchors', [])
             b_text, m_text = test_dict.get(title, ""), model_dict.get(title, "")
-            card_html = self._generate_detail_card(title, missing, b_text, m_text, checker)
+            card_html = self._generate_detail_card(
+                title,
+                missing,
+                b_text,
+                m_text,
+                checker,
+                pages=rec.get("pages"),
+                locations=rec.get("locations"),
+            )
             detail_html = f"""
             <!DOCTYPE html>
-            <html><head><meta charset="UTF-8"><title>审查详情 - {html.escape(title)}</title>{self.CSS_STYLE}</head>
-            <body><a href="javascript:void(0);" onclick="window.history.back();" class="back-link">← 返回总览</a>
+            <html><head><meta charset="UTF-8"><title>审查详情 - {html.escape(title)}</title>{self.CSS_STYLE}{self._build_locator_support_style()}</head>
+            <body>{self._build_locator_support_markup()}<a href="javascript:void(0);" onclick="window.history.back();" class="back-link">← 返回总览</a>
             <div class="container"><div style="height: 40px;"></div><div class="legend-card"><strong>💡 阅读指引：</strong><span>浅蓝底纹=匹配成功</span><span>缺=缺失模版内容</span></div>{card_html}</div>
-            <script>document.querySelectorAll('.expand-btn').forEach(btn => {{ btn.onclick = function() {{ const content = document.getElementById('content-' + this.dataset.uid); const isCol = content.classList.contains('content-collapsed'); content.classList.toggle('content-collapsed', !isCol); content.classList.toggle('content-expanded', isCol); this.querySelector('.expand-text').textContent = isCol ? '收起' : '显示全部'; this.querySelector('.expand-icon').textContent = isCol ? '▲' : '▼'; }}; }});</script>
+            <script>document.querySelectorAll('.expand-btn').forEach(btn => {{ btn.onclick = function() {{ const content = document.getElementById('content-' + this.dataset.uid); const isCol = content.classList.contains('content-collapsed'); content.classList.toggle('content-collapsed', !isCol); content.classList.toggle('content-expanded', isCol); this.querySelector('.expand-text').textContent = isCol ? '收起' : '显示全部'; this.querySelector('.expand-icon').textContent = isCol ? '▲' : '▼'; }}; }});if(window.__bindLocatorChips){{window.__bindLocatorChips();}}</script>
+            {self._build_locator_support_script()}
             </body></html>
             """
             with open(os.path.join(details_dir, f"detail_{idx}.html"), "w", encoding="utf-8") as f:
@@ -1212,6 +1924,7 @@ class ReportVisualizer:
                         }});
                     }});
                 </script>
+                {self._build_locator_support_script()}
             </body>
             </html>
         """

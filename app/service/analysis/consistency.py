@@ -472,6 +472,31 @@ class ConsistencyChecker:
                 existing["text"] = f"{prefix}\n{part}".strip() if prefix else part
         return by_number, merged_sections
 
+    def _serialize_section_locations(self, section: dict | None) -> List[Dict]:
+        if not isinstance(section, dict):
+            return []
+        locations: List[Dict] = []
+        for item in section.get("sections") or []:
+            if not isinstance(item, dict):
+                continue
+            page = item.get("page") if isinstance(item.get("page"), int) else None
+            bbox = item.get("bbox")
+            normalized_bbox = None
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and all(isinstance(x, (int, float)) for x in bbox[:4]):
+                normalized_bbox = [int(round(float(x))) for x in bbox[:4]]
+            text = str(item.get("text") or "").strip()
+            if page is None and normalized_bbox is None and not text:
+                continue
+            locations.append(
+                {
+                    "page": page,
+                    "bbox": normalized_bbox,
+                    "text": text[:120] if text else "",
+                    "type": str(item.get("type") or "text"),
+                }
+            )
+        return locations
+
     def _get_anchors(self, text: str) -> List[str]:
         # 1. 抹平括号（防止文本粘连）
         text = re.sub(r'\(.*?\)|（.*?）', ' ', text)
@@ -521,6 +546,8 @@ class ConsistencyChecker:
                             "name": title,
                             "is_passed": False,
                             "missing_anchors": [],
+                            "pages": [],
+                            "locations": [],
                             "skip_reason": {
                                 "type": "attachment_not_found",
                                 "attachment_number": attachment_probe["attachment_number"],
@@ -528,6 +555,9 @@ class ConsistencyChecker:
                         }
                     )
                     continue
+
+            matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
+            matched_locations = self._serialize_section_locations(matched_section)
 
             m_body = self._trim_instruction_note_block(
                 self._trim_non_body_lines(self._strip_title_line(m_txt, title))
@@ -542,7 +572,9 @@ class ConsistencyChecker:
                 results.append({
                     "name": title,
                     "is_passed": passed,
-                    "missing_anchors": [] if passed else ["[未检测到内容]"]
+                    "missing_anchors": [] if passed else ["[未检测到内容]"],
+                    "pages": matched_pages,
+                    "locations": matched_locations,
                 })
                 continue
 
@@ -558,7 +590,9 @@ class ConsistencyChecker:
                 results.append({
                     "name": title,
                     "is_passed": bool(t_txt.strip()) and len(missing) == 0,
-                    "missing_anchors": missing if t_txt.strip() else ["[未检测到内容]"]
+                    "missing_anchors": missing if t_txt.strip() else ["[未检测到内容]"],
+                    "pages": matched_pages,
+                    "locations": matched_locations,
                 })
                 continue
 
@@ -569,6 +603,8 @@ class ConsistencyChecker:
             results.append({
                 "name": title,
                 "is_passed": len(missing) == 0,
-                "missing_anchors": missing
+                "missing_anchors": missing,
+                "pages": matched_pages,
+                "locations": matched_locations,
             })
         return results
