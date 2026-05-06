@@ -1,0 +1,4414 @@
+{
+  "filename": "翡翠商务标.pdf",
+  "ocr_used": true,
+  "pdf_mode": "vl_only",
+  "ocr_engine": "PaddleOCR-VL-1.5",
+  "page_count": 104,
+  "seal_count": 0,
+  "seal_texts": [],
+  "layout_used": true,
+  "source_mode": "local",
+  "text_length": 17991,
+  "active_device": "gpu:0",
+  "native_tables": [
+    {
+      "page": 6,
+      "block_id": 3,
+      "group_id": 3,
+      "block_bbox": [
+        108,
+        285,
+        1121,
+        626
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td></td><td>$ \\text{Å }7\\text{&#x27;}1 $</td><td>?  $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s  $ \\text{α} $</td></tr><tr><td></td><td>=  $ \\text{ŷ }OL\\text{€} $</td><td>8 &lt;1 $ \\text{®A} $ $ \\text{Ö} $(  $ \\text{C} $ $ \\text{§} $  $ \\text{α} $</td></tr></table>",
+      "global_block_id": 16,
+      "global_group_id": 16,
+      "block_polygon_points": [
+        [
+          108.0,
+          285.0
+        ],
+        [
+          1121.0,
+          285.0
+        ],
+        [
+          1121.0,
+          626.0
+        ],
+        [
+          108.0,
+          626.0
+        ]
+      ]
+    },
+    {
+      "page": 7,
+      "block_id": 4,
+      "group_id": 4,
+      "block_bbox": [
+        98,
+        308,
+        1141,
+        1100
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td>i&#x27;</td><td>CE $ \\mu $ é</td><td></td><td>...&#x27; À s À</td><td>G $ \\ddot{y} $</td><td>?AŨ $ \\ddot{A} $ s À</td><td>B\\gt 7#</td></tr><tr><td></td><td>8i f F&amp;Y $ \\ddot{Y} $á $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td></td></tr><tr><td></td><td>h8i 8a $ \\mu $ $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td></td></tr><tr><td></td><td>58i #k  $ \\ddot{O} $ j $ ^{-} $</td><td>!Q</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td colspan=\"7\">8A $ \\ddot{N} $ $ \\ddot{A} $ s A  $ \\ddot{O} $ s  $ \\ddot{E} $6¶ )AE. | 7 s</td></tr></table>",
+      "global_block_id": 27,
+      "global_group_id": 27,
+      "block_polygon_points": [
+        [
+          98.0,
+          308.0
+        ],
+        [
+          1141.0,
+          308.0
+        ],
+        [
+          1141.0,
+          1100.0
+        ],
+        [
+          98.0,
+          1100.0
+        ]
+      ]
+    },
+    {
+      "page": 8,
+      "block_id": 12,
+      "group_id": 12,
+      "block_bbox": [
+        89,
+        1089,
+        1110,
+        1574
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td>¿'</td><td>=</td><td>☞U'</td><td>W[</td><td>6| ŷ 6| 0</td><td>• ¶ 1/4 J 5</td><td>p Lt J 5 Aŷ&gt; € É N¥1</td><td>p 9ç 9“@¹ Aŷ−</td><td>\\ N© - ☞ + N 1/4 @8¢</td><td>7#</td></tr><tr><td colspan=\"10\">0 Aŷ© C©Sê</td></tr><tr><td></td><td>4ÚT</td><td></td><td>+g</td><td>N© k 5</td><td></td><td></td><td></td><td>k C©S ê</td><td></td></tr><tr><td></td><td>~ ú</td><td></td><td>£</td><td>N© k -</td><td></td><td></td><td></td><td>N© B8 T</td><td></td></tr><tr><td></td><td>Q M19%4</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© 1† B</td><td></td></tr><tr><td></td><td>í V</td><td></td><td>+g</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© Ct $Àf Lõ Aô`</td><td></td></tr><tr><td></td><td>G $ *d</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr><tr><td></td><td>)» £;®</td><td></td><td>£</td><td>N© 4y *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr></table>",
+      "global_block_id": 45,
+      "global_group_id": 45,
+      "block_polygon_points": [
+        [
+          89.0,
+          1089.0
+        ],
+        [
+          1110.0,
+          1089.0
+        ],
+        [
+          1110.0,
+          1574.0
+        ],
+        [
+          89.0,
+          1574.0
+        ]
+      ]
+    },
+    {
+      "page": 19,
+      "block_id": 0,
+      "group_id": 0,
+      "block_bbox": [
+        77,
+        61,
+        1101,
+        312
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td>1</td><td>☐» £;☹ &lt;</td><td>☐” J 34: #§ 893 W- ☐ p J - z&gt; | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•</td></tr><tr><td>1</td><td>☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g</td><td></td></tr><tr><td colspan=\"3\">☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A</td></tr><tr><td colspan=\"3\">☐ 8 μ M’ ☐ ü Cμ 2 $ F f</td></tr><tr><td colspan=\"3\">N© &amp; L$ ☐</td></tr><tr><td colspan=\"3\">N© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐</td></tr></table>",
+      "global_block_id": 58,
+      "global_group_id": 58,
+      "block_polygon_points": [
+        [
+          77.0,
+          61.0
+        ],
+        [
+          1101.0,
+          61.0
+        ],
+        [
+          1101.0,
+          312.0
+        ],
+        [
+          77.0,
+          312.0
+        ]
+      ]
+    },
+    {
+      "page": 24,
+      "block_id": 3,
+      "group_id": 3,
+      "block_bbox": [
+        103,
+        298,
+        1105,
+        823
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td>i&#x27;</td><td>7 · &amp;,&#x27;G-€]MOr</td><td>Å 7 · &amp;,&#x27;Ų Å ö å</td><td>• /ë B$&gt;</td><td>) Ä Å 7 · &amp; p XN¥</td></tr><tr><td></td><td>8i f F&amp;Ųá− z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>$h8i 8a \\mu − z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>58i #k Ø j `</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr></table>",
+      "global_block_id": 67,
+      "global_group_id": 67,
+      "block_polygon_points": [
+        [
+          103.0,
+          298.0
+        ],
+        [
+          1105.0,
+          298.0
+        ],
+        [
+          1105.0,
+          823.0
+        ],
+        [
+          103.0,
+          823.0
+        ]
+      ]
+    },
+    {
+      "page": 25,
+      "block_id": 1,
+      "group_id": 1,
+      "block_bbox": [
+        98,
+        165,
+        1099,
+        1278
+      ],
+      "block_label": "table",
+      "block_order": null,
+      "block_content": "<table><tr><td>i,</td><td>$ \\alpha $ -</td><td>N© =0</td><td>8 &lt; H NÍ</td><td>$ \\mu $ é</td><td>^...}</td><td>pLtAñ&gt; € É X  $ \\lambda $ 7 · &amp;,’ p XN¥.1</td></tr><tr><td></td><td></td><td>: #§#• h?øi \\mathring{A} f 8 CE• AP</td><td>#&#x27; ö</td><td>8i 8f - z 0 Cq</td><td>: #§, · F P \\mathring{A} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>€0/E</td><td>€0/E</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>&lt;8è</td><td>: #§’ s · F P \\mathring{A} 9L€</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>] - K&amp;|</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>i?&quot;®G, - LuCh C 9L€CS+ ∞(</td><td></td></tr><tr><td></td><td></td><td>FHEž” G,8²</td><td>9 \\mathring{I} Lu5</td><td>j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}</td><td>: #§#&quot;• h?øLö 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>ü r</td><td>#&#x27; ö</td><td>ü r  E- DÜ z</td><td>: #§&quot;dLvFJö h...9L€ø(</td><td></td></tr><tr><td></td><td></td><td>!WÊ4j#-Aê&lt; G} ‡ §?øJ</td><td>#&#x27; ö</td><td>...J</td><td>?−1 2 Š?ø» Ń ] ó</td><td></td></tr><tr><td></td><td></td><td>ÀCt: #§? 0; ‡</td><td>#&#x27; ö</td><td>?0; ‡ £ F :U = Ń</td><td>: #§2 v Ń ^ J</td><td></td></tr><tr><td></td><td></td><td>à \\mathring{A} f P Ý ☐ v = Ń</td><td>#&#x27; ö</td><td>:UK0Ø−</td><td>: #§§7 · F P \\mathring{Y} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>K−U Ń Š J</td><td>#&#x27; ö</td><td>C](™8²</td><td>K−U Ń J Š?øJ</td><td></td></tr></table>",
+      "global_block_id": 70,
+      "global_group_id": 70,
+      "block_polygon_points": [
+        [
+          98.0,
+          165.0
+        ],
+        [
+          1099.0,
+          165.0
+        ],
+        [
+          1099.0,
+          1278.0
+        ],
+        [
+          98.0,
+          1278.0
+        ]
+      ]
+    }
+  ],
+  "parser_engine": "PaddleOCR-VL-1.5",
+  "seal_detected": false,
+  "logical_tables": [
+    {
+      "id": "table_1",
+      "rows": [
+        [
+          "$ \\text{Å }7\\text{'}1 $",
+          "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+        ],
+        [
+          "= $ \\text{ŷ }OL\\text{€} $",
+          "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+        ]
+      ],
+      "pages": [
+        6
+      ],
+      "title": null,
+      "headers": [
+        "col_1",
+        "col_2"
+      ],
+      "records": [
+        {
+          "col_1": "$ \\text{Å }7\\text{'}1 $",
+          "col_2": "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+        },
+        {
+          "col_1": "= $ \\text{ŷ }OL\\text{€} $",
+          "col_2": "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+        }
+      ],
+      "continued": false,
+      "row_count": 2,
+      "column_count": 2,
+      "parser_chain": [
+        "text"
+      ],
+      "data_row_count": 2,
+      "header_row_count": 0,
+      "header_signature": "col1|col2",
+      "source_section_indexes": [
+        14
+      ]
+    },
+    {
+      "id": "table_2",
+      "rows": [
+        [
+          "i'",
+          "CE $ \\mu $ é",
+          "...' À s À",
+          "G $ \\ddot{y} $",
+          "?AŨ $ \\ddot{A} $ s À",
+          "B\\gt 7#"
+        ],
+        [
+          "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+          "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+          "",
+          "",
+          "",
+          ""
+        ],
+        [
+          "h8i 8a $ \\mu $ $ ^{-} $ z",
+          "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+          "",
+          "",
+          "",
+          ""
+        ],
+        [
+          "58i #k $ \\ddot{O} $ j $ ^{-} $",
+          "!Q",
+          "",
+          "",
+          "",
+          ""
+        ]
+      ],
+      "pages": [
+        7
+      ],
+      "title": null,
+      "headers": [
+        "col_1",
+        "col_2",
+        "col_3",
+        "col_4",
+        "col_5",
+        "col_6"
+      ],
+      "records": [
+        {
+          "col_1": "i'",
+          "col_2": "CE $ \\mu $ é",
+          "col_3": "...' À s À",
+          "col_4": "G $ \\ddot{y} $",
+          "col_5": "?AŨ $ \\ddot{A} $ s À",
+          "col_6": "B\\gt 7#"
+        },
+        {
+          "col_1": "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+          "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+          "col_3": "",
+          "col_4": "",
+          "col_5": "",
+          "col_6": ""
+        },
+        {
+          "col_1": "h8i 8a $ \\mu $ $ ^{-} $ z",
+          "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+          "col_3": "",
+          "col_4": "",
+          "col_5": "",
+          "col_6": ""
+        },
+        {
+          "col_1": "58i #k $ \\ddot{O} $ j $ ^{-} $",
+          "col_2": "!Q",
+          "col_3": "",
+          "col_4": "",
+          "col_5": "",
+          "col_6": ""
+        }
+      ],
+      "continued": false,
+      "row_count": 4,
+      "column_count": 6,
+      "parser_chain": [
+        "text"
+      ],
+      "data_row_count": 4,
+      "header_row_count": 0,
+      "header_signature": "col1|col2|col3|col4|col5|col6",
+      "source_section_indexes": [
+        25
+      ]
+    },
+    {
+      "id": "table_3",
+      "rows": [
+        [
+          "¿'",
+          "=",
+          "☞U'",
+          "W[",
+          "6| ŷ 6| 0",
+          "• ¶ 1/4 J 5",
+          "p Lt J 5 Aŷ> € É N¥1",
+          "p 9ç 9“@¹ Aŷ−",
+          "\\ N© - ☞ + N 1/4 @8¢",
+          "7#"
+        ],
+        [
+          "4ÚT",
+          "",
+          "+g",
+          "N© k 5",
+          "",
+          "",
+          "",
+          "k C©S ê",
+          "",
+          ""
+        ],
+        [
+          "~ ú",
+          "",
+          "£",
+          "N© k -",
+          "",
+          "",
+          "",
+          "N© B8 T",
+          "",
+          ""
+        ],
+        [
+          "Q M19%4",
+          "",
+          "£",
+          "N© 4ý *6",
+          "",
+          "",
+          "",
+          "N© 1† B",
+          "",
+          ""
+        ],
+        [
+          "í V",
+          "",
+          "+g",
+          "N© 4ý *6",
+          "",
+          "",
+          "",
+          "N© Ct $Àf Lõ Aô`",
+          "",
+          ""
+        ],
+        [
+          "G $ *d",
+          "",
+          "£",
+          "N© 4ý *6",
+          "",
+          "",
+          "",
+          "N© — >|",
+          "",
+          ""
+        ],
+        [
+          ")» £;®",
+          "",
+          "£",
+          "N© 4y *6",
+          "",
+          "",
+          "",
+          "N© — >|",
+          "",
+          ""
+        ]
+      ],
+      "pages": [
+        8
+      ],
+      "title": null,
+      "headers": [
+        "col_1",
+        "col_2",
+        "col_3",
+        "col_4",
+        "col_5",
+        "col_6",
+        "col_7",
+        "col_8",
+        "col_9",
+        "col_10"
+      ],
+      "records": [
+        {
+          "col_1": "¿'",
+          "col_2": "=",
+          "col_3": "☞U'",
+          "col_4": "W[",
+          "col_5": "6| ŷ 6| 0",
+          "col_6": "• ¶ 1/4 J 5",
+          "col_7": "p Lt J 5 Aŷ> € É N¥1",
+          "col_8": "p 9ç 9“@¹ Aŷ−",
+          "col_9": "\\ N© - ☞ + N 1/4 @8¢",
+          "col_10": "7#"
+        },
+        {
+          "col_1": "4ÚT",
+          "col_2": "",
+          "col_3": "+g",
+          "col_4": "N© k 5",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "k C©S ê",
+          "col_9": "",
+          "col_10": ""
+        },
+        {
+          "col_1": "~ ú",
+          "col_2": "",
+          "col_3": "£",
+          "col_4": "N© k -",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "N© B8 T",
+          "col_9": "",
+          "col_10": ""
+        },
+        {
+          "col_1": "Q M19%4",
+          "col_2": "",
+          "col_3": "£",
+          "col_4": "N© 4ý *6",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "N© 1† B",
+          "col_9": "",
+          "col_10": ""
+        },
+        {
+          "col_1": "í V",
+          "col_2": "",
+          "col_3": "+g",
+          "col_4": "N© 4ý *6",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "N© Ct $Àf Lõ Aô`",
+          "col_9": "",
+          "col_10": ""
+        },
+        {
+          "col_1": "G $ *d",
+          "col_2": "",
+          "col_3": "£",
+          "col_4": "N© 4ý *6",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "N© — >|",
+          "col_9": "",
+          "col_10": ""
+        },
+        {
+          "col_1": ")» £;®",
+          "col_2": "",
+          "col_3": "£",
+          "col_4": "N© 4y *6",
+          "col_5": "",
+          "col_6": "",
+          "col_7": "",
+          "col_8": "N© — >|",
+          "col_9": "",
+          "col_10": ""
+        }
+      ],
+      "continued": false,
+      "row_count": 7,
+      "column_count": 10,
+      "parser_chain": [
+        "text"
+      ],
+      "data_row_count": 7,
+      "header_row_count": 0,
+      "header_signature": "col1|col2|col3|col4|col5|col6|col7|col8|col9|col10",
+      "source_section_indexes": [
+        43
+      ]
+    },
+    {
+      "id": "table_4",
+      "rows": [
+        [
+          "1",
+          "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+        ],
+        [
+          "1",
+          "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+        ]
+      ],
+      "pages": [
+        19
+      ],
+      "title": null,
+      "headers": [
+        "col_1",
+        "col_2"
+      ],
+      "records": [
+        {
+          "col_1": "1",
+          "col_2": "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+        },
+        {
+          "col_1": "1",
+          "col_2": "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+        }
+      ],
+      "continued": false,
+      "row_count": 2,
+      "column_count": 2,
+      "parser_chain": [
+        "text"
+      ],
+      "data_row_count": 2,
+      "header_row_count": 0,
+      "header_signature": "col1|col2",
+      "source_section_indexes": [
+        55
+      ]
+    },
+    {
+      "id": "table_5",
+      "rows": [
+        [
+          "i'",
+          "7 · &,'G-€]MOr",
+          "Å 7 · &,'Ų Å ö å",
+          "• /ë B$>",
+          ") Ä Å 7 · & p XN¥"
+        ],
+        [
+          "8i f F&Ųá− z",
+          "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+          "• /ë",
+          "",
+          ""
+        ],
+        [
+          "i,",
+          "$ \\alpha $ -",
+          "N© =0",
+          "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1"
+        ],
+        [
+          ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+          "#' ö",
+          "8i 8f - z 0 Cq",
+          ": #§, · F P \\mathring{A} 9L€ø("
+        ],
+        [
+          "- z : :",
+          "#' ö",
+          "€0/E",
+          "€0/E"
+        ],
+        [
+          "- z : :",
+          "#' ö",
+          "<8è",
+          ": #§’ s · F P \\mathring{A} 9L€"
+        ],
+        [
+          "- z : :",
+          "#' ö",
+          "8a $ \\mu $ - z",
+          "] - K&|"
+        ],
+        [
+          "- z : :",
+          "#' ö",
+          "8a $ \\mu $ - z",
+          "i?\"®G, - LuCh C 9L€CS+ ∞("
+        ],
+        [
+          "FHEž” G,8²",
+          "9 \\mathring{I} Lu5",
+          "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+          ": #§#\"• h?øLö 9L€ø("
+        ],
+        [
+          "ü r",
+          "#' ö",
+          "ü r E- DÜ z",
+          ": #§\"dLvFJö h...9L€ø("
+        ],
+        [
+          "!WÊ4j#-Aê< G} ‡ §?øJ",
+          "#' ö",
+          "...J",
+          "?−1 2 Š?ø» Ń ] ó"
+        ],
+        [
+          "ÀCt: #§? 0; ‡",
+          "#' ö",
+          "?0; ‡ £ F :U = Ń",
+          ": #§2 v Ń ^ J"
+        ],
+        [
+          "à \\mathring{A} f P Ý ☐ v = Ń",
+          "#' ö",
+          ":UK0Ø−",
+          ": #§§7 · F P \\mathring{Y} 9L€ø("
+        ],
+        [
+          "K−U Ń Š J",
+          "#' ö",
+          "C](™8²",
+          "K−U Ń J Š?øJ"
+        ]
+      ],
+      "pages": [
+        24,
+        25
+      ],
+      "title": null,
+      "headers": [
+        "col_1",
+        "col_2",
+        "col_3",
+        "col_4",
+        "col_5"
+      ],
+      "records": [
+        {
+          "col_1": "i'",
+          "col_2": "7 · &,'G-€]MOr",
+          "col_3": "Å 7 · &,'Ų Å ö å",
+          "col_4": "• /ë B$>",
+          "col_5": ") Ä Å 7 · & p XN¥"
+        },
+        {
+          "col_1": "8i f F&Ųá− z",
+          "col_2": "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+          "col_3": "• /ë",
+          "col_4": "",
+          "col_5": ""
+        },
+        {
+          "col_1": "i,",
+          "col_2": "$ \\alpha $ -",
+          "col_3": "N© =0",
+          "col_4": "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1",
+          "col_5": ""
+        },
+        {
+          "col_1": ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+          "col_2": "#' ö",
+          "col_3": "8i 8f - z 0 Cq",
+          "col_4": ": #§, · F P \\mathring{A} 9L€ø(",
+          "col_5": ""
+        },
+        {
+          "col_1": "- z : :",
+          "col_2": "#' ö",
+          "col_3": "€0/E",
+          "col_4": "€0/E",
+          "col_5": ""
+        },
+        {
+          "col_1": "- z : :",
+          "col_2": "#' ö",
+          "col_3": "<8è",
+          "col_4": ": #§’ s · F P \\mathring{A} 9L€",
+          "col_5": ""
+        },
+        {
+          "col_1": "- z : :",
+          "col_2": "#' ö",
+          "col_3": "8a $ \\mu $ - z",
+          "col_4": "] - K&|",
+          "col_5": ""
+        },
+        {
+          "col_1": "- z : :",
+          "col_2": "#' ö",
+          "col_3": "8a $ \\mu $ - z",
+          "col_4": "i?\"®G, - LuCh C 9L€CS+ ∞(",
+          "col_5": ""
+        },
+        {
+          "col_1": "FHEž” G,8²",
+          "col_2": "9 \\mathring{I} Lu5",
+          "col_3": "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+          "col_4": ": #§#\"• h?øLö 9L€ø(",
+          "col_5": ""
+        },
+        {
+          "col_1": "ü r",
+          "col_2": "#' ö",
+          "col_3": "ü r E- DÜ z",
+          "col_4": ": #§\"dLvFJö h...9L€ø(",
+          "col_5": ""
+        },
+        {
+          "col_1": "!WÊ4j#-Aê< G} ‡ §?øJ",
+          "col_2": "#' ö",
+          "col_3": "...J",
+          "col_4": "?−1 2 Š?ø» Ń ] ó",
+          "col_5": ""
+        },
+        {
+          "col_1": "ÀCt: #§? 0; ‡",
+          "col_2": "#' ö",
+          "col_3": "?0; ‡ £ F :U = Ń",
+          "col_4": ": #§2 v Ń ^ J",
+          "col_5": ""
+        },
+        {
+          "col_1": "à \\mathring{A} f P Ý ☐ v = Ń",
+          "col_2": "#' ö",
+          "col_3": ":UK0Ø−",
+          "col_4": ": #§§7 · F P \\mathring{Y} 9L€ø(",
+          "col_5": ""
+        },
+        {
+          "col_1": "K−U Ń Š J",
+          "col_2": "#' ö",
+          "col_3": "C](™8²",
+          "col_4": "K−U Ń J Š?øJ",
+          "col_5": ""
+        }
+      ],
+      "continued": true,
+      "row_count": 14,
+      "column_count": 5,
+      "parser_chain": [
+        "text"
+      ],
+      "data_row_count": 14,
+      "header_row_count": 0,
+      "header_signature": "col1|col2|col3|col4|col5",
+      "source_section_indexes": [
+        64,
+        67
+      ]
+    }
+  ],
+  "pdf_text_stats": {},
+  "seal_locations": [],
+  "table_sections": [
+    {
+      "bbox": [
+        54,
+        142,
+        560,
+        313
+      ],
+      "page": 6,
+      "text": "$ \\text{Å }7\\text{'}1 $ ? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $ = $ \\text{ŷ }OL\\text{€} $ 8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $",
+      "type": "table",
+      "bbox_ocr": [
+        108,
+        285,
+        1121,
+        626
+      ],
+      "raw_text": "$ \\text{Å }7\\text{'}1 $\t\t? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $\n= $ \\text{ŷ }OL\\text{€} $\t\t8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $",
+      "native_table": {
+        "page": 6,
+        "block_id": 3,
+        "group_id": 3,
+        "block_bbox": [
+          108,
+          285,
+          1121,
+          626
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td></td><td>$ \\text{Å }7\\text{&#x27;}1 $</td><td>?  $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s  $ \\text{α} $</td></tr><tr><td></td><td>=  $ \\text{ŷ }OL\\text{€} $</td><td>8 &lt;1 $ \\text{®A} $ $ \\text{Ö} $(  $ \\text{C} $ $ \\text{§} $  $ \\text{α} $</td></tr></table>",
+        "global_block_id": 16,
+        "global_group_id": 16,
+        "block_polygon_points": [
+          [
+            108.0,
+            285.0
+          ],
+          [
+            1121.0,
+            285.0
+          ],
+          [
+            1121.0,
+            626.0
+          ],
+          [
+            108.0,
+            626.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "$ \\text{Å }7\\text{'}1 $",
+            "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+          ],
+          [
+            "= $ \\text{ŷ }OL\\text{€} $",
+            "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2"
+        ],
+        "records": [
+          {
+            "col_1": "$ \\text{Å }7\\text{'}1 $",
+            "col_2": "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+          },
+          {
+            "col_1": "= $ \\text{ŷ }OL\\text{€} $",
+            "col_2": "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+          }
+        ],
+        "row_count": 2,
+        "column_count": 2,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2"
+      }
+    },
+    {
+      "bbox": [
+        49,
+        154,
+        570,
+        550
+      ],
+      "page": 7,
+      "text": "i' CE $ \\mu $ é ...' À s À G $ \\ddot{y} $ ?AŨ $ \\ddot{A} $ s À B\\gt 7# 8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z 8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $ h8i 8a $ \\mu $ $ ^{-} $ z 8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $ 58i #k $ \\ddot{O} $ j $ ^{-} $ !Q 8A $ \\ddot{N} $ $ \\ddot{A} $ s A $ \\ddot{O} $ s $ \\ddot{E} $6¶ )AE. | 7 s",
+      "type": "table",
+      "bbox_ocr": [
+        98,
+        308,
+        1141,
+        1100
+      ],
+      "raw_text": "i'\t\tCE $ \\mu $ é\t\t\t\t...' À s À\t\tG $ \\ddot{y} $\t\t?AŨ $ \\ddot{A} $ s À\t\tB\\gt 7#\n8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z\t\t8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $\nh8i 8a $ \\mu $ $ ^{-} $ z\t\t8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $\n58i #k $ \\ddot{O} $ j $ ^{-} $\t\t!Q\n8A $ \\ddot{N} $ $ \\ddot{A} $ s A $ \\ddot{O} $ s $ \\ddot{E} $6¶ )AE. | 7 s",
+      "native_table": {
+        "page": 7,
+        "block_id": 4,
+        "group_id": 4,
+        "block_bbox": [
+          98,
+          308,
+          1141,
+          1100
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i&#x27;</td><td>CE $ \\mu $ é</td><td></td><td>...&#x27; À s À</td><td>G $ \\ddot{y} $</td><td>?AŨ $ \\ddot{A} $ s À</td><td>B\\gt 7#</td></tr><tr><td></td><td>8i f F&amp;Y $ \\ddot{Y} $á $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td></td></tr><tr><td></td><td>h8i 8a $ \\mu $ $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td></td></tr><tr><td></td><td>58i #k  $ \\ddot{O} $ j $ ^{-} $</td><td>!Q</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td colspan=\"7\">8A $ \\ddot{N} $ $ \\ddot{A} $ s A  $ \\ddot{O} $ s  $ \\ddot{E} $6¶ )AE. | 7 s</td></tr></table>",
+        "global_block_id": 27,
+        "global_group_id": 27,
+        "block_polygon_points": [
+          [
+            98.0,
+            308.0
+          ],
+          [
+            1141.0,
+            308.0
+          ],
+          [
+            1141.0,
+            1100.0
+          ],
+          [
+            98.0,
+            1100.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i'",
+            "CE $ \\mu $ é",
+            "...' À s À",
+            "G $ \\ddot{y} $",
+            "?AŨ $ \\ddot{A} $ s À",
+            "B\\gt 7#"
+          ],
+          [
+            "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+            "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "",
+            "",
+            "",
+            ""
+          ],
+          [
+            "h8i 8a $ \\mu $ $ ^{-} $ z",
+            "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "",
+            "",
+            "",
+            ""
+          ],
+          [
+            "58i #k $ \\ddot{O} $ j $ ^{-} $",
+            "!Q",
+            "",
+            "",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5",
+          "col_6"
+        ],
+        "records": [
+          {
+            "col_1": "i'",
+            "col_2": "CE $ \\mu $ é",
+            "col_3": "...' À s À",
+            "col_4": "G $ \\ddot{y} $",
+            "col_5": "?AŨ $ \\ddot{A} $ s À",
+            "col_6": "B\\gt 7#"
+          },
+          {
+            "col_1": "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+            "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          },
+          {
+            "col_1": "h8i 8a $ \\mu $ $ ^{-} $ z",
+            "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          },
+          {
+            "col_1": "58i #k $ \\ddot{O} $ j $ ^{-} $",
+            "col_2": "!Q",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          }
+        ],
+        "row_count": 4,
+        "column_count": 6,
+        "data_row_count": 4,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5|col6"
+      }
+    },
+    {
+      "bbox": [
+        44,
+        544,
+        555,
+        787
+      ],
+      "page": 8,
+      "text": "¿' = ☞U' W[ 6| ŷ 6| 0 • ¶ 1/4 J 5 p Lt J 5 Aŷ> € É N¥1 p 9ç 9“@¹ Aŷ− \\ N© - ☞ + N 1/4 @8¢ 7# 0 Aŷ© C©Sê 4ÚT +g N© k 5 k C©S ê ~ ú £ N© k - N© B8 T Q M19%4 £ N© 4ý *6 N© 1† B í V +g N© 4ý *6 N© Ct $Àf Lõ Aô` G $ *d £ N© 4ý *6 N© — >| )» £;® £ N© 4y *6 N© — >|",
+      "type": "table",
+      "bbox_ocr": [
+        89,
+        1089,
+        1110,
+        1574
+      ],
+      "raw_text": "¿'\t\t=\t\t☞U'\t\tW[\t\t6| ŷ 6| 0\t\t• ¶ 1/4 J 5\t\tp Lt J 5 Aŷ> € É N¥1\t\tp 9ç 9“@¹ Aŷ−\t\t\\ N© - ☞ + N 1/4 @8¢\t\t7#\n0 Aŷ© C©Sê\n4ÚT\t\t\t\t+g\t\tN© k 5\t\t\t\t\t\t\t\tk C©S ê\n~ ú\t\t\t\t£\t\tN© k -\t\t\t\t\t\t\t\tN© B8 T\nQ M19%4\t\t\t\t£\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© 1† B\ní V\t\t\t\t+g\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© Ct $Àf Lõ Aô`\nG $ *d\t\t\t\t£\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© — >|\n)» £;®\t\t\t\t£\t\tN© 4y *6\t\t\t\t\t\t\t\tN© — >|",
+      "native_table": {
+        "page": 8,
+        "block_id": 12,
+        "group_id": 12,
+        "block_bbox": [
+          89,
+          1089,
+          1110,
+          1574
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>¿'</td><td>=</td><td>☞U'</td><td>W[</td><td>6| ŷ 6| 0</td><td>• ¶ 1/4 J 5</td><td>p Lt J 5 Aŷ&gt; € É N¥1</td><td>p 9ç 9“@¹ Aŷ−</td><td>\\ N© - ☞ + N 1/4 @8¢</td><td>7#</td></tr><tr><td colspan=\"10\">0 Aŷ© C©Sê</td></tr><tr><td></td><td>4ÚT</td><td></td><td>+g</td><td>N© k 5</td><td></td><td></td><td></td><td>k C©S ê</td><td></td></tr><tr><td></td><td>~ ú</td><td></td><td>£</td><td>N© k -</td><td></td><td></td><td></td><td>N© B8 T</td><td></td></tr><tr><td></td><td>Q M19%4</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© 1† B</td><td></td></tr><tr><td></td><td>í V</td><td></td><td>+g</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© Ct $Àf Lõ Aô`</td><td></td></tr><tr><td></td><td>G $ *d</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr><tr><td></td><td>)» £;®</td><td></td><td>£</td><td>N© 4y *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr></table>",
+        "global_block_id": 45,
+        "global_group_id": 45,
+        "block_polygon_points": [
+          [
+            89.0,
+            1089.0
+          ],
+          [
+            1110.0,
+            1089.0
+          ],
+          [
+            1110.0,
+            1574.0
+          ],
+          [
+            89.0,
+            1574.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "¿'",
+            "=",
+            "☞U'",
+            "W[",
+            "6| ŷ 6| 0",
+            "• ¶ 1/4 J 5",
+            "p Lt J 5 Aŷ> € É N¥1",
+            "p 9ç 9“@¹ Aŷ−",
+            "\\ N© - ☞ + N 1/4 @8¢",
+            "7#"
+          ],
+          [
+            "4ÚT",
+            "",
+            "+g",
+            "N© k 5",
+            "",
+            "",
+            "",
+            "k C©S ê",
+            "",
+            ""
+          ],
+          [
+            "~ ú",
+            "",
+            "£",
+            "N© k -",
+            "",
+            "",
+            "",
+            "N© B8 T",
+            "",
+            ""
+          ],
+          [
+            "Q M19%4",
+            "",
+            "£",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© 1† B",
+            "",
+            ""
+          ],
+          [
+            "í V",
+            "",
+            "+g",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© Ct $Àf Lõ Aô`",
+            "",
+            ""
+          ],
+          [
+            "G $ *d",
+            "",
+            "£",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© — >|",
+            "",
+            ""
+          ],
+          [
+            ")» £;®",
+            "",
+            "£",
+            "N© 4y *6",
+            "",
+            "",
+            "",
+            "N© — >|",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5",
+          "col_6",
+          "col_7",
+          "col_8",
+          "col_9",
+          "col_10"
+        ],
+        "records": [
+          {
+            "col_1": "¿'",
+            "col_2": "=",
+            "col_3": "☞U'",
+            "col_4": "W[",
+            "col_5": "6| ŷ 6| 0",
+            "col_6": "• ¶ 1/4 J 5",
+            "col_7": "p Lt J 5 Aŷ> € É N¥1",
+            "col_8": "p 9ç 9“@¹ Aŷ−",
+            "col_9": "\\ N© - ☞ + N 1/4 @8¢",
+            "col_10": "7#"
+          },
+          {
+            "col_1": "4ÚT",
+            "col_2": "",
+            "col_3": "+g",
+            "col_4": "N© k 5",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "k C©S ê",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "~ ú",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© k -",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© B8 T",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "Q M19%4",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© 1† B",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "í V",
+            "col_2": "",
+            "col_3": "+g",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© Ct $Àf Lõ Aô`",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "G $ *d",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© — >|",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": ")» £;®",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4y *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© — >|",
+            "col_9": "",
+            "col_10": ""
+          }
+        ],
+        "row_count": 7,
+        "column_count": 10,
+        "data_row_count": 7,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5|col6|col7|col8|col9|col10"
+      }
+    },
+    {
+      "bbox": [
+        38,
+        30,
+        550,
+        156
+      ],
+      "page": 19,
+      "text": "1 ☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5• 1 ☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g ☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A ☐ 8 μ M’ ☐ ü Cμ 2 $ F f N© & L$ ☐ N© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐",
+      "type": "table",
+      "bbox_ocr": [
+        77,
+        61,
+        1101,
+        312
+      ],
+      "raw_text": "1\t\t☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•\n1\t\t☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g\n☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A\n☐ 8 μ M’ ☐ ü Cμ 2 $ F f\nN© & L$ ☐\nN© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐",
+      "native_table": {
+        "page": 19,
+        "block_id": 0,
+        "group_id": 0,
+        "block_bbox": [
+          77,
+          61,
+          1101,
+          312
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>1</td><td>☐» £;☹ &lt;</td><td>☐” J 34: #§ 893 W- ☐ p J - z&gt; | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•</td></tr><tr><td>1</td><td>☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g</td><td></td></tr><tr><td colspan=\"3\">☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A</td></tr><tr><td colspan=\"3\">☐ 8 μ M’ ☐ ü Cμ 2 $ F f</td></tr><tr><td colspan=\"3\">N© &amp; L$ ☐</td></tr><tr><td colspan=\"3\">N© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐</td></tr></table>",
+        "global_block_id": 58,
+        "global_group_id": 58,
+        "block_polygon_points": [
+          [
+            77.0,
+            61.0
+          ],
+          [
+            1101.0,
+            61.0
+          ],
+          [
+            1101.0,
+            312.0
+          ],
+          [
+            77.0,
+            312.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "1",
+            "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+          ],
+          [
+            "1",
+            "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2"
+        ],
+        "records": [
+          {
+            "col_1": "1",
+            "col_2": "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+          },
+          {
+            "col_1": "1",
+            "col_2": "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+          }
+        ],
+        "row_count": 2,
+        "column_count": 2,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2"
+      }
+    },
+    {
+      "bbox": [
+        51,
+        149,
+        552,
+        412
+      ],
+      "page": 24,
+      "text": "i' 7 · &,'G-€]MOr Å 7 · &,'Ų Å ö å • /ë B$> ) Ä Å 7 · & p XN¥ 8i f F&Ųá− z > 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( < • /ë",
+      "type": "table",
+      "bbox_ocr": [
+        103,
+        298,
+        1105,
+        823
+      ],
+      "raw_text": "i'\t\t7 · &,'G-€]MOr\t\tÅ 7 · &,'Ų Å ö å\t\t• /ë B$>\t\t) Ä Å 7 · & p XN¥\n8i f F&Ųá− z\t\t> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <\t\t• /ë",
+      "native_table": {
+        "page": 24,
+        "block_id": 3,
+        "group_id": 3,
+        "block_bbox": [
+          103,
+          298,
+          1105,
+          823
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i&#x27;</td><td>7 · &amp;,&#x27;G-€]MOr</td><td>Å 7 · &amp;,&#x27;Ų Å ö å</td><td>• /ë B$&gt;</td><td>) Ä Å 7 · &amp; p XN¥</td></tr><tr><td></td><td>8i f F&amp;Ųá− z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>$h8i 8a \\mu − z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>58i #k Ø j `</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr></table>",
+        "global_block_id": 67,
+        "global_group_id": 67,
+        "block_polygon_points": [
+          [
+            103.0,
+            298.0
+          ],
+          [
+            1105.0,
+            298.0
+          ],
+          [
+            1105.0,
+            823.0
+          ],
+          [
+            103.0,
+            823.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i'",
+            "7 · &,'G-€]MOr",
+            "Å 7 · &,'Ų Å ö å",
+            "• /ë B$>",
+            ") Ä Å 7 · & p XN¥"
+          ],
+          [
+            "8i f F&Ųá− z",
+            "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+            "• /ë",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5"
+        ],
+        "records": [
+          {
+            "col_1": "i'",
+            "col_2": "7 · &,'G-€]MOr",
+            "col_3": "Å 7 · &,'Ų Å ö å",
+            "col_4": "• /ë B$>",
+            "col_5": ") Ä Å 7 · & p XN¥"
+          },
+          {
+            "col_1": "8i f F&Ųá− z",
+            "col_2": "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+            "col_3": "• /ë",
+            "col_4": "",
+            "col_5": ""
+          }
+        ],
+        "row_count": 2,
+        "column_count": 5,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5"
+      }
+    },
+    {
+      "bbox": [
+        49,
+        82,
+        549,
+        639
+      ],
+      "page": 25,
+      "text": "i, $ \\alpha $ - N© =0 8 € É X $ \\lambda $ 7 · &,’ p XN¥.1 : #§#• h?øi \\mathring{A} f 8 CE• AP #' ö 8i 8f - z 0 Cq : #§, · F P \\mathring{A} 9L€ø( - z : : #' ö €0/E €0/E - z : : #' ö <8è : #§’ s · F P \\mathring{A} 9L€ - z : : #' ö 8a $ \\mu $ - z ] - K&| - z : : #' ö 8a $ \\mu $ - z i?\"®G, - LuCh C 9L€CS+ ∞( FHEž” G,8² 9 \\mathring{I} Lu5 j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A} : #§#\"• h?øLö 9L€ø( ü r #' ö ü r E- DÜ z : #§\"dLvFJö h...9L€ø( !WÊ4j#-Aê< G} ‡ §?øJ #' ö ...J ?−1 2 Š?ø» Ń ] ó ÀCt: #§? 0; ‡ #' ö ?0; ‡ £ F :U = Ń : #§2 v Ń ^ J à \\mathring{A} f P Ý ☐ v = Ń #' ö :UK0Ø− : #§§7 · F P \\mathring{Y} 9L€ø( K−U Ń Š J #' ö C](™8² K−U Ń J Š?øJ",
+      "type": "table",
+      "bbox_ocr": [
+        98,
+        165,
+        1099,
+        1278
+      ],
+      "raw_text": "i,\t\t$ \\alpha $ -\t\tN© =0\t\t8 € É X $ \\lambda $ 7 · &,’ p XN¥.1\n: #§#• h?øi \\mathring{A} f 8 CE• AP\t\t#' ö\t\t8i 8f - z 0 Cq\t\t: #§, · F P \\mathring{A} 9L€ø(\n- z : :\t\t#' ö\t\t€0/E\t\t€0/E\n- z : :\t\t#' ö\t\t<8è\t\t: #§’ s · F P \\mathring{A} 9L€\n- z : :\t\t#' ö\t\t8a $ \\mu $ - z\t\t] - K&|\n- z : :\t\t#' ö\t\t8a $ \\mu $ - z\t\ti?\"®G, - LuCh C 9L€CS+ ∞(\nFHEž” G,8²\t\t9 \\mathring{I} Lu5\t\tj ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}\t\t: #§#\"• h?øLö 9L€ø(\nü r\t\t#' ö\t\tü r E- DÜ z\t\t: #§\"dLvFJö h...9L€ø(\n!WÊ4j#-Aê< G} ‡ §?øJ\t\t#' ö\t\t...J\t\t?−1 2 Š?ø» Ń ] ó\nÀCt: #§? 0; ‡\t\t#' ö\t\t?0; ‡ £ F :U = Ń\t\t: #§2 v Ń ^ J\nà \\mathring{A} f P Ý ☐ v = Ń\t\t#' ö\t\t:UK0Ø−\t\t: #§§7 · F P \\mathring{Y} 9L€ø(\nK−U Ń Š J\t\t#' ö\t\tC](™8²\t\tK−U Ń J Š?øJ",
+      "native_table": {
+        "page": 25,
+        "block_id": 1,
+        "group_id": 1,
+        "block_bbox": [
+          98,
+          165,
+          1099,
+          1278
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i,</td><td>$ \\alpha $ -</td><td>N© =0</td><td>8 &lt; H NÍ</td><td>$ \\mu $ é</td><td>^...}</td><td>pLtAñ&gt; € É X  $ \\lambda $ 7 · &amp;,’ p XN¥.1</td></tr><tr><td></td><td></td><td>: #§#• h?øi \\mathring{A} f 8 CE• AP</td><td>#&#x27; ö</td><td>8i 8f - z 0 Cq</td><td>: #§, · F P \\mathring{A} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>€0/E</td><td>€0/E</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>&lt;8è</td><td>: #§’ s · F P \\mathring{A} 9L€</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>] - K&amp;|</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>i?&quot;®G, - LuCh C 9L€CS+ ∞(</td><td></td></tr><tr><td></td><td></td><td>FHEž” G,8²</td><td>9 \\mathring{I} Lu5</td><td>j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}</td><td>: #§#&quot;• h?øLö 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>ü r</td><td>#&#x27; ö</td><td>ü r  E- DÜ z</td><td>: #§&quot;dLvFJö h...9L€ø(</td><td></td></tr><tr><td></td><td></td><td>!WÊ4j#-Aê&lt; G} ‡ §?øJ</td><td>#&#x27; ö</td><td>...J</td><td>?−1 2 Š?ø» Ń ] ó</td><td></td></tr><tr><td></td><td></td><td>ÀCt: #§? 0; ‡</td><td>#&#x27; ö</td><td>?0; ‡ £ F :U = Ń</td><td>: #§2 v Ń ^ J</td><td></td></tr><tr><td></td><td></td><td>à \\mathring{A} f P Ý ☐ v = Ń</td><td>#&#x27; ö</td><td>:UK0Ø−</td><td>: #§§7 · F P \\mathring{Y} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>K−U Ń Š J</td><td>#&#x27; ö</td><td>C](™8²</td><td>K−U Ń J Š?øJ</td><td></td></tr></table>",
+        "global_block_id": 70,
+        "global_group_id": 70,
+        "block_polygon_points": [
+          [
+            98.0,
+            165.0
+          ],
+          [
+            1099.0,
+            165.0
+          ],
+          [
+            1099.0,
+            1278.0
+          ],
+          [
+            98.0,
+            1278.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i,",
+            "$ \\alpha $ -",
+            "N© =0",
+            "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1"
+          ],
+          [
+            ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+            "#' ö",
+            "8i 8f - z 0 Cq",
+            ": #§, · F P \\mathring{A} 9L€ø("
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "€0/E",
+            "€0/E"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "<8è",
+            ": #§’ s · F P \\mathring{A} 9L€"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "8a $ \\mu $ - z",
+            "] - K&|"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "8a $ \\mu $ - z",
+            "i?\"®G, - LuCh C 9L€CS+ ∞("
+          ],
+          [
+            "FHEž” G,8²",
+            "9 \\mathring{I} Lu5",
+            "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+            ": #§#\"• h?øLö 9L€ø("
+          ],
+          [
+            "ü r",
+            "#' ö",
+            "ü r E- DÜ z",
+            ": #§\"dLvFJö h...9L€ø("
+          ],
+          [
+            "!WÊ4j#-Aê< G} ‡ §?øJ",
+            "#' ö",
+            "...J",
+            "?−1 2 Š?ø» Ń ] ó"
+          ],
+          [
+            "ÀCt: #§? 0; ‡",
+            "#' ö",
+            "?0; ‡ £ F :U = Ń",
+            ": #§2 v Ń ^ J"
+          ],
+          [
+            "à \\mathring{A} f P Ý ☐ v = Ń",
+            "#' ö",
+            ":UK0Ø−",
+            ": #§§7 · F P \\mathring{Y} 9L€ø("
+          ],
+          [
+            "K−U Ń Š J",
+            "#' ö",
+            "C](™8²",
+            "K−U Ń J Š?øJ"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4"
+        ],
+        "records": [
+          {
+            "col_1": "i,",
+            "col_2": "$ \\alpha $ -",
+            "col_3": "N© =0",
+            "col_4": "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1"
+          },
+          {
+            "col_1": ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+            "col_2": "#' ö",
+            "col_3": "8i 8f - z 0 Cq",
+            "col_4": ": #§, · F P \\mathring{A} 9L€ø("
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "€0/E",
+            "col_4": "€0/E"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "<8è",
+            "col_4": ": #§’ s · F P \\mathring{A} 9L€"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "8a $ \\mu $ - z",
+            "col_4": "] - K&|"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "8a $ \\mu $ - z",
+            "col_4": "i?\"®G, - LuCh C 9L€CS+ ∞("
+          },
+          {
+            "col_1": "FHEž” G,8²",
+            "col_2": "9 \\mathring{I} Lu5",
+            "col_3": "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+            "col_4": ": #§#\"• h?øLö 9L€ø("
+          },
+          {
+            "col_1": "ü r",
+            "col_2": "#' ö",
+            "col_3": "ü r E- DÜ z",
+            "col_4": ": #§\"dLvFJö h...9L€ø("
+          },
+          {
+            "col_1": "!WÊ4j#-Aê< G} ‡ §?øJ",
+            "col_2": "#' ö",
+            "col_3": "...J",
+            "col_4": "?−1 2 Š?ø» Ń ] ó"
+          },
+          {
+            "col_1": "ÀCt: #§? 0; ‡",
+            "col_2": "#' ö",
+            "col_3": "?0; ‡ £ F :U = Ń",
+            "col_4": ": #§2 v Ń ^ J"
+          },
+          {
+            "col_1": "à \\mathring{A} f P Ý ☐ v = Ń",
+            "col_2": "#' ö",
+            "col_3": ":UK0Ø−",
+            "col_4": ": #§§7 · F P \\mathring{Y} 9L€ø("
+          },
+          {
+            "col_1": "K−U Ń Š J",
+            "col_2": "#' ö",
+            "col_3": "C](™8²",
+            "col_4": "K−U Ń J Š?øJ"
+          }
+        ],
+        "row_count": 12,
+        "column_count": 4,
+        "data_row_count": 12,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4"
+      }
+    }
+  ],
+  "layout_sections": [
+    {
+      "bbox": [
+        48,
+        30,
+        132,
+        48
+      ],
+      "page": 1,
+      "text": "75F' Ö; 7-6",
+      "type": "text",
+      "bbox_ocr": [
+        96,
+        59,
+        264,
+        97
+      ]
+    },
+    {
+      "bbox": [
+        54,
+        132,
+        538,
+        177
+      ],
+      "page": 1,
+      "text": ":#S#—\"• $h?ø8i f ¬ z } G-€]N©",
+      "type": "text",
+      "bbox_ocr": [
+        109,
+        264,
+        1077,
+        354
+      ]
+    },
+    {
+      "bbox": [
+        285,
+        330,
+        333,
+        548
+      ],
+      "page": 1,
+      "text": "$$ \\begin{array}{r} A \\\\ 7 \\overline{) 7 } \\\\ \\times \\quad \\cdot \\\\ \\hline \\& \\end{array} $$",
+      "type": "text",
+      "bbox_ocr": [
+        570,
+        661,
+        666,
+        1095
+      ]
+    },
+    {
+      "bbox": [
+        143,
+        692,
+        469,
+        718
+      ],
+      "page": 1,
+      "text": "À 7 ê Ở: #§...Che € v Ń 9 L€ Œ( Ả œ1 Ả",
+      "type": "text",
+      "bbox_ocr": [
+        286,
+        1384,
+        939,
+        1437
+      ]
+    },
+    {
+      "bbox": [
+        34,
+        50,
+        548,
+        796
+      ],
+      "page": 3,
+      "text": "0 A Å 7 Añ– ½ A 0 7 0?∅~ 9 A 6 N©Ö' >~ Ã A 7 ê * \\ ö à>~ Ä 0 A * \\ ö à Ö Ä ½ A * \\ 4ý#~7 7 A ` : ☎ Ö 8!' A Ö Ã 9 A | ö à Ö Ã J ê ^ 62«ú ê Ö Ã 1 J CtCXñ– ö à Ö Ã F 9 ☎ μ F # F?ö ` >| J ú-( £ j ´ FJÖ©Aô : 4*6,' ö à Ö Ã | MØ±B$>,' ö à Ö Ã A MOr % CäÖ• /ë>~ • A ½@' 2«I N© J 5 $5... Ã 0 A A : #§#-• $h?∅i f A f 8 C∩© Ã ½ A A ¬ z : : Å €0A∅A Ã 9 A A B' 3 O•,' A A A!WÊ4ý#~Aê ~ ê Ct I Añ> – > A# Ê >~ ê, s ^ - • A Ë A v ¬ B* > - q A = ☎ > $ 7 b 7 ¬ B*–",
+      "type": "text",
+      "bbox_ocr": [
+        69,
+        100,
+        1096,
+        1591
+      ]
+    },
+    {
+      "bbox": [
+        32,
+        23,
+        150,
+        41
+      ],
+      "page": 4,
+      "text": "q 0 ACRN NANÖ z",
+      "type": "text",
+      "bbox_ocr": [
+        65,
+        46,
+        301,
+        82
+      ]
+    },
+    {
+      "bbox": [
+        32,
+        47,
+        82,
+        66
+      ],
+      "page": 4,
+      "text": "q 9 A |",
+      "type": "text",
+      "bbox_ocr": [
+        64,
+        94,
+        164,
+        132
+      ]
+    },
+    {
+      "bbox": [
+        146,
+        24,
+        434,
+        58
+      ],
+      "page": 5,
+      "text": "Å 7 - & v Ņ 7 - &Lt &",
+      "type": "heading",
+      "bbox_ocr": [
+        293,
+        48,
+        868,
+        117
+      ]
+    },
+    {
+      "bbox": [
+        31,
+        72,
+        160,
+        98
+      ],
+      "page": 5,
+      "text": "0 A A 7 A n-",
+      "type": "heading",
+      "bbox_ocr": [
+        63,
+        143,
+        321,
+        195
+      ]
+    },
+    {
+      "bbox": [
+        30,
+        115,
+        179,
+        136
+      ],
+      "page": 5,
+      "text": "8$ K&6CR9LECS+ ∞( Ở",
+      "type": "heading",
+      "bbox_ocr": [
+        60,
+        230,
+        359,
+        271
+      ]
+    },
+    {
+      "bbox": [
+        37,
+        136,
+        546,
+        786
+      ],
+      "page": 5,
+      "text": "i žCeé j Ä: #§#-*.$h?ø8i f ¯z } G-C]N© 7 ÂN© Ä 75F' Ö;7-6 ___Å,’ 7 cez È1®‡ >~Ä~ü È2 j k- Â4j!\"?, s | >~Â 7 êÂ: #§..Chre€ v Ŋ9L€ce( Â: #§2 ~Ó3 ² ; Ö Â 7 Ö' j ê\"A 1 WÉ Ö 6¶ )/E. | 7 s ☎ ×? É Ö _____Ä A é \" B 4õ.D0! ¶ ~ G 7 · &È 5 7 · &,' %$5½ i · &Ä² ì 9,' B ÂÃ ô63 Ct É ú 9 £Lt & È A \" ½~ *6@ | Ö 7 · &,' 4N©ô Ê ½?±\"r È ) 7 · &,' 8*6 WÃ 8# W= ½9 2A₺Ã A é Â 7 9 £,’ 0 7 ž FCt É È ½~ *6@Ceé = 0 Ê?± Ö 0 ~',‘ Â 7 F f ﹂,’ +...Â 7 Å Â 7 9 x Oj Ö8 Â 7 · & Ô Z!' { C§ ___ Z ¶ Å A é 9'— 7 · &?±\"r FBÔÂ 7 AñH Å ² 9?±\"r ÂÃ ² ì X?ôÊ,’ 0 7 &L$> È A é X A 7 9 x O μ ÔK0Â 7 ÈCeé =F₀F A é,’ Â 7 AñH Å ² A é ] 7 È Â 7 · & 6 ©Ej \\ N© 8 | ½\" w 1 9 x È A é 6 9 7 · & ú 7 Â 7-( £# » Â#?ô,'?ô Ê È ¬ ō ½@8 ² ; Ö A é ACeé Ô,' p 9 Â 7 · & ÂCt ÉG-_ ö.ž,' ½OÎ,’ Â : » N© 9 ⌉ È | = ½+\"r +... X ў E«F } L\"# » CS+,’ Eü@ Â > \\ Â 7 9 £,' 0 7!\"? ° • FJAFB' ô Ö ` p Ö: #§2«© j __ GD'Q í WÖ r _____ FH5FÖ _____ +eB Ö_____ P-OÖ_____ # Ê >~ ê Â F |, s >~ Â1®‡ F- 1 Ő BBBBBBBBB Â 7 ê =0 Ö: #§..Chre€ v Ŋ9L€ce( Â- 1 À O Ö BB __ BB BB BB8 BBB B",
+      "type": "text",
+      "bbox_ocr": [
+        75,
+        273,
+        1093,
+        1572
+      ]
+    },
+    {
+      "bbox": [
+        60,
+        47,
+        185,
+        74
+      ],
+      "page": 6,
+      "text": "½Ã 0 7 0?∅~",
+      "type": "heading",
+      "bbox_ocr": [
+        121,
+        94,
+        370,
+        147
+      ]
+    },
+    {
+      "bbox": [
+        65,
+        92,
+        329,
+        112
+      ],
+      "page": 6,
+      "text": "N© =0 Ö: #§#-\".$h?08i f - z } G€]N© 7",
+      "type": "text",
+      "bbox_ocr": [
+        131,
+        183,
+        658,
+        225
+      ]
+    },
+    {
+      "bbox": [
+        82,
+        118,
+        201,
+        137
+      ],
+      "page": 6,
+      "text": "75F' Ö:7-6",
+      "type": "text",
+      "bbox_ocr": [
+        164,
+        236,
+        402,
+        274
+      ]
+    },
+    {
+      "bbox": [
+        54,
+        142,
+        560,
+        313
+      ],
+      "page": 6,
+      "text": "$ \\text{Å }7\\text{'}1 $ ? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $ = $ \\text{ŷ }OL\\text{€} $ 8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $",
+      "type": "table",
+      "bbox_ocr": [
+        108,
+        285,
+        1121,
+        626
+      ],
+      "raw_text": "$ \\text{Å }7\\text{'}1 $\t\t? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $\n= $ \\text{ŷ }OL\\text{€} $\t\t8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $",
+      "native_table": {
+        "page": 6,
+        "block_id": 3,
+        "group_id": 3,
+        "block_bbox": [
+          108,
+          285,
+          1121,
+          626
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td></td><td>$ \\text{Å }7\\text{&#x27;}1 $</td><td>?  $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s  $ \\text{α} $</td></tr><tr><td></td><td>=  $ \\text{ŷ }OL\\text{€} $</td><td>8 &lt;1 $ \\text{®A} $ $ \\text{Ö} $(  $ \\text{C} $ $ \\text{§} $  $ \\text{α} $</td></tr></table>",
+        "global_block_id": 16,
+        "global_group_id": 16,
+        "block_polygon_points": [
+          [
+            108.0,
+            285.0
+          ],
+          [
+            1121.0,
+            285.0
+          ],
+          [
+            1121.0,
+            626.0
+          ],
+          [
+            108.0,
+            626.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "$ \\text{Å }7\\text{'}1 $",
+            "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+          ],
+          [
+            "= $ \\text{ŷ }OL\\text{€} $",
+            "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2"
+        ],
+        "records": [
+          {
+            "col_1": "$ \\text{Å }7\\text{'}1 $",
+            "col_2": "? $ \\text{É }Ö $ W $ \\text{É }Ö6¶ $ )AE. | 7 s $ \\text{α} $"
+          },
+          {
+            "col_1": "= $ \\text{ŷ }OL\\text{€} $",
+            "col_2": "8 <1 $ \\text{®A} $ $ \\text{Ö} $( $ \\text{C} $ $ \\text{§} $ $ \\text{α} $"
+          }
+        ],
+        "row_count": 2,
+        "column_count": 2,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2"
+      }
+    },
+    {
+      "bbox": [
+        58,
+        332,
+        88,
+        348
+      ],
+      "page": 6,
+      "text": "# Ö",
+      "type": "text",
+      "bbox_ocr": [
+        116,
+        664,
+        177,
+        695
+      ]
+    },
+    {
+      "bbox": [
+        65,
+        354,
+        434,
+        373
+      ],
+      "page": 6,
+      "text": "Ã À 7'| j [ 0>'| È j Lt & 6 N©õ' >~ = N μ é..N©õ','k ½Ã",
+      "type": "text",
+      "bbox_ocr": [
+        131,
+        708,
+        868,
+        746
+      ]
+    },
+    {
+      "bbox": [
+        63,
+        377,
+        354,
+        396
+      ],
+      "page": 6,
+      "text": "Ã p 9'I w+Xê \"A 1>~/j Ê...} j s Ê2î.ž ` Z } Ä",
+      "type": "text",
+      "bbox_ocr": [
+        127,
+        754,
+        709,
+        791
+      ]
+    },
+    {
+      "bbox": [
+        268,
+        508,
+        556,
+        526
+      ],
+      "page": 6,
+      "text": "Å 7 ê# Ê >~ ê A F, s >~ Å 1®‡ F- 1 Ö BBBBBBB",
+      "type": "text",
+      "bbox_ocr": [
+        537,
+        1015,
+        1113,
+        1051
+      ]
+    },
+    {
+      "bbox": [
+        266,
+        551,
+        517,
+        568
+      ],
+      "page": 6,
+      "text": "Å 7 ê = 0 Ö: #§..Ch+e€ v Ŝ 9 L€ ∞( Å- 1 Å",
+      "type": "text",
+      "bbox_ocr": [
+        533,
+        1102,
+        1035,
+        1137
+      ]
+    },
+    {
+      "bbox": [
+        277,
+        596,
+        442,
+        610
+      ],
+      "page": 6,
+      "text": "O Ö BB BBα BB BB8 BB BB",
+      "type": "text",
+      "bbox_ocr": [
+        555,
+        1191,
+        885,
+        1221
+      ]
+    },
+    {
+      "bbox": [
+        53,
+        36,
+        179,
+        61
+      ],
+      "page": 7,
+      "text": "9 A 6 N©O' >~",
+      "type": "heading",
+      "bbox_ocr": [
+        106,
+        73,
+        358,
+        122
+      ]
+    },
+    {
+      "bbox": [
+        59,
+        78,
+        322,
+        102
+      ],
+      "page": 7,
+      "text": "N© =0 Ö: #S#-\".$h?08i f - z } G€]N© 7",
+      "type": "text",
+      "bbox_ocr": [
+        118,
+        155,
+        645,
+        203
+      ]
+    },
+    {
+      "bbox": [
+        75,
+        104,
+        194,
+        123
+      ],
+      "page": 7,
+      "text": "75F' Ö;7-6",
+      "type": "text",
+      "bbox_ocr": [
+        150,
+        207,
+        389,
+        246
+      ]
+    },
+    {
+      "bbox": [
+        62,
+        129,
+        175,
+        148
+      ],
+      "page": 7,
+      "text": "CW...} Ös ê\"A 1",
+      "type": "text",
+      "bbox_ocr": [
+        124,
+        258,
+        351,
+        295
+      ]
+    },
+    {
+      "bbox": [
+        49,
+        154,
+        570,
+        550
+      ],
+      "page": 7,
+      "text": "i' CE $ \\mu $ é ...' À s À G $ \\ddot{y} $ ?AŨ $ \\ddot{A} $ s À B\\gt 7# 8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z 8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $ h8i 8a $ \\mu $ $ ^{-} $ z 8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $ 58i #k $ \\ddot{O} $ j $ ^{-} $ !Q 8A $ \\ddot{N} $ $ \\ddot{A} $ s A $ \\ddot{O} $ s $ \\ddot{E} $6¶ )AE. | 7 s",
+      "type": "table",
+      "bbox_ocr": [
+        98,
+        308,
+        1141,
+        1100
+      ],
+      "raw_text": "i'\t\tCE $ \\mu $ é\t\t\t\t...' À s À\t\tG $ \\ddot{y} $\t\t?AŨ $ \\ddot{A} $ s À\t\tB\\gt 7#\n8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z\t\t8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $\nh8i 8a $ \\mu $ $ ^{-} $ z\t\t8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $\n58i #k $ \\ddot{O} $ j $ ^{-} $\t\t!Q\n8A $ \\ddot{N} $ $ \\ddot{A} $ s A $ \\ddot{O} $ s $ \\ddot{E} $6¶ )AE. | 7 s",
+      "native_table": {
+        "page": 7,
+        "block_id": 4,
+        "group_id": 4,
+        "block_bbox": [
+          98,
+          308,
+          1141,
+          1100
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i&#x27;</td><td>CE $ \\mu $ é</td><td></td><td>...&#x27; À s À</td><td>G $ \\ddot{y} $</td><td>?AŨ $ \\ddot{A} $ s À</td><td>B\\gt 7#</td></tr><tr><td></td><td>8i f F&amp;Y $ \\ddot{Y} $á $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td rowspan=\"3\"></td><td></td></tr><tr><td></td><td>h8i 8a $ \\mu $ $ ^{-} $ z</td><td>8 &lt;1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O  $ \\alpha $</td><td></td></tr><tr><td></td><td>58i #k  $ \\ddot{O} $ j $ ^{-} $</td><td>!Q</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr><tr><td colspan=\"7\">8A $ \\ddot{N} $ $ \\ddot{A} $ s A  $ \\ddot{O} $ s  $ \\ddot{E} $6¶ )AE. | 7 s</td></tr></table>",
+        "global_block_id": 27,
+        "global_group_id": 27,
+        "block_polygon_points": [
+          [
+            98.0,
+            308.0
+          ],
+          [
+            1141.0,
+            308.0
+          ],
+          [
+            1141.0,
+            1100.0
+          ],
+          [
+            98.0,
+            1100.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i'",
+            "CE $ \\mu $ é",
+            "...' À s À",
+            "G $ \\ddot{y} $",
+            "?AŨ $ \\ddot{A} $ s À",
+            "B\\gt 7#"
+          ],
+          [
+            "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+            "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "",
+            "",
+            "",
+            ""
+          ],
+          [
+            "h8i 8a $ \\mu $ $ ^{-} $ z",
+            "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "",
+            "",
+            "",
+            ""
+          ],
+          [
+            "58i #k $ \\ddot{O} $ j $ ^{-} $",
+            "!Q",
+            "",
+            "",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5",
+          "col_6"
+        ],
+        "records": [
+          {
+            "col_1": "i'",
+            "col_2": "CE $ \\mu $ é",
+            "col_3": "...' À s À",
+            "col_4": "G $ \\ddot{y} $",
+            "col_5": "?AŨ $ \\ddot{A} $ s À",
+            "col_6": "B\\gt 7#"
+          },
+          {
+            "col_1": "8i f F&Y $ \\ddot{Y} $á $ ^{-} $ z",
+            "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          },
+          {
+            "col_1": "h8i 8a $ \\mu $ $ ^{-} $ z",
+            "col_2": "8 <1 $ \\ddot{R} $A $ \\ddot{O} $ { C $ \\ddot{S} $O $ \\alpha $",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          },
+          {
+            "col_1": "58i #k $ \\ddot{O} $ j $ ^{-} $",
+            "col_2": "!Q",
+            "col_3": "",
+            "col_4": "",
+            "col_5": "",
+            "col_6": ""
+          }
+        ],
+        "row_count": 4,
+        "column_count": 6,
+        "data_row_count": 4,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5|col6"
+      }
+    },
+    {
+      "bbox": [
+        54,
+        570,
+        84,
+        586
+      ],
+      "page": 7,
+      "text": "# ☀",
+      "type": "heading",
+      "bbox_ocr": [
+        109,
+        1140,
+        169,
+        1171
+      ]
+    },
+    {
+      "bbox": [
+        78,
+        591,
+        389,
+        631
+      ],
+      "page": 7,
+      "text": "p 9'l w3++Xê \"A 1 >~/j Ê...} j s Ê2î.ž ` Z } Ã ² ì...' \"wk > k'=1V& Ê...' \"wk j ö Ê | !\" k'Ã",
+      "type": "text",
+      "bbox_ocr": [
+        156,
+        1182,
+        778,
+        1262
+      ]
+    },
+    {
+      "bbox": [
+        256,
+        676,
+        552,
+        694
+      ],
+      "page": 7,
+      "text": "Å 7 ê# Ê >~ ê Â F, s >~ Â 1®‡ F- 1 Ö BBBBBBB",
+      "type": "text",
+      "bbox_ocr": [
+        512,
+        1353,
+        1105,
+        1389
+      ]
+    },
+    {
+      "bbox": [
+        258,
+        706,
+        534,
+        724
+      ],
+      "page": 7,
+      "text": "Å 7 ê = 0 Ö : #§..Ch+e€ v N 9 L€ ∞( ∂A - 1 A",
+      "type": "text",
+      "bbox_ocr": [
+        517,
+        1411,
+        1069,
+        1447
+      ]
+    },
+    {
+      "bbox": [
+        270,
+        735,
+        438,
+        750
+      ],
+      "page": 7,
+      "text": "O Ö B BBBα BBB B8 BB BB",
+      "type": "text",
+      "bbox_ocr": [
+        541,
+        1470,
+        877,
+        1500
+      ]
+    },
+    {
+      "bbox": [
+        46,
+        38,
+        219,
+        64
+      ],
+      "page": 8,
+      "text": "Ã A 7 ê * \\õ à>~",
+      "type": "heading",
+      "bbox_ocr": [
+        92,
+        76,
+        439,
+        127
+      ]
+    },
+    {
+      "bbox": [
+        55,
+        81,
+        173,
+        102
+      ],
+      "page": 8,
+      "text": "Ảo Ả* \\ õ Ả Ố",
+      "type": "heading",
+      "bbox_ocr": [
+        110,
+        162,
+        347,
+        204
+      ]
+    },
+    {
+      "bbox": [
+        57,
+        112,
+        269,
+        130
+      ],
+      "page": 8,
+      "text": "...} =0 $ \\ddot{O} $: #§...Ch+e∈ v $ \\tilde{N} $ 9L∈∞(",
+      "type": "text",
+      "bbox_ocr": [
+        115,
+        223,
+        539,
+        260
+      ]
+    },
+    {
+      "bbox": [
+        58,
+        134,
+        342,
+        153
+      ],
+      "page": 8,
+      "text": "p Ö: #§2<© j GD'Q í WÖ r",
+      "type": "text",
+      "bbox_ocr": [
+        116,
+        269,
+        684,
+        306
+      ]
+    },
+    {
+      "bbox": [
+        56,
+        160,
+        141,
+        177
+      ],
+      "page": 8,
+      "text": "F15F0",
+      "type": "text",
+      "bbox_ocr": [
+        113,
+        319,
+        283,
+        354
+      ]
+    },
+    {
+      "bbox": [
+        57,
+        182,
+        288,
+        198
+      ],
+      "page": 8,
+      "text": "+eB P-OÖ",
+      "type": "text",
+      "bbox_ocr": [
+        114,
+        364,
+        576,
+        396
+      ]
+    },
+    {
+      "bbox": [
+        60,
+        203,
+        239,
+        221
+      ],
+      "page": 8,
+      "text": "@û O F# 1/4 O Ö ___",
+      "type": "text",
+      "bbox_ocr": [
+        120,
+        406,
+        479,
+        442
+      ]
+    },
+    {
+      "bbox": [
+        59,
+        227,
+        159,
+        244
+      ],
+      "page": 8,
+      "text": "> | J 2《》 ÖM&^ J",
+      "type": "text",
+      "bbox_ocr": [
+        118,
+        454,
+        319,
+        487
+      ]
+    },
+    {
+      "bbox": [
+        60,
+        266,
+        370,
+        440
+      ],
+      "page": 8,
+      "text": "Ä ½ Å * \\ 4j#~7 7 Ä ` : ☎ Ö 8 !' Å Ö Î f Ct \\ ö Ct × k Ní ö Cq k Ní ö :U J f • ö ö Y#ÖÖ : Ö0>f ö X ¼ ê Ö ê",
+      "type": "text",
+      "bbox_ocr": [
+        121,
+        533,
+        741,
+        881
+      ]
+    },
+    {
+      "bbox": [
+        69,
+        462,
+        180,
+        481
+      ],
+      "page": 8,
+      "text": "Ả9 Ả! Ố Ả Ố",
+      "type": "text",
+      "bbox_ocr": [
+        139,
+        923,
+        360,
+        962
+      ]
+    },
+    {
+      "bbox": [
+        100,
+        502,
+        219,
+        518
+      ],
+      "page": 8,
+      "text": "Ã Jê 62«ú ê ☀",
+      "type": "text",
+      "bbox_ocr": [
+        200,
+        1005,
+        439,
+        1037
+      ]
+    },
+    {
+      "bbox": [
+        58,
+        524,
+        513,
+        542
+      ],
+      "page": 8,
+      "text": "Ã 9 C J 6 | 0 ê ú 6 | 0 ö à Ê | ] 9 — J Ct | ê ú 6 | 0 ö à Ê | ê ^ ö à 1 y 1° ü À",
+      "type": "text",
+      "bbox_ocr": [
+        117,
+        1048,
+        1026,
+        1083
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        544,
+        555,
+        787
+      ],
+      "page": 8,
+      "text": "¿' = ☞U' W[ 6| ŷ 6| 0 • ¶ 1/4 J 5 p Lt J 5 Aŷ> € É N¥1 p 9ç 9“@¹ Aŷ− \\ N© - ☞ + N 1/4 @8¢ 7# 0 Aŷ© C©Sê 4ÚT +g N© k 5 k C©S ê ~ ú £ N© k - N© B8 T Q M19%4 £ N© 4ý *6 N© 1† B í V +g N© 4ý *6 N© Ct $Àf Lõ Aô` G $ *d £ N© 4ý *6 N© — >| )» £;® £ N© 4y *6 N© — >|",
+      "type": "table",
+      "bbox_ocr": [
+        89,
+        1089,
+        1110,
+        1574
+      ],
+      "raw_text": "¿'\t\t=\t\t☞U'\t\tW[\t\t6| ŷ 6| 0\t\t• ¶ 1/4 J 5\t\tp Lt J 5 Aŷ> € É N¥1\t\tp 9ç 9“@¹ Aŷ−\t\t\\ N© - ☞ + N 1/4 @8¢\t\t7#\n0 Aŷ© C©Sê\n4ÚT\t\t\t\t+g\t\tN© k 5\t\t\t\t\t\t\t\tk C©S ê\n~ ú\t\t\t\t£\t\tN© k -\t\t\t\t\t\t\t\tN© B8 T\nQ M19%4\t\t\t\t£\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© 1† B\ní V\t\t\t\t+g\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© Ct $Àf Lõ Aô`\nG $ *d\t\t\t\t£\t\tN© 4ý *6\t\t\t\t\t\t\t\tN© — >|\n)» £;®\t\t\t\t£\t\tN© 4y *6\t\t\t\t\t\t\t\tN© — >|",
+      "native_table": {
+        "page": 8,
+        "block_id": 12,
+        "group_id": 12,
+        "block_bbox": [
+          89,
+          1089,
+          1110,
+          1574
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>¿'</td><td>=</td><td>☞U'</td><td>W[</td><td>6| ŷ 6| 0</td><td>• ¶ 1/4 J 5</td><td>p Lt J 5 Aŷ&gt; € É N¥1</td><td>p 9ç 9“@¹ Aŷ−</td><td>\\ N© - ☞ + N 1/4 @8¢</td><td>7#</td></tr><tr><td colspan=\"10\">0 Aŷ© C©Sê</td></tr><tr><td></td><td>4ÚT</td><td></td><td>+g</td><td>N© k 5</td><td></td><td></td><td></td><td>k C©S ê</td><td></td></tr><tr><td></td><td>~ ú</td><td></td><td>£</td><td>N© k -</td><td></td><td></td><td></td><td>N© B8 T</td><td></td></tr><tr><td></td><td>Q M19%4</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© 1† B</td><td></td></tr><tr><td></td><td>í V</td><td></td><td>+g</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© Ct $Àf Lõ Aô`</td><td></td></tr><tr><td></td><td>G $ *d</td><td></td><td>£</td><td>N© 4ý *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr><tr><td></td><td>)» £;®</td><td></td><td>£</td><td>N© 4y *6</td><td></td><td></td><td></td><td>N© — &gt;|</td><td></td></tr></table>",
+        "global_block_id": 45,
+        "global_group_id": 45,
+        "block_polygon_points": [
+          [
+            89.0,
+            1089.0
+          ],
+          [
+            1110.0,
+            1089.0
+          ],
+          [
+            1110.0,
+            1574.0
+          ],
+          [
+            89.0,
+            1574.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "¿'",
+            "=",
+            "☞U'",
+            "W[",
+            "6| ŷ 6| 0",
+            "• ¶ 1/4 J 5",
+            "p Lt J 5 Aŷ> € É N¥1",
+            "p 9ç 9“@¹ Aŷ−",
+            "\\ N© - ☞ + N 1/4 @8¢",
+            "7#"
+          ],
+          [
+            "4ÚT",
+            "",
+            "+g",
+            "N© k 5",
+            "",
+            "",
+            "",
+            "k C©S ê",
+            "",
+            ""
+          ],
+          [
+            "~ ú",
+            "",
+            "£",
+            "N© k -",
+            "",
+            "",
+            "",
+            "N© B8 T",
+            "",
+            ""
+          ],
+          [
+            "Q M19%4",
+            "",
+            "£",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© 1† B",
+            "",
+            ""
+          ],
+          [
+            "í V",
+            "",
+            "+g",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© Ct $Àf Lõ Aô`",
+            "",
+            ""
+          ],
+          [
+            "G $ *d",
+            "",
+            "£",
+            "N© 4ý *6",
+            "",
+            "",
+            "",
+            "N© — >|",
+            "",
+            ""
+          ],
+          [
+            ")» £;®",
+            "",
+            "£",
+            "N© 4y *6",
+            "",
+            "",
+            "",
+            "N© — >|",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5",
+          "col_6",
+          "col_7",
+          "col_8",
+          "col_9",
+          "col_10"
+        ],
+        "records": [
+          {
+            "col_1": "¿'",
+            "col_2": "=",
+            "col_3": "☞U'",
+            "col_4": "W[",
+            "col_5": "6| ŷ 6| 0",
+            "col_6": "• ¶ 1/4 J 5",
+            "col_7": "p Lt J 5 Aŷ> € É N¥1",
+            "col_8": "p 9ç 9“@¹ Aŷ−",
+            "col_9": "\\ N© - ☞ + N 1/4 @8¢",
+            "col_10": "7#"
+          },
+          {
+            "col_1": "4ÚT",
+            "col_2": "",
+            "col_3": "+g",
+            "col_4": "N© k 5",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "k C©S ê",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "~ ú",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© k -",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© B8 T",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "Q M19%4",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© 1† B",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "í V",
+            "col_2": "",
+            "col_3": "+g",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© Ct $Àf Lõ Aô`",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": "G $ *d",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4ý *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© — >|",
+            "col_9": "",
+            "col_10": ""
+          },
+          {
+            "col_1": ")» £;®",
+            "col_2": "",
+            "col_3": "£",
+            "col_4": "N© 4y *6",
+            "col_5": "",
+            "col_6": "",
+            "col_7": "",
+            "col_8": "N© — >|",
+            "col_9": "",
+            "col_10": ""
+          }
+        ],
+        "row_count": 7,
+        "column_count": 10,
+        "data_row_count": 7,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5|col6|col7|col8|col9|col10"
+      }
+    },
+    {
+      "bbox": [
+        39,
+        736,
+        559,
+        792
+      ],
+      "page": 9,
+      "text": "4Ệt | J ₽ J 4ỆP¹ Ế ₽ J ₫ Ế ₫,'+e?õ Â f ` > O,' g F E-F f ÔF J Â f Â ú- } 0 à, ` 7 Â f Â ê j Ã?(-l'4 /ý '? ¶@ DF?« Ế à Ế,'Â f 1†+• é x Ç ` G J - μ - Lu Ô g,'A Ô Ế | Ồ @N© 8 CEÃ § 9 >- W,' Ô g 9 Ö] - K& 6„ Ã,® 1 Â] - Z £ L™Ã Ç6ß\" - E-Ã í ) Á A!W2£941y Å",
+      "type": "text",
+      "bbox_ocr": [
+        79,
+        1471,
+        1119,
+        1585
+      ]
+    },
+    {
+      "bbox": [
+        48,
+        71,
+        545,
+        288
+      ],
+      "page": 10,
+      "text": "N© ] - K&„ ♂g ü ü j j 7 N© &L$ ♂ N© ê = ♂4ỨT N© 6| ŉ ♂, s ~ ЁN© k- N© û4ý łj j &ŸáD ☎ 3N© Ёi ž ♂g,‘ 7?±\"r Ё5 8 Â f Hï ¹/4Î Luō à Ё5 ♂g ł 9 J, ) WÂ f Ø9€ é x Ё > Š 7 – Ё | VN¶K&„ ♂g î ` 63 ♂ X)à j +X0 1°..2î EÎ,' B 5 Lš ŉ Aâ@&é} õ å Ё+%♂ $! k B‘ Ä X > O1 7 ] Ё ¹ T Ý * ♂g MOr,’ G¥é é A Ё @Ї / ; B N© Ё ó @☹( ¹/4K&„ ♂g,‘ @ї 8 CEÄ N© 6| CSÖC©F ZN©,’ 7 » ⇄ Ё@ ă p 90± » õ Ё i ž 7)à j,’ ⇄ ⇄ Luō à Š * 1\\ 0 T Ý | *'Ё.ž ☎( @Ї / ; B N© Ä",
+      "type": "text",
+      "bbox_ocr": [
+        97,
+        142,
+        1091,
+        576
+      ]
+    },
+    {
+      "bbox": [
+        492,
+        89,
+        551,
+        103
+      ],
+      "page": 11,
+      "text": "_z é x Ẫ",
+      "type": "text",
+      "bbox_ocr": [
+        984,
+        178,
+        1103,
+        206
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        96,
+        553,
+        151
+      ],
+      "page": 11,
+      "text": "~ ú < ₹ J %: #§ F - B B + W - ₹ 9 J ∞ 8i $h ₹$ h 8w' : : 4yP% ₹ p ∨ N88T - ∼ |:m ~ 0; D DZm ∬ ₹ < & § 7'₹,'W» #k ∅ ₹ s ê Aê ( 464 ‡ 4yP¹/₹ ) #- \"• $h?og F _ z ∀ q 6' ₹ ₹ ₹ 1 D 9'₹,'- ( £ G} ‡ Ct$ ÀE. j #$K ₹ ₹ ₹ § k + Ç ₹ $2 5% 4 1y W» 1 J ~ é } ₹ f :UK0",
+      "type": "text",
+      "bbox_ocr": [
+        89,
+        192,
+        1107,
+        302
+      ]
+    },
+    {
+      "bbox": [
+        48,
+        26,
+        541,
+        202
+      ],
+      "page": 12,
+      "text": "N© %^J ủ* í ü ü à ñ : #§` 7 N© &L$Ö N© ê = Ö ~ ú N© 6| ŉ ÖN© k- N© û4ý Ö%^J ù* í U “ à ñ ∅* 2 j È! Œj × ñ,‘ ~ *3O/E ₽ 2 : #§ È X 0 § >~ W,’ j F% j ú)β*3$_ü € „ Š#k ∅O/E ? È)à j × ì M7i Ä N© 6| CSÖCФSg F ` 7N©,’ ) Ö ¹/AôT È 6 0 1V8 Ô g ## ½1V8 × ñ Ê },‘ ` 7 ’? ∅9€5 Ô g È ó @ü é 8 ŒÃ",
+      "type": "text",
+      "bbox_ocr": [
+        97,
+        52,
+        1083,
+        403
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        78,
+        555,
+        141
+      ],
+      "page": 13,
+      "text": "Q M934 O$_W- ∉ Q ¶ ∞ 8:UKOP ḋ.D0†+O. ∉ X g F - z> | J ♭ J J ☎ ☰ W» N© #k ∅,' 1†B § 9) (©,' MD Q? ሙ K? Wj ∉ ḋ. Q ; Q ሙ AÖ ∉ _ G J W» #k ∅,' h ♂ 1† B ∉ (™ ሙ 0 § >~ W' N© j ∉ ∅ D% \" G, ~ ☎, #k ∅ ∉ ∉X 0 ☎,'g F>~ ☎ { # ∉ C' ♂ 0 8$ - Aδ ሙ",
+      "type": "text",
+      "bbox_ocr": [
+        89,
+        156,
+        1111,
+        282
+      ]
+    },
+    {
+      "bbox": [
+        46,
+        34,
+        544,
+        208
+      ],
+      "page": 14,
+      "text": "∅ D% \" G, ü ü ê j ~ ☞ ¶ 3 N© &L$ Ö N© ê = ÖQ M9³⁄₄ N© 6| ŉ ÖN© 4¥*6 N© û 4¥ Ö ∅ D% \" G, ~ ☞ ¶ È ♡ g _+✕ } 0 j } \"ï, ‹ g F à >~)à { # ü ê j • j #k ∅ Ў É Ê 6#k ∅)à j ∅ AQ %₹ E • G J)à X?ò G,‘ 0 8$ - AôÃ N© 6| CSÖC©Sg F ê j N©,‘ ) Ö Â K? Â)à j • B3È 6 ♡ g,‘ ## 5 8 × ñ Ê } È ú #k ∅,’ x ⇑ Ø9€5 ♂ g È ó @ü é 8 CEÃ",
+      "type": "text",
+      "bbox_ocr": [
+        92,
+        67,
+        1088,
+        417
+      ]
+    },
+    {
+      "bbox": [
+        36,
+        712,
+        559,
+        762
+      ],
+      "page": 15,
+      "text": "i V ~ - 4 W= Q @ǐ 8 CEÈAÙ3 ǐ,' à × Ő 1/40 - à - O Š 9 x 5 8 Ē K? ## Ç ` Ů gQ ŮAÔ Ů",
+      "type": "text",
+      "bbox_ocr": [
+        72,
+        1423,
+        1118,
+        1524
+      ]
+    },
+    {
+      "bbox": [
+        47,
+        36,
+        542,
+        214
+      ],
+      "page": 16,
+      "text": "3 ì OŽĚ ü ü Q #k Ø N© &L$ Ö N© ê = Ő í V N© 6| Ũ Ũ Â f Ct$À‘w k ÃAô` N© û 4ý Ů 5 8 Ũ L 0 — “ - %#k ∅ Ě ¼. = OžÉ ñ (| 3 ì È X ¬ - × W- 0 _ 4ï : 4ï ;, ’ à ñ ∅ ¬ #k ∅ Ě w ñ (| ’ B‘ Ė < &...y 2î ö- 7 G,‘ £ ;® ¹/4 ì - Ä N© 6| CSÖC©$N© 4ï : 3 Ã4ï ; #k ∅ Ã F6„1y » ì È@ ă p 90± » õ Ė.ž ∞( ½ñ (| é 8 CNª Y Ė Ū L 4ï : EoFEî 7 Ã",
+      "type": "text",
+      "bbox_ocr": [
+        94,
+        71,
+        1084,
+        427
+      ]
+    },
+    {
+      "bbox": [
+        34,
+        748,
+        559,
+        790
+      ],
+      "page": 17,
+      "text": "G $ *d E÷ ₹ J ₹?⊝ J ₹ - ₹ J ₹ S J,' G & #k ∅N© ₹ N© →| E÷0; ] ₹'N¶,,' Q ♂Aₒ ₹ XN© →|,' 4 Z4ₒ² é M' ₹ Aₒ04ₒ8$ ₹ ₹'₹ g N±,' ₹ ₹ 0 H →| ₹ ^ 9 † ₹",
+      "type": "text",
+      "bbox_ocr": [
+        68,
+        1496,
+        1118,
+        1581
+      ]
+    },
+    {
+      "bbox": [
+        49,
+        68,
+        550,
+        266
+      ],
+      "page": 18,
+      "text": ". H$u ü ` Jñ$FFfÂ Ø N© &L$ Ö N© ê = ÖG $ *d N© 6| N ÖN© →| N© û 4ý Ö. (( 3EŸ&_− } k #q,' F Ø $33È j ¶™W8 DÜ = Ö ¼+Xg f P’/Ö ÈF9 X Ö#qGў u W’ 1 &éŠ4ï ; Â Ø,' f P’¼? ÈFJE±Â i ¼ $33,' 6„ Ø È w ¶ Ò g# ¹/GўÈ ø w ¶ Ò g f P’¼ x ì Å N© 6| CSÖ> Ct$ÀË Ä é #nB8 é x Aî # ÈÎ ` F9 1V8?±\"r,’ j ` È ) Ö Ö N ¹/#,Lbí 1y 4 )β8² È 6 Ô g,’ ## -O!\" :mÎ ` } È Ç ` Ô gAÔ",
+      "type": "text",
+      "bbox_ocr": [
+        99,
+        135,
+        1100,
+        533
+      ]
+    },
+    {
+      "bbox": [
+        38,
+        30,
+        550,
+        156
+      ],
+      "page": 19,
+      "text": "1 ☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5• 1 ☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g ☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A ☐ 8 μ M’ ☐ ü Cμ 2 $ F f N© & L$ ☐ N© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐",
+      "type": "table",
+      "bbox_ocr": [
+        77,
+        61,
+        1101,
+        312
+      ],
+      "raw_text": "1\t\t☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•\n1\t\t☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g\n☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A\n☐ 8 μ M’ ☐ ü Cμ 2 $ F f\nN© & L$ ☐\nN© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐",
+      "native_table": {
+        "page": 19,
+        "block_id": 0,
+        "group_id": 0,
+        "block_bbox": [
+          77,
+          61,
+          1101,
+          312
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>1</td><td>☐» £;☹ &lt;</td><td>☐” J 34: #§ 893 W- ☐ p J - z&gt; | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•</td></tr><tr><td>1</td><td>☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g</td><td></td></tr><tr><td colspan=\"3\">☐ C J,’ * Ap☐ - C 0 4☐ @ ☐ Wn 2 ™ ☐ ☐ g Q ☐ A☐ ☐ A</td></tr><tr><td colspan=\"3\">☐ 8 μ M’ ☐ ü Cμ 2 $ F f</td></tr><tr><td colspan=\"3\">N© &amp; L$ ☐</td></tr><tr><td colspan=\"3\">N© ☐ ☐ ☐ ☐ ☐ ☐ ☐ ☐</td></tr></table>",
+        "global_block_id": 58,
+        "global_group_id": 58,
+        "block_polygon_points": [
+          [
+            77.0,
+            61.0
+          ],
+          [
+            1101.0,
+            61.0
+          ],
+          [
+            1101.0,
+            312.0
+          ],
+          [
+            77.0,
+            312.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "1",
+            "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+          ],
+          [
+            "1",
+            "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2"
+        ],
+        "records": [
+          {
+            "col_1": "1",
+            "col_2": "☐» £;☹ | J J ☐ ☐ j G J - μ F. = 1 J,’ ☐ P 14 ☐ 5•"
+          },
+          {
+            "col_1": "1",
+            "col_2": "☐ S ¶ £ M’ K? A☐ AN☐ ) 8‡ ™’ *6 @ 1‡ F +X’ @?!,’ Npl ☐ 1V8 f ; ☐ g,’ ## ☐ | 7-5 ☐ g"
+          }
+        ],
+        "row_count": 2,
+        "column_count": 2,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2"
+      }
+    },
+    {
+      "bbox": [
+        43,
+        24,
+        548,
+        136
+      ],
+      "page": 20,
+      "text": "N© 6| Ŝ ŖON© →| N© û 4ý Œ 5 8 ç 8 μ U8² “,‘ #k Ø È ° à ñ Ø9€ 2 j È F :U ~ - æ€/¿ v Cµf 3+F >| Ø ¬ ÈF9¶ ∂#q ö 4ў,’ | β :,’ L d ’ ? È w ñ (| ’ B‘ Ä N© 6| CSŐ > v Cµf 3+Š Œ#mÈ 6 ò g,’ ## ½ K ? > î ` j Ÿ 5 8 È AÙ× ñ ñ (| ’ B‘ X w,’ E÷ 0; ] È >)à j ,’ , C] 0 C§È ó @à ñ K0^ Gў’ w Ä",
+      "type": "text",
+      "bbox_ocr": [
+        87,
+        47,
+        1096,
+        272
+      ]
+    },
+    {
+      "bbox": [
+        73,
+        21,
+        203,
+        36
+      ],
+      "page": 21,
+      "text": "Á 1 J CtCAñ-õ à Ö",
+      "type": "heading",
+      "bbox_ocr": [
+        147,
+        42,
+        407,
+        72
+      ]
+    },
+    {
+      "bbox": [
+        63,
+        140,
+        526,
+        160
+      ],
+      "page": 23,
+      "text": "A é _B*: F õ à _-O I Ã ö.ž,’ Ê A é <? i ž 7 ê F 0!•?±\"r * / j 9 £ Ct É, AñÎ Ã",
+      "type": "text",
+      "bbox_ocr": [
+        127,
+        280,
+        1053,
+        321
+      ]
+    },
+    {
+      "bbox": [
+        57,
+        183,
+        540,
+        348
+      ],
+      "page": 23,
+      "text": "∃ | ∀₁⊥B$>, ∅ ∂ ∅ ∞( 1° ₫ ∅ : #§..Ch+e € ∨ Ŝ 9⌊€ ∞( 3⁄4 ➞ @₫ ₹ ∞( * 0₀¶⌉∂ₒ( | 1†₂₂ ₹ ₭ K? ∀ₐₙₐ ₩»ₖ ∅₁†₂₂ ₹ ¶ \" ₹ ﹁ ₂ *6 > 3 ₹ ∞£ ₽ ♀ ₫ ∨ ∫ ∫:∪1₂₂₁y ‰ ₫,‿ C ∫ ₣ = ₫ f 3+ ₹ ∫ ∅ ∇ 0 C ₫ ₂₀Q ₫, ₹ ( | • ₣> ➢ 8 ₫ ♀ ₫ ∂ ₫ × ∃ = ∂ ⌒ ₪ ₹ ( | ﹁ ₂ k ₫ ) - 2 ₫ >- 7 ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ ∀ �",
+      "type": "text",
+      "bbox_ocr": [
+        115,
+        366,
+        1081,
+        696
+      ]
+    },
+    {
+      "bbox": [
+        140,
+        406,
+        505,
+        424
+      ],
+      "page": 23,
+      "text": "A F 9 μ F # F?δ > | J ú - ( £ j'FJ Ö ©Aδ : 4*6,' ö à Ö",
+      "type": "text",
+      "bbox_ocr": [
+        281,
+        812,
+        1011,
+        848
+      ]
+    },
+    {
+      "bbox": [
+        55,
+        58,
+        241,
+        86
+      ],
+      "page": 24,
+      "text": "Ẫ Ắ MỐr % CãỐ • /ë >~",
+      "type": "heading",
+      "bbox_ocr": [
+        110,
+        115,
+        482,
+        172
+      ]
+    },
+    {
+      "bbox": [
+        60,
+        102,
+        317,
+        122
+      ],
+      "page": 24,
+      "text": "N© =0 Ö: #S#-*.$h?08i f - z } G€]N© 7",
+      "type": "text",
+      "bbox_ocr": [
+        120,
+        203,
+        635,
+        244
+      ]
+    },
+    {
+      "bbox": [
+        76,
+        127,
+        152,
+        144
+      ],
+      "page": 24,
+      "text": "75F' Ö:7-6",
+      "type": "text",
+      "bbox_ocr": [
+        152,
+        254,
+        304,
+        287
+      ]
+    },
+    {
+      "bbox": [
+        51,
+        149,
+        552,
+        412
+      ],
+      "page": 24,
+      "text": "i' 7 · &,'G-€]MOr Å 7 · &,'Ų Å ö å • /ë B$> ) Ä Å 7 · & p XN¥ 8i f F&Ųá− z > 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( < • /ë",
+      "type": "table",
+      "bbox_ocr": [
+        103,
+        298,
+        1105,
+        823
+      ],
+      "raw_text": "i'\t\t7 · &,'G-€]MOr\t\tÅ 7 · &,'Ų Å ö å\t\t• /ë B$>\t\t) Ä Å 7 · & p XN¥\n8i f F&Ųá− z\t\t> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <\t\t• /ë",
+      "native_table": {
+        "page": 24,
+        "block_id": 3,
+        "group_id": 3,
+        "block_bbox": [
+          103,
+          298,
+          1105,
+          823
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i&#x27;</td><td>7 · &amp;,&#x27;G-€]MOr</td><td>Å 7 · &amp;,&#x27;Ų Å ö å</td><td>• /ë B$&gt;</td><td>) Ä Å 7 · &amp; p XN¥</td></tr><tr><td></td><td>8i f F&amp;Ųá− z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>$h8i 8a \\mu − z</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td>58i #k Ø j `</td><td>&gt; 7 · &amp; &#x27;!n-( &lt;</td><td>• /ë</td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td><td></td><td></td></tr></table>",
+        "global_block_id": 67,
+        "global_group_id": 67,
+        "block_polygon_points": [
+          [
+            103.0,
+            298.0
+          ],
+          [
+            1105.0,
+            298.0
+          ],
+          [
+            1105.0,
+            823.0
+          ],
+          [
+            103.0,
+            823.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i'",
+            "7 · &,'G-€]MOr",
+            "Å 7 · &,'Ų Å ö å",
+            "• /ë B$>",
+            ") Ä Å 7 · & p XN¥"
+          ],
+          [
+            "8i f F&Ųá− z",
+            "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+            "• /ë",
+            "",
+            ""
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4",
+          "col_5"
+        ],
+        "records": [
+          {
+            "col_1": "i'",
+            "col_2": "7 · &,'G-€]MOr",
+            "col_3": "Å 7 · &,'Ų Å ö å",
+            "col_4": "• /ë B$>",
+            "col_5": ") Ä Å 7 · & p XN¥"
+          },
+          {
+            "col_1": "8i f F&Ųá− z",
+            "col_2": "> 7 · & '!n-( 7 · & '!n-( 7 · & '!n-( <",
+            "col_3": "• /ë",
+            "col_4": "",
+            "col_5": ""
+          }
+        ],
+        "row_count": 2,
+        "column_count": 5,
+        "data_row_count": 2,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4|col5"
+      }
+    },
+    {
+      "bbox": [
+        47,
+        431,
+        401,
+        448
+      ],
+      "page": 24,
+      "text": "# Ö ) = % Cã 7 · &?±\"r,' G 6 ÈõN«>.ž ² ☑ > É | B$> ☑ A",
+      "type": "text",
+      "bbox_ocr": [
+        95,
+        862,
+        802,
+        896
+      ]
+    },
+    {
+      "bbox": [
+        54,
+        38,
+        290,
+        72
+      ],
+      "page": 25,
+      "text": "- ☎ ½@' 2«| NG J5 $5...",
+      "type": "heading",
+      "bbox_ocr": [
+        109,
+        75,
+        580,
+        144
+      ]
+    },
+    {
+      "bbox": [
+        49,
+        82,
+        549,
+        639
+      ],
+      "page": 25,
+      "text": "i, $ \\alpha $ - N© =0 8 € É X $ \\lambda $ 7 · &,’ p XN¥.1 : #§#• h?øi \\mathring{A} f 8 CE• AP #' ö 8i 8f - z 0 Cq : #§, · F P \\mathring{A} 9L€ø( - z : : #' ö €0/E €0/E - z : : #' ö <8è : #§’ s · F P \\mathring{A} 9L€ - z : : #' ö 8a $ \\mu $ - z ] - K&| - z : : #' ö 8a $ \\mu $ - z i?\"®G, - LuCh C 9L€CS+ ∞( FHEž” G,8² 9 \\mathring{I} Lu5 j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A} : #§#\"• h?øLö 9L€ø( ü r #' ö ü r E- DÜ z : #§\"dLvFJö h...9L€ø( !WÊ4j#-Aê< G} ‡ §?øJ #' ö ...J ?−1 2 Š?ø» Ń ] ó ÀCt: #§? 0; ‡ #' ö ?0; ‡ £ F :U = Ń : #§2 v Ń ^ J à \\mathring{A} f P Ý ☐ v = Ń #' ö :UK0Ø− : #§§7 · F P \\mathring{Y} 9L€ø( K−U Ń Š J #' ö C](™8² K−U Ń J Š?øJ",
+      "type": "table",
+      "bbox_ocr": [
+        98,
+        165,
+        1099,
+        1278
+      ],
+      "raw_text": "i,\t\t$ \\alpha $ -\t\tN© =0\t\t8 € É X $ \\lambda $ 7 · &,’ p XN¥.1\n: #§#• h?øi \\mathring{A} f 8 CE• AP\t\t#' ö\t\t8i 8f - z 0 Cq\t\t: #§, · F P \\mathring{A} 9L€ø(\n- z : :\t\t#' ö\t\t€0/E\t\t€0/E\n- z : :\t\t#' ö\t\t<8è\t\t: #§’ s · F P \\mathring{A} 9L€\n- z : :\t\t#' ö\t\t8a $ \\mu $ - z\t\t] - K&|\n- z : :\t\t#' ö\t\t8a $ \\mu $ - z\t\ti?\"®G, - LuCh C 9L€CS+ ∞(\nFHEž” G,8²\t\t9 \\mathring{I} Lu5\t\tj ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}\t\t: #§#\"• h?øLö 9L€ø(\nü r\t\t#' ö\t\tü r E- DÜ z\t\t: #§\"dLvFJö h...9L€ø(\n!WÊ4j#-Aê< G} ‡ §?øJ\t\t#' ö\t\t...J\t\t?−1 2 Š?ø» Ń ] ó\nÀCt: #§? 0; ‡\t\t#' ö\t\t?0; ‡ £ F :U = Ń\t\t: #§2 v Ń ^ J\nà \\mathring{A} f P Ý ☐ v = Ń\t\t#' ö\t\t:UK0Ø−\t\t: #§§7 · F P \\mathring{Y} 9L€ø(\nK−U Ń Š J\t\t#' ö\t\tC](™8²\t\tK−U Ń J Š?øJ",
+      "native_table": {
+        "page": 25,
+        "block_id": 1,
+        "group_id": 1,
+        "block_bbox": [
+          98,
+          165,
+          1099,
+          1278
+        ],
+        "block_label": "table",
+        "block_order": null,
+        "block_content": "<table><tr><td>i,</td><td>$ \\alpha $ -</td><td>N© =0</td><td>8 &lt; H NÍ</td><td>$ \\mu $ é</td><td>^...}</td><td>pLtAñ&gt; € É X  $ \\lambda $ 7 · &amp;,’ p XN¥.1</td></tr><tr><td></td><td></td><td>: #§#• h?øi \\mathring{A} f 8 CE• AP</td><td>#&#x27; ö</td><td>8i 8f - z 0 Cq</td><td>: #§, · F P \\mathring{A} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>€0/E</td><td>€0/E</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>&lt;8è</td><td>: #§’ s · F P \\mathring{A} 9L€</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>] - K&amp;|</td><td></td></tr><tr><td></td><td></td><td>- z : :</td><td>#&#x27; ö</td><td>8a $ \\mu $ - z</td><td>i?&quot;®G, - LuCh C 9L€CS+ ∞(</td><td></td></tr><tr><td></td><td></td><td>FHEž” G,8²</td><td>9 \\mathring{I} Lu5</td><td>j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}</td><td>: #§#&quot;• h?øLö 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>ü r</td><td>#&#x27; ö</td><td>ü r  E- DÜ z</td><td>: #§&quot;dLvFJö h...9L€ø(</td><td></td></tr><tr><td></td><td></td><td>!WÊ4j#-Aê&lt; G} ‡ §?øJ</td><td>#&#x27; ö</td><td>...J</td><td>?−1 2 Š?ø» Ń ] ó</td><td></td></tr><tr><td></td><td></td><td>ÀCt: #§? 0; ‡</td><td>#&#x27; ö</td><td>?0; ‡ £ F :U = Ń</td><td>: #§2 v Ń ^ J</td><td></td></tr><tr><td></td><td></td><td>à \\mathring{A} f P Ý ☐ v = Ń</td><td>#&#x27; ö</td><td>:UK0Ø−</td><td>: #§§7 · F P \\mathring{Y} 9L€ø(</td><td></td></tr><tr><td></td><td></td><td>K−U Ń Š J</td><td>#&#x27; ö</td><td>C](™8²</td><td>K−U Ń J Š?øJ</td><td></td></tr></table>",
+        "global_block_id": 70,
+        "global_group_id": 70,
+        "block_polygon_points": [
+          [
+            98.0,
+            165.0
+          ],
+          [
+            1099.0,
+            165.0
+          ],
+          [
+            1099.0,
+            1278.0
+          ],
+          [
+            98.0,
+            1278.0
+          ]
+        ]
+      },
+      "table_structure": {
+        "rows": [
+          [
+            "i,",
+            "$ \\alpha $ -",
+            "N© =0",
+            "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1"
+          ],
+          [
+            ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+            "#' ö",
+            "8i 8f - z 0 Cq",
+            ": #§, · F P \\mathring{A} 9L€ø("
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "€0/E",
+            "€0/E"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "<8è",
+            ": #§’ s · F P \\mathring{A} 9L€"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "8a $ \\mu $ - z",
+            "] - K&|"
+          ],
+          [
+            "- z : :",
+            "#' ö",
+            "8a $ \\mu $ - z",
+            "i?\"®G, - LuCh C 9L€CS+ ∞("
+          ],
+          [
+            "FHEž” G,8²",
+            "9 \\mathring{I} Lu5",
+            "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+            ": #§#\"• h?øLö 9L€ø("
+          ],
+          [
+            "ü r",
+            "#' ö",
+            "ü r E- DÜ z",
+            ": #§\"dLvFJö h...9L€ø("
+          ],
+          [
+            "!WÊ4j#-Aê< G} ‡ §?øJ",
+            "#' ö",
+            "...J",
+            "?−1 2 Š?ø» Ń ] ó"
+          ],
+          [
+            "ÀCt: #§? 0; ‡",
+            "#' ö",
+            "?0; ‡ £ F :U = Ń",
+            ": #§2 v Ń ^ J"
+          ],
+          [
+            "à \\mathring{A} f P Ý ☐ v = Ń",
+            "#' ö",
+            ":UK0Ø−",
+            ": #§§7 · F P \\mathring{Y} 9L€ø("
+          ],
+          [
+            "K−U Ń Š J",
+            "#' ö",
+            "C](™8²",
+            "K−U Ń J Š?øJ"
+          ]
+        ],
+        "spans": [],
+        "parser": "text",
+        "headers": [
+          "col_1",
+          "col_2",
+          "col_3",
+          "col_4"
+        ],
+        "records": [
+          {
+            "col_1": "i,",
+            "col_2": "$ \\alpha $ -",
+            "col_3": "N© =0",
+            "col_4": "8 € É X $ \\lambda $ 7 · &,’ p XN¥.1"
+          },
+          {
+            "col_1": ": #§#• h?øi \\mathring{A} f 8 CE• AP",
+            "col_2": "#' ö",
+            "col_3": "8i 8f - z 0 Cq",
+            "col_4": ": #§, · F P \\mathring{A} 9L€ø("
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "€0/E",
+            "col_4": "€0/E"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "<8è",
+            "col_4": ": #§’ s · F P \\mathring{A} 9L€"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "8a $ \\mu $ - z",
+            "col_4": "] - K&|"
+          },
+          {
+            "col_1": "- z : :",
+            "col_2": "#' ö",
+            "col_3": "8a $ \\mu $ - z",
+            "col_4": "i?\"®G, - LuCh C 9L€CS+ ∞("
+          },
+          {
+            "col_1": "FHEž” G,8²",
+            "col_2": "9 \\mathring{I} Lu5",
+            "col_3": "j ` 35ž \\mathring{A} × ñ ∃ \\mathring{A}",
+            "col_4": ": #§#\"• h?øLö 9L€ø("
+          },
+          {
+            "col_1": "ü r",
+            "col_2": "#' ö",
+            "col_3": "ü r E- DÜ z",
+            "col_4": ": #§\"dLvFJö h...9L€ø("
+          },
+          {
+            "col_1": "!WÊ4j#-Aê< G} ‡ §?øJ",
+            "col_2": "#' ö",
+            "col_3": "...J",
+            "col_4": "?−1 2 Š?ø» Ń ] ó"
+          },
+          {
+            "col_1": "ÀCt: #§? 0; ‡",
+            "col_2": "#' ö",
+            "col_3": "?0; ‡ £ F :U = Ń",
+            "col_4": ": #§2 v Ń ^ J"
+          },
+          {
+            "col_1": "à \\mathring{A} f P Ý ☐ v = Ń",
+            "col_2": "#' ö",
+            "col_3": ":UK0Ø−",
+            "col_4": ": #§§7 · F P \\mathring{Y} 9L€ø("
+          },
+          {
+            "col_1": "K−U Ń Š J",
+            "col_2": "#' ö",
+            "col_3": "C](™8²",
+            "col_4": "K−U Ń J Š?øJ"
+          }
+        ],
+        "row_count": 12,
+        "column_count": 4,
+        "data_row_count": 12,
+        "header_row_count": 0,
+        "header_signature": "col1|col2|col3|col4"
+      }
+    },
+    {
+      "bbox": [
+        54,
+        657,
+        85,
+        672
+      ],
+      "page": 25,
+      "text": "# ○",
+      "type": "heading",
+      "bbox_ocr": [
+        109,
+        1314,
+        170,
+        1343
+      ]
+    },
+    {
+      "bbox": [
+        100,
+        676,
+        275,
+        692
+      ],
+      "page": 25,
+      "text": "$$ \\begin{array}{l}\\mathrm{~d~}\\end{array}>\\tilde{\\mathrm{~d~}}>\\bar{\\mathrm{~A~L~t~}}\\mathrm{~d~}<\\mathrm{~d~}\\quad\\mathrm{~d~}\\quad\\mathrm{~d~}\\quad\\mathrm{~d~}\\quad\\mathrm{~d~}\\quad\\mathrm{~d~}\\quad\\mathrm{~d~} $$",
+      "type": "text",
+      "bbox_ocr": [
+        200,
+        1353,
+        551,
+        1385
+      ]
+    },
+    {
+      "bbox": [
+        98,
+        696,
+        535,
+        716
+      ],
+      "page": 25,
+      "text": "\\[\\begin{array}{l} 2《\\10;\\ \\ddot{O}\\dot{E}6\\ j\\ >\\ \\backslash\\ N\\textcircled{c}\\ \\frac{1}{4}\\text{~}\\text{~",
+      "type": "text",
+      "bbox_ocr": [
+        197,
+        1392,
+        1070,
+        1433
+      ]
+    },
+    {
+      "bbox": [
+        101,
+        716,
+        163,
+        732
+      ],
+      "page": 25,
+      "text": "$$ \\hat{~}\\hat{~}J\\hat{~}a\\hat{~}\\hat{E}\\hat{~}A $$",
+      "type": "text",
+      "bbox_ocr": [
+        203,
+        1433,
+        326,
+        1465
+      ]
+    },
+    {
+      "bbox": [
+        101,
+        738,
+        545,
+        758
+      ],
+      "page": 25,
+      "text": "$$ \\textcircled{a}\\textsf{I}\\textsf{x}\\textsf{»}\\textsf{È}\\quad8<1\\textsf{R}\\textsf{A}\\dot{O}\\quad\\textcircled{O}j\\quad\\textcircled{o}\\dot{E}N\\textcircled{e}\\quad\\textcircled{E}8<O\\textcircled{A}¥\\textcircled{A}n/j\\quad\\textcircled{N}\\textcircled{e}\\quad=0\\quad\\textcircled{F}N\\textcircled{e}\\quad\\mu\\mathrm{~e~}N¥\\textcircled{A}\\frac{1}{4}1\\textcircled{R}\\ddag $$",
+      "type": "text",
+      "bbox_ocr": [
+        203,
+        1475,
+        1090,
+        1515
+      ]
+    },
+    {
+      "bbox": [
+        98,
+        758,
+        547,
+        777
+      ],
+      "page": 25,
+      "text": "$$ \\begin{array}{l} \\text{-1 N¥=}\\quad\\text{&F i}\\quad\\text{&A<0\\ldots}\\}\\quad0!Q\\quad7\\text{J 艹 \\text{”}i+XO\\mu5\\text{1®’J Z 8<9}\\quad ZA\\tilde{N}\\text{E v<}}\\end{array} $$",
+      "type": "text",
+      "bbox_ocr": [
+        197,
+        1516,
+        1095,
+        1554
+      ]
+    },
+    {
+      "bbox": [
+        64,
+        12,
+        545,
+        84
+      ],
+      "page": 26,
+      "text": "0...} J!Q4ў0; ₹ 7 N© 9'—J ZAŃÇĄ \" - - J X • 4ÖO 8 < È 8 < 1®AÖ Oj ö ÈN« Ë 8 < O ₪ ¥Ä n/j N© =0 FN© μ é N¥Ä ¹/41®‡ - 1 N¥’ = & F i & Ä",
+      "type": "text",
+      "bbox_ocr": [
+        129,
+        23,
+        1091,
+        167
+      ]
+    },
+    {
+      "bbox": [
+        46,
+        18,
+        297,
+        60
+      ],
+      "page": 27,
+      "text": "A 0 A A: #S# \"• $h?@8i f A f 8 CIN© 7 5F' Ö; 7-6",
+      "type": "text",
+      "bbox_ocr": [
+        93,
+        37,
+        595,
+        121
+      ]
+    },
+    {
+      "bbox": [
+        41,
+        21,
+        235,
+        41
+      ],
+      "page": 32,
+      "text": "$ \\bar{A} \\frac{1}{4} \\bar{A} \\bar{A}^{-} z : : \\bar{A} \\quad \\epsilon_{0} A \\bar{A} $",
+      "type": "heading",
+      "bbox_ocr": [
+        82,
+        42,
+        471,
+        82
+      ]
+    },
+    {
+      "bbox": [
+        45,
+        20,
+        300,
+        42
+      ],
+      "page": 38,
+      "text": "A 9 A A B' 3 O•,’ A <8è) æĐ = À",
+      "type": "text",
+      "bbox_ocr": [
+        90,
+        40,
+        601,
+        84
+      ]
+    },
+    {
+      "bbox": [
+        42,
+        19,
+        219,
+        40
+      ],
+      "page": 44,
+      "text": "A A A] - K&|8aμ−z",
+      "type": "text",
+      "bbox_ocr": [
+        85,
+        38,
+        439,
+        79
+      ]
+    },
+    {
+      "bbox": [
+        42,
+        20,
+        217,
+        40
+      ],
+      "page": 48,
+      "text": "Ẫ Ẫ Ẫ Ẫ i?\"®G,8aμ ¬ z",
+      "type": "text",
+      "bbox_ocr": [
+        85,
+        41,
+        435,
+        81
+      ]
+    },
+    {
+      "bbox": [
+        42,
+        20,
+        179,
+        40
+      ],
+      "page": 52,
+      "text": "À • À AFEZ” G,8²",
+      "type": "text",
+      "bbox_ocr": [
+        84,
+        41,
+        359,
+        81
+      ]
+    },
+    {
+      "bbox": [
+        41,
+        20,
+        143,
+        39
+      ],
+      "page": 60,
+      "text": "Ả 3 Ả Ả ủ r $",
+      "type": "heading",
+      "bbox_ocr": [
+        82,
+        41,
+        286,
+        78
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        20,
+        260,
+        40
+      ],
+      "page": 64,
+      "text": "A > A A!WE4y#~Aê< G}‡ S?øJ",
+      "type": "text",
+      "bbox_ocr": [
+        88,
+        40,
+        521,
+        80
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        21,
+        164,
+        40
+      ],
+      "page": 69,
+      "text": "A • A A ACt : #§",
+      "type": "text",
+      "bbox_ocr": [
+        88,
+        42,
+        328,
+        81
+      ]
+    },
+    {
+      "bbox": [
+        43,
+        20,
+        238,
+        40
+      ],
+      "page": 74,
+      "text": "A q A A à A f P Y x v = N",
+      "type": "heading",
+      "bbox_ocr": [
+        87,
+        40,
+        477,
+        81
+      ]
+    },
+    {
+      "bbox": [
+        46,
+        20,
+        189,
+        40
+      ],
+      "page": 78,
+      "text": "Ảo AẪKỮUỢS J",
+      "type": "heading",
+      "bbox_ocr": [
+        92,
+        41,
+        379,
+        79
+      ]
+    },
+    {
+      "bbox": [
+        55,
+        24,
+        266,
+        48
+      ],
+      "page": 83,
+      "text": "3 A# Ê >~ ê Ct l Añ> -",
+      "type": "heading",
+      "bbox_ocr": [
+        110,
+        47,
+        532,
+        96
+      ]
+    },
+    {
+      "bbox": [
+        52,
+        98,
+        554,
+        181
+      ],
+      "page": 83,
+      "text": "8$ K&6CR9L€CS+ ∅(___ ♂ ©Añ> 4ÚT ♂ W[ +g ♂ ♂ U' ___ ♂ ♂ Añ'.1 ___ ♂)à + A... } k4y*6 ♂ 3+ \\ ♂ (# ♂ >~ ê ♂ ©Sê ♂ A ♂",
+      "type": "text",
+      "bbox_ocr": [
+        104,
+        195,
+        1109,
+        362
+      ]
+    },
+    {
+      "bbox": [
+        52,
+        214,
+        550,
+        445
+      ],
+      "page": 83,
+      "text": "Lt Ö# Ê >~ ê W[ Ö +g DÛ- Añ'.1 Ö ce(# ¼'.1 Ö 0$ *7454...} 2«» Ö - 9 1 J 4ў:U93$ Ö+e€ v NĂ = Ç p » î l +e ĂH =½J N À È p » C∀™ú ° _,' F * J N È p » 5•5 ° _ ĂAŃÇj EŸœ & ° _ N¶ μ,' ° _ 0 Ă ° _ EœÀŃÃ ° _ ØB Ă ° _ = N ÈEŸ& 0 È Á £ = N È ÁEŸ& = N ÈAîAŃÃ f CEÃ *6 42«‒ z È Y+X8 9 Â f 3 ¬ z È 1 J 1Ń6 È v N ØB È ñ(| 1Ń6 È. · AîAŃf CEÈ K? = N È J N = N È..?ø../j = N È 1 J'B‘1† B È œ£ #k Ø4ô4÷1† B È +X®CWÃJ, 4ê4÷ñ Ń Â F ¶ ñ Â =>ãM»m Â+e € × ñ,‘ K0^ ÈO ñ#qFJÃ ï í # N«4ў© ö,‘ N© - È4ў-( £G L © ö > é 0..4ў:U#k Ø Đ",
+      "type": "text",
+      "bbox_ocr": [
+        104,
+        427,
+        1100,
+        890
+      ]
+    },
+    {
+      "bbox": [
+        310,
+        484,
+        551,
+        501
+      ],
+      "page": 83,
+      "text": "Å 7 ê = 0 Ö. #§..Ch+e€ v N 9 L€ ₹( A- 1 A",
+      "type": "text",
+      "bbox_ocr": [
+        620,
+        967,
+        1102,
+        1002
+      ]
+    },
+    {
+      "bbox": [
+        321,
+        518,
+        466,
+        534
+      ],
+      "page": 83,
+      "text": "0 0 8",
+      "type": "text",
+      "bbox_ocr": [
+        642,
+        1036,
+        933,
+        1068
+      ]
+    },
+    {
+      "bbox": [
+        59,
+        553,
+        153,
+        574
+      ],
+      "page": 83,
+      "text": "2ỂCđ# Ê >~ ê",
+      "type": "text",
+      "bbox_ocr": [
+        118,
+        1106,
+        307,
+        1148
+      ]
+    },
+    {
+      "bbox": [
+        47,
+        22,
+        268,
+        53
+      ],
+      "page": 85,
+      "text": "> A# Ê >~ ê, s -",
+      "type": "heading",
+      "bbox_ocr": [
+        95,
+        45,
+        537,
+        106
+      ]
+    },
+    {
+      "bbox": [
+        48,
+        34,
+        554,
+        696
+      ],
+      "page": 85,
+      "text": "A# E > e, S \\, s - > ♂ # ½³⁄₄: #§2 9 Ê j í Já ♂D ', ', r ♂, : #§..Chre€ v N 9 L€ ♂(,' ; M'1®‡,'4ÚT Ê k 4¥*6 >~ \\ ♂(, s ; M'1®‡,'~ ú Ê 2 j k- j \\ ♂(,' 8 # *6 ê Ê A é,'= y ò ₁: #§# \"• $h? ♂i f ﹁ z } G-€]N© 7 Ã 75F' ♂; 7-6 ♂,'A 7 #k ♂ ₁! >~ A é ~ s ⇑ *6 J, ) : F N©,'A 7 Ã 0 7 Ã A 7 · & % $5 Ã 1 ♂ ♂y 0 7 § f » Ń ½1 ♂φ-( £ & Ã A é ) > ♂, s ê,'1®= » N © ♂ G CS+ Ã \\, s - ⁄₄ ♂ 8 8# ♂ 8 9 x Ê *6 ê E ♂e ^ s Ã (©!\" > Ã # Ê >~ ê 1®‡ F- 1 Ö > ♂, s ê 1®‡ F- 1 Ö 6| N ♂ v N k- ...} = 0 Ã- ♂1 A ♂: #§..Chre€ v N 9 L € ♂( ` p ♂: #§ 2 < © j GD'Q í W ♂ r 2 Ê C ♂ ₫, s ê",
+      "type": "text",
+      "bbox_ocr": [
+        97,
+        69,
+        1109,
+        1391
+      ]
+    },
+    {
+      "bbox": [
+        50,
+        714,
+        553,
+        756
+      ],
+      "page": 85,
+      "text": ">Lt Ö ∅ ∅( F 9 Z 8 +? 0 Z 8 j >Ü, s ê 5d4ã/n,’ Añ> € É È Ť Ū ³/F0A ê ∕,’ È ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♂ ♀ ♂ ♂ ♀ ♂ ♂ ♀ ♂ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ ♂ ♀ �",
+      "type": "text",
+      "bbox_ocr": [
+        101,
+        1429,
+        1107,
+        1511
+      ]
+    },
+    {
+      "bbox": [
+        51,
+        40,
+        225,
+        69
+      ],
+      "page": 87,
+      "text": "• A Ẫ A v ẍ B* > -",
+      "type": "text",
+      "bbox_ocr": [
+        102,
+        79,
+        451,
+        138
+      ]
+    },
+    {
+      "bbox": [
+        47,
+        118,
+        196,
+        140
+      ],
+      "page": 87,
+      "text": "8$ K&6CR9LECS+ ∞( Ố",
+      "type": "text",
+      "bbox_ocr": [
+        94,
+        237,
+        392,
+        279
+      ]
+    },
+    {
+      "bbox": [
+        49,
+        160,
+        549,
+        288
+      ],
+      "page": 87,
+      "text": "A ∞( ﹁B*\" 8 ₹X ◌ ∂ \\ N⊝ Å 7‡k ∅] ZF ∂ ∂ ⌋ ~ ⊜\"A ‖ ½- 7 ∂ 7‡ ∂ ∂ ∵ ∇ 1\\ 9 q ‘ > 7 ∂ ⌒ X Y ₂ £ 3+ 7- ‖ ∂ 7 ∂“ W,‡ ‡ ₫ ₁ 4₀4÷ F65Z ₹ ₹ = ₹ ∂ ∂ ∂ 7 ∂...} C∅Sₑ ∂ < 0 ₓ F65⁺ X × 6₅₇₎1₅₆ £ 3+,‘ = <...} ₹ = ₹ ∂ ∂ < 0 7 ⁸! ₹ ∂ 7 ∂ 7 ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ∂ ��",
+      "type": "text",
+      "bbox_ocr": [
+        98,
+        321,
+        1099,
+        577
+      ]
+    },
+    {
+      "bbox": [
+        70,
+        302,
+        136,
+        318
+      ],
+      "page": 87,
+      "text": "$$ \\begin{array}{r l r}{(\\textcircled{c}!)}&{{}}&{>\\text{Å }}\\end{array} $$",
+      "type": "text",
+      "bbox_ocr": [
+        140,
+        604,
+        273,
+        636
+      ]
+    },
+    {
+      "bbox": [
+        49,
+        417,
+        325,
+        434
+      ],
+      "page": 87,
+      "text": "Å 7 ê Ä ₣ - ₒ1 Ả Ö : #§..Ch+e € v Ń 9 L € ₹(",
+      "type": "text",
+      "bbox_ocr": [
+        98,
+        834,
+        650,
+        869
+      ]
+    },
+    {
+      "bbox": [
+        48,
+        446,
+        411,
+        462
+      ],
+      "page": 87,
+      "text": "# Ê >~ ê F, s ^ ê A1®‡ F- 1 À Ö___",
+      "type": "text",
+      "bbox_ocr": [
+        96,
+        891,
+        823,
+        924
+      ]
+    },
+    {
+      "bbox": [
+        63,
+        474,
+        263,
+        489
+      ],
+      "page": 87,
+      "text": "0 ☐ ☐ ☐ ☐ ☐ ☐",
+      "type": "text",
+      "bbox_ocr": [
+        127,
+        948,
+        526,
+        978
+      ]
+    },
+    {
+      "bbox": [
+        51,
+        534,
+        523,
+        552
+      ],
+      "page": 87,
+      "text": ">Lt Ö +X] - Ä KWSV ZZZ FUHGLVFKLQD JRY FQ Å ] ; E-,’ E Ä v +X Ÿ Ö z Ä",
+      "type": "text",
+      "bbox_ocr": [
+        103,
+        1069,
+        1046,
+        1105
+      ]
+    },
+    {
+      "bbox": [
+        47,
+        28,
+        262,
+        52
+      ],
+      "page": 91,
+      "text": "q $ \\tilde{A} = \\dot{o} > \\ 7 b 7 \\bar{B}^* $",
+      "type": "heading",
+      "bbox_ocr": [
+        94,
+        55,
+        524,
+        105
+      ]
+    },
+    {
+      "bbox": [
+        45,
+        78,
+        318,
+        99
+      ],
+      "page": 91,
+      "text": "8$ K&6CR9L€CS+ ∞( Ấ : #§ Ả * Â 9L€ ∞( Ở",
+      "type": "text",
+      "bbox_ocr": [
+        91,
+        155,
+        636,
+        198
+      ]
+    },
+    {
+      "bbox": [
+        46,
+        130,
+        545,
+        410
+      ],
+      "page": 91,
+      "text": "A ∞( 8?₪₣¥, 9 £♯ ➚ #?₫ ₹ ₹ Ej ∆ 7 ⊂ ⊁ > ___ K&6CR9⊥₹CS+ ∞( ₹ N© ___ 75F' ♡ ; 7-6 ___ ∂,‡ ∂ 7 ₫ a \\!Q ∂ 7 ₹ A ∞( G Gý⁻B*² ; ☉ ₹ 0 ∂ = 4₊⁄₂ ₹ = ∂ > +...₫ 7 ₹ 7,‡ >| j × ₹ ½ ∂ 5 = ₹ = y ∂ 7 ₹ = 4₊⁄₂ ₹ = ∂ > | 4 | j × ₹ 9 ∂ 5 = * ∂ ∂ ∗ 0 Ct | ₹ Ct₃∂ₐₜ₋ ₽ ₹ ∂ 7 ₹ = 4₊⁄₂ ₹ = ∂ > 2«| F # ∂ >| j × ₹ ∂ k ∅ 0 ± ‡ • ₽ ₹ ₹ -( £ GL B3 ₩ 7 ₹ 7 1yF # ₹?₫>| j × ∂ ∞( ) : ⁻ B* μ é,‡ -O₁ ∀¹₄• 4ₒWC∅ₛₑ ² 9 F B* ₹ 6 8 ∂ ₹ >| o k 1₮₂ L )!\" ₹ * , >| o 45₂₅ ₹ | D ‘ & ⁻ ₫ + a\" V •,‡ 0 7 > ₹ ¹₄CS+ ₹ X ₹ F?₫>| j B 3 OL$ ₹ ₹ # ₹ N₂F >| 7 N©,‡ ∂ 7 Ct | ₹ (©!\" ⁻ B* ½",
+      "type": "text",
+      "bbox_ocr": [
+        92,
+        260,
+        1091,
+        820
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        530,
+        305,
+        553
+      ],
+      "page": 91,
+      "text": "À 7 ê À Đ- 0e1 À Ö : #§..Che€ v N9L€ce(",
+      "type": "text",
+      "bbox_ocr": [
+        88,
+        1061,
+        611,
+        1106
+      ]
+    },
+    {
+      "bbox": [
+        44,
+        551,
+        323,
+        572
+      ],
+      "page": 91,
+      "text": "，s ^ ê A1®‡ F- 1 AÖ ___",
+      "type": "text",
+      "bbox_ocr": [
+        89,
+        1102,
+        646,
+        1143
+      ]
+    },
+    {
+      "bbox": [
+        54,
+        574,
+        243,
+        596
+      ],
+      "page": 91,
+      "text": "0 ☐ ☐ ☐ ☐ ☐ ☐",
+      "type": "text",
+      "bbox_ocr": [
+        108,
+        1149,
+        487,
+        1191
+      ]
+    },
+    {
+      "bbox": [
+        47,
+        44,
+        206,
+        68
+      ],
+      "page": 92,
+      "text": "q 0 ACRŨ NÃO z",
+      "type": "heading",
+      "bbox_ocr": [
+        95,
+        87,
+        412,
+        136
+      ]
+    },
+    {
+      "bbox": [
+        64,
+        106,
+        547,
+        186
+      ],
+      "page": 92,
+      "text": "CRŷ Ŗ>~ Ã ₫F ☎,‹ 4ў․ 0û J Aŷ8 ➛ ŷ p * §,‹ ŷ NĂŷO z ŷ CRŷ Ŗ>‿ ŷ CRŷ Ŗ>‿ 5 [ Ct × Cq >∼ Ă Y#Ŗ∼ ú)à H #qGᵃ∼ 1y Ầ F * \\ 0 g>| * §,‹ Ct ặñ> ẋ- œ1 ẋ",
+      "type": "text",
+      "bbox_ocr": [
+        129,
+        212,
+        1095,
+        371
+      ]
+    },
+    {
+      "bbox": [
+        36,
+        183,
+        550,
+        230
+      ],
+      "page": 92,
+      "text": ": #§..Chte € v N 9 L€ ce( ₹ ṏ = 0 : #§ F 5, = +e € v N 9 L€ ce( ₹ = 0 h ö ² ;. ₹ ECRN N",
+      "type": "text",
+      "bbox_ocr": [
+        73,
+        366,
+        1100,
+        461
+      ]
+    },
+    {
+      "bbox": [
+        45,
+        23,
+        548,
+        52
+      ],
+      "page": 101,
+      "text": "q $ \\frac{1}{4} $ A i # 5d 4ã 0> f $ \\frac{1}{4} $ /n J Lì Ct H, 8Y - Aà..., Añ >",
+      "type": "heading",
+      "bbox_ocr": [
+        91,
+        46,
+        1096,
+        103
+      ]
+    },
+    {
+      "bbox": [
+        38,
+        32,
+        109,
+        58
+      ],
+      "page": 104,
+      "text": "q 9 A",
+      "type": "text",
+      "bbox_ocr": [
+        77,
+        64,
+        219,
+        116
+      ]
+    }
+  ],
+  "signature_count": 0,
+  "signature_texts": [],
+  "recognition_route": "paddleocr_vl",
+  "native_table_count": 6,
+  "recognition_reason": "vl_only_pipeline",
+  "signature_detected": false,
+  "logical_table_count": 5,
+  "signature_locations": [],
+  "table_section_count": 6,
+  "layout_section_count": 114,
+  "bbox_coordinate_space": "pdf",
+  "ppstructure_v3_enabled": false,
+  "ppstructure_v3_requested": false,
+  "seal_recognition_enabled": true,
+  "bbox_source_coordinate_space": "ocr_image"
+}
