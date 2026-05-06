@@ -589,7 +589,22 @@ class DuplicateCheckService:
 
         deviation_payload = self._deviation_checker._coerce_payload(payload)
         deviation_sections = self._deviation_checker._extract_bid_deviation_sections(deviation_payload)
+        row_segments = self._segments_from_deviation_rows(deviation_sections)
+        for segment in row_segments:
+            segments.append(segment)
+
+        covered_page_keys = {
+            tuple(int(page) for page in (segment.get("pages") or []) if isinstance(page, int))
+            for segment in row_segments
+        }
         for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or []):
+            section_pages = tuple(
+                int(page)
+                for page in ([section.get("page")] if isinstance(section.get("page"), int) else [])
+                if isinstance(page, int)
+            )
+            if section_pages and section_pages in covered_page_keys:
+                continue
             segment = self._segment_from_deviation_section(section)
             if segment is not None:
                 segments.append(segment)
@@ -597,6 +612,93 @@ class DuplicateCheckService:
         deduped = self._dedupe_scoped_segments(segments)
         deduped.sort(key=self._scoped_segment_sort_key)
         return deduped
+
+    def _segments_from_deviation_rows(
+        self,
+        deviation_sections: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        section_pages = {
+            int(section.get("page"))
+            for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or [])
+            if isinstance(section, dict) and isinstance(section.get("page"), int)
+        }
+        grouped: dict[tuple[str, int], list[str]] = {}
+
+        for row in deviation_sections.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            page = row.get("page")
+            if not isinstance(page, int):
+                continue
+            title = str(row.get("title") or "").strip() or "偏离表"
+            if "偏离" not in title and page not in section_pages:
+                continue
+
+            requirement = self._normalize_plain_text(row.get("requirement_text") or "")
+            response = self._normalize_plain_text(row.get("response_text") or "")
+            deviation = self._normalize_plain_text(row.get("deviation_text") or "")
+            if not self._is_deviation_duplicate_row(requirement, response, deviation):
+                continue
+            joined = " | ".join(part for part in (requirement, response, deviation) if part).strip()
+            if len(self._compact_raw_text(joined)) < 6:
+                continue
+
+            grouped.setdefault((title, page), []).append(joined)
+
+        segments: list[dict[str, Any]] = []
+        for (title, page), lines in grouped.items():
+            deduped_lines: list[str] = []
+            seen = set()
+            for line in lines:
+                key = self._compact_raw_text(line)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                deduped_lines.append(line)
+            if not deduped_lines:
+                continue
+            segments.append(
+                {
+                    "title": title,
+                    "pages": [page],
+                    "kind": "table",
+                    "source": "deviation_table",
+                    "preserve_common_lines": True,
+                    "lines": deduped_lines,
+                }
+            )
+        return segments
+
+    def _is_deviation_duplicate_row(
+        self,
+        requirement: str,
+        response: str,
+        deviation: str,
+    ) -> bool:
+        compact_requirement = self._compact_raw_text(requirement)
+        compact_response = self._compact_raw_text(response)
+        compact_deviation = self._compact_raw_text(deviation)
+        joined = f"{compact_requirement}{compact_response}{compact_deviation}"
+        if not joined:
+            return False
+
+        header_hits = sum(1 for token in self.COMMON_DUPLICATE_HEADER_TOKENS if token in joined)
+        if header_hits >= 4:
+            return False
+
+        if compact_requirement and compact_requirement == compact_response and len(compact_requirement) >= 12:
+            return False
+
+        if compact_deviation:
+            return True
+
+        if not compact_response:
+            return False
+
+        if any(token in compact_response for token in ("响应", "相同", "满足", "符合", "偏离", "详见")):
+            return True
+
+        return False
 
     def _segment_from_itemized_section(self, section: dict[str, Any]) -> dict[str, Any] | None:
         lines = self._normalize_scope_lines(section.get("lines") or [])
@@ -620,7 +722,10 @@ class DuplicateCheckService:
         raw_lines = section.get("lines")
         if not isinstance(raw_lines, list) or not raw_lines:
             raw_lines = self.SPLIT_LINE_PATTERN.split(str(section.get("text") or ""))
-        lines = self._normalize_scope_lines(self._trim_deviation_section_lines(raw_lines))
+        lines = self._normalize_scope_lines(
+            self._trim_deviation_section_lines(raw_lines),
+            preserve_common_lines=True,
+        )
         lines = [line for line in lines if self._is_deviation_response_line(line)]
         if not lines:
             return None
@@ -642,6 +747,7 @@ class DuplicateCheckService:
             "pages": pages or [1],
             "kind": "table",
             "source": "deviation_table",
+            "preserve_common_lines": True,
             "lines": lines,
         }
 
@@ -677,7 +783,12 @@ class DuplicateCheckService:
             )
         )
 
-    def _normalize_scope_lines(self, values: list[Any]) -> list[str]:
+    def _normalize_scope_lines(
+        self,
+        values: list[Any],
+        *,
+        preserve_common_lines: bool = False,
+    ) -> list[str]:
         normalized: list[str] = []
         seen = set()
         for value in values:
@@ -687,7 +798,7 @@ class DuplicateCheckService:
             text = self._strip_scope_serial_prefix(text)
             if not text:
                 continue
-            if self._is_common_duplicate_scope_line(text):
+            if not preserve_common_lines and self._is_common_duplicate_scope_line(text):
                 continue
             key = self._compact_raw_text(text)
             if not key or key in seen:
@@ -789,7 +900,10 @@ class DuplicateCheckService:
         tables: list[dict[str, Any]] = []
 
         for index, segment in enumerate(segments, start=1):
-            lines = self._normalize_scope_lines(segment.get("lines") or [])
+            lines = self._normalize_scope_lines(
+                segment.get("lines") or [],
+                preserve_common_lines=bool(segment.get("preserve_common_lines")),
+            )
             if not lines:
                 continue
 
@@ -1419,6 +1533,8 @@ class DuplicateCheckService:
                     "right_pages": right_unit.get("pages", []),
                     "exact": False,
                     "similarity": round(score, 4),
+                    "left_rows": [self._clip(row, 200) for row in list(left_unit.get("rows") or [])],
+                    "right_rows": [self._clip(row, 200) for row in list(right_unit.get("rows") or [])],
                     "left_sample_rows": [self._clip(row, 160) for row in list(left_unit.get("rows") or [])[:3]],
                     "right_sample_rows": [self._clip(row, 160) for row in list(right_unit.get("rows") or [])[:3]],
                 }
@@ -1725,6 +1841,8 @@ class DuplicateCheckService:
                     "left_pages": left_table.get("pages", []),
                     "right_pages": right_table.get("pages", []),
                     "exact": True,
+                    "left_rows": [self._clip(row, 200) for row in list(left_table.get("rows", []) or [])],
+                    "right_rows": [self._clip(row, 200) for row in list(right_table.get("rows", []) or [])],
                     "sample_rows": [self._clip(row, 160) for row in left_table.get("rows", [])[:3]],
                 }
             )

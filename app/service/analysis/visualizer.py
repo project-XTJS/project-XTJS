@@ -6,6 +6,7 @@ import os
 import random
 import string
 from collections import Counter
+from difflib import SequenceMatcher
 
 from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
@@ -812,6 +813,42 @@ class ReportVisualizer:
                     }};
                 }}
 
+                const remotePageCache = new Map();
+
+                function resolveRemotePreviewUrl(docConfig, page) {{
+                    const template = String((docConfig && docConfig.page_preview_url_template) || '').trim();
+                    if (!template || !page) return '';
+                    return template.replace('{{page}}', String(page));
+                }}
+
+                function appendSourcePageHint(rawSourceUrl, page) {{
+                    const base = String(rawSourceUrl || '').split('#', 1)[0];
+                    if (!base || !page) return base;
+                    if (base.includes('/api/postgresql/documents/')) {{
+                        return `${{base}}${{base.includes('?') ? '&' : '?'}}page=${{page}}`;
+                    }}
+                    return `${{base}}#page=${{page}}`;
+                }}
+
+                async function loadRemotePagePreview(docConfig, page) {{
+                    const requestUrl = resolveRemotePreviewUrl(docConfig, page);
+                    if (!requestUrl) return null;
+                    if (remotePageCache.has(requestUrl)) {{
+                        return remotePageCache.get(requestUrl);
+                    }}
+                    const response = await fetch(requestUrl, {{
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'omit',
+                    }});
+                    if (!response.ok) {{
+                        throw new Error(`preview request failed: ${{response.status}}`);
+                    }}
+                    const payload = await response.json();
+                    remotePageCache.set(requestUrl, payload);
+                    return payload;
+                }}
+
                 function sourceKindLabel(kind) {{
                     if (kind === 'pdf') return 'PDF预览';
                     if (kind === 'image') return '图片预览';
@@ -857,7 +894,7 @@ class ReportVisualizer:
                     boxNode.classList.add('visible');
                 }}
 
-                function openLocator(button) {{
+                async function openLocator(button) {{
                     if (!overlay) return;
                     const documentKey = button.dataset.document || 'bidder';
                     const page = Number(button.dataset.page || 0);
@@ -890,7 +927,7 @@ class ReportVisualizer:
                         if (rawSourceUrl) {{
                             let finalUrl = rawSourceUrl;
                             if (docConfig.source_kind === 'pdf' && page) {{
-                                finalUrl = `${{rawSourceUrl}}#page=${{page}}`;
+                                finalUrl = appendSourcePageHint(rawSourceUrl, page);
                             }}
                             sourceLink.setAttribute('href', finalUrl);
                             sourceLink.style.display = 'inline-flex';
@@ -900,25 +937,55 @@ class ReportVisualizer:
                         }}
                     }}
 
-                    if (!resolved) {{
+                    if (resolved) {{
+                        const pageConfig = resolved.pageConfig;
+                        emptyNode.style.display = 'none';
+                        pageWrap.style.display = 'inline-block';
+                        overlay.classList.add('visible');
+                        imageNode.onload = function() {{
+                            renderBox(bbox, pageConfig);
+                        }};
+                        imageNode.src = pageConfig.image_url;
+                        if (imageNode.complete) {{
+                            renderBox(bbox, pageConfig);
+                        }}
+                        return;
+                    }}
+
+                    const remotePreviewUrl = resolveRemotePreviewUrl(docConfig, page);
+                    if (!remotePreviewUrl) {{
                         pageWrap.style.display = 'none';
                         boxNode.classList.remove('visible');
                         emptyNode.style.display = 'flex';
-                        emptyNode.textContent = '当前缺少该页的预览资源。';
+                        emptyNode.textContent = 'No preview is available for this page.';
                         overlay.classList.add('visible');
                         return;
                     }}
 
-                    const pageConfig = resolved.pageConfig;
-                    emptyNode.style.display = 'none';
-                    pageWrap.style.display = 'inline-block';
                     overlay.classList.add('visible');
-                    imageNode.onload = function() {{
-                        renderBox(bbox, pageConfig);
-                    }};
-                    imageNode.src = pageConfig.image_url;
-                    if (imageNode.complete) {{
-                        renderBox(bbox, pageConfig);
+                    pageWrap.style.display = 'none';
+                    boxNode.classList.remove('visible');
+                    emptyNode.style.display = 'flex';
+                    emptyNode.textContent = 'Loading source preview...';
+                    try {{
+                        const pageConfig = await loadRemotePagePreview(docConfig, page);
+                        if (!pageConfig || !pageConfig.image_data_url) {{
+                            throw new Error('preview data is empty');
+                        }}
+                        emptyNode.style.display = 'none';
+                        pageWrap.style.display = 'inline-block';
+                        imageNode.onload = function() {{
+                            renderBox(bbox, pageConfig);
+                        }};
+                        imageNode.src = pageConfig.image_data_url;
+                        if (imageNode.complete) {{
+                            renderBox(bbox, pageConfig);
+                        }}
+                    }} catch (error) {{
+                        pageWrap.style.display = 'none';
+                        boxNode.classList.remove('visible');
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = 'Failed to load source preview. Please retry later.';
                     }}
                 }}
 
@@ -926,8 +993,8 @@ class ReportVisualizer:
                     document.querySelectorAll('.locator-open').forEach((button) => {{
                         if (button.dataset.locatorBound === '1') return;
                         button.dataset.locatorBound = '1';
-                        button.addEventListener('click', function() {{
-                            openLocator(this);
+                        button.addEventListener('click', async function() {{
+                            await openLocator(this);
                         }});
                     }});
                 }}
@@ -1976,6 +2043,9 @@ class ReportVisualizer:
             return ""
         base = str(url).split("#", 1)[0]
         if isinstance(page, int) and page > 0:
+            if "/api/postgresql/documents/" in base:
+                separator = "&" if "?" in base else "?"
+                return f"{base}{separator}page={page}"
             return f"{base}#page={page}"
         return base
 
@@ -1994,6 +2064,90 @@ class ReportVisualizer:
             f"<a class='issue-link issue-detail-link' href='{html.escape(str(href))}' "
             f"target='_blank' rel='noreferrer'>{html.escape(str(label))}</a>"
         )
+
+    def _project_locator_document_key(self, entry, fallback):
+        if not isinstance(entry, dict):
+            return ""
+        explicit = str(entry.get("locator_document_key") or "").strip()
+        if explicit:
+            return explicit
+        identifier = str(entry.get("document_identifier") or "").strip()
+        if identifier:
+            return f"doc_{identifier}"
+        name = str(fallback or entry.get("json_name") or entry.get("display_name") or "").strip()
+        if not name:
+            return ""
+        return "doc_" + self._project_make_stable_token(name)
+
+    def _project_build_locator_button_html(
+        self,
+        *,
+        entry,
+        label,
+        page,
+        page_end=None,
+        bbox=None,
+    ):
+        if not isinstance(page, int) or page <= 0:
+            return f"<span>{html.escape(str(label))}</span>"
+        document_key = self._project_locator_document_key(entry, str(label))
+        if not document_key:
+            return f"<span>{html.escape(str(label))}</span>"
+        bbox_attr = ""
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+            bbox_attr = ",".join(
+                str(int(round(float(item))))
+                for item in bbox[:4]
+                if isinstance(item, (int, float))
+            )
+        return (
+            f"<button type='button' class='issue-link issue-page-link issue-link-button locator-open' "
+            f"data-document='{html.escape(document_key)}' "
+            f"data-page='{page}' "
+            f"data-page-end='{page_end if isinstance(page_end, int) and page_end >= page else page}' "
+            f"data-bbox='{html.escape(bbox_attr)}' "
+            f"data-label='{html.escape(str(label))}'>"
+            f"{html.escape(str(label))}</button>"
+        )
+
+    def _project_build_locator_preview_config(self, source_lookup):
+        documents = {}
+        if not isinstance(source_lookup, dict):
+            return {"documents": documents}
+        for fallback_name, entry in source_lookup.items():
+            if not isinstance(entry, dict):
+                continue
+            document_key = self._project_locator_document_key(entry, fallback_name)
+            if not document_key or document_key in documents:
+                continue
+            source_url = str(entry.get("source_url") or "").strip()
+            preview_template = str(entry.get("page_preview_url_template") or "").strip()
+            source_kind = str(entry.get("source_kind") or "").strip() or "synthetic"
+            if not source_url and not preview_template:
+                continue
+            documents[document_key] = {
+                "title": str(entry.get("display_name") or entry.get("json_name") or fallback_name or document_key),
+                "source_kind": source_kind if source_url else "synthetic",
+                "source_url": source_url,
+                "page_preview_url_template": preview_template,
+                "pages": {},
+            }
+        return {"documents": documents}
+
+    def _project_build_locator_assets_html(self, source_lookup):
+        preview_config = self._project_build_locator_preview_config(source_lookup)
+        if not (preview_config.get("documents") or {}):
+            return ""
+        previous = self._document_preview_config
+        try:
+            self._document_preview_config = preview_config
+            return (
+                self._build_locator_support_style()
+                + self._build_locator_support_markup()
+                + self._build_locator_support_script()
+            )
+        finally:
+            self._document_preview_config = previous
 
     def _project_build_source_file_link_html(self, source_lookup, file_name, *, label=None, page=None):
         entry = source_lookup.get(file_name) or {}
@@ -2014,10 +2168,20 @@ class ReportVisualizer:
 
         entry = source_lookup.get(file_name) or {}
         source_url = str(entry.get("source_url") or "")
+        preview_template = str(entry.get("page_preview_url_template") or "")
         fragments = []
         for start_page, end_page in self._coalesce_page_ranges(normalized_pages):
             label = f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}"
-            if source_url:
+            if preview_template:
+                fragments.append(
+                    self._project_build_locator_button_html(
+                        entry=entry,
+                        label=label,
+                        page=start_page,
+                        page_end=end_page,
+                    )
+                )
+            elif source_url:
                 href = self._project_append_page_fragment(source_url, start_page)
                 fragments.append(
                     f"<a class='issue-link issue-page-link' href='{html.escape(href)}' "
@@ -2144,6 +2308,102 @@ class ReportVisualizer:
             or str(item.get("right_file_name") or "") in current_files
         ]
 
+    def _project_duplicate_item_files(self, item):
+        files = []
+        left_file = str(item.get("left_file_name") or "").strip()
+        right_file = str(item.get("right_file_name") or "").strip()
+        if left_file:
+            files.append(left_file)
+        if right_file and right_file not in files:
+            files.append(right_file)
+        return files
+
+    def _project_duplicate_cluster_items(self, items):
+        normalized_items = [item for item in items if self._project_duplicate_item_files(item)]
+        return [
+            {
+                "files": self._project_duplicate_item_files(item),
+                "items": [item],
+            }
+            for item in normalized_items
+        ]
+
+    def _project_duplicate_cluster_metrics(self, cluster):
+        totals = {
+            "exact_section_count": 0,
+            "similar_section_count": 0,
+            "exact_block_count": 0,
+            "similar_block_count": 0,
+            "exact_table_count": 0,
+            "similar_table_count": 0,
+        }
+        for item in cluster.get("items") or []:
+            metrics = item.get("metrics") or {}
+            for key in totals:
+                totals[key] += int(metrics.get(key) or 0)
+        return totals
+
+    def _project_duplicate_cluster_risk(self, cluster):
+        best_rank = -1
+        best_risk = "none"
+        for item in cluster.get("items") or []:
+            risk = str(item.get("risk_level") or "none")
+            rank = self._project_duplicate_risk_rank(risk)
+            if rank > best_rank:
+                best_rank = rank
+                best_risk = risk
+        return best_risk
+
+    def _project_duplicate_cluster_score(self, cluster):
+        best_score = 0.0
+        best_raw = "0"
+        for item in cluster.get("items") or []:
+            raw = item.get("match_score")
+            if raw is None:
+                raw = item.get("exact_match_score")
+            try:
+                value = float(raw or 0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value >= best_score:
+                best_score = value
+                best_raw = self._project_duplicate_score(item)
+        return best_raw
+
+    def _project_duplicate_cluster_anchor(self, doc_type, cluster):
+        files = cluster.get("files") or []
+        return (
+            f"duplicate-cluster-{doc_type}-"
+            f"{self._project_make_stable_token(*files)}"
+        )
+
+    def _project_duplicate_cluster_pages(self, cluster):
+        pages_by_file = {}
+        for item in cluster.get("items") or []:
+            left_file = str(item.get("left_file_name") or "")
+            right_file = str(item.get("right_file_name") or "")
+            if left_file:
+                pages_by_file.setdefault(left_file, set()).update(self._project_collect_duplicate_pages(item, "left"))
+            if right_file:
+                pages_by_file.setdefault(right_file, set()).update(self._project_collect_duplicate_pages(item, "right"))
+        return {
+            file_name: sorted(page_set)
+            for file_name, page_set in pages_by_file.items()
+        }
+
+    def _project_build_duplicate_cluster_doc_list_html(self, cluster, *, source_lookup):
+        pages_by_file = self._project_duplicate_cluster_pages(cluster)
+        parts = []
+        for file_name in cluster.get("files") or []:
+            parts.append(
+                self._project_build_source_doc_cell_html(
+                    source_lookup,
+                    file_name,
+                    pages_by_file.get(file_name) or [],
+                )
+            )
+        return "<div class='issue-doc-list'>" + "".join(parts) + "</div>"
+
     def _project_iter_typo_items(self, result, *, current_files=None):
         rows = []
         for role, group in (result.get("groups") or {}).items():
@@ -2179,6 +2439,16 @@ class ReportVisualizer:
         except (TypeError, ValueError):
             return str(value or "0")
 
+    def _project_duplicate_risk_rank(self, risk_level):
+        normalized = str(risk_level or "").strip().lower()
+        mapping = {
+            "none": 0,
+            "low": 1,
+            "medium": 2,
+            "high": 3,
+        }
+        return mapping.get(normalized, 0)
+
     def _project_metric_display(self, metrics, exact_key, similar_key):
         exact_value = int(metrics.get(exact_key) or 0)
         similar_value = int(metrics.get(similar_key) or 0)
@@ -2197,26 +2467,21 @@ class ReportVisualizer:
     ):
         items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
         if not items:
-            return "<tr><td colspan='8'>未发现相关可疑对</td></tr>"
+            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
 
         page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
         detail_page = issue_pages.get(page_key, "")
         rows = []
-        for item in items:
-            metrics = item.get("metrics") or {}
-            risk_level = str(item.get("risk_level") or "-")
-            left_file = str(item.get("left_file_name") or "")
-            right_file = str(item.get("right_file_name") or "")
-            left_pages = self._project_collect_duplicate_pages(item, "left")
-            right_pages = self._project_collect_duplicate_pages(item, "right")
-            detail_anchor = self._project_duplicate_pair_anchor(doc_type, item)
+        for cluster in self._project_duplicate_cluster_items(items):
+            metrics = self._project_duplicate_cluster_metrics(cluster)
+            risk_level = self._project_duplicate_cluster_risk(cluster)
+            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
             detail_href = self._project_issue_page_href(detail_page, detail_anchor)
             rows.append(
                 f"<tr class='{self._project_severity_css_class(risk_level)}'>"
                 f"<td>{html.escape(risk_level)}</td>"
-                f"<td>{html.escape(self._project_duplicate_score(item))}</td>"
-                f"<td>{self._project_build_source_doc_cell_html(source_lookup, left_file, left_pages)}</td>"
-                f"<td>{self._project_build_source_doc_cell_html(source_lookup, right_file, right_pages)}</td>"
+                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
+                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
@@ -2440,20 +2705,29 @@ class ReportVisualizer:
             body = "<p class='issue-empty'>未发现相关可疑对。</p>"
         else:
             cards = []
-            for item in items:
-                metrics = item.get("metrics") or {}
-                risk_level = str(item.get("risk_level") or "-")
-                left_file = str(item.get("left_file_name") or "")
-                right_file = str(item.get("right_file_name") or "")
-                left_pages = self._project_collect_duplicate_pages(item, "left")
-                right_pages = self._project_collect_duplicate_pages(item, "right")
+            for cluster in self._project_duplicate_cluster_items(items):
+                metrics = self._project_duplicate_cluster_metrics(cluster)
+                risk_level = self._project_duplicate_cluster_risk(cluster)
+                pair_sections = []
+                for item in cluster.get("items") or []:
+                    pair_metrics = item.get("metrics") or {}
+                    left_file = str(item.get("left_file_name") or "")
+                    right_file = str(item.get("right_file_name") or "")
+                    pair_sections.append(
+                        f"""
+                        <details open>
+                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} ｜ 分数：{html.escape(self._project_duplicate_score(item))} ｜ 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} ｜ 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} ｜ 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                        </details>
+                        """
+                    )
                 cards.append(
                     f"""
-                    <article id="{html.escape(self._project_duplicate_pair_anchor(doc_type, item))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
                       <div class="issue-card-header">
                         <div>
-                          <h2>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)}</h2>
-                          <p class="issue-meta">风险：{html.escape(risk_level)} ｜ 分数：{html.escape(self._project_duplicate_score(item))}</p>
+                          <h2>{html.escape(' / '.join(cluster.get('files') or []))}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} ｜ 最高分：{html.escape(self._project_duplicate_cluster_score(cluster))} ｜ 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
                         </div>
                         <div class="issue-metrics">
                           <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
@@ -2461,10 +2735,234 @@ class ReportVisualizer:
                           <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
                         </div>
                       </div>
-                      <div class="issue-doc-grid">
-                        <div>{self._project_build_source_doc_cell_html(source_lookup, left_file, left_pages)}</div>
-                        <div>{self._project_build_source_doc_cell_html(source_lookup, right_file, right_pages)}</div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {''.join(pair_sections)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
+        )
+
+    def _project_duplicate_cluster_anchor(self, doc_type, cluster):
+        files = cluster.get("files") or []
+        items = cluster.get("items") or []
+        if len(items) == 1:
+            item = items[0]
+            left_pages = self._project_collect_duplicate_pages(item, "left")
+            right_pages = self._project_collect_duplicate_pages(item, "right")
+            return (
+                f"duplicate-cluster-{doc_type}-"
+                f"{self._project_make_stable_token(*files, *left_pages, *right_pages, self._project_duplicate_score(item))}"
+            )
+        return f"duplicate-cluster-{doc_type}-{self._project_make_stable_token(*files)}"
+
+    def _project_render_duplicate_rows(
+        self,
+        result,
+        doc_type,
+        *,
+        source_lookup,
+        issue_pages,
+        current_files=None,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
+        if not items:
+            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+
+        page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
+        detail_page = issue_pages.get(page_key, "")
+        rows = []
+        for cluster in self._project_duplicate_cluster_items(items):
+            metrics = self._project_duplicate_cluster_metrics(cluster)
+            risk_level = self._project_duplicate_cluster_risk(cluster)
+            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
+            detail_href = self._project_issue_page_href(detail_page, detail_anchor)
+            rows.append(
+                f"<tr class='{self._project_severity_css_class(risk_level)}'>"
+                f"<td>{html.escape(risk_level)}</td>"
+                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
+                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}</div></td>"
+                "</tr>"
+            )
+        return "\n".join(rows)
+
+    def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
+        item = self._project_filter_duplicate_item_evidence(item)
+        left_file = str(item.get("left_file_name") or "")
+        right_file = str(item.get("right_file_name") or "")
+        blocks = item.get("duplicate_blocks") or []
+        sections = item.get("duplicate_sections") or []
+        tables = item.get("duplicate_tables") or []
+        similar_blocks = item.get("similar_blocks") or []
+        similar_sections = item.get("similar_sections") or []
+        similar_tables = item.get("similar_tables") or []
+        parts = []
+
+        def build_actions(evidence):
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+
+        if sections:
+            entries = []
+            for section in sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>重复段落证据（{len(sections)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if blocks:
+            entries = []
+            for block in blocks:
+                left_pages = self._project_normalize_pages(block.get('left_page'), block.get('page'))
+                right_pages = self._project_normalize_pages(block.get('right_page'), block.get('page'))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>重复句证据（{len(blocks)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if tables:
+            entries = []
+            for table in tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                sample_rows = table.get("sample_rows") or []
+                sample_text = self._project_trim_text(json.dumps(sample_rows, ensure_ascii=False), 220) if sample_rows else "-"
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>重复表格证据（{len(tables)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if similar_sections:
+            entries = []
+            for section in similar_sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                similarity = html.escape(str(section.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if similar_blocks:
+            entries = []
+            for block in similar_blocks:
+                left_pages = self._project_normalize_pages(block.get('left_page'), block.get('page'))
+                right_pages = self._project_normalize_pages(block.get('right_page'), block.get('page'))
+                similarity = html.escape(str(block.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if similar_tables:
+            entries = []
+            for table in similar_tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                similarity = html.escape(str(table.get("similarity") or 0))
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for cluster in self._project_duplicate_cluster_items(items):
+                raw_item = (cluster.get("items") or [None])[0]
+                if not isinstance(raw_item, dict):
+                    continue
+                item = self._project_filter_duplicate_item_evidence(raw_item)
+                metrics = item.get("metrics") or {}
+                risk_level = str(item.get("risk_level") or "none")
+                left_file = str(item.get("left_file_name") or "")
+                right_file = str(item.get("right_file_name") or "")
+                pair_title = f"{left_file} <> {right_file}".strip(" <>")
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>{html.escape(pair_title)}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 分数：{html.escape(self._project_duplicate_score(item))} | 涉及文件：2</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                        </div>
                       </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
                       {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
                     </article>
                     """
@@ -2474,6 +2972,509 @@ class ReportVisualizer:
             project_identifier=project_identifier,
             title=title,
             body=body,
+            source_lookup=source_lookup,
+        )
+
+    def _project_duplicate_cluster_anchor(self, doc_type, cluster):
+        files = cluster.get("files") or []
+        items = cluster.get("items") or []
+        if len(items) == 1:
+            item = items[0]
+            left_pages = self._project_collect_duplicate_pages(item, "left")
+            right_pages = self._project_collect_duplicate_pages(item, "right")
+            return (
+                f"duplicate-cluster-{doc_type}-"
+                f"{self._project_make_stable_token(*files, *left_pages, *right_pages, self._project_duplicate_score(item))}"
+            )
+        return (
+            f"duplicate-cluster-{doc_type}-"
+            f"{self._project_make_stable_token(*files)}"
+        )
+
+    def _project_render_duplicate_rows(
+        self,
+        result,
+        doc_type,
+        *,
+        source_lookup,
+        issue_pages,
+        current_files=None,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
+        if not items:
+            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+
+        page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
+        detail_page = issue_pages.get(page_key, "")
+        rows = []
+        for cluster in self._project_duplicate_cluster_items(items):
+            metrics = self._project_duplicate_cluster_metrics(cluster)
+            risk_level = self._project_duplicate_cluster_risk(cluster)
+            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
+            detail_href = self._project_issue_page_href(detail_page, detail_anchor)
+            rows.append(
+                f"<tr class='{self._project_severity_css_class(risk_level)}'>"
+                f"<td>{html.escape(risk_level)}</td>"
+                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
+                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}</div></td>"
+                "</tr>"
+            )
+        return "\n".join(rows)
+
+    def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
+        item = self._project_filter_duplicate_item_evidence(item)
+        left_file = str(item.get("left_file_name") or "")
+        right_file = str(item.get("right_file_name") or "")
+        blocks = item.get("duplicate_blocks") or []
+        sections = item.get("duplicate_sections") or []
+        tables = item.get("duplicate_tables") or []
+        similar_blocks = item.get("similar_blocks") or []
+        similar_sections = item.get("similar_sections") or []
+        similar_tables = item.get("similar_tables") or []
+        parts = []
+
+        def build_actions(evidence):
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+
+        if sections:
+            entries = []
+            for section in sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复段落证据（{len(sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if blocks:
+            entries = []
+            for block in blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复句证据（{len(blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if tables:
+            entries = []
+            for table in tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                sample_rows = table.get("sample_rows") or []
+                sample_text = self._project_trim_text(
+                    json.dumps(sample_rows, ensure_ascii=False),
+                    220,
+                ) if sample_rows else "-"
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复表格证据（{len(tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_sections:
+            entries = []
+            for section in similar_sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                similarity = html.escape(str(section.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_blocks:
+            entries = []
+            for block in similar_blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                similarity = html.escape(str(block.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_tables:
+            entries = []
+            for table in similar_tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                similarity = html.escape(str(table.get("similarity") or 0))
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for cluster in self._project_duplicate_cluster_items(items):
+                raw_item = (cluster.get("items") or [None])[0]
+                if not isinstance(raw_item, dict):
+                    continue
+                item = self._project_filter_duplicate_item_evidence(raw_item)
+                metrics = item.get("metrics") or {}
+                risk_level = str(item.get("risk_level") or "none")
+                left_file = str(item.get("left_file_name") or "")
+                right_file = str(item.get("right_file_name") or "")
+                pair_title = f"{left_file} <> {right_file}".strip(" <>")
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>{html.escape(pair_title)}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 分数：{html.escape(self._project_duplicate_score(item))} | 涉及文件：2</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                        </div>
+                      </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
+        )
+
+    def _project_duplicate_cluster_anchor(self, doc_type, cluster):
+        files = cluster.get("files") or []
+        items = cluster.get("items") or []
+        if len(items) == 1:
+            item = items[0]
+            left_pages = self._project_collect_duplicate_pages(item, "left")
+            right_pages = self._project_collect_duplicate_pages(item, "right")
+            return (
+                f"duplicate-cluster-{doc_type}-"
+                f"{self._project_make_stable_token(*files, *left_pages, *right_pages, self._project_duplicate_score(item))}"
+            )
+        return (
+            f"duplicate-cluster-{doc_type}-"
+            f"{self._project_make_stable_token(*files)}"
+        )
+
+    def _project_render_duplicate_rows(
+        self,
+        result,
+        doc_type,
+        *,
+        source_lookup,
+        issue_pages,
+        current_files=None,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
+        if not items:
+            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+
+        page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
+        detail_page = issue_pages.get(page_key, "")
+        rows = []
+        for cluster in self._project_duplicate_cluster_items(items):
+            metrics = self._project_duplicate_cluster_metrics(cluster)
+            risk_level = self._project_duplicate_cluster_risk(cluster)
+            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
+            detail_href = self._project_issue_page_href(detail_page, detail_anchor)
+            rows.append(
+                f"<tr class='{self._project_severity_css_class(risk_level)}'>"
+                f"<td>{html.escape(risk_level)}</td>"
+                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
+                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}</div></td>"
+                "</tr>"
+            )
+        return "\n".join(rows)
+
+    def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
+        item = self._project_filter_duplicate_item_evidence(item)
+        left_file = str(item.get("left_file_name") or "")
+        right_file = str(item.get("right_file_name") or "")
+        blocks = item.get("duplicate_blocks") or []
+        sections = item.get("duplicate_sections") or []
+        tables = item.get("duplicate_tables") or []
+        similar_blocks = item.get("similar_blocks") or []
+        similar_sections = item.get("similar_sections") or []
+        similar_tables = item.get("similar_tables") or []
+        parts = []
+
+        def build_actions(evidence):
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+
+        if sections:
+            entries = []
+            for section in sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复段落证据（{len(sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if blocks:
+            entries = []
+            for block in blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复句证据（{len(blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if tables:
+            entries = []
+            for table in tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                sample_rows = table.get("sample_rows") or []
+                sample_text = self._project_trim_text(
+                    json.dumps(sample_rows, ensure_ascii=False),
+                    220,
+                ) if sample_rows else "-"
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复表格证据（{len(tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_sections:
+            entries = []
+            for section in similar_sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                similarity = html.escape(str(section.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(section)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_blocks:
+            entries = []
+            for block in similar_blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                similarity = html.escape(str(block.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(block)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_tables:
+            entries = []
+            for table in similar_tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                similarity = html.escape(str(table.get("similarity") or 0))
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(table)}"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for cluster in self._project_duplicate_cluster_items(items):
+                raw_item = (cluster.get("items") or [None])[0]
+                if not isinstance(raw_item, dict):
+                    continue
+                item = self._project_filter_duplicate_item_evidence(raw_item)
+                metrics = item.get("metrics") or {}
+                risk_level = str(item.get("risk_level") or "none")
+                left_file = str(item.get("left_file_name") or "")
+                right_file = str(item.get("right_file_name") or "")
+                pair_title = f"{left_file} <> {right_file}".strip(" <>")
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>{html.escape(pair_title)}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 分数：{html.escape(self._project_duplicate_score(item))} | 涉及文件：2</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                        </div>
+                      </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
         )
 
     def _project_build_typo_issue_detail_html(self, *, project_identifier, result, source_lookup):
@@ -2503,6 +3504,7 @@ class ReportVisualizer:
             project_identifier=project_identifier,
             title="错别字问题总览",
             body=body,
+            source_lookup=source_lookup,
         )
 
     def _project_build_personnel_issue_detail_html(self, *, project_identifier, result, source_lookup):
@@ -2540,9 +3542,11 @@ class ReportVisualizer:
             project_identifier=project_identifier,
             title="一人多用问题总览",
             body=body,
+            source_lookup=source_lookup,
         )
 
-    def _project_build_issue_page_shell(self, *, project_identifier, title, body):
+    def _project_build_issue_page_shell(self, *, project_identifier, title, body, source_lookup=None):
+        locator_assets = self._project_build_locator_assets_html(source_lookup)
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -2562,9 +3566,17 @@ class ReportVisualizer:
     .issue-meta {{ margin: 0; color: #5f6862; }}
     .issue-doc-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 14px 0; }}
     .issue-doc-cell {{ background: #f8faf7; border: 1px solid #d9ded8; border-radius: 8px; padding: 10px 12px; }}
+    .issue-doc-list {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 14px 0; }}
     .issue-subtext {{ margin-top: 4px; color: #5f6862; font-size: 12px; }}
     .issue-link {{ color: #0b57d0; text-decoration: none; }}
     .issue-link:hover {{ text-decoration: underline; }}
+    .issue-link-button {{
+      border: none;
+      background: none;
+      padding: 0;
+      cursor: pointer;
+      font: inherit;
+    }}
     .issue-page-links {{ display: inline-flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
     .issue-evidence-list {{ margin: 12px 0 0; padding-left: 18px; }}
     .issue-evidence-list li + li {{ margin-top: 12px; }}
@@ -2589,6 +3601,7 @@ class ReportVisualizer:
     </div>
     {body}
   </main>
+  {locator_assets}
 </body>
 </html>"""
 
@@ -2637,6 +3650,22 @@ class ReportVisualizer:
             path.write_text(contents[key], encoding="utf-8")
         return page_map
 
+    def _project_resolve_display_options(self, display_options=None):
+        defaults = {
+            "show_business_duplicates": True,
+            "show_technical_duplicates": False,
+            "show_personnel_reuse": False,
+            "show_typos": False,
+            "business_duplicates_only_mode": False,
+        }
+        if not isinstance(display_options, dict):
+            return defaults
+        resolved = dict(defaults)
+        for key in defaults:
+            if key in display_options:
+                resolved[key] = bool(display_options.get(key))
+        return resolved
+
     def build_project_review_section(
         self,
         project_results,
@@ -2644,7 +3673,9 @@ class ReportVisualizer:
         source_lookup,
         issue_pages,
         current_business_file=None,
+        display_options=None,
     ):
+        options = self._project_resolve_display_options(display_options)
         business_duplicate = project_results.get("business_duplicate_check") or {}
         technical_duplicate = project_results.get("technical_duplicate_check") or {}
         bid_review = project_results.get("bid_document_review") or {}
@@ -2653,6 +3684,118 @@ class ReportVisualizer:
         technical_summary = technical_duplicate.get("summary") or {}
         current_files = {current_business_file} if current_business_file else None
         scope_text = current_business_file or "全项目"
+
+        summary_cards = [
+            (
+                "商务标可疑对",
+                business_summary.get("suspicious_pair_count") or 0,
+            )
+        ]
+        if options["show_technical_duplicates"]:
+            summary_cards.append(
+                (
+                    "技术标可疑对",
+                    technical_summary.get("suspicious_pair_count") or 0,
+                )
+            )
+        if options["show_typos"]:
+            summary_cards.append(
+                (
+                    "错别字候选",
+                    bid_summary.get("typo_issue_count") or 0,
+                )
+            )
+        if options["show_personnel_reuse"]:
+            summary_cards.append(
+                (
+                    "一人多用姓名",
+                    bid_summary.get("reused_name_count") or 0,
+                )
+            )
+
+        summary_cards_html = "".join(
+            f"<div class='project-review-card'><div class='label'>{html.escape(str(label))}</div><div class='value'>{html.escape(str(value))}</div></div>"
+            for label, value in summary_cards
+        )
+
+        review_links = []
+        if options["show_business_duplicates"]:
+            review_links.append(
+                f"<a href='{html.escape(str(issue_pages.get('business_duplicates') or ''))}' target='_blank' rel='noreferrer'>全部商务标查重问题</a>"
+            )
+        if options["show_technical_duplicates"]:
+            review_links.append(
+                f"<a href='{html.escape(str(issue_pages.get('technical_duplicates') or ''))}' target='_blank' rel='noreferrer'>全部技术标查重问题</a>"
+            )
+        if options["show_typos"]:
+            review_links.append(
+                f"<a href='{html.escape(str(issue_pages.get('typos') or ''))}' target='_blank' rel='noreferrer'>全部错别字问题</a>"
+            )
+        if options["show_personnel_reuse"]:
+            review_links.append(
+                f"<a href='{html.escape(str(issue_pages.get('personnel') or ''))}' target='_blank' rel='noreferrer'>全部一人多用问题</a>"
+            )
+        review_links_html = "".join(review_links)
+
+        sections = []
+        if options["show_business_duplicates"]:
+            sections.append(
+                f"""
+          <h3>商务标查重（当前文件相关）</h3>
+          <table>
+            <thead>
+              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>详情</th></tr>
+            </thead>
+            <tbody>{self._project_render_duplicate_rows(business_duplicate, DOCUMENT_TYPE_BUSINESS_BID, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
+          </table>
+                """
+            )
+        if options["show_technical_duplicates"]:
+            sections.append(
+                f"""
+          <h3>技术标查重（全项目）</h3>
+          <table>
+            <thead>
+              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>详情</th></tr>
+            </thead>
+            <tbody>{self._project_render_duplicate_rows(technical_duplicate, DOCUMENT_TYPE_TECHNICAL_BID, source_lookup=source_lookup, issue_pages=issue_pages)}</tbody>
+          </table>
+                """
+            )
+        if options["show_personnel_reuse"]:
+            sections.append(
+                f"""
+          <h3>一人多用（当前文件相关）</h3>
+          <table>
+            <thead>
+              <tr><th>文档类型</th><th>姓名</th><th>风险</th><th>涉及文件数</th><th>文件与页码</th><th>详情</th></tr>
+            </thead>
+            <tbody>{self._project_render_personnel_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
+          </table>
+                """
+            )
+        if options["show_typos"]:
+            sections.append(
+                f"""
+          <h3>错别字检测（当前文件相关）</h3>
+          <table>
+            <thead>
+              <tr><th>文档类型</th><th>文件</th><th>页码</th><th>疑似词</th><th>建议词</th><th>上下文</th><th>详情</th></tr>
+            </thead>
+            <tbody>{self._project_render_typo_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
+          </table>
+                """
+            )
+        sections_html = "".join(sections)
+        section_title = (
+            "商务标查重"
+            if options["business_duplicates_only_mode"]
+            and options["show_business_duplicates"]
+            and not options["show_technical_duplicates"]
+            and not options["show_personnel_reuse"]
+            and not options["show_typos"]
+            else "项目级补充审查"
+        )
 
         return f"""
         <style>
@@ -2723,12 +3866,24 @@ class ReportVisualizer:
             color: #0b57d0;
             text-decoration: none;
           }}
+          .project-review-addon .issue-link-button {{
+            border: none;
+            background: none;
+            padding: 0;
+            cursor: pointer;
+            font: inherit;
+          }}
           .project-review-addon .project-review-links a:hover,
           .project-review-addon .issue-link:hover {{
             text-decoration: underline;
           }}
           .project-review-addon .issue-doc-cell {{
             min-width: 220px;
+          }}
+          .project-review-addon .issue-doc-list {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 8px;
           }}
           .project-review-addon .issue-page-links {{
             display: inline-flex;
@@ -2759,54 +3914,38 @@ class ReportVisualizer:
           }}
         </style>
         <section class="project-review-addon">
-          <h2>项目级补充审查</h2>
-          <div class="project-review-grid">
-            <div class="project-review-card"><div class="label">商务标可疑对</div><div class="value">{html.escape(str(business_summary.get("suspicious_pair_count") or 0))}</div></div>
-            <div class="project-review-card"><div class="label">技术标可疑对</div><div class="value">{html.escape(str(technical_summary.get("suspicious_pair_count") or 0))}</div></div>
-            <div class="project-review-card"><div class="label">错别字候选</div><div class="value">{html.escape(str(bid_summary.get("typo_issue_count") or 0))}</div></div>
-            <div class="project-review-card"><div class="label">一人多用姓名</div><div class="value">{html.escape(str(bid_summary.get("reused_name_count") or 0))}</div></div>
-          </div>
+          <h2>{html.escape(section_title)}</h2>
+          <div class="project-review-grid">{summary_cards_html}</div>
           <p class="project-review-scope">当前视角：{html.escape(scope_text)}</p>
-          <div class="project-review-links">
-            <a href="{html.escape(str(issue_pages.get('business_duplicates') or ''))}" target="_blank" rel="noreferrer">全部商务标查重问题</a>
-            <a href="{html.escape(str(issue_pages.get('technical_duplicates') or ''))}" target="_blank" rel="noreferrer">全部技术标查重问题</a>
-            <a href="{html.escape(str(issue_pages.get('typos') or ''))}" target="_blank" rel="noreferrer">全部错别字问题</a>
-            <a href="{html.escape(str(issue_pages.get('personnel') or ''))}" target="_blank" rel="noreferrer">全部一人多用问题</a>
-          </div>
-
-          <h3>商务标查重（当前文件相关）</h3>
-          <table>
-            <thead>
-              <tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>段落</th><th>句子</th><th>表格</th><th>证据</th></tr>
-            </thead>
-            <tbody>{self._project_render_duplicate_rows(business_duplicate, DOCUMENT_TYPE_BUSINESS_BID, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
-          </table>
-
-          <h3>技术标查重（全项目）</h3>
-          <table>
-            <thead>
-              <tr><th>风险</th><th>分数</th><th>文件 A</th><th>文件 B</th><th>段落</th><th>句子</th><th>表格</th><th>证据</th></tr>
-            </thead>
-            <tbody>{self._project_render_duplicate_rows(technical_duplicate, DOCUMENT_TYPE_TECHNICAL_BID, source_lookup=source_lookup, issue_pages=issue_pages)}</tbody>
-          </table>
-
-          <h3>一人多用（当前文件相关）</h3>
-          <table>
-            <thead>
-              <tr><th>文档类型</th><th>姓名</th><th>风险</th><th>涉及文件数</th><th>文件与页码</th><th>详情</th></tr>
-            </thead>
-            <tbody>{self._project_render_personnel_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
-          </table>
-
-          <h3>错别字识别（当前文件相关）</h3>
-          <table>
-            <thead>
-              <tr><th>文档类型</th><th>文件</th><th>页码</th><th>原字</th><th>建议</th><th>原文</th><th>详情</th></tr>
-            </thead>
-            <tbody>{self._project_render_typo_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
-          </table>
+          <div class="project-review-links">{review_links_html}</div>
+          {sections_html}
         </section>
         """
+
+    def focus_project_review_section(
+        self,
+        html_report,
+        *,
+        section_title="商务标查重",
+    ):
+        focused_style = """
+        <style id="project-review-focus-style">
+          .container > .card { display: none !important; }
+          .container { max-width: 1320px; margin: 0 auto; }
+          .project-review-addon {
+            margin-top: 0 !important;
+            background: #fff !important;
+          }
+        </style>
+        """
+        if "</head>" in html_report:
+            html_report = html_report.replace("</head>", f"{focused_style}\n</head>", 1)
+        html_report = html_report.replace(
+            "<h2>项目级补充审查</h2>",
+            f"<h2>{html.escape(str(section_title))}</h2>",
+            1,
+        )
+        return html_report
 
     def build_project_summary_html(
         self,
@@ -2816,17 +3955,19 @@ class ReportVisualizer:
         project_results,
         source_lookup,
         issue_pages,
+        display_options=None,
     ):
         link_items = "\n".join(
             f"<li><a href='{html.escape(str(item['url']))}'>{html.escape(str(item['name']))}</a></li>"
             for item in business_infos
         )
+        locator_assets = self._project_build_locator_assets_html(source_lookup)
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>项目级审查总览</title>
+  <title>项目审查总览</title>
   <style>
     body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f4; color: #1c1c1c; }}
     main {{ padding: 28px 36px 40px; max-width: 1320px; margin: 0 auto; }}
@@ -2838,12 +3979,13 @@ class ReportVisualizer:
 </head>
 <body>
   <main>
-    <h1>项目级审查总览</h1>
+    <h1>项目审查总览</h1>
     <div class="meta">{html.escape(str(project_identifier))}</div>
-    <h2>单文件报告</h2>
+    <h2>投标文件列表</h2>
     <ul>{link_items}</ul>
-    {self.build_project_review_section(project_results, source_lookup=source_lookup, issue_pages=issue_pages)}
+    {self.build_project_review_section(project_results, source_lookup=source_lookup, issue_pages=issue_pages, display_options=display_options)}
   </main>
+  {locator_assets}
 </body>
 </html>"""
 
@@ -2852,3 +3994,1745 @@ class ReportVisualizer:
         if marker in html_report:
             return html_report.replace(marker, f"{extra_section}\n{marker}", 1)
         return f"{html_report}\n{extra_section}"
+
+    def _project_build_duplicate_cluster_locator_targets(self, cluster, *, source_lookup):
+        targets = []
+        pages_by_file = self._project_duplicate_cluster_pages(cluster)
+        for file_name in cluster.get("files") or []:
+            entry = source_lookup.get(file_name) or {}
+            document_key = self._project_locator_document_key(entry, file_name)
+            if not document_key:
+                continue
+            source_url = str(entry.get("source_url") or "").strip()
+            preview_template = str(entry.get("page_preview_url_template") or "").strip()
+            if not source_url and not preview_template:
+                continue
+            pages = pages_by_file.get(file_name) or []
+            ranges = [
+                {
+                    "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
+                    "page": start_page,
+                    "pageEnd": end_page,
+                }
+                for start_page, end_page in self._coalesce_page_ranges(pages)
+            ]
+            targets.append(
+                {
+                    "document": document_key,
+                    "title": str(entry.get("display_name") or file_name),
+                    "json_name": str(entry.get("json_name") or file_name),
+                    "default_page": pages[0] if pages else None,
+                    "pages": pages,
+                    "ranges": ranges,
+                }
+            )
+        return targets
+
+    def _project_build_duplicate_cluster_preview_button_html(
+        self,
+        cluster,
+        *,
+        source_lookup,
+        label="并排预览",
+    ):
+        targets = self._project_build_duplicate_cluster_locator_targets(cluster, source_lookup=source_lookup)
+        if not targets:
+            return "<span class='issue-muted'>暂无预览</span>"
+        payload = html.escape(json.dumps(targets, ensure_ascii=False))
+        return (
+            f"<button type='button' class='issue-link issue-link-button locator-open-group' "
+            f"data-label='{html.escape(str(label))}' "
+            f"data-targets='{payload}'>"
+            f"{html.escape(str(label))}</button>"
+        )
+
+    def _project_build_duplicate_item_locator_targets(self, item, *, source_lookup, evidence=None):
+        targets = []
+        left_file = str(item.get("left_file_name") or "").strip()
+        right_file = str(item.get("right_file_name") or "").strip()
+        file_specs = [
+            ("left", left_file, self._project_evidence_pages(evidence, "left") if evidence else self._project_collect_duplicate_pages(item, "left")),
+            ("right", right_file, self._project_evidence_pages(evidence, "right") if evidence else self._project_collect_duplicate_pages(item, "right")),
+        ]
+        for side, file_name, pages in file_specs:
+            if not file_name:
+                continue
+            entry = source_lookup.get(file_name) or {}
+            document_key = self._project_locator_document_key(entry, file_name)
+            if not document_key:
+                continue
+            source_url = str(entry.get("source_url") or "").strip()
+            preview_template = str(entry.get("page_preview_url_template") or "").strip()
+            if not source_url and not preview_template:
+                continue
+            normalized_pages = self._project_normalize_pages(pages)
+            ranges = [
+                {
+                    "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
+                    "page": start_page,
+                    "pageEnd": end_page,
+                }
+                for start_page, end_page in self._coalesce_page_ranges(normalized_pages)
+            ]
+            if not normalized_pages and evidence:
+                fallback_page = evidence.get(f"{side}_page") or evidence.get("page")
+                normalized_pages = self._project_normalize_pages(fallback_page)
+                ranges = [
+                    {
+                        "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
+                        "page": start_page,
+                        "pageEnd": end_page,
+                    }
+                    for start_page, end_page in self._coalesce_page_ranges(normalized_pages)
+                ]
+            targets.append(
+                {
+                    "document": document_key,
+                    "title": str(entry.get("display_name") or file_name),
+                    "json_name": str(entry.get("json_name") or file_name),
+                    "default_page": normalized_pages[0] if normalized_pages else None,
+                    "pages": normalized_pages,
+                    "ranges": ranges,
+                }
+            )
+        return targets
+
+    def _project_build_duplicate_evidence_preview_button_html(
+        self,
+        item,
+        evidence,
+        *,
+        source_lookup,
+        label="并排预览",
+    ):
+        targets = self._project_build_duplicate_item_locator_targets(
+            item,
+            source_lookup=source_lookup,
+            evidence=evidence,
+        )
+        if len(targets) < 2:
+            return "<span class='issue-muted'>暂无预览</span>"
+        payload = html.escape(json.dumps(targets, ensure_ascii=False))
+        return (
+            f"<button type='button' class='issue-link issue-link-button locator-open-group' "
+            f"data-label='{html.escape(str(label))}' "
+            f"data-targets='{payload}'>"
+            f"{html.escape(str(label))}</button>"
+        )
+
+    def _project_render_duplicate_rows(
+        self,
+        result,
+        doc_type,
+        *,
+        source_lookup,
+        issue_pages,
+        current_files=None,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
+        if not items:
+            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+
+        page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
+        detail_page = issue_pages.get(page_key, "")
+        rows = []
+        for cluster in self._project_duplicate_cluster_items(items):
+            metrics = self._project_duplicate_cluster_metrics(cluster)
+            risk_level = self._project_duplicate_cluster_risk(cluster)
+            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
+            detail_href = self._project_issue_page_href(detail_page, detail_anchor)
+            preview_button = self._project_build_duplicate_cluster_preview_button_html(
+                cluster,
+                source_lookup=source_lookup,
+            )
+            rows.append(
+                f"<tr class='{self._project_severity_css_class(risk_level)}'>"
+                f"<td>{html.escape(risk_level)}</td>"
+                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
+                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}{preview_button}</div></td>"
+                "</tr>"
+            )
+        return "\n".join(rows)
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for cluster in self._project_duplicate_cluster_items(items):
+                metrics = self._project_duplicate_cluster_metrics(cluster)
+                risk_level = self._project_duplicate_cluster_risk(cluster)
+                preview_button = self._project_build_duplicate_cluster_preview_button_html(
+                    cluster,
+                    source_lookup=source_lookup,
+                    label="并排预览这组文件",
+                )
+                pair_sections = []
+                for item in cluster.get("items") or []:
+                    pair_metrics = item.get("metrics") or {}
+                    left_file = str(item.get("left_file_name") or "")
+                    right_file = str(item.get("right_file_name") or "")
+                    pair_sections.append(
+                        f"""
+                        <details open>
+                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                        </details>
+                        """
+                    )
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>{html.escape(' / '.join(cluster.get('files') or []))}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 最高分：{html.escape(self._project_duplicate_cluster_score(cluster))} | 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                          <div class="issue-card-actions">{preview_button}</div>
+                        </div>
+                      </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {''.join(pair_sections)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
+        )
+
+    def _project_build_issue_page_shell(self, *, project_identifier, title, body, source_lookup=None):
+        locator_assets = self._project_build_locator_assets_html(source_lookup)
+        return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(str(title))}</title>
+  <style>
+    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f4; color: #1c1c1c; }}
+    main {{ max-width: 1320px; margin: 0 auto; padding: 28px 32px 40px; }}
+    h1 {{ margin: 0 0 8px; font-size: 28px; }}
+    .meta {{ color: #5f6862; margin-bottom: 18px; }}
+    .toolbar {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }}
+    .toolbar a {{ color: #0b57d0; text-decoration: none; font-weight: 600; }}
+    .issue-card {{ background: #fff; border: 1px solid #d9ded8; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }}
+    .issue-card-header {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }}
+    .issue-card h2 {{ margin: 0 0 6px; font-size: 20px; }}
+    .issue-meta {{ margin: 0; color: #5f6862; }}
+    .issue-card-tools {{ display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }}
+    .issue-card-actions {{ display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }}
+    .issue-doc-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 14px 0; }}
+    .issue-doc-cell {{ background: #f8faf7; border: 1px solid #d9ded8; border-radius: 8px; padding: 10px 12px; }}
+    .issue-doc-list {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 14px 0; }}
+    .issue-subtext {{ margin-top: 4px; color: #5f6862; font-size: 12px; }}
+    .issue-link {{ color: #0b57d0; text-decoration: none; }}
+    .issue-link:hover {{ text-decoration: underline; }}
+    .issue-link-button {{
+      border: none;
+      background: none;
+      padding: 0;
+      cursor: pointer;
+      font: inherit;
+    }}
+    .issue-action-stack {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }}
+    .issue-page-links {{ display: inline-flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
+    .issue-evidence-list {{ margin: 12px 0 0; padding-left: 18px; }}
+    .issue-evidence-list li + li {{ margin-top: 12px; }}
+    .issue-preview {{ margin-top: 8px; line-height: 1.6; }}
+    .issue-block {{ background: #fff7dd; border-radius: 8px; padding: 10px 12px; }}
+    .issue-metrics {{ display: flex; flex-wrap: wrap; gap: 10px; color: #5f6862; font-size: 13px; }}
+    .issue-empty, .issue-muted {{ color: #5f6862; }}
+    .issue-row.issue-severity-high {{ border-left: 6px solid #c62828; background: #fff5f5; }}
+    .issue-row.issue-severity-medium {{ border-left: 6px solid #f9a825; background: #fff8e1; }}
+    .issue-row.issue-severity-low {{ border-left: 6px solid #2e7d32; background: #f6fbf6; }}
+    mark {{ background: #ffe082; padding: 0 2px; }}
+    details {{ margin-top: 12px; }}
+    summary {{ cursor: pointer; font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{html.escape(str(title))}</h1>
+    <div class="meta">{html.escape(str(project_identifier))}</div>
+    <div class="toolbar">
+      <a href="project_review_summary.html">返回项目总览</a>
+    </div>
+    {body}
+  </main>
+  {locator_assets}
+</body>
+</html>"""
+
+    def _build_locator_support_style(self):
+        return """
+        <style>
+            .locator-chip {
+                margin: 2px 0;
+                padding: 2px 6px;
+                border-radius: 10px;
+                background: #eef1ed;
+                color: #4f5a52;
+                font-size: 12px;
+                white-space: nowrap;
+                border: 1px solid #d9ded8;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            button.locator-chip { font: inherit; }
+            .locator-chip:hover {
+                background: #e3ebff;
+                border-color: #b8cdf5;
+                color: #2457b2;
+            }
+            .locator-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(17, 24, 39, 0.45);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                z-index: 30000;
+                padding: clamp(8px, 1.8vw, 20px);
+            }
+            .locator-overlay.visible { display: flex; }
+            .locator-dialog {
+                width: min(1440px, calc(100vw - 16px));
+                height: min(95vh, 980px);
+                background: #fff;
+                border-radius: 14px;
+                box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .locator-toolbar {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 18px;
+                border-bottom: 1px solid var(--border-color);
+                background: #f8fafc;
+                flex-wrap: wrap;
+            }
+            .locator-title {
+                font-size: 16px;
+                font-weight: 600;
+                color: var(--text-main);
+            }
+            .locator-subtitle {
+                margin-top: 4px;
+                font-size: 12px;
+                color: var(--text-light);
+            }
+            .locator-close {
+                border: 1px solid var(--border-color);
+                background: #fff;
+                color: var(--text-regular);
+                border-radius: 8px;
+                padding: 6px 12px;
+                cursor: pointer;
+                font-size: 13px;
+            }
+            .locator-close:hover {
+                color: var(--primary-color);
+                border-color: #bfd6ff;
+            }
+            .locator-actions {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .locator-source,
+            .locator-multi-source {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid #bfd6ff;
+                background: #f4f8ff;
+                color: #2457b2;
+                border-radius: 8px;
+                padding: 6px 12px;
+                cursor: pointer;
+                font-size: 13px;
+                text-decoration: none;
+            }
+            .locator-source:hover,
+            .locator-multi-source:hover { background: #eaf1ff; }
+            .locator-stage {
+                flex: 1;
+                min-height: 0;
+                overflow: auto;
+                padding: clamp(10px, 1.6vw, 18px);
+                background: #f5f7fa;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: flex-start;
+            }
+            .locator-empty {
+                min-height: min(52vh, 620px);
+                width: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: var(--text-light);
+                font-size: 14px;
+                text-align: center;
+            }
+            .locator-page-wrap {
+                position: relative;
+                margin: 0 auto;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                background: #fff;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+                border-radius: 12px;
+                padding: clamp(8px, 1vw, 12px);
+                max-width: 100%;
+            }
+            .locator-page-image {
+                display: block;
+                width: auto;
+                height: auto;
+                max-width: min(100%, 1320px);
+                max-height: calc(95vh - 210px);
+                object-fit: contain;
+                border-radius: 8px;
+                background: #fff;
+            }
+            .locator-box,
+            .locator-multi-box {
+                position: absolute;
+                border: 3px solid #ef4444;
+                background: rgba(239, 68, 68, 0.14);
+                box-shadow: 0 0 0 1px rgba(255,255,255,0.6) inset;
+                pointer-events: none;
+                display: none;
+            }
+            .locator-box.visible,
+            .locator-multi-box.visible { display: block; }
+            .locator-note {
+                margin-top: 12px;
+                color: var(--text-regular);
+                font-size: 13px;
+            }
+            .locator-multi-wrap {
+                display: grid;
+                width: 100%;
+                grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+                gap: 16px;
+                align-items: stretch;
+            }
+            .locator-multi-card {
+                background: #fff;
+                border: 1px solid var(--border-color);
+                border-radius: 12px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+                overflow: hidden;
+                display: flex;
+                flex-direction: column;
+                min-height: min(62vh, 720px);
+            }
+            .locator-multi-header {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 14px 16px 10px;
+                border-bottom: 1px solid var(--border-color);
+                background: #fbfcfe;
+            }
+            .locator-multi-title {
+                font-size: 15px;
+                font-weight: 600;
+                color: var(--text-main);
+            }
+            .locator-multi-subtitle {
+                margin-top: 4px;
+                font-size: 12px;
+                color: var(--text-light);
+            }
+            .locator-multi-pages {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                padding: 12px 16px 0;
+            }
+            .locator-page-tab {
+                border: 1px solid #d9ded8;
+                background: #fff;
+                color: var(--text-regular);
+                border-radius: 999px;
+                padding: 4px 10px;
+                font-size: 12px;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            .locator-page-tab:hover {
+                border-color: #b8cdf5;
+                color: #2457b2;
+                background: #f4f8ff;
+            }
+            .locator-page-tab.active {
+                border-color: #a9c5ff;
+                background: #eaf1ff;
+                color: #2457b2;
+                font-weight: 600;
+            }
+            .locator-multi-stage {
+                padding: 12px 16px 16px;
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                min-height: 0;
+                flex: 1;
+            }
+            .locator-multi-preview-wrap {
+                position: relative;
+                background: #fff;
+                border-radius: 10px;
+                overflow: auto;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 10px;
+                min-height: min(42vh, 520px);
+            }
+            .locator-multi-image {
+                display: block;
+                width: auto;
+                max-width: 100%;
+                max-height: min(46vh, 560px);
+                height: auto;
+                object-fit: contain;
+                border-radius: 8px;
+                background: #fff;
+            }
+            .locator-multi-empty {
+                min-height: min(36vh, 380px);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: var(--text-light);
+                font-size: 13px;
+                text-align: center;
+                border: 1px dashed #d9ded8;
+                border-radius: 10px;
+                background: #fafbfc;
+                padding: 24px 12px;
+            }
+            .locator-multi-note {
+                color: var(--text-regular);
+                font-size: 12px;
+                line-height: 1.6;
+            }
+            .locator-multi-highlight {
+                display: none;
+                border: 1px solid #e6eaf0;
+                border-radius: 10px;
+                background: #fffdf5;
+                padding: 10px 12px;
+                color: var(--text-main);
+            }
+            .locator-multi-highlight-title {
+                font-size: 12px;
+                font-weight: 600;
+                color: #8a5a00;
+                margin-bottom: 8px;
+            }
+            .locator-highlight-block + .locator-highlight-block {
+                margin-top: 10px;
+                padding-top: 10px;
+                border-top: 1px dashed #ead8a2;
+            }
+            .locator-highlight-caption {
+                font-size: 12px;
+                color: var(--text-light);
+                margin-bottom: 4px;
+            }
+            .locator-highlight-body {
+                font-size: 13px;
+                line-height: 1.7;
+                word-break: break-word;
+            }
+            .locator-highlight-body mark {
+                background: #ffe082;
+                color: #3b2a00;
+                padding: 0 2px;
+                border-radius: 3px;
+            }
+            @media (max-width: 900px) {
+                .locator-dialog {
+                    width: calc(100vw - 8px);
+                    height: calc(100vh - 8px);
+                    border-radius: 10px;
+                }
+                .locator-toolbar {
+                    padding: 12px 14px;
+                }
+                .locator-actions {
+                    width: 100%;
+                    justify-content: flex-end;
+                }
+                .locator-page-image {
+                    max-height: calc(100vh - 240px);
+                }
+                .locator-multi-wrap {
+                    grid-template-columns: 1fr;
+                }
+                .locator-multi-preview-wrap {
+                    min-height: min(40vh, 420px);
+                }
+                .locator-multi-image {
+                    max-height: min(40vh, 420px);
+                }
+            }
+        </style>
+        """
+
+    def _build_locator_support_markup(self):
+        return """
+        <div id="locator-overlay" class="locator-overlay">
+            <div class="locator-dialog" role="dialog" aria-modal="true" aria-label="定位预览">
+                <div class="locator-toolbar">
+                    <div>
+                        <div id="locator-title" class="locator-title">定位预览</div>
+                        <div id="locator-subtitle" class="locator-subtitle">请选择页码定位</div>
+                    </div>
+                    <div class="locator-actions">
+                        <a id="locator-source" class="locator-source" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">打开原文件</a>
+                        <button type="button" id="locator-close" class="locator-close">关闭</button>
+                    </div>
+                </div>
+                <div class="locator-stage">
+                    <div id="locator-empty" class="locator-empty">当前没有可用的页面预览资源。</div>
+                    <div id="locator-page-wrap" class="locator-page-wrap" style="display:none;">
+                        <img id="locator-page-image" class="locator-page-image" alt="定位预览页">
+                        <div id="locator-box" class="locator-box"></div>
+                    </div>
+                    <div id="locator-multi-wrap" class="locator-multi-wrap" style="display:none;"></div>
+                    <div id="locator-note" class="locator-note" style="display:none;"></div>
+                </div>
+            </div>
+        </div>
+        """
+
+    def _build_locator_support_script(self):
+        config_json = json.dumps(self._document_preview_config or {"documents": {}}, ensure_ascii=False)
+        return f"""
+        <script>
+            (function() {{
+                const locatorPreviewConfig = {config_json};
+                const overlay = document.getElementById('locator-overlay');
+                const closeBtn = document.getElementById('locator-close');
+                const sourceLink = document.getElementById('locator-source');
+                const titleNode = document.getElementById('locator-title');
+                const subtitleNode = document.getElementById('locator-subtitle');
+                const emptyNode = document.getElementById('locator-empty');
+                const pageWrap = document.getElementById('locator-page-wrap');
+                const imageNode = document.getElementById('locator-page-image');
+                const boxNode = document.getElementById('locator-box');
+                const multiWrap = document.getElementById('locator-multi-wrap');
+                const noteNode = document.getElementById('locator-note');
+
+                function resetSingleView() {{
+                    if (imageNode) {{
+                        imageNode.removeAttribute('src');
+                        imageNode.onload = null;
+                    }}
+                    if (boxNode) {{
+                        boxNode.classList.remove('visible');
+                    }}
+                    if (pageWrap) {{
+                        pageWrap.style.display = 'none';
+                    }}
+                    if (noteNode) {{
+                        noteNode.style.display = 'none';
+                        noteNode.textContent = '';
+                    }}
+                }}
+
+                function resetMultiView() {{
+                    if (multiWrap) {{
+                        multiWrap.style.display = 'none';
+                        multiWrap.innerHTML = '';
+                    }}
+                }}
+
+                function hideLocator() {{
+                    if (!overlay) return;
+                    overlay.classList.remove('visible');
+                    resetSingleView();
+                    resetMultiView();
+                    if (emptyNode) {{
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = '当前没有可用的页面预览资源。';
+                    }}
+                    if (sourceLink) {{
+                        sourceLink.style.display = 'none';
+                        sourceLink.setAttribute('href', '#');
+                    }}
+                }}
+
+                function parseBbox(raw) {{
+                    if (!raw) return null;
+                    const values = String(raw).split(',').map(Number).filter(Number.isFinite);
+                    if (values.length < 4) return null;
+                    return values.slice(0, 4);
+                }}
+
+                function escapeHtml(value) {{
+                    return String(value || '')
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                }}
+
+                function resolvePagePreview(documentKey, page) {{
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[documentKey];
+                    if (!docConfig) return null;
+                    const pageConfig = (docConfig.pages || {{}})[String(page)];
+                    if (!pageConfig) return null;
+                    return {{
+                        docConfig,
+                        pageConfig,
+                    }};
+                }}
+
+                const remotePageCache = new Map();
+
+                function resolveRemotePreviewUrl(docConfig, page) {{
+                    const template = String((docConfig && docConfig.page_preview_url_template) || '').trim();
+                    if (!template || !page) return '';
+                    return template.replace('{{page}}', String(page));
+                }}
+
+                function appendSourcePageHint(rawSourceUrl, page) {{
+                    const base = String(rawSourceUrl || '').split('#', 1)[0];
+                    if (!base || !page) return base;
+                    if (base.includes('/api/postgresql/documents/')) {{
+                        return `${{base}}${{base.includes('?') ? '&' : '?'}}page=${{page}}`;
+                    }}
+                    return `${{base}}#page=${{page}}`;
+                }}
+
+                async function loadRemotePagePreview(docConfig, page) {{
+                    const requestUrl = resolveRemotePreviewUrl(docConfig, page);
+                    if (!requestUrl) return null;
+                    if (remotePageCache.has(requestUrl)) {{
+                        return remotePageCache.get(requestUrl);
+                    }}
+                    const response = await fetch(requestUrl, {{
+                        method: 'GET',
+                        mode: 'cors',
+                        credentials: 'omit',
+                    }});
+                    if (!response.ok) {{
+                        throw new Error(`preview request failed: ${{response.status}}`);
+                    }}
+                    const payload = await response.json();
+                    remotePageCache.set(requestUrl, payload);
+                    return payload;
+                }}
+
+                function sourceKindLabel(kind) {{
+                    if (kind === 'pdf') return 'PDF预览';
+                    if (kind === 'image') return '图片预览';
+                    if (kind === 'synthetic') return '合成预览';
+                    return '页面预览';
+                }}
+
+                function sourceHint(docConfig) {{
+                    if (!docConfig) return '';
+                    if (docConfig.source_kind === 'synthetic') {{
+                        return '未找到原始 PDF/图片，当前使用 OCR 结果生成的定位预览。';
+                    }}
+                    if (docConfig.source_kind === 'pdf') {{
+                        return '当前预览页由真实 PDF 动态渲染生成，可用于定位原文位置。';
+                    }}
+                    if (docConfig.source_kind === 'image') {{
+                        return '当前预览页来自原始图片文件。';
+                    }}
+                    return '';
+                }}
+
+                function coalescePages(rawPages) {{
+                    const normalized = Array.from(new Set((rawPages || [])
+                        .map((value) => Number(value))
+                        .filter((value) => Number.isInteger(value) && value > 0)))
+                        .sort((a, b) => a - b);
+                    if (!normalized.length) return [];
+                    const ranges = [];
+                    let start = normalized[0];
+                    let previous = normalized[0];
+                    for (let index = 1; index < normalized.length; index += 1) {{
+                        const current = normalized[index];
+                        if (current === previous + 1) {{
+                            previous = current;
+                            continue;
+                        }}
+                        ranges.push({{
+                            label: start === previous ? `P${{start}}` : `P${{start}}-P${{previous}}`,
+                            page: start,
+                            pageEnd: previous,
+                        }});
+                        start = current;
+                        previous = current;
+                    }}
+                    ranges.push({{
+                        label: start === previous ? `P${{start}}` : `P${{start}}-P${{previous}}`,
+                        page: start,
+                        pageEnd: previous,
+                    }});
+                    return ranges;
+                }}
+
+                function renderBoxForImage(boxElement, imageElement, bbox, pageConfig) {{
+                    if (!boxElement || !imageElement || !bbox || !pageConfig) {{
+                        if (boxElement) {{
+                            boxElement.classList.remove('visible');
+                        }}
+                        return;
+                    }}
+                    const naturalWidth = Number(pageConfig.width) || imageElement.naturalWidth || imageElement.width;
+                    const naturalHeight = Number(pageConfig.height) || imageElement.naturalHeight || imageElement.height;
+                    if (!naturalWidth || !naturalHeight) {{
+                        boxElement.classList.remove('visible');
+                        return;
+                    }}
+                    const scaleX = imageElement.clientWidth / naturalWidth;
+                    const scaleY = imageElement.clientHeight / naturalHeight;
+                    const left = bbox[0] * scaleX;
+                    const top = bbox[1] * scaleY;
+                    const width = Math.max((bbox[2] - bbox[0]) * scaleX, 6);
+                    const height = Math.max((bbox[3] - bbox[1]) * scaleY, 6);
+                    boxElement.style.left = left + 'px';
+                    boxElement.style.top = top + 'px';
+                    boxElement.style.width = width + 'px';
+                    boxElement.style.height = height + 'px';
+                    boxElement.classList.add('visible');
+                }}
+
+                function renderBox(bbox, pageConfig) {{
+                    renderBoxForImage(boxNode, imageNode, bbox, pageConfig);
+                }}
+
+                async function loadSinglePreview(docConfig, page, bbox) {{
+                    const resolved = resolvePagePreview(docConfig.key, page);
+                    if (resolved) {{
+                        const pageConfig = resolved.pageConfig;
+                        emptyNode.style.display = 'none';
+                        pageWrap.style.display = 'inline-flex';
+                        imageNode.onload = function() {{
+                            renderBox(bbox, pageConfig);
+                        }};
+                        imageNode.src = pageConfig.image_url || pageConfig.image_data_url || '';
+                        if (imageNode.complete) {{
+                            renderBox(bbox, pageConfig);
+                        }}
+                        return;
+                    }}
+
+                    const remotePreviewUrl = resolveRemotePreviewUrl(docConfig, page);
+                    if (!remotePreviewUrl) {{
+                        pageWrap.style.display = 'none';
+                        boxNode.classList.remove('visible');
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = 'No preview is available for this page.';
+                        overlay.classList.add('visible');
+                        return;
+                    }}
+
+                    emptyNode.style.display = 'flex';
+                    emptyNode.textContent = 'Loading source preview...';
+                    try {{
+                        const pageConfig = await loadRemotePagePreview(docConfig, page);
+                        if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
+                            throw new Error('preview data is empty');
+                        }}
+                        emptyNode.style.display = 'none';
+                        pageWrap.style.display = 'inline-flex';
+                        imageNode.onload = function() {{
+                            renderBox(bbox, pageConfig);
+                        }};
+                        imageNode.src = pageConfig.image_data_url || pageConfig.image_url;
+                        if (imageNode.complete) {{
+                            renderBox(bbox, pageConfig);
+                        }}
+                    }} catch (error) {{
+                        pageWrap.style.display = 'none';
+                        boxNode.classList.remove('visible');
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = 'Failed to load source preview. Please retry later.';
+                    }}
+                }}
+
+                async function openLocator(button) {{
+                    if (!overlay) return;
+                    const documentKey = button.dataset.document || 'bidder';
+                    const page = Number(button.dataset.page || 0);
+                    const pageEnd = Number(button.dataset.pageEnd || button.dataset.page || 0);
+                    const label = button.dataset.label || button.textContent || '定位预览';
+                    const bbox = parseBbox(button.dataset.bbox);
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[documentKey] || {{}};
+                    docConfig.key = documentKey;
+                    const pageRangeText = pageEnd && pageEnd > page ? `${{page}}-${{pageEnd}}` : `${{page || '?'}}`;
+                    titleNode.textContent = label;
+                    subtitleNode.textContent = `${{docConfig.title || documentKey}} - 第 ${{pageRangeText}} 页 · ${{sourceKindLabel(docConfig.source_kind)}}`;
+                    const extraHint = sourceHint(docConfig);
+                    const rangeHint = pageEnd && pageEnd > page ? `连续页范围：${{page}}-${{pageEnd}}` : '';
+                    if (bbox && extraHint) {{
+                        noteNode.textContent = `坐标：[${{bbox.join(', ')}}] · ${{rangeHint}}${{rangeHint && extraHint ? ' · ' : ''}}${{extraHint}}`;
+                    }} else if (bbox) {{
+                        noteNode.textContent = rangeHint ? `坐标：[${{bbox.join(', ')}}] · ${{rangeHint}}` : `坐标：[${{bbox.join(', ')}}]`;
+                    }} else if (rangeHint && extraHint) {{
+                        noteNode.textContent = `${{rangeHint}} · ${{extraHint}}`;
+                    }} else {{
+                        noteNode.textContent = rangeHint || extraHint || '';
+                    }}
+                    noteNode.style.display = noteNode.textContent ? 'block' : 'none';
+                    if (sourceLink) {{
+                        const rawSourceUrl = docConfig.source_url || '';
+                        sourceLink.textContent = pageEnd && pageEnd > page ? `打开原文件（第 ${{pageRangeText}} 页）` : '打开原文件';
+                        if (rawSourceUrl) {{
+                            let finalUrl = rawSourceUrl;
+                            if (docConfig.source_kind === 'pdf' && page) {{
+                                finalUrl = appendSourcePageHint(rawSourceUrl, page);
+                            }}
+                            sourceLink.setAttribute('href', finalUrl);
+                            sourceLink.style.display = 'inline-flex';
+                        }} else {{
+                            sourceLink.style.display = 'none';
+                            sourceLink.setAttribute('href', '#');
+                        }}
+                    }}
+
+                    resetSingleView();
+                    resetMultiView();
+                    overlay.classList.add('visible');
+                    await loadSinglePreview(docConfig, page, bbox);
+                }}
+
+                async function loadMultiTargetPage(target, range, cardRefs) {{
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[target.document] || {{}};
+                    const page = Number((range && range.page) || target.default_page || 0);
+                    const pageEnd = Number((range && range.pageEnd) || page);
+                    const bbox = parseBbox((range && range.bbox) || target.bbox);
+                    const highlightHtml = String((range && range.highlightHtml) || target.highlightHtml || '').trim();
+                    const highlightTitle = String((range && range.highlightTitle) || target.highlightTitle || '命中内容').trim();
+                    const pageRangeText = pageEnd && pageEnd > page ? `${{page}}-${{pageEnd}}` : `${{page || '?'}}`;
+                    cardRefs.subtitle.textContent = `第 ${{pageRangeText}} 页 · ${{sourceKindLabel(docConfig.source_kind)}}`;
+                    const noteParts = [];
+                    if (pageEnd && pageEnd > page) {{
+                        noteParts.push(`连续页范围：${{page}}-${{pageEnd}}`);
+                    }}
+                    if (bbox) {{
+                        noteParts.push(`坐标：[${{bbox.join(', ')}}]`);
+                    }}
+                    const extraHint = sourceHint(docConfig);
+                    if (extraHint) {{
+                        noteParts.push(extraHint);
+                    }}
+                    cardRefs.note.textContent = noteParts.join(' · ');
+                    cardRefs.note.style.display = cardRefs.note.textContent ? 'block' : 'none';
+                    if (cardRefs.highlight) {{
+                        if (highlightHtml) {{
+                            cardRefs.highlight.innerHTML = `<div class="locator-multi-highlight-title">${{escapeHtml(highlightTitle)}}</div>${{highlightHtml}}`;
+                            cardRefs.highlight.style.display = 'block';
+                        }} else {{
+                            cardRefs.highlight.innerHTML = '';
+                            cardRefs.highlight.style.display = 'none';
+                        }}
+                    }}
+
+                    Array.from(cardRefs.tabs.querySelectorAll('.locator-page-tab')).forEach((button) => {{
+                        button.classList.toggle('active', button.dataset.page === String(page) && button.dataset.pageEnd === String(pageEnd));
+                    }});
+
+                    const rawSourceUrl = docConfig.source_url || '';
+                    if (rawSourceUrl) {{
+                        let finalUrl = rawSourceUrl;
+                        if (docConfig.source_kind === 'pdf' && page) {{
+                            finalUrl = appendSourcePageHint(rawSourceUrl, page);
+                        }}
+                        cardRefs.source.href = finalUrl;
+                        cardRefs.source.style.display = 'inline-flex';
+                        cardRefs.source.textContent = pageEnd && pageEnd > page ? `打开原文件（第 ${{pageRangeText}} 页）` : '打开原文件';
+                    }} else {{
+                        cardRefs.source.style.display = 'none';
+                        cardRefs.source.removeAttribute('href');
+                    }}
+
+                    cardRefs.empty.style.display = 'flex';
+                    cardRefs.empty.textContent = 'Loading source preview...';
+                    cardRefs.wrap.style.display = 'none';
+                    cardRefs.box.classList.remove('visible');
+
+                    try {{
+                        const resolved = resolvePagePreview(target.document, page);
+                        const pageConfig = resolved ? resolved.pageConfig : await loadRemotePagePreview(docConfig, page);
+                        if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
+                            throw new Error('preview data is empty');
+                        }}
+                        const imageUrl = pageConfig.image_data_url || pageConfig.image_url;
+                        cardRefs.empty.style.display = 'none';
+                        cardRefs.wrap.style.display = 'flex';
+                        cardRefs.image.onload = function() {{
+                            renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                        }};
+                        cardRefs.image.src = imageUrl;
+                        if (cardRefs.image.complete) {{
+                            renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                        }}
+                    }} catch (error) {{
+                        cardRefs.wrap.style.display = 'none';
+                        cardRefs.box.classList.remove('visible');
+                        cardRefs.empty.style.display = 'flex';
+                        cardRefs.empty.textContent = 'Failed to load source preview. Please retry later.';
+                    }}
+                }}
+
+                function buildMultiCard(target) {{
+                    const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
+                    const docConfig = docs[target.document] || {{}};
+                    const ranges = Array.isArray(target.ranges) && target.ranges.length
+                        ? target.ranges
+                        : coalescePages(target.pages || (target.default_page ? [target.default_page] : []));
+
+                    const card = document.createElement('section');
+                    card.className = 'locator-multi-card';
+
+                    const header = document.createElement('div');
+                    header.className = 'locator-multi-header';
+
+                    const headerText = document.createElement('div');
+                    const title = document.createElement('div');
+                    title.className = 'locator-multi-title';
+                    title.textContent = target.title || docConfig.title || target.document;
+                    const subtitle = document.createElement('div');
+                    subtitle.className = 'locator-multi-subtitle';
+                    subtitle.textContent = '准备预览...';
+                    headerText.appendChild(title);
+                    headerText.appendChild(subtitle);
+
+                    const source = document.createElement('a');
+                    source.className = 'locator-multi-source';
+                    source.target = '_blank';
+                    source.rel = 'noopener noreferrer';
+                    source.style.display = 'none';
+
+                    header.appendChild(headerText);
+                    header.appendChild(source);
+
+                    const tabs = document.createElement('div');
+                    tabs.className = 'locator-multi-pages';
+
+                    const stage = document.createElement('div');
+                    stage.className = 'locator-multi-stage';
+
+                    const empty = document.createElement('div');
+                    empty.className = 'locator-multi-empty';
+                    empty.textContent = 'Loading source preview...';
+
+                    const wrap = document.createElement('div');
+                    wrap.className = 'locator-multi-preview-wrap';
+                    wrap.style.display = 'none';
+
+                    const image = document.createElement('img');
+                    image.className = 'locator-multi-image';
+                    image.alt = target.title || docConfig.title || target.document;
+
+                    const box = document.createElement('div');
+                    box.className = 'locator-multi-box';
+
+                    wrap.appendChild(image);
+                    wrap.appendChild(box);
+
+                    const note = document.createElement('div');
+                    note.className = 'locator-multi-note';
+                    note.style.display = 'none';
+
+                    const highlight = document.createElement('div');
+                    highlight.className = 'locator-multi-highlight';
+                    highlight.style.display = 'none';
+
+                    stage.appendChild(empty);
+                    stage.appendChild(wrap);
+                    stage.appendChild(note);
+                    stage.appendChild(highlight);
+
+                    card.appendChild(header);
+                    card.appendChild(tabs);
+                    card.appendChild(stage);
+
+                    const cardRefs = {{ subtitle, source, tabs, empty, wrap, image, box, note, highlight }};
+                    const tabRanges = ranges.length
+                        ? ranges
+                        : [{{
+                            label: target.default_page ? `P${{target.default_page}}` : '无页码',
+                            page: Number(target.default_page || 0),
+                            pageEnd: Number(target.default_page || 0),
+                            bbox: target.bbox || '',
+                        }}];
+
+                    tabRanges.forEach((range, index) => {{
+                        const tab = document.createElement('button');
+                        tab.type = 'button';
+                        tab.className = 'locator-page-tab';
+                        tab.dataset.page = String(range.page || 0);
+                        tab.dataset.pageEnd = String(range.pageEnd || range.page || 0);
+                        tab.textContent = range.label || `P${{range.page || '?'}}`;
+                        tab.addEventListener('click', async function() {{
+                            await loadMultiTargetPage(target, range, cardRefs);
+                        }});
+                        tabs.appendChild(tab);
+                        if (index === 0) {{
+                            loadMultiTargetPage(target, range, cardRefs);
+                        }}
+                    }});
+
+                    return card;
+                }}
+
+                async function openMultiLocator(button) {{
+                    if (!overlay || !multiWrap) return;
+                    let targets = [];
+                    try {{
+                        targets = JSON.parse(button.dataset.targets || '[]');
+                    }} catch (error) {{
+                        targets = [];
+                    }}
+                    if (!Array.isArray(targets) || !targets.length) {{
+                        resetSingleView();
+                        resetMultiView();
+                        emptyNode.style.display = 'flex';
+                        emptyNode.textContent = 'No grouped preview is available for this issue.';
+                        overlay.classList.add('visible');
+                        return;
+                    }}
+                    titleNode.textContent = button.dataset.label || '并排预览';
+                    subtitleNode.textContent = `同时预览 ${{targets.length}} 份文件的相关页`;
+                    if (sourceLink) {{
+                        sourceLink.style.display = 'none';
+                        sourceLink.setAttribute('href', '#');
+                    }}
+                    resetSingleView();
+                    resetMultiView();
+                    emptyNode.style.display = 'none';
+                    multiWrap.style.display = 'grid';
+                    targets.forEach((target) => {{
+                        multiWrap.appendChild(buildMultiCard(target));
+                    }});
+                    overlay.classList.add('visible');
+                }}
+
+                function bindLocatorChips() {{
+                    document.querySelectorAll('.locator-open').forEach((button) => {{
+                        if (button.dataset.locatorBound === '1') return;
+                        button.dataset.locatorBound = '1';
+                        button.addEventListener('click', async function() {{
+                            await openLocator(this);
+                        }});
+                    }});
+                    document.querySelectorAll('.locator-open-group').forEach((button) => {{
+                        if (button.dataset.locatorGroupBound === '1') return;
+                        button.dataset.locatorGroupBound = '1';
+                        button.addEventListener('click', async function() {{
+                            await openMultiLocator(this);
+                        }});
+                    }});
+                }}
+
+                if (closeBtn) {{
+                    closeBtn.addEventListener('click', hideLocator);
+                }}
+                if (overlay) {{
+                    overlay.addEventListener('click', function(event) {{
+                        if (event.target === overlay) {{
+                            hideLocator();
+                        }}
+                    }});
+                }}
+                document.addEventListener('keydown', function(event) {{
+                    if (event.key === 'Escape') {{
+                        hideLocator();
+                    }}
+                }});
+
+                bindLocatorChips();
+                window.__bindLocatorChips = bindLocatorChips;
+            }})();
+        </script>
+        """
+
+    def _project_duplicate_text_key(self, value):
+        text = str(value or "").strip().lower()
+        text = re.sub(r"第\s*\d+\s*页", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?:p|P)\s*\d+(?:\s*-\s*(?:p|P)?\s*\d+)?", " ", text)
+        text = re.sub(r"\d[\d,.\-]*", " ", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text, flags=re.UNICODE)
+        text = re.sub(r"\s+", "", text)
+        return text.strip()
+
+    def _project_duplicate_table_side_keys(self, table, side):
+        if side == "left":
+            rows = (
+                table.get("left_rows")
+                or table.get("rows")
+                or table.get("left_sample_rows")
+                or table.get("sample_rows")
+                or []
+            )
+        else:
+            rows = (
+                table.get("right_rows")
+                or table.get("rows")
+                or table.get("right_sample_rows")
+                or table.get("sample_rows")
+                or []
+            )
+        normalized_rows = []
+        for row in rows:
+            key = self._project_duplicate_text_key(row)
+            if key:
+                normalized_rows.append(key)
+        return normalized_rows
+
+    def _project_evidence_pages(self, evidence, side):
+        return self._project_normalize_pages(
+            evidence.get(f"{side}_pages"),
+            evidence.get(f"{side}_page"),
+            evidence.get("page"),
+        )
+
+    def _project_evidence_text(self, evidence, side):
+        return (
+            evidence.get(f"{side}_text")
+            or evidence.get(f"{side}_preview")
+            or evidence.get(f"{side}_title")
+            or evidence.get("text")
+            or ""
+        )
+
+    def _project_section_side_key(self, section, side):
+        return self._project_duplicate_text_key(
+            section.get(f"{side}_preview")
+            or section.get(f"{side}_title")
+            or section.get("text")
+            or ""
+        )
+
+    def _project_pages_overlap(self, left_pages, right_pages):
+        left_set = set(self._project_normalize_pages(left_pages))
+        right_set = set(self._project_normalize_pages(right_pages))
+        return bool(left_set and right_set and (left_set & right_set))
+
+    def _project_text_matches_table_rows(self, text, row_keys, *, threshold=0.72):
+        text_key = self._project_duplicate_text_key(text)
+        if not text_key:
+            return False
+        if not row_keys:
+            return False
+        joined = "".join(row_keys)
+        if joined and text_key in joined:
+            return True
+        for row_key in row_keys:
+            if not row_key:
+                continue
+            if text_key in row_key or row_key in text_key:
+                return True
+            if len(text_key) >= 8 and len(row_key) >= 8 and SequenceMatcher(None, text_key, row_key).ratio() >= threshold:
+                return True
+        return False
+
+    def _project_text_matches_exact(self, left_text, right_text, *, threshold=0.72):
+        left_key = self._project_duplicate_text_key(left_text)
+        right_key = self._project_duplicate_text_key(right_text)
+        if not left_key or not right_key:
+            return False
+        if left_key == right_key:
+            return True
+        if left_key in right_key or right_key in left_key:
+            return True
+        if len(left_key) >= 8 and len(right_key) >= 8:
+            return SequenceMatcher(None, left_key, right_key).ratio() >= threshold
+        return False
+
+    def _project_is_evidence_subsumed_by_exact_text(self, similar_evidence, exact_evidence):
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(similar_evidence, "left"),
+            self._project_evidence_pages(exact_evidence, "left"),
+        ):
+            return False
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(similar_evidence, "right"),
+            self._project_evidence_pages(exact_evidence, "right"),
+        ):
+            return False
+        return (
+            self._project_text_matches_exact(
+                self._project_evidence_text(similar_evidence, "left"),
+                self._project_evidence_text(exact_evidence, "left"),
+                threshold=0.58,
+            )
+            and self._project_text_matches_exact(
+                self._project_evidence_text(similar_evidence, "right"),
+                self._project_evidence_text(exact_evidence, "right"),
+                threshold=0.58,
+            )
+        )
+
+    def _project_is_block_subsumed_by_section(self, block, section):
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(block, "left"),
+            self._project_evidence_pages(section, "left"),
+        ):
+            return False
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(block, "right"),
+            self._project_evidence_pages(section, "right"),
+        ):
+            return False
+        return (
+            self._project_text_matches_exact(
+                self._project_evidence_text(block, "left"),
+                self._project_evidence_text(section, "left"),
+                threshold=0.58,
+            )
+            or self._project_text_matches_exact(
+                self._project_evidence_text(block, "right"),
+                self._project_evidence_text(section, "right"),
+                threshold=0.58,
+            )
+        )
+
+    def _project_is_similar_evidence_subsumed_by_exact(self, similar_evidence, exact_evidence, *, evidence_kind):
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(similar_evidence, "left"),
+            self._project_evidence_pages(exact_evidence, "left"),
+        ):
+            return False
+        if not self._project_pages_overlap(
+            self._project_evidence_pages(similar_evidence, "right"),
+            self._project_evidence_pages(exact_evidence, "right"),
+        ):
+            return False
+        if evidence_kind == "table":
+            left_similar = self._project_duplicate_table_side_keys(similar_evidence, "left")
+            right_similar = self._project_duplicate_table_side_keys(similar_evidence, "right")
+            left_exact = self._project_duplicate_table_side_keys(exact_evidence, "left")
+            right_exact = self._project_duplicate_table_side_keys(exact_evidence, "right")
+            left_match = any(self._project_text_matches_table_rows(row, left_exact, threshold=0.58) for row in left_similar)
+            right_match = any(self._project_text_matches_table_rows(row, right_exact, threshold=0.58) for row in right_similar)
+            return left_match and right_match
+        if evidence_kind == "section":
+            return (
+                self._project_text_matches_exact(
+                    self._project_evidence_text(similar_evidence, "left"),
+                    self._project_evidence_text(exact_evidence, "left"),
+                    threshold=0.58,
+                )
+                or self._project_text_matches_exact(
+                    self._project_evidence_text(similar_evidence, "right"),
+                    self._project_evidence_text(exact_evidence, "right"),
+                    threshold=0.58,
+                )
+            )
+        return (
+            self._project_text_matches_exact(
+                self._project_evidence_text(similar_evidence, "left"),
+                self._project_evidence_text(exact_evidence, "left"),
+                threshold=0.58,
+            )
+            and self._project_text_matches_exact(
+                self._project_evidence_text(similar_evidence, "right"),
+                self._project_evidence_text(exact_evidence, "right"),
+                threshold=0.58,
+            )
+        )
+
+    def _project_is_evidence_subsumed_by_table(self, evidence, table, *, evidence_kind):
+        evidence_left_pages = self._project_normalize_pages(
+            evidence.get("left_pages"),
+            evidence.get("left_page"),
+            evidence.get("page"),
+        )
+        evidence_right_pages = self._project_normalize_pages(
+            evidence.get("right_pages"),
+            evidence.get("right_page"),
+            evidence.get("page"),
+        )
+        table_left_pages = self._project_normalize_pages(table.get("left_pages"))
+        table_right_pages = self._project_normalize_pages(table.get("right_pages"))
+
+        if not self._project_pages_overlap(evidence_left_pages, table_left_pages):
+            return False
+        if not self._project_pages_overlap(evidence_right_pages, table_right_pages):
+            return False
+
+        left_text = (
+            evidence.get("left_text")
+            or evidence.get("left_preview")
+            or evidence.get("text")
+            or ""
+        )
+        right_text = (
+            evidence.get("right_text")
+            or evidence.get("right_preview")
+            or evidence.get("text")
+            or ""
+        )
+        left_rows = self._project_duplicate_table_side_keys(table, "left")
+        right_rows = self._project_duplicate_table_side_keys(table, "right")
+
+        if not left_rows and not right_rows:
+            return True
+
+        if evidence_kind == "block":
+            return self._project_text_matches_table_rows(left_text, left_rows) and self._project_text_matches_table_rows(right_text, right_rows)
+
+        left_match = self._project_text_matches_table_rows(left_text, left_rows, threshold=0.58)
+        right_match = self._project_text_matches_table_rows(right_text, right_rows, threshold=0.58)
+        return left_match or right_match
+
+    def _project_filter_duplicate_item_evidence(self, item):
+        if not isinstance(item, dict):
+            return item
+        cached = item.get("_project_display_filtered")
+        if isinstance(cached, dict):
+            return cached
+
+        filtered = dict(item)
+        duplicate_tables = list(item.get("duplicate_tables") or [])
+        similar_tables = list(item.get("similar_tables") or [])
+        duplicate_sections = [
+            section
+            for section in (item.get("duplicate_sections") or [])
+            if not any(
+                self._project_is_evidence_subsumed_by_table(section, table, evidence_kind="section")
+                for table in duplicate_tables
+            )
+        ]
+        duplicate_blocks = [
+            block
+            for block in (item.get("duplicate_blocks") or [])
+            if not any(
+                self._project_is_evidence_subsumed_by_table(block, table, evidence_kind="block")
+                for table in duplicate_tables
+            )
+            and not any(
+                self._project_is_block_subsumed_by_section(block, section)
+                for section in duplicate_sections
+            )
+        ]
+        similar_tables = [
+            table
+            for table in similar_tables
+            if not any(
+                self._project_is_similar_evidence_subsumed_by_exact(table, exact_table, evidence_kind="table")
+                for exact_table in duplicate_tables
+            )
+        ]
+        table_coverages = duplicate_tables + similar_tables
+        similar_sections = [
+            section
+            for section in (item.get("similar_sections") or [])
+            if not any(
+                self._project_is_evidence_subsumed_by_table(section, table, evidence_kind="section")
+                for table in table_coverages
+            )
+            and not any(
+                self._project_is_similar_evidence_subsumed_by_exact(section, exact_section, evidence_kind="section")
+                for exact_section in duplicate_sections
+            )
+            and not any(
+                self._project_is_evidence_subsumed_by_exact_text(section, exact_block)
+                for exact_block in duplicate_blocks
+            )
+        ]
+        similar_blocks = [
+            block
+            for block in (item.get("similar_blocks") or [])
+            if not any(
+                self._project_is_evidence_subsumed_by_table(block, table, evidence_kind="block")
+                for table in table_coverages
+            )
+            and not any(
+                self._project_is_block_subsumed_by_section(block, section)
+                for section in duplicate_sections + similar_sections
+            )
+            and not any(
+                self._project_is_similar_evidence_subsumed_by_exact(block, exact_block, evidence_kind="block")
+                for exact_block in duplicate_blocks
+            )
+        ]
+
+        filtered["duplicate_blocks"] = duplicate_blocks
+        filtered["duplicate_sections"] = duplicate_sections
+        filtered["duplicate_tables"] = duplicate_tables
+        filtered["similar_blocks"] = similar_blocks
+        filtered["similar_sections"] = similar_sections
+        filtered["similar_tables"] = similar_tables
+
+        metrics = dict(item.get("metrics") or {})
+        metrics["exact_block_count"] = len(duplicate_blocks)
+        metrics["exact_section_count"] = len(duplicate_sections)
+        metrics["exact_table_count"] = len(duplicate_tables)
+        metrics["similar_block_count"] = len(similar_blocks)
+        metrics["similar_section_count"] = len(similar_sections)
+        metrics["similar_table_count"] = len(similar_tables)
+        filtered["metrics"] = metrics
+
+        item["_project_display_filtered"] = filtered
+        return filtered
+
+    def _project_duplicate_cluster_metrics(self, cluster):
+        totals = {
+            "exact_section_count": 0,
+            "similar_section_count": 0,
+            "exact_block_count": 0,
+            "similar_block_count": 0,
+            "exact_table_count": 0,
+            "similar_table_count": 0,
+        }
+        for raw_item in cluster.get("items") or []:
+            item = self._project_filter_duplicate_item_evidence(raw_item)
+            metrics = item.get("metrics") or {}
+            for key in totals:
+                totals[key] += int(metrics.get(key) or 0)
+        return totals
+
+    def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
+        item = self._project_filter_duplicate_item_evidence(item)
+        left_file = str(item.get("left_file_name") or "")
+        right_file = str(item.get("right_file_name") or "")
+        blocks = item.get("duplicate_blocks") or []
+        sections = item.get("duplicate_sections") or []
+        tables = item.get("duplicate_tables") or []
+        similar_blocks = item.get("similar_blocks") or []
+        similar_sections = item.get("similar_sections") or []
+        similar_tables = item.get("similar_tables") or []
+        parts = []
+
+        if sections:
+            entries = []
+            for section in sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复段落证据（{len(sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if blocks:
+            entries = []
+            for block in blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复句证据（{len(blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if tables:
+            entries = []
+            for table in tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                sample_rows = table.get("sample_rows") or []
+                sample_text = self._project_trim_text(
+                    json.dumps(sample_rows, ensure_ascii=False),
+                    220,
+                ) if sample_rows else "-"
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复表格证据（{len(tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_sections:
+            entries = []
+            for section in similar_sections:
+                left_pages = self._project_normalize_pages(section.get("left_pages"))
+                right_pages = self._project_normalize_pages(section.get("right_pages"))
+                similarity = html.escape(str(section.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_blocks:
+            entries = []
+            for block in similar_blocks:
+                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
+                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
+                similarity = html.escape(str(block.get("similarity") or 0))
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        if similar_tables:
+            entries = []
+            for table in similar_tables:
+                left_pages = self._project_normalize_pages(table.get("left_pages"))
+                right_pages = self._project_normalize_pages(table.get("right_pages"))
+                similarity = html.escape(str(table.get("similarity") or 0))
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
+                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
+
+        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for cluster in self._project_duplicate_cluster_items(items):
+                metrics = self._project_duplicate_cluster_metrics(cluster)
+                risk_level = self._project_duplicate_cluster_risk(cluster)
+                preview_button = self._project_build_duplicate_cluster_preview_button_html(
+                    cluster,
+                    source_lookup=source_lookup,
+                    label="并排预览这组文件",
+                )
+                pair_sections = []
+                for raw_item in cluster.get("items") or []:
+                    item = self._project_filter_duplicate_item_evidence(raw_item)
+                    pair_metrics = item.get("metrics") or {}
+                    left_file = str(item.get("left_file_name") or "")
+                    right_file = str(item.get("right_file_name") or "")
+                    pair_sections.append(
+                        f"""
+                        <details open>
+                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                        </details>
+                        """
+                    )
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>{html.escape(' / '.join(cluster.get('files') or []))}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 最高分：{html.escape(self._project_duplicate_cluster_score(cluster))} | 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                          <div class="issue-card-actions">{preview_button}</div>
+                        </div>
+                      </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {''.join(pair_sections)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
+        )

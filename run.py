@@ -19,7 +19,7 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 def _resolve_server_config() -> tuple[str, int, bool]:
     host = os.getenv("UVICORN_HOST", "127.0.0.1").strip() or "127.0.0.1"
-    port = int(os.getenv("UVICORN_PORT", "8080"))
+    port = int(os.getenv("UVICORN_PORT", "8888"))
     reload_enabled = _env_flag("UVICORN_RELOAD", default=False)
 
     if sys.platform == "win32" and reload_enabled:

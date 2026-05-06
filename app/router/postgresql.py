@@ -1,8 +1,16 @@
 """项目与文档 CRUD 路由。"""
 
+import base64
+import io
+import os
+import time
+from collections import OrderedDict
+from threading import Lock
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, RedirectResponse
 from psycopg2 import Error as PsycopgError
 
 from app.core.document_types import (
@@ -42,11 +50,155 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 
+_PREVIEW_CACHE_MAX_ITEMS = max(8, min(int(os.getenv("XTJS_PREVIEW_CACHE_MAX_ITEMS", "64")), 512))
+_PREVIEW_CACHE_TTL_SECONDS = max(30, int(os.getenv("XTJS_PREVIEW_CACHE_TTL_SECONDS", "900")))
+_DOCUMENT_PREVIEW_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, dict]]" = OrderedDict()
+_DOCUMENT_PREVIEW_CACHE_LOCK = Lock()
+
 
 def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]]:
     if scope == DuplicateCheckScope.ALL:
         return None
     return [scope.value]
+
+
+def _document_source_kind(document: dict) -> str:
+    file_name = str(document.get("file_name") or "").strip()
+    file_url = str(document.get("file_url") or "").strip()
+    target = file_name or file_url
+    suffix = os.path.splitext(target)[1].lower()
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return "image"
+    return "unknown"
+
+
+def _resolve_document_source_object(document: dict) -> tuple[str, str, str]:
+    file_url = str(document.get("file_url") or "").strip()
+    if not file_url:
+        raise ValueError("document file_url is empty")
+
+    if file_url.startswith("minio://"):
+        bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
+    elif MinioService.is_presigned_url(file_url):
+        bucket_name, object_name = MinioService.bucket_and_object_from_presigned_url(file_url)
+    else:
+        raise ValueError("document source file is not stored in MinIO")
+
+    file_name = str(document.get("file_name") or object_name or "document").strip() or "document"
+    return bucket_name, object_name, file_name
+
+
+def _load_document_source_bytes(
+    *,
+    document: dict,
+    oss_service: MinioService,
+) -> tuple[bytes, str, str]:
+    bucket_name, object_name, _file_name = _resolve_document_source_object(document)
+    data, content_type = oss_service.get_object_bytes(object_name, bucket_name)
+    return data, content_type, object_name
+
+
+def _preview_cache_key(document: dict, page: int) -> tuple[str, str, int]:
+    identifier_id = str(document.get("identifier_id") or "").strip()
+    version = str(document.get("update_time") or document.get("file_url") or "").strip()
+    return identifier_id, version, int(page)
+
+
+def _preview_cache_prune(now: float) -> None:
+    expired_keys = [
+        key for key, (created_at, _payload) in _DOCUMENT_PREVIEW_CACHE.items()
+        if now - created_at > _PREVIEW_CACHE_TTL_SECONDS
+    ]
+    for key in expired_keys:
+        _DOCUMENT_PREVIEW_CACHE.pop(key, None)
+
+
+def _preview_cache_get(document: dict, page: int) -> Optional[dict]:
+    cache_key = _preview_cache_key(document, page)
+    now = time.monotonic()
+    with _DOCUMENT_PREVIEW_CACHE_LOCK:
+        _preview_cache_prune(now)
+        cached = _DOCUMENT_PREVIEW_CACHE.get(cache_key)
+        if not cached:
+            return None
+        created_at, payload = cached
+        if now - created_at > _PREVIEW_CACHE_TTL_SECONDS:
+            _DOCUMENT_PREVIEW_CACHE.pop(cache_key, None)
+            return None
+        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)
+        return dict(payload)
+
+
+def _preview_cache_set(document: dict, page: int, payload: dict) -> None:
+    cache_key = _preview_cache_key(document, page)
+    now = time.monotonic()
+    with _DOCUMENT_PREVIEW_CACHE_LOCK:
+        _preview_cache_prune(now)
+        _DOCUMENT_PREVIEW_CACHE[cache_key] = (now, dict(payload))
+        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)
+        while len(_DOCUMENT_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX_ITEMS:
+            _DOCUMENT_PREVIEW_CACHE.popitem(last=False)
+
+
+def _preview_payload_from_source(
+    *,
+    file_bytes: bytes,
+    source_kind: str,
+    page: int,
+) -> dict:
+    if page <= 0:
+        raise ValueError("page must be greater than 0")
+
+    if source_kind == "pdf":
+        import fitz
+
+        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        try:
+            page_count = int(pdf.page_count)
+            if page > page_count:
+                raise ValueError(f"page {page} is out of range, max page is {page_count}")
+            pdf_page = pdf.load_page(page - 1)
+            rect = pdf_page.rect
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+            image_bytes = pix.tobytes("png")
+            return {
+                "page": page,
+                "page_count": page_count,
+                "width": float(rect.width),
+                "height": float(rect.height),
+                "image_data_url": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(image_bytes).decode("ascii")
+                ),
+                "source_kind": "pdf",
+            }
+        finally:
+            pdf.close()
+
+    if source_kind == "image":
+        if page != 1:
+            raise ValueError("image document only supports page 1 preview")
+        from PIL import Image
+
+        with Image.open(io.BytesIO(file_bytes)) as image:
+            rgb = image.convert("RGB")
+            buffer = io.BytesIO()
+            rgb.save(buffer, format="PNG")
+            return {
+                "page": 1,
+                "page_count": 1,
+                "width": int(rgb.width),
+                "height": int(rgb.height),
+                "image_data_url": (
+                    "data:image/png;base64,"
+                    + base64.b64encode(buffer.getvalue()).decode("ascii")
+                ),
+                "source_kind": "image",
+            }
+
+    raise ValueError("document source kind does not support preview")
 
 
 def _run_project_duplicate_check(
@@ -1024,6 +1176,74 @@ async def get_document(
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.get("/documents/{identifier_id}/source", summary="Get document source file")
+async def get_document_source(
+    identifier_id: str,
+    page: Optional[int] = Query(default=None, ge=1),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    try:
+        document = db_service.get_document_by_identifier(identifier_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="document not found")
+
+        bucket_name, object_name, _file_name = _resolve_document_source_object(document)
+        presigned_url = oss_service.get_presigned_url(object_name, bucket_name)
+        if page and _document_source_kind(document) == "pdf":
+            presigned_url = f"{presigned_url}#page={page}"
+        return RedirectResponse(url=presigned_url, status_code=307)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/documents/{identifier_id}/preview/pages/{page}", summary="Get document page preview")
+async def get_document_page_preview(
+    identifier_id: str,
+    page: int,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    try:
+        document = db_service.get_document_by_identifier(identifier_id)
+        if not document:
+            raise HTTPException(status_code=404, detail="document not found")
+
+        cached_payload = _preview_cache_get(document, page)
+        if cached_payload is not None:
+            return JSONResponse(cached_payload)
+
+        source_kind = _document_source_kind(document)
+        file_bytes, _content_type, _object_name = _load_document_source_bytes(
+            document=document,
+            oss_service=oss_service,
+        )
+        payload = _preview_payload_from_source(
+            file_bytes=file_bytes,
+            source_kind=source_kind,
+            page=page,
+        )
+        payload["document_identifier"] = identifier_id
+        payload["file_name"] = str(document.get("file_name") or "")
+        payload["source_url"] = f"/api/postgresql/documents/{identifier_id}/source"
+        _preview_cache_set(document, page, payload)
+        return JSONResponse(payload)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
 @router.put("/documents/{identifier_id}", summary="更新文档")

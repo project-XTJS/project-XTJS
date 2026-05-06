@@ -39,6 +39,12 @@ EXTRA_SOURCE_ROOTS = [
     Path(r"D:\Desktop\测试文件\船体广告"),
 ]
 ACTIVE_TEST_NAME = str(OUTPUT_DIR.name or TENDER_PATH.parent.name or TENDER_PATH.stem)
+PROJECT_REVIEW_DISPLAY_OPTIONS = {
+    "show_business_duplicates": True,
+    "show_technical_duplicates": True,
+    "show_personnel_reuse": True,
+    "show_typos": True,
+}
 
 SOURCE_SEARCH_ROOTS = [
     Path("./ocr_results"),
@@ -751,6 +757,7 @@ def generate_report_for_bidder(
         source_lookup=source_lookup,
         issue_pages=issue_pages,
         current_business_file=bidder_json_path.name,
+        display_options=PROJECT_REVIEW_DISPLAY_OPTIONS,
     )
     html_report = visualizer.inject_project_review_section(html_report, project_review_section)
 
@@ -806,6 +813,7 @@ def main() -> None:
         project_results=project_results,
         source_lookup=source_lookup,
         issue_pages=issue_pages,
+        display_options=PROJECT_REVIEW_DISPLAY_OPTIONS,
     )
     summary_path = OUTPUT_DIR / "project_review_summary.html"
     with summary_path.open("w", encoding="utf-8") as file:

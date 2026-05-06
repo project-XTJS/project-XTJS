@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from mimetypes import guess_type
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -91,6 +92,11 @@ class MinioService:
 
         normalized_object_name = object_name.lstrip("/")
         return f"minio://{resolved_bucket_name}/{normalized_object_name}"
+
+    @staticmethod
+    def guess_content_type(object_name: str, default: str = "application/octet-stream") -> str:
+        guessed, _ = guess_type(str(object_name or "").strip())
+        return guessed or default
 
     @staticmethod
     def is_presigned_url(file_url: str) -> bool:
@@ -207,14 +213,18 @@ class MinioService:
             )
             raise RuntimeError(f"MinIO upload error: {exc}") from exc
 
-    def get_presigned_url(self, object_name: str) -> str:
+    def get_presigned_url(self, object_name: str, bucket_name: str | None = None) -> str:
         if not object_name or not object_name.strip():
             raise ValueError("Object name cannot be empty")
 
         try:
-            self.ensure_bucket()
+            resolved_bucket_name = str(bucket_name or self.bucket_name or "").strip()
+            if not resolved_bucket_name:
+                raise ValueError("Bucket name cannot be empty")
+            if resolved_bucket_name == self.bucket_name:
+                self.ensure_bucket()
             presigned_url = self.client.presigned_get_object(
-                self.bucket_name,
+                resolved_bucket_name,
                 object_name,
                 expires=timedelta(days=settings.MINIO_PRESIGNED_EXPIRES_DAYS),
             )
@@ -269,6 +279,61 @@ class MinioService:
                 detail=f"{type(exc).__name__}: {exc}",
             )
             raise RuntimeError(f"MinIO delete error: {exc}") from exc
+
+    def get_object_bytes(
+        self,
+        object_name: str,
+        bucket_name: str | None = None,
+    ) -> tuple[bytes, str]:
+        resolved_object_name = str(object_name or "").strip()
+        if not resolved_object_name:
+            raise ValueError("Object name cannot be empty")
+
+        resolved_bucket_name = str(bucket_name or self.bucket_name or "").strip()
+        if not resolved_bucket_name:
+            raise ValueError("Bucket name cannot be empty")
+
+        response = None
+        try:
+            if resolved_bucket_name == self.bucket_name:
+                self.ensure_bucket()
+            response = self.client.get_object(resolved_bucket_name, resolved_object_name)
+            data = response.read()
+            content_type = (
+                response.headers.get("Content-Type")
+                or self.guess_content_type(resolved_object_name)
+            )
+            self._audit(
+                action="get_object_bytes",
+                status="success",
+                object_name=resolved_object_name,
+            )
+            return data, content_type
+        except ValueError:
+            raise
+        except S3Error as exc:
+            self._audit(
+                action="get_object_bytes",
+                status="failed",
+                object_name=resolved_object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            raise RuntimeError(f"MinIO get object failed: {exc}") from exc
+        except Exception as exc:
+            self._audit(
+                action="get_object_bytes",
+                status="failed",
+                object_name=resolved_object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            raise RuntimeError(f"MinIO get object error: {exc}") from exc
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                    response.release_conn()
+                except Exception:
+                    pass
 
     @staticmethod
     def object_name_from_presigned_url(file_url: str) -> str:
