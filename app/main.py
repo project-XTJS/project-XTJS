@@ -13,8 +13,8 @@ from app.router.postgresql_batch import router as postgresql_batch_router
 from app.service.postgresql_service import PostgreSQLService
 
 app = FastAPI(
-    title="XTJS API",
-    description="Unified API for project, file and text analysis workflows",
+    title="XTJS 接口文档",
+    description="项目、文件与文本分析统一接口",
     version="1.0.0",
     default_response_class=UnifiedResponse  # 全局统一响应
 )
@@ -32,10 +32,10 @@ app.add_middleware(
 configure_exception_handlers(app)
 
 # 注册路由
-app.include_router(analysis_router, prefix="/api/analysis", tags=["analysis"])
-app.include_router(file_router, prefix="/api/files", tags=["files"])
-app.include_router(postgresql_router, prefix="/api/postgresql", tags=["postgresql"])
-app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["postgresql"])
+app.include_router(analysis_router, prefix="/api/analysis", tags=["文档解析"])
+app.include_router(file_router, prefix="/api/files", tags=["文件存储"])
+app.include_router(postgresql_router, prefix="/api/postgresql", tags=["项目业务"])
+app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["项目业务"])
 
 
 def _inject_string_choices(schema: dict, choices: list[str]) -> None:
@@ -129,11 +129,11 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-@app.get("/", summary="系统根目录", tags=["system"])
+@app.get("/", summary="系统根目录", tags=["系统"])
 def read_root():
     return "Welcome to XTJS API"
 
-@app.get("/health", summary="健康检查接口", tags=["system"])
+@app.get("/health", summary="健康检查接口", tags=["系统"])
 def health_check():
     return {"status": "healthy"}
 

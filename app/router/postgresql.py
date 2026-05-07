@@ -1,12 +1,16 @@
 """项目与文档 CRUD 路由。"""
 
 import base64
+import json
 import io
 import os
+import hashlib
+import re
+import tempfile
 import time
 from collections import OrderedDict
 from threading import Lock
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -36,10 +40,14 @@ from app.router.uploaded_json_support import (
 from app.schemas.postgresql import (
     DuplicateCheckScope,
     DocumentUpdateRequest,
+    IdentifierBatchDeleteRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
     ProjectDuplicateCheckRequest,
+    ProjectResultUpdateRequest,
+    ProjectResultUpsertRequest,
     ProjectRelationUpdateRequest,
+    RelationBatchDeleteRequest,
     ProjectUpdateRequest,
 )
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
@@ -54,12 +62,29 @@ _PREVIEW_CACHE_MAX_ITEMS = max(8, min(int(os.getenv("XTJS_PREVIEW_CACHE_MAX_ITEM
 _PREVIEW_CACHE_TTL_SECONDS = max(30, int(os.getenv("XTJS_PREVIEW_CACHE_TTL_SECONDS", "900")))
 _DOCUMENT_PREVIEW_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, dict]]" = OrderedDict()
 _DOCUMENT_PREVIEW_CACHE_LOCK = Lock()
+_HIGHLIGHT_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]+")
 
 
 def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]]:
     if scope == DuplicateCheckScope.ALL:
         return None
     return [scope.value]
+
+
+def _resolve_pagination(
+    *,
+    page: int,
+    page_size: int,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> tuple[int, int]:
+    if limit is not None or offset is not None:
+        normalized_limit = max(1, min(int(limit or page_size), 200))
+        normalized_offset = max(0, int(offset or 0))
+        return normalized_limit, normalized_offset
+    normalized_page_size = max(1, min(int(page_size), 200))
+    normalized_page = max(1, int(page))
+    return normalized_page_size, (normalized_page - 1) * normalized_page_size
 
 
 def _document_source_kind(document: dict) -> str:
@@ -100,10 +125,10 @@ def _load_document_source_bytes(
     return data, content_type, object_name
 
 
-def _preview_cache_key(document: dict, page: int) -> tuple[str, str, int]:
+def _preview_cache_key(document: dict, page: int, variant: str = "") -> tuple[str, str, int, str]:
     identifier_id = str(document.get("identifier_id") or "").strip()
     version = str(document.get("update_time") or document.get("file_url") or "").strip()
-    return identifier_id, version, int(page)
+    return identifier_id, version, int(page), variant
 
 
 def _preview_cache_prune(now: float) -> None:
@@ -115,8 +140,8 @@ def _preview_cache_prune(now: float) -> None:
         _DOCUMENT_PREVIEW_CACHE.pop(key, None)
 
 
-def _preview_cache_get(document: dict, page: int) -> Optional[dict]:
-    cache_key = _preview_cache_key(document, page)
+def _preview_cache_get(document: dict, page: int, variant: str = "") -> Optional[dict]:
+    cache_key = _preview_cache_key(document, page, variant)
     now = time.monotonic()
     with _DOCUMENT_PREVIEW_CACHE_LOCK:
         _preview_cache_prune(now)
@@ -131,8 +156,8 @@ def _preview_cache_get(document: dict, page: int) -> Optional[dict]:
         return dict(payload)
 
 
-def _preview_cache_set(document: dict, page: int, payload: dict) -> None:
-    cache_key = _preview_cache_key(document, page)
+def _preview_cache_set(document: dict, page: int, payload: dict, variant: str = "") -> None:
+    cache_key = _preview_cache_key(document, page, variant)
     now = time.monotonic()
     with _DOCUMENT_PREVIEW_CACHE_LOCK:
         _preview_cache_prune(now)
@@ -147,6 +172,9 @@ def _preview_payload_from_source(
     file_bytes: bytes,
     source_kind: str,
     page: int,
+    highlight_phrases: Optional[list[str]] = None,
+    highlight_bbox: Optional[list[float]] = None,
+    highlight_rects: Optional[list[list[float]]] = None,
 ) -> dict:
     if page <= 0:
         raise ValueError("page must be greater than 0")
@@ -161,6 +189,22 @@ def _preview_payload_from_source(
                 raise ValueError(f"page {page} is out of range, max page is {page_count}")
             pdf_page = pdf.load_page(page - 1)
             rect = pdf_page.rect
+            text_rects = _apply_pdf_text_highlights(
+                pdf_page,
+                highlight_phrases=highlight_phrases or [],
+                highlight_bbox=highlight_bbox,
+            )
+            direct_rects = []
+            if not text_rects:
+                refined_rects = _refine_highlight_rects_via_ocr(
+                    pdf_page,
+                    highlight_rects=highlight_rects or [],
+                    highlight_phrases=highlight_phrases or [],
+                )
+                direct_rects = _apply_pdf_rect_highlights(
+                    pdf_page,
+                    highlight_rects=refined_rects,
+                )
             pix = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
             image_bytes = pix.tobytes("png")
             return {
@@ -173,6 +217,8 @@ def _preview_payload_from_source(
                     + base64.b64encode(image_bytes).decode("ascii")
                 ),
                 "source_kind": "pdf",
+                "highlight_rect_count": len(text_rects) + len(direct_rects),
+                "highlight_applied": bool(text_rects or direct_rects),
             }
         finally:
             pdf.close()
@@ -199,6 +245,422 @@ def _preview_payload_from_source(
             }
 
     raise ValueError("document source kind does not support preview")
+
+
+def _normalize_preview_highlight_phrases(raw_values: Optional[list[str]]) -> list[str]:
+    normalized: list[str] = []
+    for value in raw_values or []:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            continue
+        compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", text, flags=re.UNICODE)
+        if len(compact) < 2:
+            continue
+        if compact.isdigit():
+            continue
+        if text not in normalized:
+            normalized.append(text[:240])
+        if len(normalized) >= 12:
+            break
+    return normalized
+
+
+def _normalize_preview_highlight_bbox(raw_bbox: Optional[str]) -> Optional[list[float]]:
+    if not raw_bbox:
+        return None
+    parts = [segment.strip() for segment in str(raw_bbox).split(",")]
+    values: list[float] = []
+    for part in parts[:4]:
+        try:
+            values.append(float(part))
+        except (TypeError, ValueError):
+            return None
+    if len(values) < 4:
+        return None
+    x0, y0, x1, y1 = values[:4]
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _preview_variant_signature(
+    highlight_phrases: Optional[list[str]],
+    highlight_bbox: Optional[list[float]],
+    highlight_rects: Optional[list[list[float]]] = None,
+) -> str:
+    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
+    bbox = highlight_bbox or []
+    rects = highlight_rects or []
+    if not phrases and not bbox and not rects:
+        return ""
+    payload = json.dumps(
+        {
+            "phrases": phrases,
+            "bbox": [round(float(value), 2) for value in bbox],
+            "rects": [
+                [round(float(value), 2) for value in rect[:4]]
+                for rect in rects
+                if isinstance(rect, (list, tuple)) and len(rect) >= 4
+            ],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _highlight_tokens_from_phrases(phrases: list[str]) -> list[str]:
+    tokens: list[str] = []
+    for phrase in phrases:
+        for raw_token in _HIGHLIGHT_TOKEN_PATTERN.findall(str(phrase or "")):
+            token = re.sub(r"[^\w\u4e00-\u9fff]+", "", raw_token, flags=re.UNICODE).lower()
+            if len(token) < 2:
+                continue
+            if token.isdigit():
+                continue
+            if token not in tokens:
+                tokens.append(token)
+    tokens.sort(key=len, reverse=True)
+    return tokens[:48]
+
+
+def _word_matches_highlight_token(word_text: str, tokens: list[str]) -> bool:
+    normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(word_text or ""), flags=re.UNICODE).lower()
+    if len(normalized) < 2:
+        return False
+    for token in tokens:
+        if normalized == token:
+            return True
+        if len(token) >= 4 and normalized in token:
+            return True
+        if len(normalized) >= 4 and token in normalized:
+            return True
+    return False
+
+
+def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], highlight_bbox: Optional[list[float]]):
+    import fitz
+
+    tokens = _highlight_tokens_from_phrases(highlight_phrases)
+    if not tokens:
+        return []
+
+    bbox_rect = fitz.Rect(highlight_bbox) if highlight_bbox else None
+
+    def iter_matches(restrict_bbox: bool):
+        matched = []
+        for word in pdf_page.get_text("words", sort=True):
+            if len(word) < 8:
+                continue
+            rect = fitz.Rect(word[:4])
+            if restrict_bbox and bbox_rect is not None:
+                overlap = rect & bbox_rect
+                if overlap.is_empty:
+                    continue
+                if overlap.get_area() <= 0:
+                    continue
+            if not _word_matches_highlight_token(word[4], tokens):
+                continue
+            matched.append(
+                {
+                    "rect": rect,
+                    "block": int(word[5]),
+                    "line": int(word[6]),
+                    "word": int(word[7]),
+                }
+            )
+        return matched
+
+    matches = iter_matches(restrict_bbox=True)
+    if not matches and bbox_rect is not None:
+        matches = iter_matches(restrict_bbox=False)
+
+    if not matches:
+        return []
+
+    merged: list[fitz.Rect] = []
+    current_rect = None
+    current_key = None
+    current_word_index = None
+
+    for item in matches:
+        rect = item["rect"]
+        key = (item["block"], item["line"])
+        word_index = item["word"]
+        if current_rect is None:
+            current_rect = fitz.Rect(rect)
+            current_key = key
+            current_word_index = word_index
+            continue
+        gap = rect.x0 - current_rect.x1
+        same_line = key == current_key
+        if same_line and word_index <= (current_word_index or 0) + 2 and gap <= max(18.0, rect.height * 1.2):
+            current_rect |= rect
+            current_word_index = word_index
+            continue
+        merged.append(current_rect)
+        current_rect = fitz.Rect(rect)
+        current_key = key
+        current_word_index = word_index
+
+    if current_rect is not None:
+        merged.append(current_rect)
+    return merged
+
+
+def _apply_pdf_text_highlights(pdf_page, *, highlight_phrases: list[str], highlight_bbox: Optional[list[float]]):
+    rects = _collect_pdf_highlight_rects(
+        pdf_page,
+        highlight_phrases=_normalize_preview_highlight_phrases(highlight_phrases),
+        highlight_bbox=highlight_bbox,
+    )
+    if not rects:
+        return []
+    for rect in rects:
+        pdf_page.draw_rect(
+            rect,
+            color=(1.0, 0.91, 0.2),
+            fill=(1.0, 0.91, 0.2),
+            width=0.3,
+            fill_opacity=0.28,
+            overlay=True,
+        )
+    return rects
+
+
+def _normalize_preview_highlight_rects(raw_value: Optional[str]) -> list[list[float]]:
+    if not raw_value:
+        return []
+    try:
+        parsed = json.loads(str(raw_value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    rects: list[list[float]] = []
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, (list, tuple)) or len(item) < 4:
+            continue
+        values = []
+        try:
+            values = [float(item[index]) for index in range(4)]
+        except (TypeError, ValueError):
+            continue
+        x0, y0, x1, y1 = values
+        if x1 <= x0 or y1 <= y0:
+            continue
+        rects.append([x0, y0, x1, y1])
+    return rects[:24]
+
+
+def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Optional[list[float]]:
+    import fitz
+
+    if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(rect_values[index]) for index in range(4)]
+    except (TypeError, ValueError):
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    page_rect = fitz.Rect(pdf_page.rect)
+    page_width = max(float(page_rect.width), 1.0)
+    page_height = max(float(page_rect.height), 1.0)
+
+    scale = 1.0
+    max_ratio = max(x1 / page_width, y1 / page_height)
+    if max_ratio > 1.05:
+        for candidate in (1.5, 2.0, 3.0, 4.0):
+            if (x1 / candidate) <= page_width * 1.05 and (y1 / candidate) <= page_height * 1.05:
+                scale = candidate
+                break
+        else:
+            scale = max_ratio
+
+    x0 /= scale
+    y0 /= scale
+    x1 /= scale
+    y1 /= scale
+
+    x0 = min(max(x0, 0.0), page_width)
+    y0 = min(max(y0, 0.0), page_height)
+    x1 = min(max(x1, 0.0), page_width)
+    y1 = min(max(y1, 0.0), page_height)
+
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _apply_pdf_rect_highlights(pdf_page, *, highlight_rects: list[list[float]]):
+    import fitz
+
+    rects = []
+    for item in highlight_rects or []:
+        coerced = _coerce_rect_to_pdf_page_space(pdf_page, item)
+        if not coerced:
+            continue
+        rect = fitz.Rect(coerced)
+        if rect.is_empty or rect.get_area() <= 0:
+            continue
+        pdf_page.draw_rect(
+            rect,
+            color=(1.0, 0.93, 0.3),
+            fill=(1.0, 0.93, 0.3),
+            width=0.2,
+            fill_opacity=0.22,
+            overlay=True,
+        )
+        rects.append(rect)
+    return rects
+
+
+def _get_preview_ocr_service():
+    try:
+        analysis_service = get_text_analysis_service()
+    except Exception:
+        return None
+
+    direct = getattr(analysis_service, "ocr_service", None)
+    if direct is not None and bool(getattr(direct, "available", False)):
+        return direct
+
+    services = getattr(analysis_service, "_services", None)
+    if isinstance(services, list):
+        for service in services:
+            ocr_service = getattr(service, "ocr_service", None)
+            if ocr_service is not None and bool(getattr(ocr_service, "available", False)):
+                return ocr_service
+    return None
+
+
+def _compact_highlight_text(text: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(text or ""), flags=re.UNICODE).lower()
+
+
+def _find_compact_substring_ranges(text: str, phrase: str) -> list[tuple[int, int]]:
+    source = str(text or "")
+    target = str(phrase or "")
+    compact_source_chars: list[str] = []
+    compact_to_source_index: list[int] = []
+    for index, char in enumerate(source):
+        if re.match(r"[\w\u4e00-\u9fff]", char, flags=re.UNICODE):
+            compact_source_chars.append(char.lower())
+            compact_to_source_index.append(index)
+    compact_source = "".join(compact_source_chars)
+    compact_target = _compact_highlight_text(target)
+    if not compact_source or not compact_target:
+        return []
+
+    ranges: list[tuple[int, int]] = []
+    search_from = 0
+    while search_from < len(compact_source):
+        found_at = compact_source.find(compact_target, search_from)
+        if found_at < 0:
+            break
+        end_at = found_at + len(compact_target)
+        ranges.append((found_at, end_at))
+        search_from = max(found_at + 1, end_at)
+    return ranges
+
+
+def _section_subrects_for_phrases(section_text: str, section_bbox: list[float], phrases: list[str]) -> list[list[float]]:
+    if not section_text or not phrases:
+        return []
+    x0, y0, x1, y1 = section_bbox[:4]
+    width = max(float(x1) - float(x0), 1.0)
+    compact_length = len(_compact_highlight_text(section_text))
+    if compact_length <= 0:
+        return []
+
+    rects: list[list[float]] = []
+    seen = set()
+    for phrase in phrases:
+        for start_at, end_at in _find_compact_substring_ranges(section_text, phrase):
+            left = x0 + width * (start_at / compact_length)
+            right = x0 + width * (end_at / compact_length)
+            key = (round(left, 1), round(right, 1), round(y0, 1), round(y1, 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            rects.append([left, y0, max(left + 2.0, right), y1])
+    return rects
+
+
+def _refine_highlight_rects_via_ocr(pdf_page, *, highlight_rects: list[list[float]], highlight_phrases: list[str]) -> list[list[float]]:
+    ocr_service = _get_preview_ocr_service()
+    if ocr_service is None:
+        return highlight_rects
+
+    import fitz
+
+    scale = 2.0
+    refined: list[list[float]] = []
+    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
+    if not phrases:
+        return highlight_rects
+    if len(highlight_rects or []) > 1:
+        return highlight_rects
+
+    for rect_values in highlight_rects or []:
+        coerced = _coerce_rect_to_pdf_page_space(pdf_page, rect_values)
+        if not coerced:
+            continue
+        rect = fitz.Rect(coerced)
+        if rect.is_empty or rect.get_area() <= 0:
+            continue
+        clip = fitz.Rect(rect)
+        clip.x0 = max(0, clip.x0 - 2)
+        clip.y0 = max(0, clip.y0 - 2)
+        clip.x1 = min(float(pdf_page.rect.width), clip.x1 + 2)
+        clip.y1 = min(float(pdf_page.rect.height), clip.y1 + 2)
+        if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
+            refined.append(coerced)
+            continue
+        try:
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+            pix_bytes = pix.tobytes("png")
+        except Exception:
+            refined.append(coerced)
+            continue
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+            temp_file.write(pix_bytes)
+            temp_path = temp_file.name
+        try:
+            ocr_payload = ocr_service.extract_all(temp_path, "png")
+        except Exception:
+            ocr_payload = {}
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+        sections = []
+        if isinstance(ocr_payload, dict):
+            sections = list(ocr_payload.get("layout_sections") or [])
+        matched_any = False
+        for section in sections:
+            section_text = str(section.get("text") or section.get("raw_text") or "").strip()
+            bbox = section.get("bbox") or section.get("bbox_ocr") or section.get("box")
+            if not section_text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                continue
+            local_bbox = [float(bbox[index]) for index in range(4)]
+            rects = _section_subrects_for_phrases(section_text, local_bbox, phrases)
+            for local_rect in rects:
+                refined.append(
+                    [
+                        clip.x0 + (local_rect[0] / scale),
+                        clip.y0 + (local_rect[1] / scale),
+                        clip.x0 + (local_rect[2] / scale),
+                        clip.y0 + (local_rect[3] / scale),
+                    ]
+                )
+                matched_any = True
+        if not matched_any:
+            refined.append([clip.x0, clip.y0, clip.x1, clip.y1])
+
+    return refined or highlight_rects
 
 
 def _run_project_duplicate_check(
@@ -424,6 +886,116 @@ def _project_snapshot(project_identifier: str) -> dict:
     return {"identifier_id": project_identifier}
 
 
+def _project_api_links(project_identifier: str) -> dict[str, str]:
+    quoted_identifier = quote(project_identifier, safe="")
+    return {
+        "detail_url": f"/api/postgresql/projects/{quoted_identifier}",
+        "results_url": f"/api/postgresql/projects/{quoted_identifier}/results",
+        "visualization_url": f"/api/postgresql/projects/{quoted_identifier}/visualization-data",
+    }
+
+
+def _document_api_links(document_identifier: str) -> dict[str, str]:
+    quoted_identifier = quote(document_identifier, safe="")
+    return {
+        "detail_url": f"/api/postgresql/documents/{quoted_identifier}",
+        "source_url": f"/api/postgresql/documents/{quoted_identifier}/source",
+        "preview_url_template": f"/api/postgresql/documents/{quoted_identifier}/preview/pages/{{page}}",
+    }
+
+
+def _collect_project_document_identifiers(project_detail: dict[str, Any]) -> list[str]:
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for relation in project_detail.get("relations") or []:
+        for field_name in (
+            "tender_identifier_id",
+            "business_bid_identifier_id",
+            "technical_bid_identifier_id",
+        ):
+            identifier = str(relation.get(field_name) or "").strip()
+            if not identifier or identifier in seen:
+                continue
+            seen.add(identifier)
+            identifiers.append(identifier)
+    return identifiers
+
+
+def _build_project_visualization_payload(
+    *,
+    identifier_id: str,
+    project_detail: dict[str, Any],
+    project_result: Optional[dict[str, Any]],
+    db_service: PostgreSQLService,
+    include_document_content: bool = False,
+) -> dict[str, Any]:
+    document_identifiers = _collect_project_document_identifiers(project_detail)
+    document_map: dict[str, dict[str, Any]] = {}
+    for document_identifier in document_identifiers:
+        document = db_service.get_document_by_identifier(document_identifier)
+        if not document:
+            continue
+        document_payload = dict(document)
+        if not include_document_content:
+            document_payload.pop("content", None)
+        document_payload["links"] = _document_api_links(document_identifier)
+        document_map[document_identifier] = document_payload
+
+    relation_items: list[dict[str, Any]] = []
+    for relation in project_detail.get("relations") or []:
+        relation_payload = dict(relation)
+        relation_payload["documents"] = {}
+        for role_name, field_name in (
+            ("tender", "tender_identifier_id"),
+            ("business_bid", "business_bid_identifier_id"),
+            ("technical_bid", "technical_bid_identifier_id"),
+        ):
+            document_identifier = str(relation.get(field_name) or "").strip()
+            if not document_identifier:
+                continue
+            document_payload = document_map.get(document_identifier)
+            if document_payload:
+                relation_payload["documents"][role_name] = document_payload
+        relation_items.append(relation_payload)
+
+    result_payload = (project_result or {}).get("result") or {}
+    return {
+        "project": project_detail.get("project") or {"identifier_id": identifier_id},
+        "project_links": _project_api_links(identifier_id),
+        "relations": relation_items,
+        "documents": list(document_map.values()),
+        "result_record": project_result,
+        "results": result_payload,
+        "available_result_keys": sorted(result_payload.keys()),
+    }
+
+
+def _build_project_report_payload(
+    *,
+    identifier_id: str,
+    project_detail: dict[str, Any],
+    project_result: Optional[dict[str, Any]],
+    db_service: PostgreSQLService,
+    include_document_content: bool = True,
+) -> dict[str, Any]:
+    visualization_payload = _build_project_visualization_payload(
+        identifier_id=identifier_id,
+        project_detail=project_detail,
+        project_result=project_result,
+        db_service=db_service,
+        include_document_content=include_document_content,
+    )
+    return {
+        "project": visualization_payload["project"],
+        "project_links": visualization_payload["project_links"],
+        "relations": visualization_payload["relations"],
+        "documents": visualization_payload["documents"],
+        "result_record": visualization_payload["result_record"],
+        "analysis_results": visualization_payload["results"],
+        "available_result_keys": visualization_payload["available_result_keys"],
+    }
+
+
 async def _persist_uploaded_analysis_documents(
     *,
     tender_json_file: UploadFile,
@@ -477,7 +1049,9 @@ async def create_project(
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
-        return db_service.create_project(payload.identifier_id)
+        return db_service.create_project(
+            identifier_id=payload.identifier_id,
+        )
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
             raise HTTPException(status_code=409, detail="项目标识已存在") from exc
@@ -486,12 +1060,42 @@ async def create_project(
 
 @router.get("/projects", summary="查询项目列表")
 async def list_projects(
-    limit: int = Query(default=20, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    offset: Optional[int] = Query(default=None, ge=0),
+    keyword: Optional[str] = Query(default=None, description="按项目标识模糊搜索"),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
-        return db_service.list_projects(limit=limit, offset=offset)
+        resolved_limit, resolved_offset = _resolve_pagination(
+            page=page,
+            page_size=page_size,
+            limit=limit,
+            offset=offset,
+        )
+        return db_service.list_projects(
+            limit=resolved_limit,
+            offset=resolved_offset,
+            keyword=keyword,
+        )
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.post("/projects/batch-delete", summary="批量删除项目")
+async def batch_delete_projects(
+    payload: IdentifierBatchDeleteRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        deleted_count = db_service.soft_delete_projects(payload.identifier_ids)
+        return {
+            "requested_count": len(payload.identifier_ids),
+            "deleted_count": deleted_count,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
@@ -510,6 +1114,221 @@ async def get_project_detail(
         raise
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
+async def get_project_results(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project = db_service.get_project_by_identifier(identifier_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        result_record = db_service.get_project_result(identifier_id)
+        results = (result_record or {}).get("result") or {}
+        return {
+            "project": project,
+            "result_record": result_record,
+            "results": results,
+            "available_result_keys": sorted(results.keys()),
+        }
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/results/{result_key}", summary="查询项目单项分析结果")
+async def get_project_result_item(
+    identifier_id: str,
+    result_key: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project = db_service.get_project_by_identifier(identifier_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        result_record = db_service.get_project_result(identifier_id)
+        results = (result_record or {}).get("result") or {}
+        if result_key not in results:
+            raise HTTPException(status_code=404, detail="result_key not found")
+
+        return {
+            "project": project,
+            "result_key": result_key,
+            "result": results[result_key],
+            "available_result_keys": sorted(results.keys()),
+        }
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/visualization-data", summary="查询项目可视化聚合数据")
+async def get_project_visualization_data(
+    identifier_id: str,
+    include_document_content: bool = Query(
+        default=False,
+        description="是否包含文档 OCR JSON 原始内容，默认不返回以减少体积",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project_detail = db_service.get_project_detail(identifier_id)
+        if not project_detail:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        project_result = db_service.get_project_result(identifier_id)
+        return _build_project_visualization_payload(
+            identifier_id=identifier_id,
+            project_detail=project_detail,
+            project_result=project_result,
+            db_service=db_service,
+            include_document_content=include_document_content,
+        )
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/report-data", summary="查询项目报告聚合数据")
+async def get_project_report_data(
+    identifier_id: str,
+    include_document_content: bool = Query(
+        default=True,
+        description="是否包含文档 OCR JSON 原始内容；生成可视化报告时建议开启",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project_detail = db_service.get_project_detail(identifier_id)
+        if not project_detail:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        project_result = db_service.get_project_result(identifier_id)
+        return _build_project_report_payload(
+            identifier_id=identifier_id,
+            project_detail=project_detail,
+            project_result=project_result,
+            db_service=db_service,
+            include_document_content=include_document_content,
+        )
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/results", summary="查询结果表列表")
+async def list_results(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    offset: Optional[int] = Query(default=None, ge=0),
+    keyword: Optional[str] = Query(default=None, description="按项目标识模糊搜索"),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        resolved_limit, resolved_offset = _resolve_pagination(
+            page=page,
+            page_size=page_size,
+            limit=limit,
+            offset=offset,
+        )
+        return db_service.list_project_results(
+            limit=resolved_limit,
+            offset=resolved_offset,
+            keyword=keyword,
+        )
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/results", summary="创建或覆盖项目结果")
+async def create_or_replace_result(
+    payload: ProjectResultUpsertRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        return db_service.create_or_replace_project_result(
+            project_identifier_id=payload.project_identifier_id,
+            result=payload.result,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/results/{project_identifier_id}", summary="查询单个项目结果")
+async def get_result_record(
+    project_identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        result_record = db_service.get_project_result(project_identifier_id)
+        if not result_record:
+            raise HTTPException(status_code=404, detail="result record not found")
+        return result_record
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.put("/results/{project_identifier_id}", summary="更新单个项目结果")
+async def update_result_record(
+    project_identifier_id: str,
+    payload: ProjectResultUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        return db_service.create_or_replace_project_result(
+            project_identifier_id=project_identifier_id,
+            result=payload.result,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.delete("/results/{project_identifier_id}", summary="删除单个项目结果")
+async def delete_result_record(
+    project_identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        deleted = db_service.delete_project_result(project_identifier_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="result record not found")
+        return {"status": "deleted"}
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/results/batch-delete", summary="批量删除项目结果")
+async def batch_delete_result_records(
+    payload: IdentifierBatchDeleteRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        deleted_count = db_service.delete_project_results(payload.identifier_ids)
+        return {
+            "requested_count": len(payload.identifier_ids),
+            "deleted_count": deleted_count,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
 @router.post("/projects/duplicate-check", summary="项目商务标/技术标查重")
@@ -1014,7 +1833,7 @@ async def update_project(
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
-        updated = db_service.update_project_identifier(
+        updated = db_service.update_project(
             identifier_id=identifier_id,
             new_identifier_id=payload.new_identifier_id,
         )
@@ -1023,6 +1842,8 @@ async def update_project(
         return updated
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
             raise HTTPException(status_code=409, detail="项目标识已存在") from exc
@@ -1060,6 +1881,33 @@ async def bind_project_documents(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.get("/relations", summary="查询项目文件绑定列表")
+async def list_relations(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    offset: Optional[int] = Query(default=None, ge=0),
+    keyword: Optional[str] = Query(default=None, description="按项目或文档标识/文件名模糊搜索"),
+    project_identifier: Optional[str] = Query(default=None, description="按项目标识过滤"),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        resolved_limit, resolved_offset = _resolve_pagination(
+            page=page,
+            page_size=page_size,
+            limit=limit,
+            offset=offset,
+        )
+        return db_service.list_relations(
+            limit=resolved_limit,
+            offset=resolved_offset,
+            keyword=keyword,
+            project_identifier=project_identifier,
+        )
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
@@ -1120,6 +1968,21 @@ async def delete_relation(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+@router.post("/relations/batch-delete", summary="批量删除关联")
+async def batch_delete_relations(
+    payload: RelationBatchDeleteRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        deleted_count = db_service.delete_relations(payload.relation_ids)
+        return {
+            "requested_count": len(payload.relation_ids),
+            "deleted_count": deleted_count,
+        }
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
 @router.post("/documents", summary="上传并创建文档")
 async def create_document(
     file: UploadFile = File(...),
@@ -1152,12 +2015,46 @@ async def create_document(
 
 @router.get("/documents", summary="查询文档列表")
 async def list_documents(
-    limit: int = Query(default=20, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    offset: Optional[int] = Query(default=None, ge=0),
+    keyword: Optional[str] = Query(default=None, description="按文档标识或文件名模糊搜索"),
+    document_type: Optional[str] = Query(default=None, description="按文档类型过滤"),
+    extracted: Optional[bool] = Query(default=None, description="按是否已完成 OCR 过滤"),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
-        return db_service.list_documents(limit=limit, offset=offset)
+        resolved_limit, resolved_offset = _resolve_pagination(
+            page=page,
+            page_size=page_size,
+            limit=limit,
+            offset=offset,
+        )
+        return db_service.list_documents(
+            limit=resolved_limit,
+            offset=resolved_offset,
+            keyword=keyword,
+            document_type=document_type,
+            extracted=extracted,
+        )
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.post("/documents/batch-delete", summary="批量删除文档")
+async def batch_delete_documents(
+    payload: IdentifierBatchDeleteRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        deleted_count = db_service.soft_delete_documents(payload.identifier_ids)
+        return {
+            "requested_count": len(payload.identifier_ids),
+            "deleted_count": deleted_count,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
@@ -1178,10 +2075,10 @@ async def get_document(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.get("/documents/{identifier_id}/source", summary="Get document source file")
+@router.get("/documents/{identifier_id}/source", summary="获取文档源文件")
 async def get_document_source(
     identifier_id: str,
-    page: Optional[int] = Query(default=None, ge=1),
+    page: Optional[int] = Query(default=None, ge=1, description="可选页码，仅 PDF 源文件支持跳转"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
@@ -1205,10 +2102,13 @@ async def get_document_source(
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
-@router.get("/documents/{identifier_id}/preview/pages/{page}", summary="Get document page preview")
+@router.get("/documents/{identifier_id}/preview/pages/{page}", summary="获取文档页面预览")
 async def get_document_page_preview(
     identifier_id: str,
     page: int,
+    highlight: Optional[list[str]] = Query(default=None, description="需要高亮的关键词，可传多个"),
+    highlight_bbox: Optional[str] = Query(default=None, description="单个高亮框，格式为 JSON 字符串"),
+    highlight_rects: Optional[str] = Query(default=None, description="多个高亮框，格式为 JSON 字符串数组"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
@@ -1217,7 +2117,16 @@ async def get_document_page_preview(
         if not document:
             raise HTTPException(status_code=404, detail="document not found")
 
-        cached_payload = _preview_cache_get(document, page)
+        normalized_highlight_phrases = _normalize_preview_highlight_phrases(highlight)
+        normalized_highlight_bbox = _normalize_preview_highlight_bbox(highlight_bbox)
+        normalized_highlight_rects = _normalize_preview_highlight_rects(highlight_rects)
+        preview_variant = _preview_variant_signature(
+            normalized_highlight_phrases,
+            normalized_highlight_bbox,
+            normalized_highlight_rects,
+        )
+
+        cached_payload = _preview_cache_get(document, page, preview_variant)
         if cached_payload is not None:
             return JSONResponse(cached_payload)
 
@@ -1226,15 +2135,30 @@ async def get_document_page_preview(
             document=document,
             oss_service=oss_service,
         )
-        payload = _preview_payload_from_source(
-            file_bytes=file_bytes,
-            source_kind=source_kind,
-            page=page,
-        )
+        try:
+            payload = _preview_payload_from_source(
+                file_bytes=file_bytes,
+                source_kind=source_kind,
+                page=page,
+                highlight_phrases=normalized_highlight_phrases,
+                highlight_bbox=normalized_highlight_bbox,
+                highlight_rects=normalized_highlight_rects,
+            )
+        except Exception:
+            payload = _preview_payload_from_source(
+                file_bytes=file_bytes,
+                source_kind=source_kind,
+                page=page,
+                highlight_phrases=[],
+                highlight_bbox=None,
+                highlight_rects=[],
+            )
+            payload["highlight_applied"] = False
+            payload["highlight_fallback"] = True
         payload["document_identifier"] = identifier_id
         payload["file_name"] = str(document.get("file_name") or "")
         payload["source_url"] = f"/api/postgresql/documents/{identifier_id}/source"
-        _preview_cache_set(document, page, payload)
+        _preview_cache_set(document, page, payload, preview_variant)
         return JSONResponse(payload)
     except HTTPException:
         raise

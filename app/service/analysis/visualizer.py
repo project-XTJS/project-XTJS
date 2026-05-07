@@ -821,6 +821,34 @@ class ReportVisualizer:
                     return template.replace('{{page}}', String(page));
                 }}
 
+                function normalizeHighlightPhrases(values) {{
+                    const seen = new Set();
+                    const normalized = [];
+                    (Array.isArray(values) ? values : []).forEach((value) => {{
+                        const text = String(value || '').replace(/\s+/g, ' ').trim();
+                        if (!text) return;
+                        const compact = text.replace(/[^\w\u4e00-\u9fff]+/g, '');
+                        if (compact.length < 2) return;
+                        if (/^\d+$/.test(compact)) return;
+                        if (seen.has(text)) return;
+                        seen.add(text);
+                        normalized.push(text);
+                    }});
+                    return normalized.slice(0, 10);
+                }}
+
+                function normalizeHighlightRects(values) {{
+                    const normalized = [];
+                    (Array.isArray(values) ? values : []).forEach((value) => {{
+                        if (!Array.isArray(value) || value.length < 4) return;
+                        const rect = value.slice(0, 4).map((item) => Number(item));
+                        if (rect.some((item) => !Number.isFinite(item))) return;
+                        if (rect[2] <= rect[0] || rect[3] <= rect[1]) return;
+                        normalized.push(rect);
+                    }});
+                    return normalized.slice(0, 24);
+                }}
+
                 function appendSourcePageHint(rawSourceUrl, page) {{
                     const base = String(rawSourceUrl || '').split('#', 1)[0];
                     if (!base || !page) return base;
@@ -2087,6 +2115,10 @@ class ReportVisualizer:
         page,
         page_end=None,
         bbox=None,
+        highlight_phrases=None,
+        highlight_rects=None,
+        highlight_html=None,
+        highlight_title=None,
     ):
         if not isinstance(page, int) or page <= 0:
             return f"<span>{html.escape(str(label))}</span>"
@@ -2100,15 +2132,174 @@ class ReportVisualizer:
                 for item in bbox[:4]
                 if isinstance(item, (int, float))
             )
+        extra_attrs = []
+        if highlight_phrases:
+            extra_attrs.append(
+                f" data-highlight-phrases='{html.escape(json.dumps(highlight_phrases, ensure_ascii=False))}'"
+            )
+        if highlight_rects:
+            extra_attrs.append(
+                f" data-highlight-rects='{html.escape(json.dumps(highlight_rects, ensure_ascii=False))}'"
+            )
+        if highlight_html:
+            extra_attrs.append(
+                f" data-highlight-html='{html.escape(str(highlight_html))}'"
+            )
+        if highlight_title:
+            extra_attrs.append(
+                f" data-highlight-title='{html.escape(str(highlight_title))}'"
+            )
         return (
             f"<button type='button' class='issue-link issue-page-link issue-link-button locator-open' "
             f"data-document='{html.escape(document_key)}' "
             f"data-page='{page}' "
             f"data-page-end='{page_end if isinstance(page_end, int) and page_end >= page else page}' "
             f"data-bbox='{html.escape(bbox_attr)}' "
+            f"{''.join(extra_attrs)}"
             f"data-label='{html.escape(str(label))}'>"
             f"{html.escape(str(label))}</button>"
         )
+
+    def _project_normalize_locator_ranges(self, ranges):
+        normalized = []
+        for item in ranges or []:
+            if isinstance(item, dict):
+                page = item.get("page")
+                if not isinstance(page, int) or page <= 0:
+                    continue
+                page_end = item.get("page_end")
+                if not isinstance(page_end, int):
+                    page_end = item.get("pageEnd")
+                if not isinstance(page_end, int) or page_end < page:
+                    page_end = page
+                label = str(item.get("label") or "").strip()
+                if not label:
+                    label = f"P{page}" if page == page_end else f"P{page}-P{page_end}"
+                bbox = item.get("bbox")
+                if not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
+                    bbox = None
+                highlight_phrases = [
+                    str(value).strip()
+                    for value in (
+                        item.get("highlight_phrases")
+                        or item.get("highlightPhrases")
+                        or []
+                    )
+                    if str(value).strip()
+                ]
+                highlight_rects = [
+                    [float(rect[index]) for index in range(4)]
+                    for rect in (
+                        item.get("highlight_rects")
+                        or item.get("highlightRects")
+                        or []
+                    )
+                    if isinstance(rect, (list, tuple))
+                    and len(rect) >= 4
+                    and all(isinstance(rect[index], (int, float)) for index in range(4))
+                ]
+                normalized.append(
+                    {
+                        "label": label,
+                        "page": page,
+                        "page_end": page_end,
+                        "bbox": bbox,
+                        "highlight_phrases": highlight_phrases,
+                        "highlight_rects": highlight_rects,
+                        "highlight_html": str(
+                            item.get("highlight_html")
+                            or item.get("highlightHtml")
+                            or ""
+                        ).strip(),
+                        "highlight_title": str(
+                            item.get("highlight_title")
+                            or item.get("highlightTitle")
+                            or "命中内容"
+                        ).strip(),
+                    }
+                )
+                continue
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                start_page, end_page = item[:2]
+                if isinstance(start_page, int) and start_page > 0 and isinstance(end_page, int):
+                    normalized.append(
+                        {
+                            "label": (
+                                f"P{start_page}"
+                                if start_page == end_page
+                                else f"P{start_page}-P{end_page}"
+                            ),
+                            "page": start_page,
+                            "page_end": end_page if end_page >= start_page else start_page,
+                            "bbox": None,
+                            "highlight_phrases": [],
+                            "highlight_rects": [],
+                            "highlight_html": "",
+                            "highlight_title": "命中内容",
+                        }
+                    )
+        return normalized
+
+    def _project_build_exact_range_links_html(self, source_lookup, file_name, ranges):
+        normalized_ranges = self._project_normalize_locator_ranges(ranges)
+        if not normalized_ranges:
+            return "<span class='issue-muted'>页码待补充</span>"
+
+        entry = source_lookup.get(file_name) or {}
+        source_url = str(entry.get("source_url") or "")
+        preview_template = str(entry.get("page_preview_url_template") or "")
+        fragments = []
+        for range_item in normalized_ranges:
+            start_page = int(range_item.get("page") or 0)
+            end_page = int(range_item.get("page_end") or start_page)
+            label = str(range_item.get("label") or f"P{start_page}")
+            if preview_template:
+                fragments.append(
+                    self._project_build_locator_button_html(
+                        entry=entry,
+                        label=label,
+                        page=start_page,
+                        page_end=end_page,
+                        bbox=range_item.get("bbox"),
+                        highlight_phrases=range_item.get("highlight_phrases") or [],
+                        highlight_rects=range_item.get("highlight_rects") or [],
+                        highlight_html=range_item.get("highlight_html") or "",
+                        highlight_title=range_item.get("highlight_title") or "命中内容",
+                    )
+                )
+            elif source_url:
+                href = self._project_append_page_fragment(source_url, start_page)
+                fragments.append(
+                    f"<a class='issue-link issue-page-link' href='{html.escape(href)}' "
+                    f"target='_blank' rel='noreferrer'>{html.escape(label)}</a>"
+                )
+            else:
+                fragments.append(f"<span>{html.escape(label)}</span>")
+        return "<span class='issue-page-links'>" + " ".join(fragments) + "</span>"
+
+    def _project_build_source_doc_cell_exact_html(self, source_lookup, file_name, ranges):
+        normalized_ranges = self._project_normalize_locator_ranges(ranges)
+        entry = source_lookup.get(file_name) or {}
+        display_name = str(entry.get("display_name") or file_name or "-")
+        json_name = str(entry.get("json_name") or file_name or "")
+        first_page = normalized_ranges[0]["page"] if normalized_ranges else None
+        parts = [
+            "<div class='issue-doc-cell'>",
+            "<div>",
+            self._project_build_source_file_link_html(
+                source_lookup,
+                file_name,
+                label=display_name,
+                page=first_page,
+            ),
+            "</div>",
+        ]
+        if json_name and json_name != display_name:
+            parts.append(f"<div class='issue-subtext'>{html.escape(json_name)}</div>")
+        parts.append("<div>")
+        parts.append(self._project_build_exact_range_links_html(source_lookup, file_name, normalized_ranges))
+        parts.append("</div></div>")
+        return "".join(parts)
 
     def _project_build_locator_preview_config(self, source_lookup):
         documents = {}
@@ -2233,6 +2424,144 @@ class ReportVisualizer:
         matched = raw_text[index:index + len(keyword)]
         after = raw_text[index + len(keyword):]
         return f"{html.escape(before)}<mark>{html.escape(matched)}</mark>{html.escape(after)}"
+
+    def _project_build_typo_locator_ranges(self, item):
+        page = item.get("page")
+        if not isinstance(page, int) or page <= 0:
+            return []
+        bbox = self._normalize_bbox(item.get("bbox"))
+        matched_text = str(item.get("matched_text") or "").strip()
+        source_text = str(item.get("text") or "-")
+        highlight_rects = [list(bbox[:4])] if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else []
+        highlight_phrases = [matched_text] if matched_text else []
+        return [
+            {
+                "page": page,
+                "pageEnd": page,
+                "bbox": bbox,
+                "highlightPhrases": highlight_phrases,
+                "highlightRects": highlight_rects,
+                "highlightHtml": self._project_highlight_text_html(source_text, matched_text),
+                "highlightTitle": "错别字命中",
+            }
+        ]
+
+    def _project_build_personnel_locator_ranges(self, entry):
+        page = entry.get("page")
+        if not isinstance(page, int) or page <= 0:
+            return []
+        bbox = self._normalize_bbox(entry.get("bbox"))
+        name = str(entry.get("name") or "").strip()
+        role = str(entry.get("role") or "").strip()
+        source_text = str(entry.get("text") or "-")
+        highlight_rects = [list(bbox[:4])] if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else []
+        highlight_phrases = [name] if name else []
+        if role and role not in highlight_phrases:
+            highlight_phrases.append(role)
+        return [
+            {
+                "page": page,
+                "pageEnd": page,
+                "bbox": bbox,
+                "highlightPhrases": highlight_phrases,
+                "highlightRects": highlight_rects,
+                "highlightHtml": self._project_highlight_text_html(source_text, name or role),
+                "highlightTitle": "人员命中",
+            }
+        ]
+
+    def _project_build_personnel_item_locator_targets(self, item, *, source_lookup):
+        grouped_targets = {}
+        for entry in item.get("items") or []:
+            file_name = str(entry.get("file_name") or "").strip()
+            if not file_name:
+                continue
+            locator_ranges = self._project_build_personnel_locator_ranges(entry)
+            if not locator_ranges:
+                continue
+            source_entry = source_lookup.get(file_name) or {}
+            document_key = self._project_locator_document_key(source_entry, file_name)
+            if not document_key:
+                continue
+            source_url = str(source_entry.get("source_url") or "").strip()
+            preview_template = str(source_entry.get("page_preview_url_template") or "").strip()
+            if not source_url and not preview_template:
+                continue
+            target = grouped_targets.setdefault(
+                document_key,
+                {
+                    "document": document_key,
+                    "title": str(source_entry.get("display_name") or file_name),
+                    "json_name": str(source_entry.get("json_name") or file_name),
+                    "default_page": None,
+                    "pages": [],
+                    "ranges": [],
+                },
+            )
+            existing_range_keys = {
+                (
+                    int(existing.get("page") or 0),
+                    int(existing.get("pageEnd") or existing.get("page") or 0),
+                    tuple(round(float(value), 2) for value in (existing.get("bbox") or [])[:4]),
+                )
+                for existing in target["ranges"]
+                if isinstance(existing, dict)
+            }
+            for locator_range in locator_ranges:
+                page = int(locator_range.get("page") or 0)
+                if page <= 0:
+                    continue
+                range_key = (
+                    page,
+                    int(locator_range.get("pageEnd") or page),
+                    tuple(round(float(value), 2) for value in (locator_range.get("bbox") or [])[:4]),
+                )
+                if range_key in existing_range_keys:
+                    continue
+                existing_range_keys.add(range_key)
+                target["ranges"].append(locator_range)
+                if page not in target["pages"]:
+                    target["pages"].append(page)
+                if target["default_page"] is None or page < int(target["default_page"]):
+                    target["default_page"] = page
+        targets = []
+        for target in grouped_targets.values():
+            target["pages"] = sorted(
+                page for page in target.get("pages") or []
+                if isinstance(page, int) and page > 0
+            )
+            target["ranges"] = sorted(
+                target.get("ranges") or [],
+                key=lambda current: (
+                    int(current.get("page") or 0),
+                    int(current.get("pageEnd") or current.get("page") or 0),
+                ),
+            )
+            if target["pages"] and not target.get("default_page"):
+                target["default_page"] = target["pages"][0]
+            targets.append(target)
+        return targets
+
+    def _project_build_personnel_item_preview_button_html(
+        self,
+        item,
+        *,
+        source_lookup,
+        label="并排预览",
+    ):
+        targets = self._project_build_personnel_item_locator_targets(
+            item,
+            source_lookup=source_lookup,
+        )
+        if len(targets) < 2:
+            return "<span class='issue-muted'>暂无预览</span>"
+        payload = html.escape(json.dumps(targets, ensure_ascii=False))
+        return (
+            f"<button type='button' class='issue-link issue-link-button locator-open-group' "
+            f"data-label='{html.escape(str(label))}' "
+            f"data-targets='{payload}'>"
+            f"{html.escape(str(label))}</button>"
+        )
 
     def _project_duplicate_pair_anchor(self, doc_type, item):
         return (
@@ -2505,14 +2834,14 @@ class ReportVisualizer:
         detail_page = issue_pages.get("typos", "")
         rows = []
         for role, file_name, item in items:
-            pages = self._project_normalize_pages(item.get("page"))
+            locator_ranges = self._project_build_typo_locator_ranges(item)
             detail_anchor = self._project_typo_issue_anchor(role, file_name, item)
             detail_href = self._project_issue_page_href(detail_page, detail_anchor)
             rows.append(
                 f"<tr class='{self._project_severity_css_class('warning')}'>"
                 f"<td>{html.escape(self._project_role_label(role))}</td>"
-                f"<td>{self._project_build_source_doc_cell_html(source_lookup, file_name, pages)}</td>"
-                f"<td>{self._project_build_source_page_links_html(source_lookup, file_name, pages)}</td>"
+                f"<td>{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, locator_ranges)}</td>"
+                f"<td>{self._project_build_exact_range_links_html(source_lookup, file_name, locator_ranges)}</td>"
                 f"<td><mark>{html.escape(str(item.get('matched_text') or '-'))}</mark></td>"
                 f"<td>{html.escape(str(item.get('suggestion') or '-'))}</td>"
                 f"<td>{self._project_highlight_text_html(str(item.get('text') or '-'), str(item.get('matched_text') or ''))}</td>"
@@ -2539,14 +2868,19 @@ class ReportVisualizer:
             detail_anchor = self._project_personnel_issue_anchor(role, item)
             detail_href = self._project_issue_page_href(detail_page, detail_anchor)
             occurrences = list(item.get("items") or [])
-            occurrence_html = "<br>".join(
-                self._project_build_source_doc_cell_html(
+            occurrence_html = "".join(
+                self._project_build_source_doc_cell_exact_html(
                     source_lookup,
                     str(entry.get("file_name") or ""),
-                    self._project_normalize_pages(entry.get("page")),
+                    self._project_build_personnel_locator_ranges(entry),
                 )
                 for entry in occurrences
+                if str(entry.get("file_name") or "").strip()
             ) or "-"
+            preview_button = self._project_build_personnel_item_preview_button_html(
+                item,
+                source_lookup=source_lookup,
+            )
             rows.append(
                 f"<tr class='{self._project_severity_css_class(str(item.get('risk_level') or 'warning'))}'>"
                 f"<td>{html.escape(self._project_role_label(role))}</td>"
@@ -2554,7 +2888,7 @@ class ReportVisualizer:
                 f"<td>{html.escape(str(item.get('risk_level') or '-'))}</td>"
                 f"<td>{html.escape(str(item.get('document_count') or 0))}</td>"
                 f"<td>{occurrence_html}</td>"
-                f"<td>{self._project_build_issue_detail_link(detail_href, '查看问题页')}</td>"
+                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看问题页')}{preview_button}</div></td>"
                 "</tr>"
             )
         return "\n".join(rows)
@@ -3484,7 +3818,7 @@ class ReportVisualizer:
         else:
             cards = []
             for role, file_name, item in items:
-                pages = self._project_normalize_pages(item.get("page"))
+                locator_ranges = self._project_build_typo_locator_ranges(item)
                 cards.append(
                     f"""
                     <article id="{html.escape(self._project_typo_issue_anchor(role, file_name, item))}" class="issue-card issue-row issue-severity-medium">
@@ -3494,7 +3828,7 @@ class ReportVisualizer:
                           <p class="issue-meta">{html.escape(self._project_role_label(role))}</p>
                         </div>
                       </div>
-                      <div>{self._project_build_source_doc_cell_html(source_lookup, file_name, pages)}</div>
+                      <div>{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, locator_ranges)}</div>
                       <div class="issue-preview issue-block">{self._project_highlight_text_html(str(item.get("text") or "-"), str(item.get("matched_text") or ""))}</div>
                     </article>
                     """
@@ -3514,13 +3848,17 @@ class ReportVisualizer:
         else:
             cards = []
             for role, item in items:
+                preview_button = self._project_build_personnel_item_preview_button_html(
+                    item,
+                    source_lookup=source_lookup,
+                    label="并排预览这组文件",
+                )
                 occurrences = []
                 for entry in item.get("items") or []:
                     file_name = str(entry.get("file_name") or "")
-                    pages = self._project_normalize_pages(entry.get("page"))
                     occurrences.append(
                         "<li>"
-                        f"{self._project_build_source_doc_cell_html(source_lookup, file_name, pages)}"
+                        f"{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, self._project_build_personnel_locator_ranges(entry))}"
                         f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(entry.get('text') or '-')))}</div>"
                         "</li>"
                     )
@@ -3531,6 +3869,9 @@ class ReportVisualizer:
                         <div>
                           <h2><mark>{html.escape(str(item.get("name") or "-"))}</mark></h2>
                           <p class="issue-meta">{html.escape(self._project_role_label(role))} ｜ 风险：{html.escape(str(item.get("risk_level") or "-"))} ｜ 涉及文件：{html.escape(str(item.get("document_count") or 0))}</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-card-actions">{preview_button}</div>
                         </div>
                       </div>
                       <ul class="issue-evidence-list">{''.join(occurrences)}</ul>
@@ -4446,6 +4787,18 @@ class ReportVisualizer:
                 color: var(--text-regular);
                 font-size: 13px;
             }
+            .locator-highlight,
+            .locator-multi-highlight {
+                display: none;
+                border: 1px solid #e6eaf0;
+                border-radius: 10px;
+                background: #fffdf5;
+                padding: 10px 12px;
+                color: var(--text-main);
+                margin-top: 12px;
+                width: min(100%, 1320px);
+                box-sizing: border-box;
+            }
             .locator-multi-wrap {
                 display: grid;
                 width: 100%;
@@ -4557,14 +4910,7 @@ class ReportVisualizer:
                 font-size: 12px;
                 line-height: 1.6;
             }
-            .locator-multi-highlight {
-                display: none;
-                border: 1px solid #e6eaf0;
-                border-radius: 10px;
-                background: #fffdf5;
-                padding: 10px 12px;
-                color: var(--text-main);
-            }
+            .locator-highlight-title,
             .locator-multi-highlight-title {
                 font-size: 12px;
                 font-weight: 600;
@@ -4643,6 +4989,7 @@ class ReportVisualizer:
                     </div>
                     <div id="locator-multi-wrap" class="locator-multi-wrap" style="display:none;"></div>
                     <div id="locator-note" class="locator-note" style="display:none;"></div>
+                    <div id="locator-highlight" class="locator-highlight" style="display:none;"></div>
                 </div>
             </div>
         </div>
@@ -4665,6 +5012,7 @@ class ReportVisualizer:
                 const boxNode = document.getElementById('locator-box');
                 const multiWrap = document.getElementById('locator-multi-wrap');
                 const noteNode = document.getElementById('locator-note');
+                const highlightNode = document.getElementById('locator-highlight');
 
                 function resetSingleView() {{
                     if (imageNode) {{
@@ -4680,6 +5028,10 @@ class ReportVisualizer:
                     if (noteNode) {{
                         noteNode.style.display = 'none';
                         noteNode.textContent = '';
+                    }}
+                    if (highlightNode) {{
+                        highlightNode.style.display = 'none';
+                        highlightNode.innerHTML = '';
                     }}
                 }}
 
@@ -4712,6 +5064,16 @@ class ReportVisualizer:
                     return values.slice(0, 4);
                 }}
 
+                function parseJsonArray(raw) {{
+                    if (!raw) return [];
+                    try {{
+                        const parsed = JSON.parse(String(raw));
+                        return Array.isArray(parsed) ? parsed : [];
+                    }} catch (error) {{
+                        return [];
+                    }}
+                }}
+
                 function escapeHtml(value) {{
                     return String(value || '')
                         .replace(/&/g, '&amp;')
@@ -4741,6 +5103,34 @@ class ReportVisualizer:
                     return template.replace('{{page}}', String(page));
                 }}
 
+                function normalizeHighlightPhrases(values) {{
+                    const seen = new Set();
+                    const normalized = [];
+                    (Array.isArray(values) ? values : []).forEach((value) => {{
+                        const text = String(value || '').replace(/\s+/g, ' ').trim();
+                        if (!text) return;
+                        const compact = text.replace(/[^\w\u4e00-\u9fff]+/g, '');
+                        if (compact.length < 2) return;
+                        if (/^\d+$/.test(compact)) return;
+                        if (seen.has(text)) return;
+                        seen.add(text);
+                        normalized.push(text);
+                    }});
+                    return normalized.slice(0, 10);
+                }}
+
+                function normalizeHighlightRects(values) {{
+                    const normalized = [];
+                    (Array.isArray(values) ? values : []).forEach((value) => {{
+                        if (!Array.isArray(value) || value.length < 4) return;
+                        const rect = value.slice(0, 4).map((item) => Number(item));
+                        if (rect.some((item) => !Number.isFinite(item))) return;
+                        if (rect[2] <= rect[0] || rect[3] <= rect[1]) return;
+                        normalized.push(rect);
+                    }});
+                    return normalized.slice(0, 24);
+                }}
+
                 function appendSourcePageHint(rawSourceUrl, page) {{
                     const base = String(rawSourceUrl || '').split('#', 1)[0];
                     if (!base || !page) return base;
@@ -4750,11 +5140,26 @@ class ReportVisualizer:
                     return `${{base}}#page=${{page}}`;
                 }}
 
-                async function loadRemotePagePreview(docConfig, page) {{
-                    const requestUrl = resolveRemotePreviewUrl(docConfig, page);
-                    if (!requestUrl) return null;
-                    if (remotePageCache.has(requestUrl)) {{
-                        return remotePageCache.get(requestUrl);
+                async function loadRemotePagePreview(docConfig, page, options = {{}}) {{
+                    const baseRequestUrl = resolveRemotePreviewUrl(docConfig, page);
+                    if (!baseRequestUrl) return null;
+                    const requestUrl = new URL(baseRequestUrl, window.location.href);
+                    let highlightPhrases = normalizeHighlightPhrases(options.highlightPhrases || []);
+                    const bbox = Array.isArray(options.highlightBbox) ? options.highlightBbox : null;
+                    const highlightRects = normalizeHighlightRects(options.highlightRects || []);
+                    if (highlightRects.length > 1) {{
+                        highlightPhrases = [];
+                    }}
+                    highlightPhrases.forEach((phrase) => requestUrl.searchParams.append('highlight', phrase));
+                    if (bbox && bbox.length >= 4) {{
+                        requestUrl.searchParams.set('highlight_bbox', bbox.slice(0, 4).join(','));
+                    }}
+                    if (highlightRects.length) {{
+                        requestUrl.searchParams.set('highlight_rects', JSON.stringify(highlightRects));
+                    }}
+                    const requestKey = requestUrl.toString();
+                    if (remotePageCache.has(requestKey)) {{
+                        return remotePageCache.get(requestKey);
                     }}
                     const response = await fetch(requestUrl, {{
                         method: 'GET',
@@ -4765,7 +5170,7 @@ class ReportVisualizer:
                         throw new Error(`preview request failed: ${{response.status}}`);
                     }}
                     const payload = await response.json();
-                    remotePageCache.set(requestUrl, payload);
+                    remotePageCache.set(requestKey, payload);
                     return payload;
                 }}
 
@@ -4851,7 +5256,20 @@ class ReportVisualizer:
                     renderBoxForImage(boxNode, imageNode, bbox, pageConfig);
                 }}
 
-                async function loadSinglePreview(docConfig, page, bbox) {{
+                function shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects) {{
+                    return Boolean(
+                        (highlightPhrases.length || highlightRects.length)
+                        && pageConfig
+                        && (
+                            Boolean(pageConfig.highlight_applied)
+                            || Number(pageConfig.highlight_rect_count || 0) > 0
+                        )
+                    );
+                }}
+
+                async function loadSinglePreview(docConfig, page, bbox, options = {{}}) {{
+                    const highlightPhrases = normalizeHighlightPhrases(options.highlightPhrases || []);
+                    const highlightRects = normalizeHighlightRects(options.highlightRects || []);
                     const resolved = resolvePagePreview(docConfig.key, page);
                     if (resolved) {{
                         const pageConfig = resolved.pageConfig;
@@ -4880,18 +5298,30 @@ class ReportVisualizer:
                     emptyNode.style.display = 'flex';
                     emptyNode.textContent = 'Loading source preview...';
                     try {{
-                        const pageConfig = await loadRemotePagePreview(docConfig, page);
+                        const pageConfig = await loadRemotePagePreview(docConfig, page, {{
+                            highlightPhrases,
+                            highlightBbox: bbox,
+                            highlightRects,
+                        }});
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
                         emptyNode.style.display = 'none';
                         pageWrap.style.display = 'inline-flex';
                         imageNode.onload = function() {{
-                            renderBox(bbox, pageConfig);
+                            if (shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects)) {{
+                                boxNode.classList.remove('visible');
+                            }} else {{
+                                renderBox(bbox, pageConfig);
+                            }}
                         }};
                         imageNode.src = pageConfig.image_data_url || pageConfig.image_url;
                         if (imageNode.complete) {{
-                            renderBox(bbox, pageConfig);
+                            if (shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects)) {{
+                                boxNode.classList.remove('visible');
+                            }} else {{
+                                renderBox(bbox, pageConfig);
+                            }}
                         }}
                     }} catch (error) {{
                         pageWrap.style.display = 'none';
@@ -4908,6 +5338,10 @@ class ReportVisualizer:
                     const pageEnd = Number(button.dataset.pageEnd || button.dataset.page || 0);
                     const label = button.dataset.label || button.textContent || '定位预览';
                     const bbox = parseBbox(button.dataset.bbox);
+                    const highlightPhrases = normalizeHighlightPhrases(parseJsonArray(button.dataset.highlightPhrases));
+                    const highlightRects = normalizeHighlightRects(parseJsonArray(button.dataset.highlightRects));
+                    const highlightHtml = String(button.dataset.highlightHtml || '').trim();
+                    const highlightTitle = String(button.dataset.highlightTitle || '命中内容').trim();
                     const docs = (locatorPreviewConfig && locatorPreviewConfig.documents) || {{}};
                     const docConfig = docs[documentKey] || {{}};
                     docConfig.key = documentKey;
@@ -4926,6 +5360,15 @@ class ReportVisualizer:
                         noteNode.textContent = rangeHint || extraHint || '';
                     }}
                     noteNode.style.display = noteNode.textContent ? 'block' : 'none';
+                    if (highlightNode) {{
+                        if (highlightHtml) {{
+                            highlightNode.innerHTML = `<div class="locator-highlight-title">${{escapeHtml(highlightTitle)}}</div>${{highlightHtml}}`;
+                            highlightNode.style.display = 'block';
+                        }} else {{
+                            highlightNode.innerHTML = '';
+                            highlightNode.style.display = 'none';
+                        }}
+                    }}
                     if (sourceLink) {{
                         const rawSourceUrl = docConfig.source_url || '';
                         sourceLink.textContent = pageEnd && pageEnd > page ? `打开原文件（第 ${{pageRangeText}} 页）` : '打开原文件';
@@ -4945,7 +5388,14 @@ class ReportVisualizer:
                     resetSingleView();
                     resetMultiView();
                     overlay.classList.add('visible');
-                    await loadSinglePreview(docConfig, page, bbox);
+                    if (highlightNode && highlightHtml) {{
+                        highlightNode.innerHTML = `<div class="locator-highlight-title">${{escapeHtml(highlightTitle)}}</div>${{highlightHtml}}`;
+                        highlightNode.style.display = 'block';
+                    }}
+                    await loadSinglePreview(docConfig, page, bbox, {{
+                        highlightPhrases,
+                        highlightRects,
+                    }});
                 }}
 
                 async function loadMultiTargetPage(target, range, cardRefs) {{
@@ -4954,6 +5404,12 @@ class ReportVisualizer:
                     const page = Number((range && range.page) || target.default_page || 0);
                     const pageEnd = Number((range && range.pageEnd) || page);
                     const bbox = parseBbox((range && range.bbox) || target.bbox);
+                    const highlightPhrases = normalizeHighlightPhrases(
+                        (range && range.highlightPhrases) || target.highlightPhrases || []
+                    );
+                    const highlightRects = normalizeHighlightRects(
+                        (range && range.highlightRects) || target.highlightRects || []
+                    );
                     const highlightHtml = String((range && range.highlightHtml) || target.highlightHtml || '').trim();
                     const highlightTitle = String((range && range.highlightTitle) || target.highlightTitle || '命中内容').trim();
                     const pageRangeText = pageEnd && pageEnd > page ? `${{page}}-${{pageEnd}}` : `${{page || '?'}}`;
@@ -5006,7 +5462,13 @@ class ReportVisualizer:
 
                     try {{
                         const resolved = resolvePagePreview(target.document, page);
-                        const pageConfig = resolved ? resolved.pageConfig : await loadRemotePagePreview(docConfig, page);
+                        const pageConfig = resolved
+                            ? resolved.pageConfig
+                            : await loadRemotePagePreview(docConfig, page, {{
+                                highlightPhrases,
+                                highlightBbox: bbox,
+                                highlightRects,
+                            }});
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
@@ -5014,11 +5476,19 @@ class ReportVisualizer:
                         cardRefs.empty.style.display = 'none';
                         cardRefs.wrap.style.display = 'flex';
                         cardRefs.image.onload = function() {{
-                            renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                            if (highlightPhrases.length || highlightRects.length) {{
+                                cardRefs.box.classList.remove('visible');
+                            }} else {{
+                                renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                            }}
                         }};
                         cardRefs.image.src = imageUrl;
                         if (cardRefs.image.complete) {{
-                            renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                            if (highlightPhrases.length || highlightRects.length) {{
+                                cardRefs.box.classList.remove('visible');
+                            }} else {{
+                                renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
+                            }}
                         }}
                     }} catch (error) {{
                         cardRefs.wrap.style.display = 'none';

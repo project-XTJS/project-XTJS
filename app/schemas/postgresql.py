@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -32,11 +32,11 @@ class DocumentCreateRequest(BaseModel):
 class ProjectBindDocumentsRequest(BaseModel):
     tender_document_identifier: str
     business_bid_document_identifier: str
-    technical_bid_document_identifier: str
+    technical_bid_document_identifier: Optional[str] = None
 
 
 class ProjectUpdateRequest(BaseModel):
-    new_identifier_id: str
+    new_identifier_id: Optional[str] = None
 
 
 class DocumentUpdateRequest(BaseModel):
@@ -50,7 +50,32 @@ class DocumentUpdateRequest(BaseModel):
 class ProjectRelationUpdateRequest(BaseModel):
     tender_document_identifier: str
     business_bid_document_identifier: str
-    technical_bid_document_identifier: str
+    technical_bid_document_identifier: Optional[str] = None
+
+
+class IdentifierBatchDeleteRequest(BaseModel):
+    identifier_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description="批量删除的业务标识列表。",
+    )
+
+
+class RelationBatchDeleteRequest(BaseModel):
+    relation_ids: list[int] = Field(
+        ...,
+        min_length=1,
+        description="批量删除的关联主键列表。",
+    )
+
+
+class ProjectResultUpsertRequest(BaseModel):
+    project_identifier_id: str = Field(..., description="项目业务标识。")
+    result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
+
+
+class ProjectResultUpdateRequest(BaseModel):
+    result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 
 class DuplicateCheckScope(str, Enum):
