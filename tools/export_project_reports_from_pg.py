@@ -32,17 +32,9 @@ from app.service.postgresql_service import PostgreSQLService
 
 PROJECT_IDENTIFIER = os.getenv("XTJS_PROJECT_IDENTIFIER", "").strip()
 OUTPUT_DIR = Path(os.getenv("XTJS_PROJECT_REPORT_DIR", f"./test_reports/{PROJECT_IDENTIFIER or 'project_from_pg'}"))
-API_BASE_URL = os.getenv("XTJS_REPORT_API_BASE_URL", "http://127.0.0.1:8888").rstrip("/")
+API_BASE_URL = os.getenv("XTJS_REPORT_API_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 USE_STORED_PROJECT_RESULTS = os.getenv("XTJS_REPORT_USE_STORED_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
 RECOMPUTE_MISSING_PROJECT_RESULTS = os.getenv("XTJS_REPORT_RECOMPUTE_MISSING_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
-BUSINESS_DUPLICATE_EVIDENCE_LIMIT = max(
-    1,
-    int(os.getenv("XTJS_BUSINESS_DUPLICATE_EVIDENCE_LIMIT", "20") or 20),
-)
-TECHNICAL_DUPLICATE_EVIDENCE_LIMIT = max(
-    1,
-    int(os.getenv("XTJS_TECHNICAL_DUPLICATE_EVIDENCE_LIMIT", "60") or 60),
-)
 PROJECT_REVIEW_DISPLAY_OPTIONS = {
     "show_business_duplicates": True,
     "show_technical_duplicates": True,
@@ -50,169 +42,6 @@ PROJECT_REVIEW_DISPLAY_OPTIONS = {
     "show_typos": True,
     "business_duplicates_only_mode": False,
 }
-
-
-def patch_visualizer_export_duplicate_display(visualizer: ReportVisualizer) -> None:
-    patch_visualizer_duplicate_display(visualizer)
-
-    def _project_filter_duplicate_item_evidence(self, item):
-        return item
-
-    def _project_duplicate_cluster_metrics(self, cluster):
-        totals = {
-            "exact_section_count": 0,
-            "similar_section_count": 0,
-            "exact_block_count": 0,
-            "similar_block_count": 0,
-            "exact_table_count": 0,
-            "similar_table_count": 0,
-        }
-        occurrences = list(cluster.get("occurrences") or [])
-        if occurrences:
-            for occurrence in occurrences:
-                mode = str(occurrence.get("mode") or "exact")
-                family = str(occurrence.get("family") or "block")
-                metric_key = f"{mode}_{family}_count"
-                if metric_key in totals:
-                    totals[metric_key] += 1
-            return totals
-
-        metrics = dict(cluster.get("metrics") or {})
-        for key in totals:
-            totals[key] = int(metrics.get(key) or 0)
-        return totals
-
-    def _project_build_duplicate_cluster_preview_button_html(
-        self,
-        cluster,
-        *,
-        source_lookup,
-        label="并排预览",
-    ):
-        targets = self._project_cluster_locator_targets_debug(
-            cluster,
-            source_lookup=source_lookup,
-        )
-        if len(targets) < 2:
-            return "<span class='issue-muted'>暂无预览</span>"
-        payload = html.escape(json.dumps(targets, ensure_ascii=False))
-        return (
-            f"<button type='button' class='issue-link issue-link-button locator-open-group' "
-            f"data-label='{html.escape(str(label))}' "
-            f"data-targets='{payload}'>"
-            f"{html.escape(str(label))}</button>"
-        )
-
-    def _project_render_duplicate_rows(
-        self,
-        result,
-        doc_type,
-        *,
-        source_lookup,
-        issue_pages,
-        current_files=None,
-    ):
-        items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
-        if not items:
-            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
-
-        page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
-        detail_page = issue_pages.get(page_key, "")
-        rows = []
-        for cluster in self._project_duplicate_cluster_items(items):
-            metrics = self._project_duplicate_cluster_metrics(cluster)
-            risk_level = self._project_duplicate_cluster_risk(cluster)
-            detail_anchor = self._project_duplicate_cluster_anchor(doc_type, cluster)
-            detail_href = self._project_issue_page_href(detail_page, detail_anchor)
-            preview_button = self._project_build_duplicate_cluster_preview_button_html(
-                cluster,
-                source_lookup=source_lookup,
-            )
-            rows.append(
-                f"<tr class='{self._project_severity_css_class(risk_level)}'>"
-                f"<td>{html.escape(risk_level)}</td>"
-                f"<td>{html.escape(self._project_duplicate_cluster_score(cluster))}</td>"
-                f"<td>{self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}</td>"
-                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
-                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
-                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
-                f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}{preview_button}</div></td>"
-                "</tr>"
-            )
-        return "\n".join(rows)
-
-    def _project_build_duplicate_issue_detail_html(
-        self,
-        *,
-        project_identifier,
-        title,
-        result,
-        doc_type,
-        source_lookup,
-    ):
-        items = list(self._project_iter_duplicate_items(result, doc_type))
-        if not items:
-            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
-        else:
-            cards = []
-            for cluster in self._project_duplicate_cluster_items(items):
-                metrics = self._project_duplicate_cluster_metrics(cluster)
-                risk_level = self._project_duplicate_cluster_risk(cluster)
-                preview_button = self._project_build_duplicate_cluster_preview_button_html(
-                    cluster,
-                    source_lookup=source_lookup,
-                    label="并排预览这处问题",
-                )
-                cards.append(
-                    f"""
-                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
-                      <div class="issue-card-header">
-                        <div>
-                          <h2>{html.escape(self._project_duplicate_cluster_title(cluster))}</h2>
-                          <p class="issue-meta">风险：{html.escape(risk_level)} | 分数：{html.escape(self._project_duplicate_cluster_score(cluster))} | 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
-                        </div>
-                        <div class="issue-card-tools">
-                          <div class="issue-metrics">
-                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
-                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
-                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
-                          </div>
-                          <div class="issue-card-actions">{preview_button}</div>
-                        </div>
-                      </div>
-                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
-                      {self._project_render_duplicate_occurrence_html(cluster, source_lookup=source_lookup)}
-                    </article>
-                    """
-                )
-            body = "".join(cards)
-        return self._project_build_issue_page_shell(
-            project_identifier=project_identifier,
-            title=title,
-            body=body,
-            source_lookup=source_lookup,
-        )
-
-    visualizer._project_filter_duplicate_item_evidence = MethodType(
-        _project_filter_duplicate_item_evidence,
-        visualizer,
-    )
-    visualizer._project_duplicate_cluster_metrics = MethodType(
-        _project_duplicate_cluster_metrics,
-        visualizer,
-    )
-    visualizer._project_build_duplicate_cluster_preview_button_html = MethodType(
-        _project_build_duplicate_cluster_preview_button_html,
-        visualizer,
-    )
-    visualizer._project_render_duplicate_rows = MethodType(
-        _project_render_duplicate_rows,
-        visualizer,
-    )
-    visualizer._project_build_duplicate_issue_detail_html = MethodType(
-        _project_build_duplicate_issue_detail_html,
-        visualizer,
-    )
 
 
 def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
@@ -351,64 +180,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             f"</div>"
         )
 
-    def _dedupe_highlight_phrases(self, values, *, limit=10):
-        phrases = []
-        for value in values or []:
-            text = _normalize_highlight_source(self, value)
-            if not text:
-                continue
-            normalized_text = text.strip()
-            if (
-                (normalized_text.startswith("[") and normalized_text.endswith("]"))
-                or '\\"' in normalized_text
-                or "&quot;" in normalized_text
-            ):
-                continue
-            compact = re.sub(r"[^\w\u4e00-\u9fff]+", "", text, flags=re.UNICODE)
-            if len(compact) < 2:
-                continue
-            if compact.isdigit():
-                continue
-            if text not in phrases:
-                phrases.append(text[:240])
-            if len(phrases) >= limit:
-                break
-        return phrases
-
-    def _occurrence_highlight_phrases(self, occurrence, file_name):
-        item = occurrence.get("item") or {}
-        docs = occurrence.get("docs") or {}
-        doc = docs.get(file_name) or {}
-        other_file_name = ""
-        for candidate in docs.keys():
-            if candidate != file_name:
-                other_file_name = candidate
-                break
-        mode = str(occurrence.get("mode") or "similar")
-
-        own_texts = _occurrence_match_texts(self, occurrence, file_name)
-        other_texts = _occurrence_match_texts(self, occurrence, other_file_name) if other_file_name else []
-        phrases = []
-
-        if mode == "exact":
-            phrases.extend(own_texts)
-            preview_text = str(doc.get("preview") or "").strip()
-            if preview_text:
-                phrases.append(preview_text)
-        else:
-            for own_text in own_texts:
-                for other_text in other_texts:
-                    phrase = _common_highlight_phrase(self, own_text, other_text)
-                    if phrase:
-                        phrases.append(phrase)
-            if not phrases:
-                preview_text = str(doc.get("preview") or "").strip()
-                other_preview = str((docs.get(other_file_name) or {}).get("preview") or "").strip()
-                phrase = _common_highlight_phrase(self, preview_text, other_preview)
-                if phrase:
-                    phrases.append(phrase)
-        return _dedupe_highlight_phrases(self, phrases)
-
     def _iter_locator_candidates(self, payload, page):
         if not isinstance(payload, dict):
             return []
@@ -424,15 +195,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             )
             text = _strip_locator_html(self, table.get("block_content") or "")
             if bbox and text:
-                candidates.append(
-                    {
-                        "family": "table",
-                        "bbox": bbox,
-                        "text": text,
-                        "html": str(table.get("block_content") or ""),
-                        "score_bias": 0.12,
-                    }
-                )
+                candidates.append({"family": "table", "bbox": bbox, "text": text, "score_bias": 0.12})
         for section in payload.get("layout_sections") or []:
             if not isinstance(section, dict):
                 continue
@@ -453,21 +216,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                     }
                 )
         return candidates
-
-    def _parse_locator_table_rows(self, html_content):
-        source = str(html_content or "")
-        if not source:
-            return []
-        rows = []
-        for row_html in re.findall(r"<tr[^>]*>(.*?)</tr>", source, flags=re.IGNORECASE | re.DOTALL):
-            cells = []
-            for cell_html in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row_html, flags=re.IGNORECASE | re.DOTALL):
-                text = _strip_locator_html(self, cell_html)
-                if text:
-                    cells.append(text)
-            if cells:
-                rows.append(cells)
-        return rows
 
     def _occurrence_match_texts(self, occurrence, file_name):
         item = occurrence.get("item") or {}
@@ -526,7 +274,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             return best
         return 0.0
 
-    def _best_locator_candidate_for_occurrence(self, occurrence, file_name, page, *, source_lookup):
+    def _occurrence_bbox_for_file_page(self, occurrence, file_name, page, *, source_lookup):
         entry = source_lookup.get(file_name) or {}
         payload = entry.get("_payload_data")
         if not isinstance(payload, dict):
@@ -535,7 +283,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         texts = _occurrence_match_texts(self, occurrence, file_name)
         if not texts:
             return None
-        best_candidate = None
+        best_bbox = None
         best_score = 0.0
         for candidate in _iter_locator_candidates(self, payload, page):
             score = _locator_candidate_score(
@@ -550,73 +298,8 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                 score += 0.03
             if score > best_score:
                 best_score = score
-                best_candidate = candidate
-        return best_candidate if best_score > 0 else None
-
-    def _occurrence_bbox_for_file_page(self, occurrence, file_name, page, *, source_lookup):
-        candidate = _best_locator_candidate_for_occurrence(
-            self,
-            occurrence,
-            file_name,
-            page,
-            source_lookup=source_lookup,
-        )
-        return candidate.get("bbox") if candidate else None
-
-    def _table_row_matches_phrase(self, row_text, phrases):
-        compact_row = _compact_locator_text(self, row_text)
-        if not compact_row:
-            return False
-        for phrase in phrases or []:
-            compact_phrase = _compact_locator_text(self, phrase)
-            if not compact_phrase:
-                continue
-            if compact_phrase in compact_row or compact_row in compact_phrase:
-                return True
-            if difflib.SequenceMatcher(None, compact_phrase[:800], compact_row[:800]).ratio() >= 0.62:
-                return True
-        return False
-
-    def _occurrence_highlight_rects_for_file_page(self, occurrence, file_name, page, *, source_lookup):
-        candidate = _best_locator_candidate_for_occurrence(
-            self,
-            occurrence,
-            file_name,
-            page,
-            source_lookup=source_lookup,
-        )
-        if not candidate:
-            return []
-        bbox = _normalize_locator_bbox(self, candidate.get("bbox"))
-        if not bbox:
-            return []
-        family = str(candidate.get("family") or occurrence.get("family") or "block")
-        phrases = _occurrence_highlight_phrases(self, occurrence, file_name)
-        if family != "table":
-            return [bbox]
-
-        rows = _parse_locator_table_rows(self, candidate.get("html") or "")
-        if not rows:
-            return [bbox]
-
-        matched_indexes = []
-        for index, cells in enumerate(rows):
-            row_text = " | ".join(cell for cell in cells if cell)
-            if _table_row_matches_phrase(self, row_text, phrases):
-                matched_indexes.append(index)
-        if not matched_indexes:
-            return [bbox]
-
-        x0, y0, x1, y1 = bbox
-        row_height = (y1 - y0) / max(len(rows), 1)
-        rects = []
-        for row_index in matched_indexes:
-            top = y0 + row_height * row_index + 2
-            bottom = y0 + row_height * (row_index + 1) - 2
-            if bottom <= top:
-                continue
-            rects.append([x0 + 2, top, x1 - 2, bottom])
-        return rects or [bbox]
+                best_bbox = candidate.get("bbox")
+        return best_bbox if best_score > 0 else None
 
     def _split_occurrence_ranges(self, left_pages, right_pages):
         left_ranges = self._coalesce_page_ranges(self._project_normalize_pages(left_pages))
@@ -1177,8 +860,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                             "page": start_page,
                             "pageEnd": end_page,
                             "highlightBlocks": [],
-                            "highlightPhrases": [],
-                            "highlightRects": [],
                             "bbox": None,
                         },
                     )
@@ -1191,24 +872,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                     )
                     if highlight_block and highlight_block not in payload["highlightBlocks"]:
                         payload["highlightBlocks"].append(highlight_block)
-                    for phrase in _occurrence_highlight_phrases(self, occurrence, file_name):
-                        if phrase not in payload["highlightPhrases"]:
-                            payload["highlightPhrases"].append(phrase)
-                    for rect in _occurrence_highlight_rects_for_file_page(
-                        self,
-                        occurrence,
-                        file_name,
-                        start_page,
-                        source_lookup=source_lookup,
-                    ):
-                        rect_key = tuple(int(round(float(value))) for value in rect[:4])
-                        existing_keys = {
-                            tuple(int(round(float(value))) for value in existing_rect[:4])
-                            for existing_rect in payload["highlightRects"]
-                            if isinstance(existing_rect, (list, tuple)) and len(existing_rect) >= 4
-                        }
-                        if rect_key not in existing_keys:
-                            payload["highlightRects"].append([float(value) for value in rect[:4]])
                     bbox = _occurrence_bbox_for_file_page(
                         self,
                         occurrence,
@@ -1229,17 +892,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                 blocks = list(range_item.pop("highlightBlocks", []) or [])
                 range_item["highlightHtml"] = "".join(blocks)
                 range_item["highlightTitle"] = "命中内容"
-                range_item["highlightPhrases"] = _dedupe_highlight_phrases(
-                    self,
-                    range_item.get("highlightPhrases") or [],
-                )
-                range_item["highlightRects"] = [
-                    [float(value) for value in rect[:4]]
-                    for rect in (range_item.get("highlightRects") or [])
-                    if isinstance(rect, (list, tuple)) and len(rect) >= 4
-                ]
-                if len(range_item["highlightRects"]) > 1:
-                    range_item["highlightPhrases"] = []
             targets.append(
                 {
                     "document": document_key,
@@ -1388,12 +1040,6 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
     visualizer._project_build_duplicate_issue_detail_html = MethodType(_build_duplicate_issue_detail_html, visualizer)
     visualizer._project_locator_bbox_for_occurrence = MethodType(_occurrence_bbox_for_file_page, visualizer)
     visualizer._project_cluster_locator_targets_debug = MethodType(_cluster_locator_targets, visualizer)
-    visualizer._project_duplicate_occurrence_cluster_items = MethodType(_cluster_items, visualizer)
-    visualizer._project_duplicate_occurrence_title = MethodType(_cluster_title, visualizer)
-    visualizer._project_duplicate_occurrence_score = MethodType(_cluster_score, visualizer)
-    visualizer._project_duplicate_occurrence_risk = MethodType(_cluster_risk, visualizer)
-    visualizer._project_build_duplicate_occurrence_doc_list_html = MethodType(_cluster_doc_list_html, visualizer)
-    visualizer._project_render_duplicate_occurrence_html = MethodType(_render_cluster_evidence_html, visualizer)
 
 
 def unwrap_document_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1576,7 +1222,6 @@ def recompute_and_persist_project_result(
             project={"identifier_id": project_identifier},
             document_records=document_records,
             document_types=[DOCUMENT_TYPE_BUSINESS_BID],
-            max_evidence_sections=BUSINESS_DUPLICATE_EVIDENCE_LIMIT,
             max_pairs_per_type=50,
         )
     elif result_key == "technical_bid_duplicate_check":
@@ -1585,7 +1230,6 @@ def recompute_and_persist_project_result(
             project={"identifier_id": project_identifier},
             document_records=document_records,
             document_types=[DOCUMENT_TYPE_TECHNICAL_BID],
-            max_evidence_sections=TECHNICAL_DUPLICATE_EVIDENCE_LIMIT,
             max_pairs_per_type=50,
         )
     elif result_key == "bid_document_review":
@@ -1777,7 +1421,7 @@ def main() -> None:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     visualizer = ReportVisualizer()
-    patch_visualizer_export_duplicate_display(visualizer)
+    patch_visualizer_duplicate_display(visualizer)
     business_infos = build_business_infos(business_records)
     project_results = resolve_project_results(
         db_service=db_service,

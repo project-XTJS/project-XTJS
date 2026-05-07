@@ -143,7 +143,7 @@ if __name__ == "__main__":
     
     # 启动服务器后自动打开Swagger UI
     host = "127.0.0.1"
-    port = 8888
+    port = 8080
     swagger_url = f"http://{host}:{port}/docs"
     browser_timer = threading.Timer(1.5, lambda: webbrowser.open(swagger_url))
     browser_timer.daemon = True

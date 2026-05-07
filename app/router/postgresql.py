@@ -970,32 +970,6 @@ def _build_project_visualization_payload(
     }
 
 
-def _build_project_report_payload(
-    *,
-    identifier_id: str,
-    project_detail: dict[str, Any],
-    project_result: Optional[dict[str, Any]],
-    db_service: PostgreSQLService,
-    include_document_content: bool = True,
-) -> dict[str, Any]:
-    visualization_payload = _build_project_visualization_payload(
-        identifier_id=identifier_id,
-        project_detail=project_detail,
-        project_result=project_result,
-        db_service=db_service,
-        include_document_content=include_document_content,
-    )
-    return {
-        "project": visualization_payload["project"],
-        "project_links": visualization_payload["project_links"],
-        "relations": visualization_payload["relations"],
-        "documents": visualization_payload["documents"],
-        "result_record": visualization_payload["result_record"],
-        "analysis_results": visualization_payload["results"],
-        "available_result_keys": visualization_payload["available_result_keys"],
-    }
-
-
 async def _persist_uploaded_analysis_documents(
     *,
     tender_json_file: UploadFile,
@@ -1184,34 +1158,6 @@ async def get_project_visualization_data(
 
         project_result = db_service.get_project_result(identifier_id)
         return _build_project_visualization_payload(
-            identifier_id=identifier_id,
-            project_detail=project_detail,
-            project_result=project_result,
-            db_service=db_service,
-            include_document_content=include_document_content,
-        )
-    except HTTPException:
-        raise
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
-
-
-@router.get("/projects/{identifier_id}/report-data", summary="查询项目报告聚合数据")
-async def get_project_report_data(
-    identifier_id: str,
-    include_document_content: bool = Query(
-        default=True,
-        description="是否包含文档 OCR JSON 原始内容；生成可视化报告时建议开启",
-    ),
-    db_service: PostgreSQLService = Depends(get_db_service),
-):
-    try:
-        project_detail = db_service.get_project_detail(identifier_id)
-        if not project_detail:
-            raise HTTPException(status_code=404, detail="project not found")
-
-        project_result = db_service.get_project_result(identifier_id)
-        return _build_project_report_payload(
             identifier_id=identifier_id,
             project_detail=project_detail,
             project_result=project_result,
