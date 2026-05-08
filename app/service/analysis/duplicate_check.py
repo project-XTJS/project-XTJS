@@ -3,6 +3,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 import hashlib
 import html
+import io
 import json
 import re
 from html.parser import HTMLParser
@@ -10,6 +11,7 @@ from itertools import combinations
 from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
+from app.service.minio_service import MinioService
 
 from .deviation import DeviationChecker
 from .itemized_pricing import ItemizedPricingChecker
@@ -123,6 +125,8 @@ class DuplicateCheckService:
     def __init__(self) -> None:
         self._itemized_checker = ItemizedPricingChecker()
         self._deviation_checker = DeviationChecker()
+        self._minio_service: MinioService | None = None
+        self._document_image_cache: dict[str, list[dict[str, Any]]] = {}
 
     def check_project_documents(
         self,
@@ -228,6 +232,7 @@ class DuplicateCheckService:
                         "section_count": item.get("section_count", 0),
                         "block_count": item.get("block_count", 0),
                         "table_count": item.get("table_count", 0),
+                        "image_count": item.get("image_count", 0),
                     }
                     for item in documents
                 ],
@@ -304,6 +309,14 @@ class DuplicateCheckService:
         payload = self._coerce_payload(record.get("content"))
         ordered_blocks, table_entries, empty_reason = self._extract_document_content(payload, role=role)
         if not ordered_blocks:
+            prepared = self._build_prepared_document(
+                record,
+                [],
+                table_entries,
+                role=role,
+            )
+            if prepared is not None:
+                return prepared, None
             return None, empty_reason
 
         ordered_blocks, table_entries = self._exclude_template_content(
@@ -312,9 +325,22 @@ class DuplicateCheckService:
             template_context=template_context,
         )
         if not ordered_blocks:
+            prepared = self._build_prepared_document(
+                record,
+                [],
+                table_entries,
+                role=role,
+            )
+            if prepared is not None:
+                return prepared, None
             return None, self.TEMPLATE_EXCLUDED_SKIP_REASON
 
-        prepared = self._build_prepared_document(record, ordered_blocks, table_entries)
+        prepared = self._build_prepared_document(
+            record,
+            ordered_blocks,
+            table_entries,
+            role=role,
+        )
         return prepared, None if prepared is not None else empty_reason
 
     def _extract_document_content(
@@ -469,16 +495,13 @@ class DuplicateCheckService:
         record: dict[str, Any],
         ordered_blocks: list[dict[str, Any]],
         table_entries: list[dict[str, Any]],
+        *,
+        role: str,
     ) -> dict[str, Any] | None:
-        if not ordered_blocks:
-            return None
-
         sections = self._build_sections(ordered_blocks)
         full_text = "\n".join(block["text"] for block in ordered_blocks if block.get("text"))
         exact_key = self._compact_raw_text(full_text)
-        if len(exact_key) < 16:
-            return None
-
+        image_entries = self._extract_document_images(record, role=role)
         exact_block_map = self._build_sentence_unit_map(ordered_blocks)
         exact_section_map = {
             section["exact_hash"]: section
@@ -486,6 +509,22 @@ class DuplicateCheckService:
             if len(section["exact_key"]) >= 8
         }
         exact_table_map = {table["exact_hash"]: table for table in table_entries}
+        exact_image_map = {
+            str(item.get("exact_hash") or ""): item
+            for item in image_entries
+            if str(item.get("exact_hash") or "")
+        }
+        if len(exact_key) < 16 and not exact_table_map and not exact_image_map:
+            return None
+
+        exact_hash_source = exact_key or json.dumps(
+            {
+                "table_hashes": sorted(exact_table_map.keys()),
+                "image_hashes": sorted(exact_image_map.keys()),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
         return {
             "identifier_id": str(record.get("identifier_id") or ""),
@@ -493,7 +532,7 @@ class DuplicateCheckService:
             "file_name": str(record.get("file_name") or ""),
             "full_text": full_text,
             "exact_key": exact_key,
-            "exact_hash": self._hash_text(exact_key),
+            "exact_hash": self._hash_text(exact_hash_source),
             "blocks": ordered_blocks,
             "exact_block_hashes": set(exact_block_map.keys()),
             "exact_block_map": exact_block_map,
@@ -506,6 +545,10 @@ class DuplicateCheckService:
             "table_count": len(table_entries),
             "exact_table_hashes": set(exact_table_map.keys()),
             "exact_table_map": exact_table_map,
+            "images": image_entries,
+            "image_count": len(image_entries),
+            "exact_image_hashes": set(exact_image_map.keys()),
+            "exact_image_map": exact_image_map,
         }
 
     def _build_sentence_unit_map(
@@ -1559,6 +1602,9 @@ class DuplicateCheckService:
         )
         return min(round(score, 4), 0.9999)
 
+    def _supports_similarity_matching(self, role: str) -> bool:
+        return role in {DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID}
+
     def _business_risk_level(
         self,
         *,
@@ -1567,6 +1613,7 @@ class DuplicateCheckService:
         exact_block_count: int,
         exact_section_count: int,
         exact_table_count: int,
+        exact_image_count: int,
         exact_block_overlap_ratio: float,
         similar_match_score: float,
         similar_block_count: int,
@@ -1582,6 +1629,7 @@ class DuplicateCheckService:
             exact_block_count=exact_block_count,
             exact_section_count=exact_section_count,
             exact_table_count=exact_table_count,
+            exact_image_count=exact_image_count,
             exact_block_overlap_ratio=exact_block_overlap_ratio,
         )
         if self._risk_rank(exact_risk) >= self._risk_rank("medium"):
@@ -1627,6 +1675,7 @@ class DuplicateCheckService:
         block_metrics = self._compare_blocks(left, right, max_evidence_sections=max_evidence_sections)
         section_metrics = self._compare_sections(left, right, max_evidence_sections=max_evidence_sections)
         table_metrics = self._compare_tables(left, right, max_evidence_sections=max_evidence_sections)
+        image_metrics = self._compare_images(left, right, max_evidence_sections=max_evidence_sections)
 
         exact_duplicate = bool(left["exact_hash"] == right["exact_hash"])
         exact_match_score = self._exact_match_score(
@@ -1634,6 +1683,7 @@ class DuplicateCheckService:
             exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
             exact_section_match_ratio=float(section_metrics["exact_match_ratio"]),
             exact_table_match_ratio=float(table_metrics["exact_match_ratio"]),
+            exact_image_match_ratio=float(image_metrics["exact_match_ratio"]),
         )
         similar_block_metrics = {
             "similar_overlap_ratio": 0.0,
@@ -1651,7 +1701,7 @@ class DuplicateCheckService:
             "items": [],
         }
         similar_match_score = 0.0
-        if role == DOCUMENT_TYPE_BUSINESS_BID:
+        if self._supports_similarity_matching(role):
             similar_block_metrics = self._compare_business_similarity_blocks(
                 left,
                 right,
@@ -1678,6 +1728,7 @@ class DuplicateCheckService:
                 exact_block_count=int(block_metrics["exact_shared_count"]),
                 exact_section_count=int(section_metrics["exact_match_count"]),
                 exact_table_count=int(table_metrics["exact_match_count"]),
+                exact_image_count=int(image_metrics["exact_match_count"]),
                 exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
                 similar_match_score=similar_match_score,
                 similar_block_count=int(similar_block_metrics["similar_shared_count"]),
@@ -1694,6 +1745,7 @@ class DuplicateCheckService:
                 exact_block_count=int(block_metrics["exact_shared_count"]),
                 exact_section_count=int(section_metrics["exact_match_count"]),
                 exact_table_count=int(table_metrics["exact_match_count"]),
+                exact_image_count=int(image_metrics["exact_match_count"]),
                 exact_block_overlap_ratio=float(block_metrics["exact_overlap_ratio"]),
             )
 
@@ -1704,6 +1756,8 @@ class DuplicateCheckService:
             notes.append("at_least_one_document_has_no_structured_table_content")
         if not left["sections"] or not right["sections"]:
             notes.append("at_least_one_document_has_no_stable_section_structure")
+        if not left["images"] or not right["images"]:
+            notes.append("at_least_one_document_has_no_extractable_image_content")
 
         return {
             "left_document_identifier": left["identifier_id"],
@@ -1723,9 +1777,11 @@ class DuplicateCheckService:
                 "exact_block_count": int(block_metrics["exact_shared_count"]),
                 "exact_section_count": int(section_metrics["exact_match_count"]),
                 "exact_table_count": int(table_metrics["exact_match_count"]),
+                "exact_image_count": int(image_metrics["exact_match_count"]),
                 "exact_block_overlap_ratio": round(float(block_metrics["exact_overlap_ratio"]), 4),
                 "exact_section_overlap_ratio": round(float(section_metrics["exact_match_ratio"]), 4),
                 "exact_table_overlap_ratio": round(float(table_metrics["exact_match_ratio"]), 4),
+                "exact_image_overlap_ratio": round(float(image_metrics["exact_match_ratio"]), 4),
                 "similar_block_count": int(similar_block_metrics["similar_shared_count"]),
                 "similar_section_count": int(similar_section_metrics["similar_match_count"]),
                 "similar_table_count": int(similar_table_metrics["similar_match_count"]),
@@ -1736,6 +1792,7 @@ class DuplicateCheckService:
             "duplicate_blocks": block_metrics["items"],
             "duplicate_sections": section_metrics["items"],
             "duplicate_tables": table_metrics["items"],
+            "duplicate_images": image_metrics["items"],
             "similar_blocks": similar_block_metrics["items"],
             "similar_sections": similar_section_metrics["items"],
             "similar_tables": similar_table_metrics["items"],
@@ -1855,6 +1912,45 @@ class DuplicateCheckService:
             "items": items,
         }
 
+    def _compare_images(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+        *,
+        max_evidence_sections: int,
+    ) -> dict[str, Any]:
+        common_hashes = left["exact_image_hashes"] & right["exact_image_hashes"]
+        exact_match_ratio = len(common_hashes) / max(
+            1,
+            min(len(left["exact_image_hashes"]), len(right["exact_image_hashes"])),
+        )
+
+        items = []
+        for image_hash in sorted(common_hashes):
+            left_image = left["exact_image_map"].get(image_hash)
+            right_image = right["exact_image_map"].get(image_hash)
+            if not left_image or not right_image:
+                continue
+            items.append(
+                {
+                    "left_pages": list(left_image.get("pages") or []),
+                    "right_pages": list(right_image.get("pages") or []),
+                    "left_width": left_image.get("width"),
+                    "left_height": left_image.get("height"),
+                    "right_width": right_image.get("width"),
+                    "right_height": right_image.get("height"),
+                    "image_hash": image_hash,
+                }
+            )
+            if len(items) >= max_evidence_sections:
+                break
+
+        return {
+            "exact_match_count": len(common_hashes),
+            "exact_match_ratio": exact_match_ratio,
+            "items": items,
+        }
+
     def _dice_ratio(self, left: set[Any], right: set[Any]) -> float:
         if not left or not right:
             return 0.0
@@ -1870,13 +1966,15 @@ class DuplicateCheckService:
         exact_block_overlap_ratio: float,
         exact_section_match_ratio: float,
         exact_table_match_ratio: float,
+        exact_image_match_ratio: float,
     ) -> float:
         if exact_duplicate:
             return 1.0
         score = (
-            (0.45 * exact_section_match_ratio)
+            (0.40 * exact_section_match_ratio)
             + (0.35 * exact_block_overlap_ratio)
             + (0.20 * exact_table_match_ratio)
+            + (0.05 * exact_image_match_ratio)
         )
         return min(round(score, 4), 0.9999)
 
@@ -1888,25 +1986,162 @@ class DuplicateCheckService:
         exact_block_count: int,
         exact_section_count: int,
         exact_table_count: int,
+        exact_image_count: int,
         exact_block_overlap_ratio: float,
     ) -> str:
         if exact_duplicate:
             return "high"
         if exact_table_count >= 2:
             return "high"
+        if exact_image_count >= 3:
+            return "high"
         if exact_match_score >= 0.35 and exact_section_count >= 5:
             return "high"
-        if exact_section_count >= 3 or exact_table_count >= 1:
+        if exact_section_count >= 3 or exact_table_count >= 1 or exact_image_count >= 2:
             return "medium"
         if exact_block_count >= 5 or exact_block_overlap_ratio >= 0.15:
             return "medium"
-        if exact_block_count >= 1:
+        if exact_block_count >= 1 or exact_image_count >= 1:
             return "low"
         return "none"
 
     def _risk_rank(self, risk_level: Any) -> int:
         mapping = {"high": 3, "medium": 2, "low": 1, "none": 0}
         return mapping.get(str(risk_level or "none"), 0)
+
+    def _get_minio_service(self) -> MinioService:
+        if self._minio_service is None:
+            self._minio_service = MinioService()
+        return self._minio_service
+
+    def _extract_document_images(
+        self,
+        record: dict[str, Any],
+        *,
+        role: str,
+    ) -> list[dict[str, Any]]:
+        if role != DOCUMENT_TYPE_TECHNICAL_BID:
+            return []
+
+        file_url = str(record.get("file_url") or "").strip()
+        if not file_url:
+            return []
+        cached = self._document_image_cache.get(file_url)
+        if cached is not None:
+            return [dict(item) for item in cached]
+
+        try:
+            bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
+            file_bytes, content_type = self._get_minio_service().get_object_bytes(
+                object_name,
+                bucket_name=bucket_name,
+            )
+            images = self._extract_image_entries_from_file_bytes(
+                file_bytes,
+                file_name=str(record.get("file_name") or object_name),
+                content_type=content_type,
+            )
+        except Exception:
+            images = []
+
+        self._document_image_cache[file_url] = [dict(item) for item in images]
+        return images
+
+    def _extract_image_entries_from_file_bytes(
+        self,
+        file_bytes: bytes,
+        *,
+        file_name: str,
+        content_type: str,
+    ) -> list[dict[str, Any]]:
+        normalized_name = str(file_name or "").strip().lower()
+        normalized_type = str(content_type or "").strip().lower()
+        if normalized_name.endswith(".pdf") or "pdf" in normalized_type:
+            return self._extract_pdf_image_entries(file_bytes)
+        return self._extract_raster_image_entries(file_bytes)
+
+    def _extract_pdf_image_entries(self, file_bytes: bytes) -> list[dict[str, Any]]:
+        try:
+            import fitz
+        except Exception:
+            return []
+
+        entries_by_hash: dict[str, dict[str, Any]] = {}
+        try:
+            document = fitz.open(stream=file_bytes, filetype="pdf")
+        except Exception:
+            return []
+
+        try:
+            for page_index in range(document.page_count):
+                page = document.load_page(page_index)
+                seen_page_hashes: set[str] = set()
+                for image_meta in page.get_images(full=True):
+                    xref = int(image_meta[0])
+                    try:
+                        extracted = document.extract_image(xref)
+                    except Exception:
+                        continue
+                    image_bytes = extracted.get("image")
+                    if not image_bytes:
+                        continue
+                    image_entry = self._build_image_entry(
+                        image_bytes=image_bytes,
+                        page=page_index + 1,
+                    )
+                    if image_entry is None:
+                        continue
+                    image_hash = str(image_entry.get("exact_hash") or "")
+                    if not image_hash or image_hash in seen_page_hashes:
+                        continue
+                    seen_page_hashes.add(image_hash)
+                    existing = entries_by_hash.get(image_hash)
+                    if existing is None:
+                        entries_by_hash[image_hash] = image_entry
+                    else:
+                        merged_pages = sorted(
+                            set(existing.get("pages") or []) | set(image_entry.get("pages") or [])
+                        )
+                        existing["pages"] = merged_pages
+        finally:
+            document.close()
+
+        return sorted(entries_by_hash.values(), key=lambda item: (item.get("pages") or [10**9])[0])
+
+    def _extract_raster_image_entries(self, file_bytes: bytes) -> list[dict[str, Any]]:
+        image_entry = self._build_image_entry(image_bytes=file_bytes, page=1)
+        return [image_entry] if image_entry is not None else []
+
+    def _build_image_entry(
+        self,
+        *,
+        image_bytes: bytes,
+        page: int,
+    ) -> dict[str, Any] | None:
+        try:
+            from PIL import Image
+        except Exception:
+            return None
+
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                rgb = image.convert("RGB")
+                width, height = rgb.size
+                if width < 80 or height < 80 or (width * height) < 20000:
+                    return None
+                pixel_bytes = rgb.tobytes()
+        except Exception:
+            return None
+
+        exact_hash = hashlib.sha256(
+            f"{width}x{height}|rgb|".encode("utf-8") + pixel_bytes
+        ).hexdigest()
+        return {
+            "pages": [int(page)],
+            "width": int(width),
+            "height": int(height),
+            "exact_hash": exact_hash,
+        }
 
     def _hash_text(self, text: str) -> str:
         return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()

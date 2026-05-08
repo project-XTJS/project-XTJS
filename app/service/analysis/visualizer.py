@@ -12,6 +12,7 @@ from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
+from app.service.analysis.duplicate_merge import DuplicateResultMerger
 
 class ReportVisualizer:
     """可视化工具：生成基于投标人(投标文件)正文内容的合规报告"""
@@ -224,7 +225,7 @@ class ReportVisualizer:
                 transition: transform 0.2s;
             }
             
-            .template-match { color: #0d5cb6; background-color: #e6f1fc; padding: 2px 6px; border-radius: 4px; margin: 0 2px; font-weight: 500; } 
+            .template-match { color: var(--text-main); background: transparent; padding: 0; border-radius: 0; margin: 0; font-weight: inherit; } 
             .bidder-data { color: var(--text-main); } 
             
             .missing-badge { display: inline-block; background: var(--danger-light); border: 1px solid var(--danger-border); color: var(--danger-color); padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; margin: 0 4px; vertical-align: middle; }
@@ -559,14 +560,10 @@ class ReportVisualizer:
             label = html.escape(str(entry.get("label") or "-"))
             page = entry.get("page")
             page_end = entry.get("page_end")
-            bbox = entry.get("bbox")
             document = html.escape(str(entry.get("document") or default_document or "bidder"))
             if page is not None:
-                bbox_attr = ""
-                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                    bbox_attr = ",".join(str(int(round(float(item)))) for item in bbox[:4] if isinstance(item, (int, float)))
                 chips.append(
-                    f"<button type='button' class='locator-chip locator-open' data-document='{document}' data-page='{page}' data-page-end='{page_end if isinstance(page_end, int) else page}' data-bbox='{html.escape(bbox_attr)}' data-label='{label}'>{label}</button>"
+                    f"<button type='button' class='locator-chip locator-open' data-document='{document}' data-page='{page}' data-page-end='{page_end if isinstance(page_end, int) else page}' data-bbox='' data-label='{label}'>{label}</button>"
                 )
             else:
                 chips.append(f"<div class='locator-chip'>{label}</div>")
@@ -2125,37 +2122,12 @@ class ReportVisualizer:
         document_key = self._project_locator_document_key(entry, str(label))
         if not document_key:
             return f"<span>{html.escape(str(label))}</span>"
-        bbox_attr = ""
-        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-            bbox_attr = ",".join(
-                str(int(round(float(item))))
-                for item in bbox[:4]
-                if isinstance(item, (int, float))
-            )
-        extra_attrs = []
-        if highlight_phrases:
-            extra_attrs.append(
-                f" data-highlight-phrases='{html.escape(json.dumps(highlight_phrases, ensure_ascii=False))}'"
-            )
-        if highlight_rects:
-            extra_attrs.append(
-                f" data-highlight-rects='{html.escape(json.dumps(highlight_rects, ensure_ascii=False))}'"
-            )
-        if highlight_html:
-            extra_attrs.append(
-                f" data-highlight-html='{html.escape(str(highlight_html))}'"
-            )
-        if highlight_title:
-            extra_attrs.append(
-                f" data-highlight-title='{html.escape(str(highlight_title))}'"
-            )
         return (
             f"<button type='button' class='issue-link issue-page-link issue-link-button locator-open' "
             f"data-document='{html.escape(document_key)}' "
             f"data-page='{page}' "
             f"data-page-end='{page_end if isinstance(page_end, int) and page_end >= page else page}' "
-            f"data-bbox='{html.escape(bbox_attr)}' "
-            f"{''.join(extra_attrs)}"
+            f"data-bbox='' "
             f"data-label='{html.escape(str(label))}'>"
             f"{html.escape(str(label))}</button>"
         )
@@ -2605,6 +2577,8 @@ class ReportVisualizer:
             collected.extend(self._project_normalize_pages(section.get(pages_key)))
         for table in item.get("duplicate_tables") or []:
             collected.extend(self._project_normalize_pages(table.get(pages_key)))
+        for image in item.get("duplicate_images") or []:
+            collected.extend(self._project_normalize_pages(image.get(pages_key)))
         for block in item.get("duplicate_blocks") or []:
             collected.extend(self._project_normalize_pages(block.get(page_key), block.get("page")))
         return sorted(set(collected))
@@ -2648,14 +2622,7 @@ class ReportVisualizer:
         return files
 
     def _project_duplicate_cluster_items(self, items):
-        normalized_items = [item for item in items if self._project_duplicate_item_files(item)]
-        return [
-            {
-                "files": self._project_duplicate_item_files(item),
-                "items": [item],
-            }
-            for item in normalized_items
-        ]
+        return DuplicateResultMerger(self).cluster_items(items)
 
     def _project_duplicate_cluster_metrics(self, cluster):
         totals = {
@@ -2796,7 +2763,7 @@ class ReportVisualizer:
     ):
         items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
         if not items:
-            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+            return "<tr><td colspan='8'>未发现相关可疑组</td></tr>"
 
         page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
         detail_page = issue_pages.get(page_key, "")
@@ -3136,6 +3103,7 @@ class ReportVisualizer:
         blocks = item.get("duplicate_blocks") or []
         sections = item.get("duplicate_sections") or []
         tables = item.get("duplicate_tables") or []
+        images = item.get("duplicate_images") or []
         similar_blocks = item.get("similar_blocks") or []
         similar_sections = item.get("similar_sections") or []
         similar_tables = item.get("similar_tables") or []
@@ -3197,6 +3165,36 @@ class ReportVisualizer:
                     "</li>"
                 )
             parts.append(f"<details open><summary>重复表格证据（{len(tables)}）</summary><ul class='issue-evidence-list'>{''.join(entries)}</ul></details>")
+
+        if images:
+            entries = []
+            for image in images:
+                left_pages = self._project_normalize_pages(image.get("left_pages"))
+                right_pages = self._project_normalize_pages(image.get("right_pages"))
+                left_size = "x".join(
+                    str(value)
+                    for value in (image.get("left_width"), image.get("left_height"))
+                    if isinstance(value, int) and value > 0
+                )
+                right_size = "x".join(
+                    str(value)
+                    for value in (image.get("right_width"), image.get("right_height"))
+                    if isinstance(value, int) and value > 0
+                )
+                hash_text = str(image.get("image_hash") or "").strip()
+                entries.append(
+                    "<li>"
+                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                    f"<div class='issue-preview'>尺寸：{html.escape(left_size or '-')}</div>"
+                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                    f"<div class='issue-preview'>尺寸：{html.escape(right_size or '-')}</div>"
+                    f"<div class='issue-preview'>图片指纹：{html.escape(hash_text[:12] if hash_text else '-')}</div>"
+                    "</li>"
+                )
+            parts.append(
+                f"<details open><summary>重复图片证据（{len(images)}）</summary>"
+                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            )
 
         if similar_sections:
             entries = []
@@ -3928,7 +3926,7 @@ class ReportVisualizer:
     .issue-row.issue-severity-high {{ border-left: 6px solid #c62828; background: #fff5f5; }}
     .issue-row.issue-severity-medium {{ border-left: 6px solid #f9a825; background: #fff8e1; }}
     .issue-row.issue-severity-low {{ border-left: 6px solid #2e7d32; background: #f6fbf6; }}
-    mark {{ background: #ffe082; padding: 0 2px; }}
+    mark {{ background: transparent; padding: 0; color: inherit; }}
     details {{ margin-top: 12px; }}
     summary {{ cursor: pointer; font-weight: 700; }}
   </style>
@@ -4085,7 +4083,7 @@ class ReportVisualizer:
           <h3>商务标查重（当前文件相关）</h3>
           <table>
             <thead>
-              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>详情</th></tr>
+              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>重复图</th><th>详情</th></tr>
             </thead>
             <tbody>{self._project_render_duplicate_rows(business_duplicate, DOCUMENT_TYPE_BUSINESS_BID, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
           </table>
@@ -4097,7 +4095,7 @@ class ReportVisualizer:
           <h3>技术标查重（全项目）</h3>
           <table>
             <thead>
-              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>详情</th></tr>
+              <tr><th>风险</th><th>分数</th><th>问题文件</th><th>重复段</th><th>重复句</th><th>重复表</th><th>重复图</th><th>详情</th></tr>
             </thead>
             <tbody>{self._project_render_duplicate_rows(technical_duplicate, DOCUMENT_TYPE_TECHNICAL_BID, source_lookup=source_lookup, issue_pages=issue_pages)}</tbody>
           </table>
@@ -4250,8 +4248,9 @@ class ReportVisualizer:
             background: #f8fbf7;
           }}
           .project-review-addon mark {{
-            background: #ffe082;
-            padding: 0 2px;
+            background: transparent;
+            padding: 0;
+            color: inherit;
           }}
         </style>
         <section class="project-review-addon">
@@ -4494,6 +4493,7 @@ class ReportVisualizer:
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_image_count', 'similar_image_count'))}</td>"
                 f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}{preview_button}</div></td>"
                 "</tr>"
             )
@@ -4529,7 +4529,7 @@ class ReportVisualizer:
                     pair_sections.append(
                         f"""
                         <details open>
-                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))} | 重复图 {html.escape(self._project_metric_display(pair_metrics, 'exact_image_count', 'similar_image_count'))}</summary>
                           {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
                         </details>
                         """
@@ -4547,6 +4547,7 @@ class ReportVisualizer:
                             <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
                             <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
                             <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                            <span>重复图 {html.escape(self._project_metric_display(metrics, 'exact_image_count', 'similar_image_count'))}</span>
                           </div>
                           <div class="issue-card-actions">{preview_button}</div>
                         </div>
@@ -4614,7 +4615,7 @@ class ReportVisualizer:
     .issue-row.issue-severity-high {{ border-left: 6px solid #c62828; background: #fff5f5; }}
     .issue-row.issue-severity-medium {{ border-left: 6px solid #f9a825; background: #fff8e1; }}
     .issue-row.issue-severity-low {{ border-left: 6px solid #2e7d32; background: #f6fbf6; }}
-    mark {{ background: #ffe082; padding: 0 2px; }}
+    mark {{ background: transparent; padding: 0; color: inherit; }}
     details {{ margin-top: 12px; }}
     summary {{ cursor: pointer; font-weight: 700; }}
   </style>
@@ -4773,15 +4774,10 @@ class ReportVisualizer:
             }
             .locator-box,
             .locator-multi-box {
-                position: absolute;
-                border: 3px solid #ef4444;
-                background: rgba(239, 68, 68, 0.14);
-                box-shadow: 0 0 0 1px rgba(255,255,255,0.6) inset;
-                pointer-events: none;
-                display: none;
+                display: none !important;
             }
             .locator-box.visible,
-            .locator-multi-box.visible { display: block; }
+            .locator-multi-box.visible { display: none !important; }
             .locator-note {
                 margin-top: 12px;
                 color: var(--text-regular);
@@ -4789,15 +4785,7 @@ class ReportVisualizer:
             }
             .locator-highlight,
             .locator-multi-highlight {
-                display: none;
-                border: 1px solid #e6eaf0;
-                border-radius: 10px;
-                background: #fffdf5;
-                padding: 10px 12px;
-                color: var(--text-main);
-                margin-top: 12px;
-                width: min(100%, 1320px);
-                box-sizing: border-box;
+                display: none !important;
             }
             .locator-multi-wrap {
                 display: grid;
@@ -4933,10 +4921,10 @@ class ReportVisualizer:
                 word-break: break-word;
             }
             .locator-highlight-body mark {
-                background: #ffe082;
-                color: #3b2a00;
-                padding: 0 2px;
-                border-radius: 3px;
+                background: transparent;
+                color: inherit;
+                padding: 0;
+                border-radius: 0;
             }
             @media (max-width: 900px) {
                 .locator-dialog {
@@ -5140,23 +5128,10 @@ class ReportVisualizer:
                     return `${{base}}#page=${{page}}`;
                 }}
 
-                async function loadRemotePagePreview(docConfig, page, options = {{}}) {{
+                async function loadRemotePagePreview(docConfig, page) {{
                     const baseRequestUrl = resolveRemotePreviewUrl(docConfig, page);
                     if (!baseRequestUrl) return null;
                     const requestUrl = new URL(baseRequestUrl, window.location.href);
-                    let highlightPhrases = normalizeHighlightPhrases(options.highlightPhrases || []);
-                    const bbox = Array.isArray(options.highlightBbox) ? options.highlightBbox : null;
-                    const highlightRects = normalizeHighlightRects(options.highlightRects || []);
-                    if (highlightRects.length > 1) {{
-                        highlightPhrases = [];
-                    }}
-                    highlightPhrases.forEach((phrase) => requestUrl.searchParams.append('highlight', phrase));
-                    if (bbox && bbox.length >= 4) {{
-                        requestUrl.searchParams.set('highlight_bbox', bbox.slice(0, 4).join(','));
-                    }}
-                    if (highlightRects.length) {{
-                        requestUrl.searchParams.set('highlight_rects', JSON.stringify(highlightRects));
-                    }}
                     const requestKey = requestUrl.toString();
                     if (remotePageCache.has(requestKey)) {{
                         return remotePageCache.get(requestKey);
@@ -5227,29 +5202,9 @@ class ReportVisualizer:
                 }}
 
                 function renderBoxForImage(boxElement, imageElement, bbox, pageConfig) {{
-                    if (!boxElement || !imageElement || !bbox || !pageConfig) {{
-                        if (boxElement) {{
-                            boxElement.classList.remove('visible');
-                        }}
-                        return;
-                    }}
-                    const naturalWidth = Number(pageConfig.width) || imageElement.naturalWidth || imageElement.width;
-                    const naturalHeight = Number(pageConfig.height) || imageElement.naturalHeight || imageElement.height;
-                    if (!naturalWidth || !naturalHeight) {{
+                    if (boxElement) {{
                         boxElement.classList.remove('visible');
-                        return;
                     }}
-                    const scaleX = imageElement.clientWidth / naturalWidth;
-                    const scaleY = imageElement.clientHeight / naturalHeight;
-                    const left = bbox[0] * scaleX;
-                    const top = bbox[1] * scaleY;
-                    const width = Math.max((bbox[2] - bbox[0]) * scaleX, 6);
-                    const height = Math.max((bbox[3] - bbox[1]) * scaleY, 6);
-                    boxElement.style.left = left + 'px';
-                    boxElement.style.top = top + 'px';
-                    boxElement.style.width = width + 'px';
-                    boxElement.style.height = height + 'px';
-                    boxElement.classList.add('visible');
                 }}
 
                 function renderBox(bbox, pageConfig) {{
@@ -5257,14 +5212,7 @@ class ReportVisualizer:
                 }}
 
                 function shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects) {{
-                    return Boolean(
-                        (highlightPhrases.length || highlightRects.length)
-                        && pageConfig
-                        && (
-                            Boolean(pageConfig.highlight_applied)
-                            || Number(pageConfig.highlight_rect_count || 0) > 0
-                        )
-                    );
+                    return false;
                 }}
 
                 async function loadSinglePreview(docConfig, page, bbox, options = {{}}) {{
@@ -5298,11 +5246,7 @@ class ReportVisualizer:
                     emptyNode.style.display = 'flex';
                     emptyNode.textContent = 'Loading source preview...';
                     try {{
-                        const pageConfig = await loadRemotePagePreview(docConfig, page, {{
-                            highlightPhrases,
-                            highlightBbox: bbox,
-                            highlightRects,
-                        }});
+                        const pageConfig = await loadRemotePagePreview(docConfig, page);
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
@@ -5464,11 +5408,7 @@ class ReportVisualizer:
                         const resolved = resolvePagePreview(target.document, page);
                         const pageConfig = resolved
                             ? resolved.pageConfig
-                            : await loadRemotePagePreview(docConfig, page, {{
-                                highlightPhrases,
-                                highlightBbox: bbox,
-                                highlightRects,
-                            }});
+                            : await loadRemotePagePreview(docConfig, page);
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
@@ -5976,6 +5916,7 @@ class ReportVisualizer:
         filtered["duplicate_blocks"] = duplicate_blocks
         filtered["duplicate_sections"] = duplicate_sections
         filtered["duplicate_tables"] = duplicate_tables
+        filtered["duplicate_images"] = list(item.get("duplicate_images") or [])
         filtered["similar_blocks"] = similar_blocks
         filtered["similar_sections"] = similar_sections
         filtered["similar_tables"] = similar_tables
@@ -5984,6 +5925,7 @@ class ReportVisualizer:
         metrics["exact_block_count"] = len(duplicate_blocks)
         metrics["exact_section_count"] = len(duplicate_sections)
         metrics["exact_table_count"] = len(duplicate_tables)
+        metrics["exact_image_count"] = len(filtered["duplicate_images"])
         metrics["similar_block_count"] = len(similar_blocks)
         metrics["similar_section_count"] = len(similar_sections)
         metrics["similar_table_count"] = len(similar_tables)
@@ -6000,6 +5942,7 @@ class ReportVisualizer:
             "similar_block_count": 0,
             "exact_table_count": 0,
             "similar_table_count": 0,
+            "exact_image_count": 0,
         }
         for raw_item in cluster.get("items") or []:
             item = self._project_filter_duplicate_item_evidence(raw_item)

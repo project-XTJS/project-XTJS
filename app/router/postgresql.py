@@ -10,12 +10,13 @@ import tempfile
 import time
 from collections import OrderedDict
 from threading import Lock
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from psycopg2 import Error as PsycopgError
+from starlette.concurrency import run_in_threadpool
 
 from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
@@ -51,6 +52,12 @@ from app.schemas.postgresql import (
     ProjectUpdateRequest,
 )
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
+from app.service.analysis.duplicate_merge import (
+    DOC_TYPE_BY_MERGED_RESULT_KEY,
+    MERGED_RESULT_KEY_BY_DOC_TYPE,
+    RAW_RESULT_KEY_BY_DOC_TYPE,
+    build_duplicate_merge_results,
+)
 from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
@@ -690,6 +697,12 @@ def _run_project_duplicate_check(
         result_key=result_key,
         result_value=duplicate_result,
     )
+    _persist_duplicate_merge_results(
+        db_service=db_service,
+        project_identifier=identifier_id,
+        source_result_key=result_key,
+        raw_result=duplicate_result,
+    )
     return duplicate_result
 
 
@@ -891,6 +904,7 @@ def _project_api_links(project_identifier: str) -> dict[str, str]:
     return {
         "detail_url": f"/api/postgresql/projects/{quoted_identifier}",
         "results_url": f"/api/postgresql/projects/{quoted_identifier}/results",
+        "merged_results_url": f"/api/postgresql/projects/{quoted_identifier}/merged-results",
         "visualization_url": f"/api/postgresql/projects/{quoted_identifier}/visualization-data",
     }
 
@@ -921,6 +935,25 @@ def _collect_project_document_identifiers(project_detail: dict[str, Any]) -> lis
     return identifiers
 
 
+def _build_result_record_meta(result_record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not isinstance(result_record, dict) or not result_record:
+        return None
+    return {
+        "id": result_record.get("id"),
+        "project_identifier_id": result_record.get("project_identifier_id"),
+        "create_time": result_record.get("create_time"),
+        "update_time": result_record.get("update_time"),
+    }
+
+
+def _compact_display_results_for_response(display_results: dict[str, Any]) -> dict[str, Any]:
+    compact_results = dict(display_results)
+    compact_results.pop("duplicate_check", None)
+    for merged_key in MERGED_RESULT_KEY_BY_DOC_TYPE.values():
+        compact_results.pop(merged_key, None)
+    return compact_results
+
+
 def _build_project_visualization_payload(
     *,
     identifier_id: str,
@@ -928,7 +961,14 @@ def _build_project_visualization_payload(
     project_result: Optional[dict[str, Any]],
     db_service: PostgreSQLService,
     include_document_content: bool = False,
+    include_raw_results: bool = False,
+    include_result_record: bool = False,
 ) -> dict[str, Any]:
+    refreshed_result_record, raw_results, display_results = _build_project_display_results(
+        identifier_id=identifier_id,
+        result_record=project_result,
+        db_service=db_service,
+    )
     document_identifiers = _collect_project_document_identifiers(project_detail)
     document_map: dict[str, dict[str, Any]] = {}
     for document_identifier in document_identifiers:
@@ -958,16 +998,22 @@ def _build_project_visualization_payload(
                 relation_payload["documents"][role_name] = document_payload
         relation_items.append(relation_payload)
 
-    result_payload = (project_result or {}).get("result") or {}
-    return {
+    compact_display_results = _compact_display_results_for_response(display_results)
+    payload = {
         "project": project_detail.get("project") or {"identifier_id": identifier_id},
         "project_links": _project_api_links(identifier_id),
         "relations": relation_items,
         "documents": list(document_map.values()),
-        "result_record": project_result,
-        "results": result_payload,
-        "available_result_keys": sorted(result_payload.keys()),
+        "result_record_meta": _build_result_record_meta(refreshed_result_record or project_result),
+        "results": compact_display_results,
+        "available_result_keys": sorted(compact_display_results.keys()),
     }
+    if include_result_record:
+        payload["result_record"] = refreshed_result_record or project_result
+    if include_raw_results:
+        payload["raw_results"] = raw_results
+        payload["raw_available_result_keys"] = sorted(raw_results.keys())
+    return payload
 
 
 async def _persist_uploaded_analysis_documents(
@@ -1015,6 +1061,143 @@ def _persist_uploaded_result(
         result_key=result_key,
         result_value=result_value,
     )
+
+
+def _persist_duplicate_merge_results(
+    *,
+    db_service: PostgreSQLService,
+    project_identifier: str,
+    source_result_key: str,
+    raw_result: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    merged_results = build_duplicate_merge_results(
+        raw_result=raw_result,
+        source_result_key=source_result_key,
+    )
+    for merged_key, merged_value in merged_results.items():
+        db_service.upsert_project_result_item(
+            project_identifier_id=project_identifier,
+            result_key=merged_key,
+            result_value=merged_value,
+        )
+    return merged_results
+
+
+def _resolve_merged_result_source(
+    *,
+    merged_result_key: str,
+    results: dict[str, Any],
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    doc_type = DOC_TYPE_BY_MERGED_RESULT_KEY.get(merged_result_key)
+    if not doc_type:
+        return None, None
+    preferred_raw_key = RAW_RESULT_KEY_BY_DOC_TYPE.get(doc_type)
+    if preferred_raw_key and isinstance(results.get(preferred_raw_key), dict):
+        return preferred_raw_key, results.get(preferred_raw_key)
+    combined_result = results.get("duplicate_check")
+    if isinstance(combined_result, dict):
+        return "duplicate_check", combined_result
+    return None, None
+
+
+def _load_or_build_project_merged_results(
+    *,
+    identifier_id: str,
+    result_record: Optional[dict[str, Any]],
+    db_service: PostgreSQLService,
+    requested_keys: Optional[list[str]] = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    results = dict((result_record or {}).get("result") or {})
+    target_keys = requested_keys or sorted(
+        {
+            merged_key
+            for merged_key in MERGED_RESULT_KEY_BY_DOC_TYPE.values()
+            if (
+                merged_key in results
+                or _resolve_merged_result_source(merged_result_key=merged_key, results=results)[0]
+            )
+        }
+    )
+
+    merged_payloads: dict[str, Any] = {}
+    changed = False
+    for merged_key in target_keys:
+        existing = results.get(merged_key)
+        if isinstance(existing, dict) and existing:
+            merged_payloads[merged_key] = existing
+            continue
+
+        source_result_key, source_result = _resolve_merged_result_source(
+            merged_result_key=merged_key,
+            results=results,
+        )
+        if not source_result_key or not isinstance(source_result, dict):
+            continue
+
+        built_results = build_duplicate_merge_results(
+            raw_result=source_result,
+            source_result_key=source_result_key,
+        )
+        built_payload = built_results.get(merged_key)
+        if not isinstance(built_payload, dict):
+            continue
+
+        results[merged_key] = built_payload
+        merged_payloads[merged_key] = built_payload
+        db_service.upsert_project_result_item(
+            project_identifier_id=identifier_id,
+            result_key=merged_key,
+            result_value=built_payload,
+        )
+        changed = True
+
+    refreshed_result_record = result_record
+    if changed:
+        refreshed_result_record = db_service.get_project_result(identifier_id)
+        results = dict((refreshed_result_record or {}).get("result") or {})
+        merged_payloads = {
+            key: value
+            for key, value in ((key, results.get(key)) for key in target_keys)
+            if isinstance(value, dict)
+        }
+
+    return refreshed_result_record or result_record or {}, merged_payloads
+
+
+def _build_project_display_results(
+    *,
+    identifier_id: str,
+    result_record: Optional[dict[str, Any]],
+    db_service: PostgreSQLService,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    refreshed_record, merged_results = _load_or_build_project_merged_results(
+        identifier_id=identifier_id,
+        result_record=result_record,
+        db_service=db_service,
+    )
+    raw_results = dict((refreshed_record or result_record or {}).get("result") or {})
+    display_results = dict(raw_results)
+
+    merged_key_aliases = {
+        "business_bid_duplicate_check": MERGED_RESULT_KEY_BY_DOC_TYPE.get(DOCUMENT_TYPE_BUSINESS_BID),
+        "technical_bid_duplicate_check": MERGED_RESULT_KEY_BY_DOC_TYPE.get(DOCUMENT_TYPE_TECHNICAL_BID),
+    }
+    for raw_key, merged_key in merged_key_aliases.items():
+        if not merged_key:
+            continue
+        merged_payload = merged_results.get(merged_key)
+        if isinstance(merged_payload, dict) and merged_payload:
+            display_results[raw_key] = merged_payload
+            display_results[merged_key] = merged_payload
+
+    if "duplicate_check" in display_results:
+        display_results["duplicate_check"] = {
+            "view_mode": "merged",
+            "business_bid_duplicate_check": display_results.get("business_bid_duplicate_check"),
+            "technical_bid_duplicate_check": display_results.get("technical_bid_duplicate_check"),
+        }
+
+    return refreshed_record or result_record or {}, raw_results, display_results
 
 
 @router.post("/projects", summary="创建项目")
@@ -1093,6 +1276,18 @@ async def get_project_detail(
 @router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
 async def get_project_results(
     identifier_id: str,
+    view: Literal["display", "raw"] = Query(
+        default="display",
+        description="display=默认返回 merge 后的展示结果，raw=返回原始结果",
+    ),
+    include_raw_results: bool = Query(
+        default=False,
+        description="是否额外返回 raw_results；默认关闭以减少响应体积",
+    ),
+    include_result_record: bool = Query(
+        default=False,
+        description="是否额外返回完整 result_record；默认只返回轻量元信息",
+    ),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
@@ -1101,13 +1296,34 @@ async def get_project_results(
             raise HTTPException(status_code=404, detail="project not found")
 
         result_record = db_service.get_project_result(identifier_id)
-        results = (result_record or {}).get("result") or {}
-        return {
+        refreshed_record = result_record or {}
+        raw_results = dict((result_record or {}).get("result") or {})
+        display_results = raw_results
+        if view == "display" or include_raw_results:
+            refreshed_record, raw_results, display_results = _build_project_display_results(
+                identifier_id=identifier_id,
+                result_record=result_record,
+                db_service=db_service,
+            )
+
+        selected_results = (
+            _compact_display_results_for_response(display_results)
+            if view == "display"
+            else raw_results
+        )
+        payload = {
             "project": project,
-            "result_record": result_record,
-            "results": results,
-            "available_result_keys": sorted(results.keys()),
+            "view": view,
+            "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+            "results": selected_results,
+            "available_result_keys": sorted(selected_results.keys()),
         }
+        if include_result_record:
+            payload["result_record"] = refreshed_record or result_record
+        if include_raw_results:
+            payload["raw_results"] = raw_results
+            payload["raw_available_result_keys"] = sorted(raw_results.keys())
+        return payload
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -1118,6 +1334,14 @@ async def get_project_results(
 async def get_project_result_item(
     identifier_id: str,
     result_key: str,
+    view: Literal["display", "raw"] = Query(
+        default="display",
+        description="display=展示用结果（查重优先返回 merge 后结构），raw=原始结果。",
+    ),
+    include_result_record: bool = Query(
+        default=False,
+        description="是否额外返回完整 result_record；默认只返回轻量元信息",
+    ),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
@@ -1126,16 +1350,76 @@ async def get_project_result_item(
             raise HTTPException(status_code=404, detail="project not found")
 
         result_record = db_service.get_project_result(identifier_id)
-        results = (result_record or {}).get("result") or {}
-        if result_key not in results:
+        refreshed_record, raw_results, display_results = _build_project_display_results(
+            identifier_id=identifier_id,
+            result_record=result_record,
+            db_service=db_service,
+        )
+        selected_results = display_results if view == "display" else raw_results
+        if result_key not in selected_results:
             raise HTTPException(status_code=404, detail="result_key not found")
 
-        return {
+        payload = {
+            "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
             "project": project,
             "result_key": result_key,
-            "result": results[result_key],
-            "available_result_keys": sorted(results.keys()),
+            "view": view,
+            "result": selected_results[result_key],
+            "available_result_keys": sorted(selected_results.keys()),
         }
+        if include_result_record:
+            payload["result_record"] = refreshed_record or result_record
+        return payload
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/merged-results", summary="查询项目查重合并结果")
+async def get_project_merged_results(
+    identifier_id: str,
+    result_key: Optional[str] = Query(
+        default=None,
+        description="可选：business_bid_duplicate_clusters 或 technical_bid_duplicate_clusters",
+    ),
+    include_result_record: bool = Query(
+        default=False,
+        description="是否额外返回完整 result_record；默认只返回轻量元信息",
+    ),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project = db_service.get_project_by_identifier(identifier_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        requested_keys: Optional[list[str]] = None
+        if result_key is not None:
+            normalized_key = str(result_key or "").strip()
+            if normalized_key not in DOC_TYPE_BY_MERGED_RESULT_KEY:
+                raise HTTPException(status_code=400, detail="unsupported merged result key")
+            requested_keys = [normalized_key]
+
+        result_record = db_service.get_project_result(identifier_id)
+        refreshed_record, merged_results = _load_or_build_project_merged_results(
+            identifier_id=identifier_id,
+            result_record=result_record,
+            db_service=db_service,
+            requested_keys=requested_keys,
+        )
+        if requested_keys and requested_keys[0] not in merged_results:
+            raise HTTPException(status_code=404, detail="merged result not found")
+
+        payload = {
+            "project": project,
+            "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+            "results": merged_results,
+            "available_result_keys": sorted(merged_results.keys()),
+        }
+        if include_result_record:
+            payload["result_record"] = refreshed_record or result_record
+        return payload
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -1148,6 +1432,14 @@ async def get_project_visualization_data(
     include_document_content: bool = Query(
         default=False,
         description="是否包含文档 OCR JSON 原始内容，默认不返回以减少体积",
+    ),
+    include_raw_results: bool = Query(
+        default=False,
+        description="是否额外返回 raw_results；默认关闭以减少响应体积",
+    ),
+    include_result_record: bool = Query(
+        default=False,
+        description="是否额外返回完整 result_record；默认只返回轻量元信息",
     ),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
@@ -1163,6 +1455,8 @@ async def get_project_visualization_data(
             project_result=project_result,
             db_service=db_service,
             include_document_content=include_document_content,
+            include_raw_results=include_raw_results,
+            include_result_record=include_result_record,
         )
     except HTTPException:
         raise
@@ -1300,7 +1594,8 @@ async def project_duplicate_check(
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
     try:
-        return _run_project_duplicate_check(
+        return await run_in_threadpool(
+            _run_project_duplicate_check,
             identifier_id=identifier_id,
             document_types=_document_types_from_scope(document_scope),
             max_evidence_sections=max_evidence_sections,
@@ -1324,7 +1619,8 @@ async def project_business_bid_format_review(
 ):
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     try:
-        return review_service.persist_project_business_review(
+        return await run_in_threadpool(
+            review_service.persist_project_business_review,
             project_identifier=identifier_id,
             result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
         )
@@ -1345,7 +1641,8 @@ async def project_business_bid_duplicate_check(
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
     try:
-        return _run_project_duplicate_check(
+        return await run_in_threadpool(
+            _run_project_duplicate_check,
             identifier_id=identifier_id,
             document_types=[DuplicateCheckScope.BUSINESS_BID.value],
             max_evidence_sections=max_evidence_sections,
@@ -1395,7 +1692,8 @@ async def upload_business_bid_duplicate_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        duplicate_result = duplicate_check_service.check_project_documents(
+        duplicate_result = await run_in_threadpool(
+            duplicate_check_service.check_project_documents,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
@@ -1403,17 +1701,26 @@ async def upload_business_bid_duplicate_check(
             max_evidence_sections=max_evidence_sections,
             max_pairs_per_type=max_pairs_per_type,
         )
-        result_record = _persist_uploaded_result(
+        result_record = await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="business_bid_duplicate_check",
             result_value=duplicate_result,
+        )
+        merged_results = await run_in_threadpool(
+            _persist_duplicate_merge_results,
+            db_service=db_service,
+            project_identifier=resolved_project_identifier,
+            source_result_key="business_bid_duplicate_check",
+            raw_result=duplicate_result,
         )
         return {
             "project": persisted_documents["project"],
             "result_key": "business_bid_duplicate_check",
             "result": duplicate_result,
             "result_record": result_record,
+            "merged_results": merged_results,
             "document_binding": persisted_documents["binding"],
         }
     except HTTPException:
@@ -1433,7 +1740,8 @@ async def project_technical_bid_duplicate_check(
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
     try:
-        return _run_project_duplicate_check(
+        return await run_in_threadpool(
+            _run_project_duplicate_check,
             identifier_id=identifier_id,
             document_types=[DuplicateCheckScope.TECHNICAL_BID.value],
             max_evidence_sections=max_evidence_sections,
@@ -1483,7 +1791,8 @@ async def upload_technical_bid_duplicate_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        duplicate_result = duplicate_check_service.check_project_documents(
+        duplicate_result = await run_in_threadpool(
+            duplicate_check_service.check_project_documents,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
@@ -1491,17 +1800,26 @@ async def upload_technical_bid_duplicate_check(
             max_evidence_sections=max_evidence_sections,
             max_pairs_per_type=max_pairs_per_type,
         )
-        result_record = _persist_uploaded_result(
+        result_record = await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="technical_bid_duplicate_check",
             result_value=duplicate_result,
+        )
+        merged_results = await run_in_threadpool(
+            _persist_duplicate_merge_results,
+            db_service=db_service,
+            project_identifier=resolved_project_identifier,
+            source_result_key="technical_bid_duplicate_check",
+            raw_result=duplicate_result,
         )
         return {
             "project": persisted_documents["project"],
             "result_key": "technical_bid_duplicate_check",
             "result": duplicate_result,
             "result_record": result_record,
+            "merged_results": merged_results,
             "document_binding": persisted_documents["binding"],
         }
     except HTTPException:
@@ -1519,7 +1837,8 @@ async def project_personnel_reuse_check(
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
     try:
-        return _run_project_personnel_reuse_check(
+        return await run_in_threadpool(
+            _run_project_personnel_reuse_check,
             identifier_id=identifier_id,
             db_service=db_service,
             bid_document_review_service=bid_document_review_service,
@@ -1563,20 +1882,23 @@ async def upload_personnel_reuse_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        review_result = bid_document_review_service.check_project_documents(
+        review_result = await run_in_threadpool(
+            bid_document_review_service.check_project_documents,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
             document_types=[DuplicateCheckScope.BUSINESS_BID.value],
         )
         personnel_result = _build_personnel_reuse_result(review_result)
-        result_record = _persist_uploaded_result(
+        result_record = await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="personnel_reuse_check",
             result_value=personnel_result,
         )
-        _persist_uploaded_result(
+        await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="bid_document_review",
@@ -1604,7 +1926,8 @@ async def project_typo_check(
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
     try:
-        return _run_project_typo_check(
+        return await run_in_threadpool(
+            _run_project_typo_check,
             identifier_id=identifier_id,
             db_service=db_service,
             bid_document_review_service=bid_document_review_service,
@@ -1652,20 +1975,23 @@ async def upload_typo_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        review_result = bid_document_review_service.check_project_documents(
+        review_result = await run_in_threadpool(
+            bid_document_review_service.check_project_documents,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
             document_types=None,
         )
         typo_result = _build_typo_check_result(review_result)
-        result_record = _persist_uploaded_result(
+        result_record = await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="typo_check",
             result_value=typo_result,
         )
-        _persist_uploaded_result(
+        await run_in_threadpool(
+            _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="bid_document_review",
@@ -1697,7 +2023,8 @@ async def project_bid_document_review(
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
     try:
-        return _run_project_bid_document_review(
+        return await run_in_threadpool(
+            _run_project_bid_document_review,
             identifier_id=identifier_id,
             document_types=_document_types_from_scope(document_scope),
             result_key="bid_document_review",
@@ -1727,7 +2054,8 @@ async def project_technical_bid_review_legacy(
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
     try:
-        return _run_project_bid_document_review(
+        return await run_in_threadpool(
+            _run_project_bid_document_review,
             identifier_id=identifier_id,
             document_types=_document_types_from_scope(document_scope),
             result_key="bid_document_review",
@@ -1755,7 +2083,8 @@ async def project_duplicate_check_legacy(
 ):
     request_payload = payload or ProjectDuplicateCheckRequest()
     try:
-        return _run_project_duplicate_check(
+        return await run_in_threadpool(
+            _run_project_duplicate_check,
             identifier_id=identifier_id,
             document_types=request_payload.document_types,
             max_evidence_sections=request_payload.max_evidence_sections,

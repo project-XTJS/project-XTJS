@@ -20,6 +20,7 @@ from app.service.analysis.bid_document_review import BidDocumentReviewService
 from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.duplicate_check import DuplicateCheckService
+from app.service.analysis.duplicate_merge import DuplicateResultMerger
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.itemized_pricing import ItemizedPricingChecker
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
@@ -425,6 +426,18 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                     evidence.get("header_signature"),
                 ]
             )
+        elif kind == "image":
+            candidates.extend(
+                [
+                    evidence.get("image_hash"),
+                    [
+                        evidence.get("left_width"),
+                        evidence.get("left_height"),
+                        evidence.get("right_width"),
+                        evidence.get("right_height"),
+                    ],
+                ]
+            )
         tokens = []
         for candidate in candidates:
             token = _normalize_cluster_token(self, candidate)
@@ -436,8 +449,9 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         mode = str(cluster.get("mode") or "similar")
         family = str(cluster.get("family") or "block")
         rank_map = {
-            ("exact", "table"): 6,
-            ("exact", "section"): 5,
+            ("exact", "table"): 7,
+            ("exact", "section"): 6,
+            ("exact", "image"): 5,
             ("exact", "block"): 4,
             ("similar", "table"): 3,
             ("similar", "section"): 2,
@@ -509,6 +523,25 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         if kind == "similar_table":
             rows = evidence.get(f"{side}_sample_rows") or evidence.get("sample_rows") or []
             return self._project_trim_text(json.dumps(rows, ensure_ascii=False), 220) if rows else "-"
+        if kind == "image":
+            width = evidence.get(f"{side}_width")
+            height = evidence.get(f"{side}_height")
+            dimensions = ""
+            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                dimensions = f"{width}x{height}"
+            pages = self._project_normalize_pages(
+                evidence.get(f"{side}_pages"),
+                evidence.get(f"{side}_page"),
+                evidence.get("page"),
+            )
+            page_label = ""
+            if pages:
+                coalesced = self._coalesce_page_ranges(pages)
+                if coalesced:
+                    start_page, end_page = coalesced[0]
+                    page_label = f"第{start_page}页" if start_page == end_page else f"第{start_page}-{end_page}页"
+            parts = [part for part in (page_label, dimensions, "相同图片") if part]
+            return " / ".join(parts) if parts else "相同图片"
         return "-"
 
     def _build_exact_range_links_html(self, source_lookup, file_name, ranges):
@@ -563,222 +596,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return "".join(parts)
 
     def _cluster_items(self, items):
-        evidence_groups = (
-            ("duplicate_sections", "section"),
-            ("duplicate_blocks", "block"),
-            ("duplicate_tables", "table"),
-            ("similar_sections", "similar_section"),
-            ("similar_blocks", "similar_block"),
-            ("similar_tables", "similar_table"),
-        )
-        occurrences = []
-        for raw_item in items:
-            item = self._project_filter_duplicate_item_evidence(raw_item)
-            left_file = str(item.get("left_file_name") or "").strip()
-            right_file = str(item.get("right_file_name") or "").strip()
-            if not left_file or not right_file:
-                continue
-            raw_score = item.get("match_score")
-            if raw_score is None:
-                raw_score = item.get("exact_match_score")
-            try:
-                score_value = float(raw_score or 0)
-            except (TypeError, ValueError):
-                score_value = 0.0
-            for group_key, kind in evidence_groups:
-                for evidence in item.get(group_key) or []:
-                    for occurrence in _explode_evidence_occurrences(self, evidence, kind):
-                        docs = {}
-                        for side, file_name in (("left", left_file), ("right", right_file)):
-                            pages = self._project_evidence_pages(occurrence, side)
-                            docs[file_name] = {
-                                "pages": self._project_normalize_pages(pages),
-                                "preview": _occurrence_preview(self, kind, occurrence, side),
-                            }
-                        tokens = _occurrence_tokens(self, kind, occurrence)
-                        if not tokens:
-                            tokens = [
-                                self._project_make_stable_token(
-                                    kind,
-                                    left_file,
-                                    right_file,
-                                    json.dumps(docs, ensure_ascii=False),
-                                )
-                            ]
-                        occurrences.append(
-                            {
-                                "kind": kind,
-                                "family": _cluster_family(self, kind),
-                                "mode": _cluster_mode(self, kind),
-                                "risk_level": str(item.get("risk_level") or "none"),
-                                "score_value": score_value,
-                                "score_display": self._project_duplicate_score(item),
-                                "similarity": occurrence.get("similarity"),
-                                "tokens": tokens,
-                                "docs": docs,
-                                "item": item,
-                                "evidence": occurrence,
-                            }
-                        )
-
-        if not occurrences:
-            return []
-
-        parent = list(range(len(occurrences)))
-
-        def find(index):
-            while parent[index] != index:
-                parent[index] = parent[parent[index]]
-                index = parent[index]
-            return index
-
-        def union(left, right):
-            left_root = find(left)
-            right_root = find(right)
-            if left_root != right_root:
-                parent[right_root] = left_root
-
-        token_owner = {}
-        for index, occurrence in enumerate(occurrences):
-            for token in occurrence.get("tokens") or []:
-                key = (occurrence.get("family"), token)
-                owner = token_owner.get(key)
-                if owner is None:
-                    token_owner[key] = index
-                else:
-                    union(index, owner)
-
-        grouped = {}
-        for index, occurrence in enumerate(occurrences):
-            grouped.setdefault(find(index), []).append(occurrence)
-
-        clusters = []
-        for members in grouped.values():
-            has_exact = any(member.get("mode") == "exact" for member in members)
-            active_mode = "exact" if has_exact else "similar"
-            active_members = [member for member in members if member.get("mode") == active_mode]
-            if not active_members:
-                continue
-
-            files = []
-            doc_ranges_by_file: dict[str, list[tuple[int, int]]] = {}
-            doc_previews_by_file: dict[str, list[str]] = {}
-            for member in active_members:
-                for file_name, doc in (member.get("docs") or {}).items():
-                    if file_name not in files:
-                        files.append(file_name)
-                    target_ranges = doc_ranges_by_file.setdefault(file_name, [])
-                    for start_page, end_page in self._coalesce_page_ranges(self._project_normalize_pages(doc.get("pages"))):
-                        pair = (start_page, end_page)
-                        if pair not in target_ranges:
-                            target_ranges.append(pair)
-                    preview_text = str(doc.get("preview") or "").strip()
-                    if preview_text:
-                        previews = doc_previews_by_file.setdefault(file_name, [])
-                        if preview_text not in previews:
-                            previews.append(preview_text)
-
-            family = str(active_members[0].get("family") or "block")
-            metrics = {
-                "exact_section_count": 0,
-                "similar_section_count": 0,
-                "exact_block_count": 0,
-                "similar_block_count": 0,
-                "exact_table_count": 0,
-                "similar_table_count": 0,
-            }
-            metric_key = f"{active_mode}_{family}_count"
-            if metric_key in metrics:
-                metrics[metric_key] = 1
-
-            best_member = max(
-                active_members,
-                key=lambda member: (
-                    self._project_duplicate_risk_rank(str(member.get("risk_level") or "none")),
-                    float(member.get("score_value") or 0),
-                ),
-            )
-            cluster_tokens = []
-            for member in active_members:
-                for token in member.get("tokens") or []:
-                    if token not in cluster_tokens:
-                        cluster_tokens.append(token)
-
-            clusters.append(
-                {
-                    "files": files,
-                    "family": family,
-                    "mode": active_mode,
-                    "items": [member.get("item") for member in active_members],
-                    "occurrences": active_members,
-                    "doc_ranges_by_file": doc_ranges_by_file,
-                    "doc_previews_by_file": doc_previews_by_file,
-                    "metrics": metrics,
-                    "risk_level": str(best_member.get("risk_level") or "none"),
-                    "score_display": str(best_member.get("score_display") or "0"),
-                    "score_value": float(best_member.get("score_value") or 0),
-                    "similarity": max(
-                        [
-                            float(member.get("similarity") or 0)
-                            for member in active_members
-                            if member.get("similarity") is not None
-                        ]
-                        or [0]
-                    ),
-                    "tokens": cluster_tokens,
-                }
-            )
-
-        def _cluster_sort_key(cluster):
-            return (
-                -_cluster_rank(self, cluster),
-                -self._project_duplicate_risk_rank(str(cluster.get("risk_level") or "none")),
-                -float(cluster.get("score_value") or 0),
-                "/".join(cluster.get("files") or []),
-            )
-
-        sorted_clusters = sorted(clusters, key=_cluster_sort_key)
-        dropped_indexes: set[int] = set()
-        for strong_index, strong in enumerate(sorted_clusters):
-            if strong_index in dropped_indexes:
-                continue
-            strong_tokens = set(strong.get("tokens") or [])
-            strong_files = set(strong.get("files") or [])
-            for weak_index in range(strong_index + 1, len(sorted_clusters)):
-                if weak_index in dropped_indexes:
-                    continue
-                weak = sorted_clusters[weak_index]
-                if _cluster_rank(self, strong) <= _cluster_rank(self, weak):
-                    continue
-                weak_tokens = set(weak.get("tokens") or [])
-                if not _clusters_are_textually_related(self, strong, weak):
-                    continue
-                common_files = strong_files & set(weak.get("files") or [])
-                if len(common_files) < 2:
-                    continue
-                if not _clusters_have_nested_ranges(self, strong, weak):
-                    continue
-                for file_name in weak.get("files") or []:
-                    if file_name not in strong["files"]:
-                        strong["files"].append(file_name)
-                    target_ranges = strong["doc_ranges_by_file"].setdefault(file_name, [])
-                    for pair in weak.get("doc_ranges_by_file", {}).get(file_name) or []:
-                        if pair not in target_ranges:
-                            target_ranges.append(pair)
-                    target_previews = strong["doc_previews_by_file"].setdefault(file_name, [])
-                    for preview in weak.get("doc_previews_by_file", {}).get(file_name) or []:
-                        if preview not in target_previews:
-                            target_previews.append(preview)
-                for token in weak.get("tokens") or []:
-                    if token not in strong["tokens"]:
-                        strong["tokens"].append(token)
-                strong["items"].extend(weak.get("items") or [])
-                strong["occurrences"].extend(weak.get("occurrences") or [])
-                strong_files = set(strong.get("files") or [])
-                strong_tokens = set(strong.get("tokens") or [])
-                dropped_indexes.add(weak_index)
-
-        return [cluster for index, cluster in enumerate(sorted_clusters) if index not in dropped_indexes]
+        return DuplicateResultMerger(self).cluster_items(items)
 
     def _cluster_anchor(self, doc_type, cluster):
         files = cluster.get("files") or []
@@ -806,6 +624,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             ("exact", "section"): "重复段落",
             ("exact", "block"): "重复句子",
             ("exact", "table"): "重复表格",
+            ("exact", "image"): "重复图片",
             ("similar", "section"): "相似段落",
             ("similar", "block"): "相似句子",
             ("similar", "table"): "相似表格",
@@ -859,28 +678,8 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                             "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
                             "page": start_page,
                             "pageEnd": end_page,
-                            "highlightBlocks": [],
-                            "bbox": None,
                         },
                     )
-                    highlight_block = _occurrence_highlight_html(
-                        self,
-                        occurrence,
-                        file_name,
-                        other_file_name,
-                        source_lookup=source_lookup,
-                    )
-                    if highlight_block and highlight_block not in payload["highlightBlocks"]:
-                        payload["highlightBlocks"].append(highlight_block)
-                    bbox = _occurrence_bbox_for_file_page(
-                        self,
-                        occurrence,
-                        file_name,
-                        start_page,
-                        source_lookup=source_lookup,
-                    )
-                    if bbox:
-                        payload["bbox"] = _merge_locator_bbox(self, payload.get("bbox"), bbox)
             ranges = sorted(range_map.values(), key=lambda item: (int(item.get("page") or 0), int(item.get("pageEnd") or 0)))
             normalized_pages = []
             for range_item in ranges:
@@ -919,7 +718,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
     def _render_duplicate_rows(self, result, doc_type, *, source_lookup, issue_pages, current_files=None):
         items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
         if not items:
-            return "<tr><td colspan='7'>未发现相关可疑组</td></tr>"
+            return "<tr><td colspan='8'>未发现相关可疑组</td></tr>"
 
         page_key = "business_duplicates" if doc_type == DOCUMENT_TYPE_BUSINESS_BID else "technical_duplicates"
         detail_page = issue_pages.get(page_key, "")
@@ -937,6 +736,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</td>"
                 f"<td>{html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</td>"
+                f"<td>{html.escape(self._project_metric_display(metrics, 'exact_image_count', 'similar_image_count'))}</td>"
                 f"<td><div class='issue-action-stack'>{self._project_build_issue_detail_link(detail_href, '查看全部证据')}</div></td>"
                 "</tr>"
             )
@@ -949,6 +749,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             ("exact", "section"): "重复段落证据",
             ("exact", "block"): "重复句证据",
             ("exact", "table"): "重复表格证据",
+            ("exact", "image"): "重复图片证据",
             ("similar", "section"): "相似段落证据",
             ("similar", "block"): "相似句证据",
             ("similar", "table"): "相似表格证据",
@@ -1013,6 +814,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                             <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
                             <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
                             <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                            <span>重复图 {html.escape(self._project_metric_display(metrics, 'exact_image_count', 'similar_image_count'))}</span>
                           </div>
                         </div>
                       </div>

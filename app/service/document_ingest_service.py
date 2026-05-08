@@ -177,3 +177,112 @@ async def upload_extract_and_create_document(
             "error": detail,
             "upload": upload_result,
         }
+
+
+async def upload_and_create_document_without_ocr(
+    *,
+    file: UploadFile,
+    document_type: DocumentType,
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+    identifier_id: Optional[str] = None,
+    document_name: Optional[str] = None,
+    object_name: Optional[str] = None,
+    raise_http_exception: bool = True,
+) -> dict[str, Any]:
+    upload_result: Optional[dict] = None
+    try:
+        upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
+        resolved_file_name = (
+            (document_name or "").strip()
+            or (file.filename or "").strip()
+            or upload_result.get("object_name", "")
+        )
+        if not resolved_file_name:
+            raise ValueError("document_name cannot be empty")
+
+        creation_result = await run_in_threadpool(
+            db_service.create_document,
+            resolved_file_name,
+            upload_result["file_url"],
+            document_type,
+            identifier_id,
+        )
+        return {
+            "ok": True,
+            "document": creation_result,
+            "document_summary": compact_document_payload(creation_result),
+            "upload": upload_result,
+            "resolved_file_name": resolved_file_name,
+        }
+    except Exception as exc:
+        rollback_error = _rollback_uploaded_object(upload_result, oss_service)
+        status_code, detail = _format_upload_create_error(exc, rollback_error)
+        if raise_http_exception:
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        return {
+            "ok": False,
+            "status_code": status_code,
+            "error": detail,
+            "upload": upload_result,
+        }
+
+
+async def recognize_existing_document(
+    *,
+    document_identifier: str,
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+    analysis_service,
+    raise_http_exception: bool = True,
+) -> dict[str, Any]:
+    try:
+        document = await run_in_threadpool(db_service.get_document_by_identifier, document_identifier)
+        if not document:
+            raise ValueError(f"document not found: {document_identifier}")
+
+        file_url = str(document.get("file_url") or "").strip()
+        if not file_url:
+            raise ValueError(f"document file_url is empty: {document_identifier}")
+
+        if file_url.startswith("minio://"):
+            bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
+        elif MinioService.is_presigned_url(file_url):
+            bucket_name, object_name = MinioService.bucket_and_object_from_presigned_url(file_url)
+        else:
+            raise ValueError(f"unsupported document file_url: {file_url}")
+
+        file_bytes, _ = await run_in_threadpool(
+            oss_service.get_object_bytes,
+            object_name,
+            bucket_name,
+        )
+        recognition_content = await run_in_threadpool(
+            _extract_recognition_content,
+            file_bytes,
+            str(document.get("file_name") or document_identifier),
+            analysis_service,
+        )
+        updated_document = await run_in_threadpool(
+            db_service.update_document_content,
+            document_identifier,
+            recognition_content,
+        )
+        if not updated_document:
+            raise ValueError(f"failed to update document content: {document_identifier}")
+        return {
+            "ok": True,
+            "document": updated_document,
+            "document_summary": compact_document_payload(updated_document),
+            "recognition_content": recognition_content,
+        }
+    except Exception as exc:
+        if raise_http_exception:
+            status_code, detail = _format_upload_create_error(exc, None)
+            raise HTTPException(status_code=status_code, detail=detail) from exc
+        status_code, detail = _format_upload_create_error(exc, None)
+        return {
+            "ok": False,
+            "status_code": status_code,
+            "error": detail,
+        }

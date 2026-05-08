@@ -174,6 +174,41 @@ class UnifiedBusinessReviewService:
             payload_data=payload_data,
         )
 
+    def _build_empty_project_business_review(
+        self,
+        *,
+        project_identifier: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        summary = self._summarize_review([])
+        return {
+            "schema_version": self.RESULT_SCHEMA_VERSION,
+            "review_type": "business_bid_format_review",
+            "generated_at": self._utc_now_iso(),
+            "project_identifier_id": project_identifier,
+            "empty": True,
+            "empty_reason": reason,
+            "dataset": {
+                "input_mode": "project_documents",
+                "tender": None,
+                "bidders": [],
+                "file_count": 0,
+            },
+            "reading_guide": {
+                "tender_file_name": None,
+                "bidder_overview": [],
+                "message": reason,
+            },
+            "extraction_tables": {
+                "catalog": [],
+                "tender_table": {},
+                "bidder_tables": [],
+            },
+            "function_validation": self._summarize_function_validation([]),
+            "summary": summary,
+            "bidders": [],
+        }
+
     def persist_project_business_review(
         self,
         *,
@@ -286,7 +321,10 @@ class UnifiedBusinessReviewService:
     ) -> dict[str, Any]:
         document_records = list(payload_data.get("documents") or [])
         if not document_records:
-            raise ValueError(f"project has no bound documents: {project_identifier}")
+            return self._build_empty_project_business_review(
+                project_identifier=project_identifier,
+                reason=f"project has no bound documents: {project_identifier}",
+            )
 
         tender_record = next(
             (
@@ -298,7 +336,10 @@ class UnifiedBusinessReviewService:
             None,
         )
         if not tender_record:
-            raise ValueError(f"project has no tender content: {project_identifier}")
+            return self._build_empty_project_business_review(
+                project_identifier=project_identifier,
+                reason=f"project has no tender content: {project_identifier}",
+            )
 
         tender_payload = self._coerce_stored_payload(tender_record.get("tender_content"))
         tender_meta = self._build_project_record_meta(
@@ -367,7 +408,10 @@ class UnifiedBusinessReviewService:
             )
 
         if not bidders:
-            raise ValueError(f"project has no business bid documents: {project_identifier}")
+            return self._build_empty_project_business_review(
+                project_identifier=project_identifier,
+                reason=f"project has no business bid documents: {project_identifier}",
+            )
 
         extraction_tables = self._build_review_extraction_tables(
             tender_payload=tender_payload,

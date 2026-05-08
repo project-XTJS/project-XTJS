@@ -27,16 +27,6 @@ _HEADER_KEYWORDS = (
     "总价",
     "税率",
     "税额",
-    "price",
-    "item",
-    "name",
-    "spec",
-    "model",
-    "unit",
-    "qty",
-    "quantity",
-    "amount",
-    "remark",
 )
 
 _HEADER_KEYWORD_TOKENS = tuple(sorted({_normalize_key for _normalize_key in (

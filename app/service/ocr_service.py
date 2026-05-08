@@ -42,10 +42,8 @@ class OCRService:
         "有限公司",
         "项目",
         "投标",
-        "科技",
-        "电磁",
     )
-    SIGNATURE_CANDIDATE_BLOCKED_CHARS = set("签章盖日期公司项目科技设备授权代表投标电磁")
+    SIGNATURE_CANDIDATE_BLOCKED_CHARS = set("签章盖日期公司项目设备授权代表投标")
 
     DEFAULT_SIGNATURE_PLACEHOLDER_TEXT = "已签字"
 

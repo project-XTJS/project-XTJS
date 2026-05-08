@@ -8,11 +8,24 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
-from app.router.dependencies import get_text_analysis_service
+from app.router.dependencies import (
+    get_bid_document_review_service,
+    get_db_service,
+    get_duplicate_check_service,
+    get_text_analysis_service,
+)
+from app.router.postgresql import (
+    _run_project_duplicate_check,
+    _run_project_personnel_reuse_check,
+    _run_project_typo_check,
+)
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
+from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
+from app.service.postgresql_service import PostgreSQLService
 from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
@@ -290,6 +303,162 @@ def _build_save_result(
     return result
 
 
+_PROJECT_SERVICE_RESULT_KEYS = {
+    "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+    "business_bid_duplicate_check": "business_bid_duplicate_check",
+    "technical_bid_duplicate_check": "technical_bid_duplicate_check",
+    "personnel_reuse_check": "personnel_reuse_check",
+    "typo_check": "typo_check",
+}
+
+
+def _normalize_selected_services(services: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for service_name in services or []:
+        token = str(service_name or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _http_exception_detail_to_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    return json.dumps(detail, ensure_ascii=False)
+
+
+async def _run_selected_project_services(
+    *,
+    identifier_id: str,
+    selected_services: list[str],
+    max_evidence_sections: int,
+    max_pairs_per_type: int,
+    db_service: PostgreSQLService,
+    duplicate_check_service: Any,
+    bid_document_review_service: Any,
+) -> dict:
+    review_service = UnifiedBusinessReviewService(db_service=db_service)
+    items: list[dict] = []
+    results: dict[str, Any] = {}
+
+    for service_name in selected_services:
+        result_key = _PROJECT_SERVICE_RESULT_KEYS.get(service_name, service_name)
+        try:
+            if service_name == "business_bid_format_review":
+                result = await run_in_threadpool(
+                    review_service.persist_project_business_review,
+                    project_identifier=identifier_id,
+                    result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+                )
+            elif service_name == "business_bid_duplicate_check":
+                result = await run_in_threadpool(
+                    _run_project_duplicate_check,
+                    identifier_id=identifier_id,
+                    document_types=["business_bid"],
+                    max_evidence_sections=max_evidence_sections,
+                    max_pairs_per_type=max_pairs_per_type,
+                    result_key="business_bid_duplicate_check",
+                    db_service=db_service,
+                    duplicate_check_service=duplicate_check_service,
+                )
+            elif service_name == "technical_bid_duplicate_check":
+                result = await run_in_threadpool(
+                    _run_project_duplicate_check,
+                    identifier_id=identifier_id,
+                    document_types=["technical_bid"],
+                    max_evidence_sections=max_evidence_sections,
+                    max_pairs_per_type=max_pairs_per_type,
+                    result_key="technical_bid_duplicate_check",
+                    db_service=db_service,
+                    duplicate_check_service=duplicate_check_service,
+                )
+            elif service_name == "personnel_reuse_check":
+                result = await run_in_threadpool(
+                    _run_project_personnel_reuse_check,
+                    identifier_id=identifier_id,
+                    db_service=db_service,
+                    bid_document_review_service=bid_document_review_service,
+                )
+            elif service_name == "typo_check":
+                result = await run_in_threadpool(
+                    _run_project_typo_check,
+                    identifier_id=identifier_id,
+                    db_service=db_service,
+                    bid_document_review_service=bid_document_review_service,
+                )
+            else:
+                raise HTTPException(status_code=400, detail=f"不支持的分析服务：{service_name}")
+        except HTTPException as exc:
+            items.append(
+                {
+                    "service": service_name,
+                    "result_key": result_key,
+                    "status": "failed",
+                    "status_code": exc.status_code,
+                    "error": _http_exception_detail_to_text(exc.detail),
+                }
+            )
+            continue
+        except ValueError as exc:
+            items.append(
+                {
+                    "service": service_name,
+                    "result_key": result_key,
+                    "status": "failed",
+                    "status_code": 400,
+                    "error": str(exc),
+                }
+            )
+            continue
+        except PsycopgError as exc:
+            items.append(
+                {
+                    "service": service_name,
+                    "result_key": result_key,
+                    "status": "failed",
+                    "status_code": 500,
+                    "error": f"数据库错误：{exc}",
+                }
+            )
+            continue
+
+        items.append(
+            {
+                "service": service_name,
+                "result_key": result_key,
+                "status": "success",
+                "result": result,
+            }
+        )
+        results[result_key] = result
+
+    success_count = sum(1 for item in items if item.get("status") == "success")
+    failed_count = len(items) - success_count
+    if failed_count == 0:
+        status = "success"
+    elif success_count == 0:
+        status = "failed"
+    else:
+        status = "partial_success"
+
+    return {
+        "mode": "project_analysis",
+        "project_identifier": identifier_id,
+        "requested_services": selected_services,
+        "status": status,
+        "summary": {
+            "total": len(selected_services),
+            "success": success_count,
+            "failed": failed_count,
+        },
+        "results": results,
+        "items": items,
+    }
+
+
 def _save_analyze_file_json(
     payload: dict,
     *,
@@ -482,13 +651,39 @@ async def analyze_file(
     }
 
 
-@router.post("/run", summary="统一文本分析接口")
+@router.post("/run", summary="统一分析接口（文本/项目服务）")
 async def run_text_analysis(
     payload: TextAnalysisRequest,
     analysis_service=Depends(get_text_analysis_service),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    duplicate_check_service=Depends(get_duplicate_check_service),
+    bid_document_review_service=Depends(get_bid_document_review_service),
 ):
-    """将文本分发到指定的规则分析模块。"""
+    """统一执行文本分析或项目级业务分析。"""
+    selected_services = _normalize_selected_services(payload.services)
+    if selected_services:
+        identifier_id = str(payload.project_identifier or "").strip()
+        if not identifier_id:
+            raise HTTPException(status_code=400, detail="project_identifier 不能为空。")
+        return await _run_selected_project_services(
+            identifier_id=identifier_id,
+            selected_services=selected_services,
+            max_evidence_sections=payload.max_evidence_sections,
+            max_pairs_per_type=payload.max_pairs_per_type,
+            db_service=db_service,
+            duplicate_check_service=duplicate_check_service,
+            bid_document_review_service=bid_document_review_service,
+        )
+
+    if payload.task_type is None:
+        raise HTTPException(
+            status_code=400,
+            detail="请传入 task_type 执行文本分析，或传入 project_identifier + services 执行项目分析。",
+        )
+
     raw_text = payload.text or ""
+    if not raw_text.strip():
+        raise HTTPException(status_code=400, detail="text 不能为空。")
     text = preprocess_text(raw_text)
 
     if payload.task_type == "integrity_check":

@@ -171,10 +171,10 @@ class PostgreSQLService:
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
-        conditions = ["deleted = FALSE"]
+        conditions = ["p.deleted = FALSE"]
         values: List[Any] = []
         if normalized_keyword:
-            conditions.append("identifier_id ILIKE %s")
+            conditions.append("p.identifier_id ILIKE %s")
             keyword_like = f"%{normalized_keyword}%"
             values.append(keyword_like)
         where_clause = " AND ".join(conditions)
@@ -183,7 +183,7 @@ class PostgreSQLService:
                 cursor.execute(
                     f"""
                     SELECT COUNT(*) AS total
-                    FROM xtjs_projects
+                    FROM xtjs_projects p
                     WHERE {where_clause}
                     """,
                     tuple(values),
@@ -191,10 +191,76 @@ class PostgreSQLService:
                 total = int(cursor.fetchone()["total"])
                 cursor.execute(
                     f"""
-                    SELECT id, identifier_id, deleted, create_time, update_time
-                    FROM xtjs_projects
+                    SELECT
+                        p.id,
+                        p.identifier_id,
+                        p.deleted,
+                        p.create_time,
+                        p.update_time,
+                        COALESCE(rel.relation_count, 0) AS relation_count,
+                        COALESCE(rel.tender_count, 0) AS tender_count,
+                        COALESCE(rel.business_bid_count, 0) AS business_bid_count,
+                        COALESCE(rel.technical_bid_count, 0) AS technical_bid_count,
+                        COALESCE(rel.document_count, 0) AS document_count,
+                        COALESCE(rel.extracted_document_count, 0) AS extracted_document_count,
+                        COALESCE(rel.pending_document_count, 0) AS pending_document_count,
+                        COALESCE(res.result_available, FALSE) AS result_available,
+                        COALESCE(res.analysis_result_count, 0) AS analysis_result_count,
+                        COALESCE(res.available_result_keys, '[]'::jsonb) AS available_result_keys,
+                        res.result_update_time
+                    FROM xtjs_projects p
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            COUNT(*) AS relation_count,
+                            COUNT(DISTINCT pd.tender_document_id) AS tender_count,
+                            COUNT(DISTINCT pd.business_bid_document_id) AS business_bid_count,
+                            COUNT(DISTINCT pd.technical_bid_document_id) AS technical_bid_count,
+                            COUNT(DISTINCT docs.doc_id) AS document_count,
+                            COUNT(DISTINCT CASE WHEN doc_meta.extracted = TRUE THEN docs.doc_id END) AS extracted_document_count,
+                            COUNT(DISTINCT CASE WHEN doc_meta.extracted = FALSE THEN docs.doc_id END) AS pending_document_count
+                        FROM xtjs_project_documents pd
+                        LEFT JOIN (
+                            SELECT pd2.tender_document_id AS doc_id
+                            FROM xtjs_project_documents pd2
+                            WHERE pd2.project_id = p.id
+                            UNION
+                            SELECT pd2.business_bid_document_id AS doc_id
+                            FROM xtjs_project_documents pd2
+                            WHERE pd2.project_id = p.id
+                            UNION
+                            SELECT pd2.technical_bid_document_id AS doc_id
+                            FROM xtjs_project_documents pd2
+                            WHERE pd2.project_id = p.id AND pd2.technical_bid_document_id IS NOT NULL
+                        ) docs ON TRUE
+                        LEFT JOIN xtjs_documents doc_meta
+                            ON doc_meta.id = docs.doc_id
+                           AND doc_meta.deleted = FALSE
+                        WHERE pd.project_id = p.id
+                    ) rel ON TRUE
+                    LEFT JOIN LATERAL (
+                        SELECT
+                            (COALESCE(r.result, '{{}}'::jsonb) <> '{{}}'::jsonb) AS result_available,
+                            COALESCE(
+                                (
+                                    SELECT COUNT(*)
+                                    FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
+                                ),
+                                0
+                            ) AS analysis_result_count,
+                            COALESCE(
+                                (
+                                    SELECT jsonb_agg(result_key ORDER BY result_key)
+                                    FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
+                                ),
+                                '[]'::jsonb
+                            ) AS available_result_keys,
+                            r.update_time AS result_update_time
+                        FROM xtjs_result r
+                        WHERE r.project_identifier_id = p.identifier_id
+                        LIMIT 1
+                    ) res ON TRUE
                     WHERE {where_clause}
-                    ORDER BY create_time DESC, id DESC
+                    ORDER BY p.create_time DESC, p.id DESC
                     LIMIT %s OFFSET %s
                     """,
                     tuple(values + [normalized_limit, normalized_offset]),
@@ -517,6 +583,37 @@ class PostgreSQLService:
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, tuple(values))
+                updated = cursor.fetchone()
+                return dict(updated) if updated else None
+
+    def update_document_content(
+        self,
+        identifier_id: str,
+        recognition_content: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
+        if not isinstance(recognition_content, dict):
+            raise ValueError("recognition_content 必须是 JSON 对象")
+
+        query = """
+            UPDATE xtjs_documents
+            SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
+            WHERE identifier_id = %s AND deleted = FALSE
+            RETURNING
+                id,
+                identifier_id,
+                document_type,
+                file_name,
+                file_url,
+                extracted,
+                content,
+                deleted,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, (Json(recognition_content), normalized_identifier))
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
 
@@ -872,6 +969,106 @@ class PostgreSQLService:
                     "business_bid_document_identifier": business_bid_document_identifier,
                     "technical_bid_document_identifier": normalized_technical_identifier,
                 }
+
+    def attach_technical_bid_to_relation(
+        self,
+        *,
+        project_identifier: str,
+        business_bid_document_identifier: str,
+        technical_bid_document_identifier: str,
+        tender_document_identifier: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_project_identifier = self._normalize_required_identifier(
+            project_identifier,
+            "project_identifier",
+        )
+        normalized_business_identifier = self._normalize_required_identifier(
+            business_bid_document_identifier,
+            "business_bid_document_identifier",
+        )
+        normalized_technical_identifier = self._normalize_required_identifier(
+            technical_bid_document_identifier,
+            "technical_bid_document_identifier",
+        )
+        normalized_tender_identifier = (tender_document_identifier or "").strip() or None
+
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                project = self._get_project_record(cursor, normalized_project_identifier)
+                if not project:
+                    raise ValueError(f"项目不存在：{normalized_project_identifier}")
+
+                self._get_required_document_record(
+                    cursor,
+                    normalized_business_identifier,
+                    role_label="商务标文件",
+                    allowed_types=set(BUSINESS_BID_COMPATIBLE_TYPES),
+                )
+                self._get_required_document_record(
+                    cursor,
+                    normalized_technical_identifier,
+                    role_label="技术标文件",
+                    allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
+                )
+
+                values: list[Any] = [project["id"], normalized_business_identifier]
+                tender_filter = ""
+                if normalized_tender_identifier:
+                    tender_filter = "AND td.identifier_id = %s"
+                    values.append(normalized_tender_identifier)
+
+                cursor.execute(
+                    f"""
+                    SELECT
+                        pd.id AS relation_id,
+                        td.identifier_id AS tender_document_identifier,
+                        bbd.identifier_id AS business_bid_document_identifier,
+                        tbd.identifier_id AS technical_bid_document_identifier
+                    FROM xtjs_project_documents pd
+                    JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
+                    JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+                    LEFT JOIN xtjs_documents tbd
+                        ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
+                    WHERE pd.project_id = %s
+                      AND bbd.identifier_id = %s
+                      {tender_filter}
+                    ORDER BY pd.id
+                    """,
+                    tuple(values),
+                )
+                rows = [dict(item) for item in cursor.fetchall()]
+
+                if not rows:
+                    raise ValueError(
+                        "未找到可补充技术标的项目绑定关系，请先上传并绑定对应商务标。"
+                    )
+                if len(rows) > 1:
+                    raise ValueError(
+                        "同一商务标匹配到多条项目绑定关系，请传入 tender_document_identifier 指定招标文件。"
+                    )
+
+                relation = rows[0]
+                existing_technical_identifier = (
+                    str(relation.get("technical_bid_document_identifier") or "").strip() or None
+                )
+                if (
+                    existing_technical_identifier
+                    and existing_technical_identifier != normalized_technical_identifier
+                ):
+                    raise ValueError(
+                        "该商务标已绑定技术标，如需替换请使用更新关联接口。"
+                    )
+
+                resolved_tender_identifier = (
+                    normalized_tender_identifier
+                    or str(relation.get("tender_document_identifier") or "").strip()
+                )
+                return self.update_relation(
+                    int(relation["relation_id"]),
+                    resolved_tender_identifier,
+                    normalized_business_identifier,
+                    normalized_technical_identifier,
+                )
 
     def delete_relation(self, relation_id: int) -> bool:
         with self._get_connection() as conn:
