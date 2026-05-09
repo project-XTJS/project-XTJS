@@ -21,7 +21,6 @@ from app.core.document_types import (
     DOCUMENT_TYPE_TENDER,
 )
 from app.router.dependencies import (
-    get_duplicate_check_service,
     RecognitionOptions,
     get_db_service,
     get_form_recognition_options,
@@ -36,7 +35,6 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
-from app.service.analysis import DuplicateCheckService
 from app.service.analysis.duplicate_merge import build_duplicate_merge_results
 from app.service.document_ingest_service import (
     upload_and_create_document_without_ocr,
@@ -533,7 +531,7 @@ async def batch_recognize_project_documents(
 
 
 # 路由：创建项目并上传全部文件后启动商务阶段 OCR 及审查
-@router.post("/projects/batch/ingest-recognize", summary="创建项目并上传全部文件后启动商务阶段 OCR")
+@router.post("/projects/batch/ingest-recognize", summary="创建项目并上传全部文件（后续 OCR 手动触发）")
 async def ingest_and_recognize_project_documents(
     project_name: str = Form(..., description="项目名称；当前作为项目标识使用"),
     tender_file: UploadFile = File(..., description="招标文件"),
@@ -543,16 +541,13 @@ async def ingest_and_recognize_project_documents(
     ),
     technical_bid_files: list[UploadFile] = File(
         ...,
-        description="技术标文件列表；本次先上传入库，后续再继续 OCR",
+        description="技术标文件列表；本接口仅上传入库，不自动执行 OCR",
     ),
     bid_group_parallelism: int = Form(default=4, ge=1, le=16),
-    recognition_options: RecognitionOptions = Depends(get_form_recognition_options),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
-    analysis_service=Depends(get_text_analysis_service),
-    duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
-    """分阶段处理：先上传并 OCR 招标文件、商务标，技术标仅上传；随后自动执行商务标形式审查和雷同检查。"""
+    """创建项目并上传全部文件，后续 OCR 由人工按阶段手动触发。"""
     normalized_project_name = (project_name or "").strip()
     if not normalized_project_name:
         raise HTTPException(status_code=400, detail="project_name 不能为空。")
@@ -587,30 +582,25 @@ async def ingest_and_recognize_project_documents(
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
-    recognition_kwargs = recognition_options.as_kwargs()
-    tender_result = await upload_extract_and_create_document(
+    tender_result = await upload_and_create_document_without_ocr(
         file=tender_file,
         document_type=DOCUMENT_TYPE_TENDER,
         db_service=db_service,
         oss_service=oss_service,
-        analysis_service=analysis_service,
-        **recognition_kwargs,
         raise_http_exception=True,
     )
     tender_document_identifier = tender_result["document"]["identifier_id"]
 
     effective_parallelism = max(1, min(int(bid_group_parallelism), bid_group_count))
-    # 并行处理商务标 OCR 和技术标上传（无 OCR）
+    # 并行上传商务标与技术标（均不执行 OCR）
     business_results, technical_results = await asyncio.gather(
-        _recognize_batch_documents(
+        _upload_batch_documents_without_ocr(
             files=normalized_business_files,
             document_type=DOCUMENT_TYPE_BUSINESS_BID,
             role_label="business_bid",
             parallelism=effective_parallelism,
             db_service=db_service,
             oss_service=oss_service,
-            analysis_service=analysis_service,
-            recognition_kwargs=recognition_kwargs,
         ),
         _upload_batch_documents_without_ocr(
             files=normalized_technical_files,
@@ -701,100 +691,16 @@ async def ingest_and_recognize_project_documents(
     technical_summary = _summarize_batch_items(technical_results)
     binding_summary = _summarize_batch_items(binding_items)
 
-    successful_binding_count = sum(1 for item in binding_items if item.get("status") == "success")
-    # 如果成功绑定，自动执行商务阶段的形式审查和雷同检查
-    business_phase: dict = {
-        "status": "pending",
-        "completed_steps": [
-            "tender_ocr",
-            "business_bid_ocr",
-        ],
-        "pending_steps": [
-            "business_bid_format_review",
-            "business_bid_duplicate_check",
-            "technical_bid_ocr",
-            "technical_bid_duplicate_check",
-            "bid_document_review",
-            "typo_check",
-            "personnel_reuse_check",
-        ],
-    }
-    if successful_binding_count > 0:
-        try:
-            business_review_service = UnifiedBusinessReviewService(db_service=db_service)
-            business_review_response = await run_in_threadpool(
-                business_review_service.persist_project_business_review,
-                project_identifier=project["identifier_id"],
-                result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
-            )
-            duplicate_payload = await run_in_threadpool(
-                db_service.get_project_documents_for_duplicate_check,
-                project["identifier_id"],
-            )
-            business_duplicate_result = await run_in_threadpool(
-                duplicate_check_service.check_project_documents,
-                project_identifier=project["identifier_id"],
-                project=(duplicate_payload or {}).get("project") or {"identifier_id": project["identifier_id"]},
-                document_records=(duplicate_payload or {}).get("documents") or [],
-                document_types=[DOCUMENT_TYPE_BUSINESS_BID],
-                max_evidence_sections=5,
-                max_pairs_per_type=0,
-            )
-            business_duplicate_record = await run_in_threadpool(
-                _persist_result_item,
-                db_service=db_service,
-                project_identifier=project["identifier_id"],
-                result_key="business_bid_duplicate_check",
-                result_value=business_duplicate_result,
-            )
-            business_duplicate_merged_results = await run_in_threadpool(
-                _persist_merge_result_items,
-                db_service=db_service,
-                project_identifier=project["identifier_id"],
-                source_result_key="business_bid_duplicate_check",
-                raw_result=business_duplicate_result,
-            )
-            business_phase = {
-                "status": "completed",
-                "completed_steps": [
-                    "tender_ocr",
-                    "business_bid_ocr",
-                    "business_bid_format_review",
-                    "business_bid_duplicate_check",
-                ],
-                "pending_steps": [
-                    "technical_bid_ocr",
-                    "technical_bid_duplicate_check",
-                    "bid_document_review",
-                    "typo_check",
-                    "personnel_reuse_check",
-                ],
-                "format_review": {
-                    "result_key": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
-                    "overview": business_review_response.get("overview"),
-                    "result_record": business_review_response.get("result_record"),
-                },
-                "duplicate_check": {
-                    "result_key": "business_bid_duplicate_check",
-                    "result": business_duplicate_result,
-                    "result_record": business_duplicate_record,
-                    "merged_results": business_duplicate_merged_results,
-                },
-            }
-        except (ValueError, PsycopgError) as exc:
-            business_phase = {
-                **business_phase,
-                "status": "failed",
-                "error": str(exc),
-            }
-    else:
-        business_phase = {
-            **business_phase,
-            "status": "failed",
-            "error": "未形成有效的项目绑定关系，商务阶段审查未启动。",
-        }
+    # 只要形成了有效绑定，就把项目状态固定在“已入库待解析”。
+    if any(item.get("status") == "success" for item in binding_items):
+        refreshed_project = await run_in_threadpool(
+            db_service.update_project_parsing_status,
+            project["identifier_id"],
+            PostgreSQLService.PARSING_STATUS_UPLOADED,
+        )
+        if refreshed_project:
+            project = refreshed_project
 
-    # 综合整体状态
     status_items = ["success"]
     status_items.extend(item.get("status") or "failed" for item in business_results)
     status_items.extend(item.get("status") or "failed" for item in technical_results)
@@ -816,23 +722,228 @@ async def ingest_and_recognize_project_documents(
             "effective_bid_group_parallelism": effective_parallelism,
         },
         "tender": {
-            "status": "ocr_completed",
+            "status": "uploaded",
             "document_identifier": tender_document_identifier,
             "document": tender_result["document_summary"],
             "upload": tender_result["upload"],
         },
-        "business_bid_documents": business_summary,
+        "business_bid_documents": {
+            **business_summary,
+            "note": "已上传入库，尚未执行 OCR。",
+        },
         "technical_bid_documents": {
             **technical_summary,
-            "note": "已上传入库，当前未执行 OCR。",
+            "note": "已上传入库，尚未执行 OCR。",
         },
         "bindings": binding_summary,
-        "business_phase": business_phase,
+        "ocr_actions": {
+            "run_business_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/run-business-ocr",
+            "run_technical_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/continue-technical-ocr",
+            "parsing_status": project.get("parsing_status"),
+            "parsing_status_label": project.get("parsing_status_label"),
+        },
+    }
+
+async def _recognize_existing_documents_batch(
+    *,
+    documents: list[dict],
+    parallelism: int,
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+    analysis_service,
+) -> list[dict]:
+    # 手动 OCR 路由共用的“对已有文档补做 OCR”批处理器。
+    normalized_documents = [item for item in (documents or []) if item]
+    if not normalized_documents:
+        return []
+
+    semaphore = asyncio.Semaphore(max(1, min(int(parallelism), len(normalized_documents))))
+
+    async def _handle_single(document_meta: dict) -> dict:
+        async with semaphore:
+            result = await recognize_existing_document(
+                document_identifier=document_meta["identifier_id"],
+                db_service=db_service,
+                oss_service=oss_service,
+                analysis_service=analysis_service,
+                raise_http_exception=False,
+            )
+        if not result["ok"]:
+            logger.error(
+                "manual recognize existing document failed identifier=%s file_name=%s status_code=%s error=%s",
+                document_meta["identifier_id"],
+                document_meta.get("file_name"),
+                result["status_code"],
+                result["error"],
+            )
+            return {
+                "identifier_id": document_meta["identifier_id"],
+                "file_name": document_meta.get("file_name"),
+                "status": "failed",
+                "error": result["error"],
+                "status_code": result["status_code"],
+            }
+        return {
+            "identifier_id": document_meta["identifier_id"],
+            "file_name": document_meta.get("file_name"),
+            "status": "success",
+            "document": result["document_summary"],
+        }
+
+    return await asyncio.gather(*(_handle_single(item) for item in normalized_documents))
+
+
+@router.post("/projects/{identifier_id}/run-business-ocr", summary="执行项目招标文件与商务标 OCR")
+async def run_project_business_ocr(
+    identifier_id: str,
+    parallelism: int = Form(default=4, ge=1, le=16),
+    analysis_service=Depends(get_text_analysis_service),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+
+    project = (payload or {}).get("project") or {}
+    tender_documents: list[dict] = []
+    business_documents: list[dict] = []
+    seen_tender: set[str] = set()
+    seen_business: set[str] = set()
+    # 只从商务标关系里收集“招标文件 + 商务标”这一组待 OCR 文档。
+    for record in payload.get("documents") or []:
+        if str(record.get("relation_role") or "").strip() != DOCUMENT_TYPE_BUSINESS_BID:
+            continue
+        tender_identifier = str(record.get("tender_identifier_id") or "").strip()
+        if tender_identifier and tender_identifier not in seen_tender:
+            seen_tender.add(tender_identifier)
+            tender_documents.append(
+                {
+                    "identifier_id": tender_identifier,
+                    "file_name": record.get("tender_file_name"),
+                    "extracted": bool(record.get("tender_extracted")),
+                }
+            )
+        business_identifier = str(record.get("identifier_id") or "").strip()
+        if business_identifier and business_identifier not in seen_business:
+            seen_business.add(business_identifier)
+            business_documents.append(
+                {
+                    "identifier_id": business_identifier,
+                    "file_name": record.get("file_name"),
+                    "extracted": bool(record.get("extracted")),
+                }
+            )
+
+    if not tender_documents or not business_documents:
+        raise HTTPException(
+            status_code=409,
+            detail="当前项目缺少招标文件或商务标绑定关系，无法执行商务阶段 OCR。",
+        )
+
+    # 已完成 OCR 的文档直接跳过，只补跑未提取的部分。
+    pending_tender_documents = [item for item in tender_documents if not item.get("extracted")]
+    pending_business_documents = [item for item in business_documents if not item.get("extracted")]
+
+    if not pending_tender_documents and not pending_business_documents:
+        current_status = int(project.get("parsing_status") or 0)
+        if current_status < PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED:
+            refreshed_project = await run_in_threadpool(
+                db_service.update_project_parsing_status,
+                identifier_id,
+                PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            )
+            if refreshed_project:
+                project = refreshed_project
+        return {
+            "status": "success",
+            "project": project,
+            "project_identifier": identifier_id,
+            "summary": {
+                "pending_tender_count": 0,
+                "pending_business_count": 0,
+                "success_count": 0,
+                "failed_count": 0,
+            },
+            "tender": {"status": "success", "total": 0, "success": 0, "failed": 0, "items": []},
+            "business_bid_documents": {
+                "status": "success",
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+                "items": [],
+            },
+            "next_steps": [
+                "business_bid_format_review",
+                "business_bid_duplicate_check",
+                "continue-technical-ocr",
+            ],
+        }
+
+    tender_items, business_items = await asyncio.gather(
+        _recognize_existing_documents_batch(
+            documents=pending_tender_documents,
+            parallelism=max(1, min(int(parallelism), len(pending_tender_documents) or 1)),
+            db_service=db_service,
+            oss_service=oss_service,
+            analysis_service=analysis_service,
+        ),
+        _recognize_existing_documents_batch(
+            documents=pending_business_documents,
+            parallelism=max(1, min(int(parallelism), len(pending_business_documents) or 1)),
+            db_service=db_service,
+            oss_service=oss_service,
+            analysis_service=analysis_service,
+        ),
+    )
+    tender_summary = _summarize_batch_items(tender_items)
+    business_summary = _summarize_batch_items(business_items)
+
+    overall_items = []
+    overall_items.extend(item.get("status") or "failed" for item in tender_items)
+    overall_items.extend(item.get("status") or "failed" for item in business_items)
+    if not overall_items or all(item == "success" for item in overall_items):
+        status = "success"
+    elif any(item == "success" for item in overall_items):
+        status = "partial_success"
+    else:
+        status = "failed"
+
+    if status == "success":
+        refreshed_project = await run_in_threadpool(
+            db_service.update_project_parsing_status,
+            identifier_id,
+            max(
+                int(project.get("parsing_status") or 0),
+                PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            ),
+        )
+        if refreshed_project:
+            project = refreshed_project
+
+    return {
+        "status": status,
+        "project": project,
+        "project_identifier": identifier_id,
+        "summary": {
+            "pending_tender_count": len(pending_tender_documents),
+            "pending_business_count": len(pending_business_documents),
+            "success_count": sum(1 for item in tender_items + business_items if item.get("status") == "success"),
+            "failed_count": sum(1 for item in tender_items + business_items if item.get("status") == "failed"),
+        },
+        "tender": tender_summary,
+        "business_bid_documents": business_summary,
+        "next_steps": [
+            "business_bid_format_review",
+            "business_bid_duplicate_check",
+            "continue-technical-ocr",
+        ],
+        "run_technical_ocr_endpoint": f"/api/postgresql/projects/{identifier_id}/continue-technical-ocr",
     }
 
 
 # 路由：继续执行项目技术标 OCR
-@router.post("/projects/{identifier_id}/continue-technical-ocr", summary="继续执行项目技术标 OCR")
+@router.post("/projects/{identifier_id}/continue-technical-ocr", summary="执行项目技术标 OCR")
 async def continue_project_technical_ocr(
     identifier_id: str,
     parallelism: int = Form(default=4, ge=1, le=16),
@@ -845,28 +956,61 @@ async def continue_project_technical_ocr(
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
 
-    # 筛选未提取的技术标文档
+    project = (payload or {}).get("project") or {}
+    # 技术标 OCR 必须建立在招标文件和商务标 OCR 已完成的前提下。
+    if int(project.get("parsing_status") or 0) < PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED:
+        raise HTTPException(
+            status_code=409,
+            detail="请先执行招标文件和商务标 OCR，完成后才能执行技术标 OCR。",
+        )
+
+    pending_business_or_tender = False
+    technical_documents: list[dict] = []
     pending_technical_documents: list[dict] = []
     seen: set[str] = set()
+    # 先核验前置阶段是否完整，再收集技术标待处理文档。
     for record in payload.get("documents") or []:
-        if str(record.get("document_type") or "").strip() != DOCUMENT_TYPE_TECHNICAL_BID:
+        relation_role = str(record.get("relation_role") or "").strip()
+        if relation_role == DOCUMENT_TYPE_BUSINESS_BID:
+            if not bool(record.get("tender_extracted")) or not bool(record.get("extracted")):
+                pending_business_or_tender = True
+            continue
+        if relation_role != DOCUMENT_TYPE_TECHNICAL_BID:
             continue
         document_identifier = str(record.get("identifier_id") or "").strip()
         if not document_identifier or document_identifier in seen:
             continue
         seen.add(document_identifier)
-        if bool(record.get("extracted")):
-            continue
-        pending_technical_documents.append(
-            {
-                "identifier_id": document_identifier,
-                "file_name": record.get("file_name"),
-            }
+        document_meta = {
+            "identifier_id": document_identifier,
+            "file_name": record.get("file_name"),
+            "extracted": bool(record.get("extracted")),
+        }
+        technical_documents.append(document_meta)
+        if not document_meta["extracted"]:
+            pending_technical_documents.append(document_meta)
+
+    if pending_business_or_tender:
+        raise HTTPException(
+            status_code=409,
+            detail="当前仍有招标文件或商务标未完成 OCR，请先执行招标文件和商务标 OCR。",
         )
+    if not technical_documents:
+        raise HTTPException(status_code=409, detail="当前项目未绑定技术标文件，无法执行技术标 OCR。")
 
     if not pending_technical_documents:
+        current_status = int(project.get("parsing_status") or 0)
+        if current_status < PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED:
+            refreshed_project = await run_in_threadpool(
+                db_service.update_project_parsing_status,
+                identifier_id,
+                PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+            )
+            if refreshed_project:
+                project = refreshed_project
         return {
             "status": "success",
+            "project": project,
             "project_identifier": identifier_id,
             "summary": {
                 "pending_count": 0,
@@ -882,33 +1026,13 @@ async def continue_project_technical_ocr(
             ],
         }
 
-    semaphore = asyncio.Semaphore(max(1, min(int(parallelism), len(pending_technical_documents))))
-
-    async def _handle_single(document_meta: dict) -> dict:
-        async with semaphore:
-            result = await recognize_existing_document(
-                document_identifier=document_meta["identifier_id"],
-                db_service=db_service,
-                oss_service=oss_service,
-                analysis_service=analysis_service,
-                raise_http_exception=False,
-            )
-        if not result["ok"]:
-            return {
-                "identifier_id": document_meta["identifier_id"],
-                "file_name": document_meta.get("file_name"),
-                "status": "failed",
-                "error": result["error"],
-                "status_code": result["status_code"],
-            }
-        return {
-            "identifier_id": document_meta["identifier_id"],
-            "file_name": document_meta.get("file_name"),
-            "status": "success",
-            "document": result["document_summary"],
-        }
-
-    items = await asyncio.gather(*(_handle_single(item) for item in pending_technical_documents))
+    items = await _recognize_existing_documents_batch(
+        documents=pending_technical_documents,
+        parallelism=parallelism,
+        db_service=db_service,
+        oss_service=oss_service,
+        analysis_service=analysis_service,
+    )
     success_count = sum(1 for item in items if item.get("status") == "success")
     failed_count = len(items) - success_count
     if failed_count == 0:
@@ -918,8 +1042,18 @@ async def continue_project_technical_ocr(
     else:
         status = "partial_success"
 
+    if status == "success":
+        refreshed_project = await run_in_threadpool(
+            db_service.update_project_parsing_status,
+            identifier_id,
+            PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+        )
+        if refreshed_project:
+            project = refreshed_project
+
     return {
         "status": status,
+        "project": project,
         "project_identifier": identifier_id,
         "summary": {
             "pending_count": len(pending_technical_documents),

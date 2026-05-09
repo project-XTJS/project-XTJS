@@ -53,6 +53,15 @@ class PostgreSQLService:
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
     SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
+    # 项目解析状态：0 仅完成入库，1 完成招标/商务 OCR，2 完成技术标 OCR。
+    PARSING_STATUS_UPLOADED = 0
+    PARSING_STATUS_BUSINESS_OCR_COMPLETED = 1
+    PARSING_STATUS_TECHNICAL_OCR_COMPLETED = 2
+    PARSING_STATUS_LABELS = {
+        PARSING_STATUS_UPLOADED: "uploaded",
+        PARSING_STATUS_BUSINESS_OCR_COMPLETED: "business_ocr_completed",
+        PARSING_STATUS_TECHNICAL_OCR_COMPLETED: "technical_ocr_completed",
+    }
 
     # 连接管理
     @contextmanager
@@ -89,6 +98,28 @@ class PostgreSQLService:
             raise ValueError(f"{field_name} cannot be empty")
         return normalized
 
+    @classmethod
+    def _normalize_parsing_status(cls, parsing_status: Optional[int]) -> int:
+        # 统一把外部传入状态收敛到系统支持的 0/1/2。
+        try:
+            normalized = int(parsing_status or 0)
+        except (TypeError, ValueError):
+            normalized = cls.PARSING_STATUS_UPLOADED
+        if normalized not in cls.PARSING_STATUS_LABELS:
+            normalized = cls.PARSING_STATUS_UPLOADED
+        return normalized
+
+    @classmethod
+    def _decorate_project_record(cls, project: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not project:
+            return project
+        decorated = dict(project)
+        # 对所有项目查询结果补充状态标签，避免路由层重复拼装。
+        normalized = cls._normalize_parsing_status(decorated.get("parsing_status"))
+        decorated["parsing_status"] = normalized
+        decorated["parsing_status_label"] = cls.PARSING_STATUS_LABELS[normalized]
+        return decorated
+
     @staticmethod
     def _build_paginated_response(
         *,
@@ -122,14 +153,14 @@ class PostgreSQLService:
     def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             """
-            SELECT id, identifier_id
+            SELECT id, identifier_id, parsing_status
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
             """,
             (identifier_id,),
         )
         project = cursor.fetchone()
-        return dict(project) if project else None
+        return self._decorate_project_record(dict(project)) if project else None
 
     def _get_document_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
@@ -176,14 +207,14 @@ class PostgreSQLService:
         """创建项目，支持自动生成标识。"""
         identifier = self._normalize_identifier(identifier_id)
         query = """
-            INSERT INTO xtjs_projects (identifier_id)
-            VALUES (%s)
-            RETURNING id, identifier_id, deleted, create_time, update_time
+            INSERT INTO xtjs_projects (identifier_id, parsing_status)
+            VALUES (%s, %s)
+            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (identifier,))
-                return dict(cursor.fetchone())
+                cursor.execute(query, (identifier, self.PARSING_STATUS_UPLOADED))
+                return self._decorate_project_record(dict(cursor.fetchone()))
 
     def list_projects(
         self,
@@ -218,6 +249,7 @@ class PostgreSQLService:
                     SELECT
                         p.id,
                         p.identifier_id,
+                        p.parsing_status,
                         p.deleted,
                         p.create_time,
                         p.update_time,
@@ -289,7 +321,9 @@ class PostgreSQLService:
                     """,
                     tuple(values + [normalized_limit, normalized_offset]),
                 )
-                items: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
+                items: List[Dict[str, Any]] = [
+                    self._decorate_project_record(dict(item)) for item in cursor.fetchall()
+                ]
         return self._build_paginated_response(
             total=total,
             limit=normalized_limit,
@@ -314,7 +348,7 @@ class PostgreSQLService:
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取项目记录。"""
         query = """
-            SELECT id, identifier_id, deleted, create_time, update_time
+            SELECT id, identifier_id, parsing_status, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
@@ -322,7 +356,7 @@ class PostgreSQLService:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (identifier_id,))
                 result = cursor.fetchone()
-                return dict(result) if result else None
+                return self._decorate_project_record(dict(result)) if result else None
 
     def update_project(
         self,
@@ -342,13 +376,33 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET {", ".join(updates)}, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING id, identifier_id, deleted, create_time, update_time
+            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, tuple(values + [identifier_id]))
                 updated = cursor.fetchone()
-                return dict(updated) if updated else None
+                return self._decorate_project_record(dict(updated)) if updated else None
+
+    def update_project_parsing_status(
+        self,
+        identifier_id: str,
+        parsing_status: int,
+    ) -> Optional[Dict[str, Any]]:
+        # 提供统一入口给手动 OCR 路由推进项目解析阶段。
+        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
+        normalized_status = self._normalize_parsing_status(parsing_status)
+        query = """
+            UPDATE xtjs_projects
+            SET parsing_status = %s, update_time = CURRENT_TIMESTAMP
+            WHERE identifier_id = %s AND deleted = FALSE
+            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, (normalized_status, normalized_identifier))
+                updated = cursor.fetchone()
+                return self._decorate_project_record(dict(updated)) if updated else None
 
     def soft_delete_project(self, identifier_id: str) -> bool:
         """软删除项目（设置删除标记）。"""
