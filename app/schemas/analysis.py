@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 TextTaskType = Literal[
     "integrity_check",
+    "consistency_check",
+    "verification_check",
     "pricing_reason",
     "itemized_pricing",
     "deviation_check",
@@ -29,7 +31,12 @@ class TextAnalysisRequest(BaseModel):
     text: str | None = Field(
         default=None,
         min_length=1,
-        description="待分析文本；用于 task_type 文本分析模式。",
+        description=(
+            "待分析文本；用于 task_type 文本分析模式。"
+            "其中 consistency_check 需要传入包含模板文档与待检文档的 JSON 字符串，"
+            "verification_check 可传单文档/招投标文档对的 JSON 字符串，"
+            "也可直接传纯文本做单文档兜底检查。"
+        ),
     )
     project_identifier: str | None = Field(
         default=None,

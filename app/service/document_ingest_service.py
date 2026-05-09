@@ -60,6 +60,32 @@ def _rollback_uploaded_object(upload_result: Optional[dict], oss_service: MinioS
         return str(cleanup_exc)
 
 
+def _log_document_pipeline_exception(
+    *,
+    operation: str,
+    file_name: str,
+    document_type: Optional[DocumentType] = None,
+    identifier_id: Optional[str] = None,
+    upload_result: Optional[dict] = None,
+) -> None:
+    """Log file-level failures before they are converted into response payloads."""
+    context = {
+        "operation": operation,
+        "file_name": str(file_name or "").strip() or "<unknown>",
+        "document_type": str(document_type or "").strip() or "<unknown>",
+        "identifier_id": str(identifier_id or "").strip() or "<none>",
+        "bucket_name": str((upload_result or {}).get("bucket_name") or "").strip() or "<none>",
+        "object_name": str((upload_result or {}).get("object_name") or "").strip() or "<none>",
+    }
+    logger.exception(
+        "document pipeline failed "
+        "operation=%(operation)s file_name=%(file_name)s "
+        "document_type=%(document_type)s identifier_id=%(identifier_id)s "
+        "bucket_name=%(bucket_name)s object_name=%(object_name)s",
+        context,
+    )
+
+
 def _extract_recognition_content(
     file_bytes: bytes,
     file_name: str,
@@ -124,6 +150,7 @@ async def upload_extract_and_create_document(
 ) -> dict[str, Any]:
     """执行上传、识别、入库一体化流程。"""
     upload_result: Optional[dict] = None
+    resolved_file_name = (document_name or "").strip() or (file.filename or "").strip()
     try:
         # 第一步：上传文件到对象存储。
         upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
@@ -166,6 +193,13 @@ async def upload_extract_and_create_document(
             "resolved_file_name": resolved_file_name,
         }
     except Exception as exc:
+        _log_document_pipeline_exception(
+            operation="upload_extract_and_create_document",
+            file_name=resolved_file_name or (file.filename or ""),
+            document_type=document_type,
+            identifier_id=identifier_id,
+            upload_result=upload_result,
+        )
         # 失败时尝试回滚上传对象，并统一返回错误信息。
         rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         status_code, detail = _format_upload_create_error(exc, rollback_error)
@@ -191,6 +225,7 @@ async def upload_and_create_document_without_ocr(
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
     upload_result: Optional[dict] = None
+    resolved_file_name = (document_name or "").strip() or (file.filename or "").strip()
     try:
         upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
         resolved_file_name = (
@@ -216,6 +251,13 @@ async def upload_and_create_document_without_ocr(
             "resolved_file_name": resolved_file_name,
         }
     except Exception as exc:
+        _log_document_pipeline_exception(
+            operation="upload_and_create_document_without_ocr",
+            file_name=resolved_file_name or (file.filename or ""),
+            document_type=document_type,
+            identifier_id=identifier_id,
+            upload_result=upload_result,
+        )
         rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         status_code, detail = _format_upload_create_error(exc, rollback_error)
         if raise_http_exception:
@@ -236,6 +278,8 @@ async def recognize_existing_document(
     analysis_service,
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
+    document: dict[str, Any] | None = None
+    object_context: Optional[dict[str, Any]] = None
     try:
         document = await run_in_threadpool(db_service.get_document_by_identifier, document_identifier)
         if not document:
@@ -251,6 +295,7 @@ async def recognize_existing_document(
             bucket_name, object_name = MinioService.bucket_and_object_from_presigned_url(file_url)
         else:
             raise ValueError(f"unsupported document file_url: {file_url}")
+        object_context = {"bucket_name": bucket_name, "object_name": object_name}
 
         file_bytes, _ = await run_in_threadpool(
             oss_service.get_object_bytes,
@@ -277,6 +322,13 @@ async def recognize_existing_document(
             "recognition_content": recognition_content,
         }
     except Exception as exc:
+        _log_document_pipeline_exception(
+            operation="recognize_existing_document",
+            file_name=str((document or {}).get("file_name") or document_identifier),
+            document_type=(document or {}).get("document_type"),
+            identifier_id=document_identifier,
+            upload_result=object_context,
+        )
         if raise_http_exception:
             status_code, detail = _format_upload_create_error(exc, None)
             raise HTTPException(status_code=status_code, detail=detail) from exc

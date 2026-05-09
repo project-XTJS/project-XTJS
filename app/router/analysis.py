@@ -330,6 +330,73 @@ def _http_exception_detail_to_text(detail: Any) -> str:
     return json.dumps(detail, ensure_ascii=False)
 
 
+def _parse_task_json_object(
+    raw_text: str,
+    *,
+    task_type: str,
+) -> dict[str, Any]:
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_type} 要求 text 为 JSON 对象字符串。",
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{task_type} 要求 text 解析后为 JSON 对象。",
+        )
+    return parsed
+
+
+def _coerce_task_document(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _resolve_consistency_documents(task_payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    candidate_pairs = (
+        ("model_json", "test_json"),
+        ("model", "test"),
+        ("tender_document", "bid_document"),
+        ("tender_document", "business_bid_document"),
+        ("tender", "bid"),
+        ("招标文件", "投标文件"),
+        ("招标", "投标"),
+    )
+    for model_key, test_key in candidate_pairs:
+        model_json = _coerce_task_document(task_payload.get(model_key))
+        test_json = _coerce_task_document(task_payload.get(test_key))
+        if model_json is not None and test_json is not None:
+            return model_json, test_json
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "consistency_check 要求 text 中提供成对文档 JSON，"
+            "例如 model_json/test_json 或 tender_document/bid_document。"
+        ),
+    )
+
+
+def _build_verification_payload(raw_text: str) -> dict[str, Any]:
+    stripped = str(raw_text or "").strip()
+    if not stripped:
+        raise HTTPException(status_code=400, detail="verification_check 的 text 不能为空。")
+    if stripped.startswith("{"):
+        return _parse_task_json_object(stripped, task_type="verification_check")
+    return {"content": raw_text}
+
+
 async def _run_selected_project_services(
     *,
     identifier_id: str,
@@ -343,16 +410,23 @@ async def _run_selected_project_services(
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     items: list[dict] = []
     results: dict[str, Any] = {}
+    business_review_response: dict[str, Any] | None = None
+
+    async def _ensure_business_review_response() -> dict[str, Any]:
+        nonlocal business_review_response
+        if business_review_response is None:
+            business_review_response = await run_in_threadpool(
+                review_service.persist_project_business_review,
+                project_identifier=identifier_id,
+                result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+            )
+        return business_review_response
 
     for service_name in selected_services:
         result_key = _PROJECT_SERVICE_RESULT_KEYS.get(service_name, service_name)
         try:
             if service_name == "business_bid_format_review":
-                result = await run_in_threadpool(
-                    review_service.persist_project_business_review,
-                    project_identifier=identifier_id,
-                    result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
-                )
+                result = await _ensure_business_review_response()
             elif service_name == "business_bid_duplicate_check":
                 result = await run_in_threadpool(
                     _run_project_duplicate_check,
@@ -688,6 +762,13 @@ async def run_text_analysis(
 
     if payload.task_type == "integrity_check":
         return analysis_service.integrity.check_integrity(text)
+    if payload.task_type == "consistency_check":
+        task_payload = _parse_task_json_object(raw_text, task_type="consistency_check")
+        model_json, test_json = _resolve_consistency_documents(task_payload)
+        return analysis_service.consistency.compare_raw_data(model_json, test_json)
+    if payload.task_type == "verification_check":
+        verification_payload = _build_verification_payload(raw_text)
+        return analysis_service.verification.check_seal_and_date(verification_payload)
     if payload.task_type == "pricing_reason":
         return analysis_service.reasonableness.check_price_reasonableness(text)
     if payload.task_type == "itemized_pricing":
