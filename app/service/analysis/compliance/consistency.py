@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 from typing import List, Dict
 
 from .template_extractor import TemplateExtractor 
-from .verification import VerificationChecker
+from ..verification import VerificationChecker
 
 
 class DocumentProcessor:

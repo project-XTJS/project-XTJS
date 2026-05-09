@@ -26,14 +26,14 @@ from app.core.document_types import (
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
 from app.service.analysis.bid_document_review import BidDocumentReviewService
-from app.service.analysis.consistency import ConsistencyChecker, DocumentProcessor
+from app.service.analysis.compliance.consistency import ConsistencyChecker, DocumentProcessor
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.duplicate_check import DuplicateCheckService
 from app.service.analysis.duplicate_merge import DuplicateResultMerger
-from app.service.analysis.integrity import IntegrityChecker
+from app.service.analysis.compliance.integrity import IntegrityChecker
 from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.reasonableness import ReasonablenessChecker
-from app.service.analysis.template_extractor import TemplateExtractor
+from app.service.analysis.compliance.template_extractor import TemplateExtractor
 from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.analysis.verification import VerificationChecker
 from app.service.analysis.visualizer import ReportVisualizer

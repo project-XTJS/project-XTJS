@@ -1696,7 +1696,7 @@ class ReportVisualizer:
         test_dict = {item['title']: item['text'] for item in test_segments}
         self._document_preview_config = document_preview_config or {"documents": {}}
 
-        from .consistency import ConsistencyChecker
+        from .compliance.consistency import ConsistencyChecker
         checker = ConsistencyChecker()
 
         attachment_info_map = self._build_attachment_info(consistency_report, test_dict)

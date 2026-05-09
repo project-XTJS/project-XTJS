@@ -10,7 +10,7 @@ from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TE
 from app.service.minio_service import MinioService
 from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
-from app.service.analysis.template_extractor import SectionClassifier
+from app.service.analysis.compliance.template_extractor import SectionClassifier
 
 from .constants import (
     SUPPORTED_DOCUMENT_TYPES,

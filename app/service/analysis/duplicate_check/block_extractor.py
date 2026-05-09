@@ -7,7 +7,7 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
-from app.service.analysis.template_extractor import SectionClassifier
+from app.service.analysis.compliance.template_extractor import SectionClassifier
 
 from .text_utils import (
     normalize_plain_text,

@@ -6,7 +6,7 @@ from datetime import date
 from difflib import SequenceMatcher
 from typing import Any
 
-from .template_extractor import TemplateExtractor
+from .compliance.template_extractor import TemplateExtractor
 
 
 class VerificationChecker:

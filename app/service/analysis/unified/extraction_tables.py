@@ -12,7 +12,7 @@ import json
 import re
 from typing import Any
 
-from app.service.analysis.template_extractor import TemplateExtractor
+from app.service.analysis.compliance.template_extractor import TemplateExtractor
 
 
 class ExtractionTablesMixin:
