@@ -31,10 +31,10 @@ from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.duplicate_check import DuplicateCheckService
 from app.service.analysis.duplicate_merge import DuplicateResultMerger
 from app.service.analysis.integrity import IntegrityChecker
-from app.service.analysis.itemized_pricing import ItemizedPricingChecker
-from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
+from app.service.analysis.itemized import ItemizedPricingChecker
+from app.service.analysis.reasonableness import ReasonablenessChecker
 from app.service.analysis.template_extractor import TemplateExtractor
-from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
+from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.analysis.verification import VerificationChecker
 from app.service.analysis.visualizer import ReportVisualizer
 from app.service.postgresql_service import PostgreSQLService

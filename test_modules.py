@@ -4,7 +4,7 @@ from pathlib import Path
 from pprint import pprint
 
 # 确保导入路径指向你重构后的包
-from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
+from app.service.analysis.reasonableness import ReasonablenessChecker
 
 # ================= 配置：卫星项目路径 =================
 TENDER_PATH = Path("./ocr_results/卫星/招标.json")

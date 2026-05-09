@@ -17,8 +17,8 @@ from app.utils.text_utils import preprocess_text
 
 from app.service.analysis.integrity import IntegrityChecker
 from app.service.analysis.consistency import ConsistencyChecker
-from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
-from app.service.analysis.itemized_pricing import ItemizedPricingChecker
+from app.service.analysis.reasonableness import ReasonablenessChecker
+from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.verification import VerificationChecker
 

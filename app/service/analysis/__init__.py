@@ -3,7 +3,7 @@ from .deviation import DeviationChecker
 from .integrity import IntegrityChecker
 from .consistency import ConsistencyChecker
 from .duplicate_check import DuplicateCheckService
-from .pricing_reasonableness import ReasonablenessChecker
+from .reasonableness import ReasonablenessChecker
 from .itemized import ItemizedPricingChecker
 from .bid_document_review import BidDocumentReviewService
 from .verification import VerificationChecker
