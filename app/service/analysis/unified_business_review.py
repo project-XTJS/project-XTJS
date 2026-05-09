@@ -799,6 +799,15 @@ class UnifiedBusinessReviewService:
                 ),
                 normalizer=self._normalize_itemized,
             ),
+            "deviation_check": self._execute_check(
+                check_code="deviation_check",
+                check_name="偏离条款审查",
+                runner=lambda: self.deviation_checker.check_technical_deviation(
+                    tender_payload,
+                    business_payload,
+                ),
+                normalizer=self._normalize_deviation,
+            ),
             "verification_check": self._execute_check(
                 check_code="verification_check",
                 check_name="签字盖章日期审查",
@@ -2737,7 +2746,11 @@ class UnifiedBusinessReviewService:
                     self._document_source_brief(technical_meta, purpose="technical_response_source")
                 )
             return {
-                "focus_scope": "对照招标文件要求，检查商务标/技术标中的响应与偏离情况。",
+                "focus_scope": (
+                    "对照招标文件要求，检查商务标/技术标中的响应与偏离情况。"
+                    if technical_meta
+                    else "对照招标文件要求，检查商务标中的偏离表响应与偏离情况。"
+                ),
                 "source_documents": source_documents,
             }
         return {

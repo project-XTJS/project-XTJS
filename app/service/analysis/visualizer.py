@@ -822,11 +822,11 @@ class ReportVisualizer:
                     const seen = new Set();
                     const normalized = [];
                     (Array.isArray(values) ? values : []).forEach((value) => {{
-                        const text = String(value || '').replace(/\s+/g, ' ').trim();
+                        const text = String(value || '').replace(/\\s+/g, ' ').trim();
                         if (!text) return;
-                        const compact = text.replace(/[^\w\u4e00-\u9fff]+/g, '');
+                        const compact = text.replace(/[^\\w\u4e00-\u9fff]+/g, '');
                         if (compact.length < 2) return;
-                        if (/^\d+$/.test(compact)) return;
+                        if (/^\\d+$/.test(compact)) return;
                         if (seen.has(text)) return;
                         seen.add(text);
                         normalized.push(text);
@@ -5095,11 +5095,11 @@ class ReportVisualizer:
                     const seen = new Set();
                     const normalized = [];
                     (Array.isArray(values) ? values : []).forEach((value) => {{
-                        const text = String(value || '').replace(/\s+/g, ' ').trim();
+                        const text = String(value || '').replace(/\\s+/g, ' ').trim();
                         if (!text) return;
-                        const compact = text.replace(/[^\w\u4e00-\u9fff]+/g, '');
+                        const compact = text.replace(/[^\\w\u4e00-\u9fff]+/g, '');
                         if (compact.length < 2) return;
-                        if (/^\d+$/.test(compact)) return;
+                        if (/^\\d+$/.test(compact)) return;
                         if (seen.has(text)) return;
                         seen.add(text);
                         normalized.push(text);

@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -46,6 +47,7 @@ from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # 从配置读取批处理数量限制，兼容新旧字段名
 PROJECT_BATCH_MIN_BID_GROUPS = max(
@@ -99,6 +101,14 @@ async def _recognize_batch_documents(
                 raise_http_exception=False,
             )
         if not result["ok"]:
+            logger.error(
+                "batch recognize file failed index=%s role=%s file_name=%s status_code=%s error=%s",
+                index,
+                role_label,
+                file_name,
+                result["status_code"],
+                result["error"],
+            )
             return {
                 "index": index,
                 "file_name": file_name,
@@ -149,6 +159,14 @@ async def _upload_batch_documents_without_ocr(
                 raise_http_exception=False,
             )
         if not result["ok"]:
+            logger.error(
+                "batch upload file failed index=%s role=%s file_name=%s status_code=%s error=%s",
+                index,
+                role_label,
+                file_name,
+                result["status_code"],
+                result["error"],
+            )
             return {
                 "index": index,
                 "file_name": file_name,

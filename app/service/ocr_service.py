@@ -313,12 +313,94 @@ class OCRService:
         shutil.copy2(source, staged_path)
         return str(staged_path), staged_path
 
+    def _resolve_predict_chunk_pages(self, file_type: str, total_pages: int) -> int:
+        normalized_type = str(file_type or "").strip().lower().lstrip(".")
+        if normalized_type != "pdf" or total_pages <= 1:
+            return 0
+
+        configured = int(getattr(settings, "OCR_PREDICT_CHUNK_PAGES", 0) or 0)
+        if configured <= 0 or configured >= total_pages:
+            return 0
+        return configured
+
+    def _build_pdf_chunk_inputs(
+        self,
+        file_path: str,
+        *,
+        total_pages: int,
+        chunk_pages: int,
+    ) -> tuple[list[dict[str, Any]], Path]:
+        import fitz
+
+        staging_dir = Path(settings.OCR_RUNTIME_TEMP_DIR) / "input-staging" / f"ocr-chunks-{uuid.uuid4().hex}"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        document = fitz.open(file_path)
+        inputs: list[dict[str, Any]] = []
+        try:
+            actual_pages = len(document)
+            if actual_pages > 0:
+                total_pages = actual_pages
+
+            for start_page in range(0, max(total_pages, 0), chunk_pages):
+                end_page = min(start_page + chunk_pages, total_pages)
+                chunk_path = staging_dir / f"chunk_{start_page + 1:05d}_{end_page:05d}.pdf"
+                chunk_doc = fitz.open()
+                try:
+                    chunk_doc.insert_pdf(document, from_page=start_page, to_page=end_page - 1)
+                    chunk_doc.save(chunk_path)
+                finally:
+                    chunk_doc.close()
+
+                inputs.append(
+                    {
+                        "input_path": str(chunk_path),
+                        "page_offset": start_page,
+                        "page_count": end_page - start_page,
+                        "cleanup_path": None,
+                        "page_range": (start_page + 1, end_page),
+                    }
+                )
+        finally:
+            document.close()
+
+        if not inputs:
+            raise RuntimeError("Failed to build OCR PDF chunks.")
+        return inputs, staging_dir
+
+    def _build_pipeline_inputs(
+        self,
+        file_path: str,
+        file_type: str,
+        total_pages: int,
+    ) -> tuple[list[dict[str, Any]], Path | None]:
+        chunk_pages = self._resolve_predict_chunk_pages(file_type, total_pages)
+        if chunk_pages <= 0:
+            input_path, staged_path = self._stage_input_for_pipeline(file_path)
+            return [
+                {
+                    "input_path": input_path,
+                    "page_offset": 0,
+                    "page_count": total_pages,
+                    "cleanup_path": staged_path,
+                    "page_range": (1, total_pages if total_pages > 0 else 1),
+                }
+            ], staged_path
+
+        return self._build_pdf_chunk_inputs(
+            file_path,
+            total_pages=total_pages,
+            chunk_pages=chunk_pages,
+        )
+
     def _run_pipeline(
         self,
         input_path: str,
         *,
         progress_monitor: OCRProgressMonitor | None = None,
         total_pages: int = 0,
+        progress_page_offset: int = 0,
+        progress_total_pages: int | None = None,
     ) -> list[Any]:
         """执行 pipeline 推理，支持页面重构。"""
         if not self.available or self.pipeline is None:
@@ -328,8 +410,8 @@ class OCRService:
             if progress_monitor is not None:
                 progress_monitor.update(
                     stage="predict",
-                    current=0,
-                    total=max(total_pages, 1),
+                    current=max(progress_page_offset, 0),
+                    total=max(int(progress_total_pages or total_pages or 1), 1),
                     detail="starting pipeline.predict_iter",
                     emit=False,
                 )
@@ -338,40 +420,50 @@ class OCRService:
             for index, item in enumerate(self.pipeline.predict_iter(input_path), start=1):
                 results.append(item)
                 if progress_monitor is not None:
+                    current_page = max(progress_page_offset + index, 0)
                     progress_monitor.update(
                         stage="predict",
-                        current=index,
-                        total=max(total_pages, index, 1),
-                        detail=f"page/batch {index} predicted",
+                        current=current_page,
+                        total=max(int(progress_total_pages or total_pages or 1), current_page, 1),
+                        detail=f"page/batch {current_page} predicted",
                         emit=True,
                     )
-
-            if settings.PADDLE_VL_RESTRUCTURE_PAGES and len(results) > 1:
-                if progress_monitor is not None:
-                    progress_monitor.update(
-                        stage="restructure",
-                        current=0,
-                        total=1,
-                        detail="restructure pages",
-                        emit=False,
-                    )
-                results = list(
-                    self.pipeline.restructure_pages(
-                        results,
-                        merge_tables=True,
-                        relevel_titles=True,
-                        concatenate_pages=False,
-                    )
-                )
-                if progress_monitor is not None:
-                    progress_monitor.update(
-                        stage="restructure",
-                        current=1,
-                        total=1,
-                        detail="restructure completed",
-                        emit=False,
-                    )
             return results
+
+    def _restructure_pipeline_results(
+        self,
+        results: list[Any],
+        *,
+        progress_monitor: OCRProgressMonitor | None = None,
+    ) -> list[Any]:
+        if not settings.PADDLE_VL_RESTRUCTURE_PAGES or len(results) <= 1:
+            return results
+
+        if progress_monitor is not None:
+            progress_monitor.update(
+                stage="restructure",
+                current=0,
+                total=1,
+                detail="restructure pages",
+                emit=False,
+            )
+        results = list(
+            self.pipeline.restructure_pages(
+                results,
+                merge_tables=True,
+                relevel_titles=True,
+                concatenate_pages=False,
+            )
+        )
+        if progress_monitor is not None:
+            progress_monitor.update(
+                stage="restructure",
+                current=1,
+                total=1,
+                detail="restructure completed",
+                emit=False,
+            )
+        return results
 
     # ── 数据类型转换与文本清洗 ─────────────────────────────
 
@@ -790,10 +882,12 @@ class OCRService:
         return ""
 
     def _page_number_from_payload(self, payload: dict[str, Any], fallback_page_no: int) -> int:
-        """从页面解析结果中提取页码（page_index 从0开始）。"""
+        if bool(payload.get("_xtjs_prefer_fallback_page_no", False)):
+            return fallback_page_no
+        page_offset = int(payload.get("_xtjs_page_offset", 0) or 0)
         raw_page_index = payload.get("page_index")
         if isinstance(raw_page_index, int):
-            return raw_page_index + 1 if raw_page_index >= 0 else fallback_page_no
+            return (raw_page_index + 1 + page_offset) if raw_page_index >= 0 else fallback_page_no
         return fallback_page_no
 
     # ── 表格提取 ─────────────────────────────
@@ -838,7 +932,7 @@ class OCRService:
             raw_payload = {}
 
         native_payload = dict(raw_payload)
-        if page_no > 0 and not isinstance(native_payload.get("page"), int):
+        if page_no > 0:
             native_payload["page"] = page_no
 
         bbox = self._normalize_bbox(
@@ -1969,14 +2063,48 @@ class OCRService:
             total_pages=total_pages,
         )
         progress_monitor.start()
-        pipeline_input_path, staged_path = self._stage_input_for_pipeline(file_path)
+        pipeline_inputs, staged_path = self._build_pipeline_inputs(file_path, file_type, total_pages)
         pdf_page_sizes = self._load_pdf_page_sizes(file_path, file_type)
+        if len(pipeline_inputs) > 1:
+            chunk_pages = int(
+                max(int(item.get("page_count", 0) or 0) for item in pipeline_inputs)
+            )
+            print(
+                "OCRService: predict chunking enabled "
+                f"(chunks={len(pipeline_inputs)}, chunk_pages={chunk_pages}, total_pages={total_pages})",
+                flush=True,
+            )
 
         try:
-            results = self._run_pipeline(
-                pipeline_input_path,
+            raw_results: list[Any] = []
+            chunked_predict = len(pipeline_inputs) > 1
+            for chunk_index, pipeline_input in enumerate(pipeline_inputs, start=1):
+                page_offset = int(pipeline_input.get("page_offset", 0) or 0)
+                page_count = int(pipeline_input.get("page_count", 0) or 0)
+                page_range = pipeline_input.get("page_range") or (page_offset + 1, page_offset + max(page_count, 1))
+                if progress_monitor is not None and len(pipeline_inputs) > 1:
+                    progress_monitor.update(
+                        stage="predict",
+                        current=max(page_offset, 0),
+                        total=max(total_pages, 1),
+                        detail=(
+                            f"predict chunk {chunk_index}/{len(pipeline_inputs)} "
+                            f"pages {page_range[0]}-{page_range[1]}"
+                        ),
+                        emit=True,
+                    )
+                chunk_results = self._run_pipeline(
+                    str(pipeline_input["input_path"]),
+                    progress_monitor=progress_monitor,
+                    total_pages=page_count,
+                    progress_page_offset=page_offset,
+                    progress_total_pages=total_pages,
+                )
+                raw_results.extend(chunk_results)
+
+            results = self._restructure_pipeline_results(
+                raw_results,
                 progress_monitor=progress_monitor,
-                total_pages=total_pages,
             )
             if not results:
                 raise RuntimeError("PaddleOCR-VL-1.5 returned no results.")
@@ -2002,6 +2130,8 @@ class OCRService:
             for fallback_page_no, result in enumerate(results, start=1):
                 page_payload = self._to_builtin(result)
                 if isinstance(page_payload, dict):
+                    if chunked_predict:
+                        page_payload["_xtjs_prefer_fallback_page_no"] = True
                     page_payloads.append((fallback_page_no, page_payload))
 
             processed_pages: list[dict[str, Any]] = []
@@ -2124,6 +2254,9 @@ class OCRService:
         finally:
             if staged_path is not None:
                 try:
-                    staged_path.unlink(missing_ok=True)
+                    if staged_path.is_dir():
+                        shutil.rmtree(staged_path, ignore_errors=True)
+                    else:
+                        staged_path.unlink(missing_ok=True)
                 except Exception:
                     pass
