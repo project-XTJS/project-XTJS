@@ -64,7 +64,7 @@ from app.service.analysis.duplicate_merge import (
     RAW_RESULT_KEY_BY_DOC_TYPE,
     build_duplicate_merge_results,
 )
-from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
+from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService

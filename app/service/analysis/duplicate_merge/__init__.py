@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-查重合并模块入口
-"""
+"""查重合并模块入口"""
 from typing import Any
 
-from .constants import DOC_TYPES_BY_SOURCE_RESULT_KEY, MERGED_RESULT_KEY_BY_DOC_TYPE
+# 导出常量
+from .constants import (
+    MERGED_RESULT_KEY_BY_DOC_TYPE,
+    RAW_RESULT_KEY_BY_DOC_TYPE,
+    DOC_TYPE_BY_MERGED_RESULT_KEY,
+    DOC_TYPES_BY_SOURCE_RESULT_KEY,
+)
+
+# 导出核心类
 from .merger import DuplicateResultMerger
 
 
@@ -40,4 +46,11 @@ def build_duplicate_merge_results(
     return merged_results
 
 
-__all__ = ["DuplicateResultMerger", "build_duplicate_merge_results"]
+__all__ = [
+    "MERGED_RESULT_KEY_BY_DOC_TYPE",
+    "RAW_RESULT_KEY_BY_DOC_TYPE",
+    "DOC_TYPE_BY_MERGED_RESULT_KEY",
+    "DOC_TYPES_BY_SOURCE_RESULT_KEY",
+    "DuplicateResultMerger",
+    "build_duplicate_merge_results",
+]

@@ -30,7 +30,7 @@ from app.router.postgresql import (
 )
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
-from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
+from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.postgresql_service import PostgreSQLService
 from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file

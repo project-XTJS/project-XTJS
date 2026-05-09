@@ -35,7 +35,7 @@ from app.router.uploaded_json_support import (
     persist_uploaded_json_project_documents,
     read_uploaded_json_file,
 )
-from app.service.analysis.unified_business_review import UnifiedBusinessReviewService
+from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.analysis import DuplicateCheckService
 from app.service.analysis.duplicate_merge import build_duplicate_merge_results
 from app.service.document_ingest_service import (
