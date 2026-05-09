@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+上传 JSON 文件的支持模块。
+
+负责读取、解析、验证上传的 OCR JSON 文件，推导投标人标识，
+并持久化至数据库，同时自动创建项目与文档绑定关系。
+"""
+
 from __future__ import annotations
 
 import json
@@ -17,16 +25,19 @@ from app.core.document_types import (
 from app.service.document_ingest_service import compact_document_payload
 from app.service.postgresql_service import PostgreSQLService
 
+# 从文件名中提取/清洗投标人标识的正则
 BUSINESS_JSON_SUFFIX_RE = re.compile(r"[\s_-]*商务标\s*$", re.IGNORECASE)
 TECHNICAL_JSON_SUFFIX_RE = re.compile(r"[\s_-]*技术标\s*$", re.IGNORECASE)
 
 
+# 解析可选的 JSON 字符串数组，并校验长度
 def parse_optional_string_array_json(
     raw_value: Optional[str],
     *,
     field_name: str,
     expected_length: int,
 ) -> Optional[list[str]]:
+    """将 JSON 数组字符串解析为字符串列表，长度需匹配上传文件数量。"""
     if raw_value is None or not str(raw_value).strip():
         return None
 
@@ -46,7 +57,9 @@ def parse_optional_string_array_json(
     return ["" if item is None else str(item).strip() for item in parsed]
 
 
+# 读取并校验单个上传的 JSON 文件
 async def read_uploaded_json_file(upload: UploadFile, *, field_name: str) -> dict[str, Any]:
+    """从上传文件中读取 UTF-8 编码的 JSON 对象，返回原始字节与解析后的字典。"""
     file_name = str(upload.filename or "").strip() or field_name
     raw_bytes = await upload.read()
     if not raw_bytes:
@@ -69,7 +82,9 @@ async def read_uploaded_json_file(upload: UploadFile, *, field_name: str) -> dic
     }
 
 
+# 从文件名推导投标人标识（去除商务标/技术标后缀）
 def derive_uploaded_bidder_key(file_name: str, index: int, *, role: str) -> str:
+    """根据文件名和文档角色生成初步的投标人标识。"""
     stem = Path(str(file_name or "").strip()).stem.strip()
     if role == DOCUMENT_TYPE_BUSINESS_BID:
         normalized = BUSINESS_JSON_SUFFIX_RE.sub("", stem).strip()
@@ -80,7 +95,9 @@ def derive_uploaded_bidder_key(file_name: str, index: int, *, role: str) -> str:
     return normalized or f"bidder_{index + 1}"
 
 
+# 确保投标人标识在批次内唯一
 def ensure_unique_bidder_key(candidate: str, used: set[str], index: int) -> str:
+    """对重复的标识添加数字后缀，保证唯一性。"""
     base = str(candidate or "").strip() or f"bidder_{index + 1}"
     unique = base
     suffix = 2
@@ -91,6 +108,7 @@ def ensure_unique_bidder_key(candidate: str, used: set[str], index: int) -> str:
     return unique
 
 
+# 批量加载并标记上传的投标 JSON 文件
 async def load_uploaded_bid_json_documents(
     uploads: Optional[list[UploadFile]],
     *,
@@ -98,6 +116,7 @@ async def load_uploaded_bid_json_documents(
     role: str,
     provided_bidder_keys: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
+    """读取一批上传文件，为每个文件分配唯一的 bidder_key，并携带文档类型与序号。"""
     normalized_uploads = [upload for upload in (uploads or []) if upload is not None]
     if provided_bidder_keys is not None and len(provided_bidder_keys) != len(normalized_uploads):
         raise HTTPException(
@@ -124,10 +143,12 @@ async def load_uploaded_bid_json_documents(
     return documents
 
 
+# 确保项目存在，必要时创建
 async def ensure_upload_project(
     db_service: PostgreSQLService,
     project_identifier: Optional[str],
 ) -> tuple[dict[str, Any], bool]:
+    """根据标识查找项目，若不存在且提供了标识则创建，未提供标识则自动生成。"""
     normalized_identifier = (project_identifier or "").strip()
     if normalized_identifier:
         existing = await run_in_threadpool(
@@ -156,6 +177,7 @@ async def ensure_upload_project(
     return created, True
 
 
+# 为上传的 JSON 文档构造虚拟 file_url
 def _build_uploaded_json_file_url(
     *,
     project_identifier: str,
@@ -163,12 +185,14 @@ def _build_uploaded_json_file_url(
     file_name: str,
     bidder_key: Optional[str] = None,
 ) -> str:
+    """生成形如 json-upload://项目/类型/投标人/文件名 的虚拟路径。"""
     safe_project_identifier = str(project_identifier or "project").strip() or "project"
     safe_file_name = Path(str(file_name or "document.json").strip() or "document.json").name
     prefix = bidder_key.strip() if bidder_key else "shared"
     return f"json-upload://{safe_project_identifier}/{document_type}/{prefix}/{safe_file_name}"
 
 
+# 创建带 JSON 内容的文档记录
 async def _create_uploaded_json_document(
     *,
     db_service: PostgreSQLService,
@@ -176,6 +200,7 @@ async def _create_uploaded_json_document(
     uploaded_document: dict[str, Any],
     document_type: str,
 ) -> dict[str, Any]:
+    """将已解析的上传 JSON 持久化为数据库文档，并返回包含元信息的摘要。"""
     created = await run_in_threadpool(
         db_service.create_document_with_content,
         uploaded_document["file_name"],
@@ -196,6 +221,7 @@ async def _create_uploaded_json_document(
     }
 
 
+# 整体持久化上传的招标/投标 JSON 文档，并绑定项目关系
 async def persist_uploaded_json_project_documents(
     *,
     db_service: PostgreSQLService,
@@ -204,9 +230,11 @@ async def persist_uploaded_json_project_documents(
     technical_bid_documents: Optional[list[dict[str, Any]]] = None,
     project_identifier: Optional[str] = None,
 ) -> dict[str, Any]:
+    """将招标文件与商务标/技术标 JSON 上传持久化，并尝试按上传顺序绑定关系。"""
     project, project_created = await ensure_upload_project(db_service, project_identifier)
     resolved_project_identifier = str(project["identifier_id"])
 
+    # 分别持久化三类文档
     persisted_tender = await _create_uploaded_json_document(
         db_service=db_service,
         project_identifier=resolved_project_identifier,
@@ -232,6 +260,7 @@ async def persist_uploaded_json_project_documents(
         for document in (technical_bid_documents or [])
     ]
 
+    # 绑定招标 + 商务标 + 技术标的对应关系（位置对齐）
     relation_items: list[dict[str, Any]] = []
     skipped_items: list[dict[str, Any]] = []
     bound_relation_ids: dict[str, int] = {}
@@ -302,6 +331,7 @@ async def persist_uploaded_json_project_documents(
             }
         )
 
+    # 组装返回结果，含绑定摘要
     return {
         "project": project,
         "project_created": project_created,
@@ -349,9 +379,11 @@ async def persist_uploaded_json_project_documents(
     }
 
 
+# 将持久化结果转换为通用的文档记录列表（供查重/审查服务使用）
 def build_uploaded_project_document_records(
     persisted_documents: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    """从 persist_uploaded_json_project_documents 的返回值提取文档记录列表。"""
     tender_document = dict(persisted_documents["tender_document"]["document"])
     business_documents = list(persisted_documents.get("business_bid_documents") or [])
     technical_documents = list(persisted_documents.get("technical_bid_documents") or [])

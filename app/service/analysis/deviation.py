@@ -1,6 +1,10 @@
-﻿"""
-偏离条款合规性检查模块
-负责人：高海斌
+﻿# -*- coding: utf-8 -*-
+"""
+偏离条款合规性检查模块。
+
+负责从招标文件中提取带星号（★）的强制性要求，
+并在投标文件（商务标/技术标）中匹配对应的响应，
+判断是否存在负偏离、正偏离或无偏离，并生成详细的检查报告。
 """
 
 from __future__ import annotations
@@ -13,18 +17,27 @@ from typing import Any
 
 
 class DeviationChecker:
-    # 仅识别真正星标，不识别 * 乘号
+    """偏离条款检查器，核心功能为检测投标文件对招标文件星号条款的响应情况。"""
+
+    # 仅匹配真正的星标符号（★），避免匹配乘号 *
     STAR_RE = re.compile(r"★")
+    # 匹配条目编号，如 (1)、★ (2)、1. 、1、 等
     ITEM_MARKER_RE = re.compile(
         r"(?:★\s*)?[（(]\d{1,2}[)）]|(?:(?<=^)|(?<=\s))\d{1,2}[、.．](?!\d)"
     )
+    # 匹配表格行首的编号（如 "1  "、"2." 等）
     TABLE_ROW_MARKER_RE = re.compile(
         r"(?:(?<=^)|(?<=\s))\d{1,3}(?:(?:[、.．)](?!\d))|\s+)"
     )
 
+    # 商务标偏离表标题关键词
     BUSINESS_TITLES = ("商务条款偏离表", "商务偏离表", "商务条款响应表", "商务偏离")
+    # 技术标偏离表标题关键词
     TECH_TITLES = ("技术条款偏离表", "技术偏离表", "技术条款响应表", "技术偏离")
+    # 停止搜索的区间标记（遇到这些标题说明偏离表部分结束）
     STOP_HINTS = ("投标人基本情况", "资格证明", "报价", "开标一览", "承诺", "目录", "附录", "类似项目", "法定代表人")
+
+    # 用于定位招标文件中"需求"章节的关键词（强/弱/排除）
     REQUIREMENT_CHAPTER_STRONG_HINTS = (
         "项目需求书",
         "服务需求书",
@@ -53,6 +66,7 @@ class DeviationChecker:
         "投标文件组成",
     )
 
+    # 偏离响应中的常见表述模式
     NO_DEV_PATTERNS = (
         r"无偏离",
         r"未偏离",
@@ -66,12 +80,15 @@ class DeviationChecker:
 
     def check_technical_deviation(self, tender_document: Any, bid_document: Any | None = None) -> dict:
         """
-        支持：
-        1) check_technical_deviation(招标JSON, 技术标JSON)
-        2) check_technical_deviation(single_text_or_json) -> 返回输入不足提示
+        对招标文件和投标文件进行偏离检查。
+
+        支持两种调用方式：
+        1) 传入招标JSON和投标JSON，执行完整比对。
+        2) 仅传入单个文档，返回提示信息。
         """
         tender = self._coerce_payload(tender_document)
         if bid_document is None:
+            # 尝试从招标文档中自动提取配对投标内容，若无则返回输入不足提示
             pair = self._extract_pair(tender)
             if not pair:
                 return self._single_doc_result(tender)
@@ -81,15 +98,23 @@ class DeviationChecker:
         return self._run_check(tender, bid)
 
     def compare_raw_data(self, tender_raw_json: Any, bid_raw_json: Any) -> dict:
+        """对外一致性接口，等同于 check_technical_deviation(tender, bid)。"""
         return self.check_technical_deviation(tender_raw_json, bid_raw_json)
 
     def _run_check(self, tender_payload: dict, bid_payload: dict) -> dict:
+        """
+        核心检查逻辑：
+        1) 从招标文件中提取所有★条款
+        2) 从投标文件中提取偏离表内容
+        3) 为每条★条款匹配对应的响应行
+        4) 统计偏离类型并返回结果
+        """
         star_requirements = self._extract_star_requirements(tender_payload)
         sections = self._extract_bid_deviation_sections(bid_payload)
         global_stmt = self._detect_global_no_deviation(sections["combined_text"])
         table_coverage = self._collect_table_coverage(sections)
 
-        # 严格规则：无★则直接通过，不比对
+        # 无星标要求时直接通过
         if not star_requirements:
             return {
                 "mode": "tender_technical_bid_json",
@@ -129,6 +154,7 @@ class DeviationChecker:
             }
 
         requirements = star_requirements
+        # 逐一为星标条款匹配偏离表行或段落
         matches = [self._match_one_star(item, sections) for item in requirements]
 
         missing_items: list[dict[str, Any]] = []
@@ -186,6 +212,7 @@ class DeviationChecker:
         negative = len(negative_items)
         unclear = len(unclear_items)
         status, deviation_status, summary = self._overall_status(total, missing, negative, unclear)
+
         findings = [f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。"]
         findings.append(f"已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
         findings.append(f"合规响应数量（无偏离/正偏离/列明未负响应）：{no_dev + positive + listed} 条。")
@@ -228,6 +255,7 @@ class DeviationChecker:
         }
 
     def _single_doc_result(self, payload: dict) -> dict:
+        """当输入仅为单份文档时，生成带有提示的结果结构。"""
         star_requirements = self._extract_star_requirements(payload)
         requirements = star_requirements
         sections = self._extract_bid_deviation_sections(payload)
@@ -266,6 +294,7 @@ class DeviationChecker:
         }
 
     def _extract_star_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
+        """从招标文件全文逐行扫描，抽取所有带 ★ 的强制性要求条目。"""
         lines = self._page_lines(tender_payload)
         out: list[dict[str, Any]] = []
         seen = set()
@@ -298,7 +327,8 @@ class DeviationChecker:
 
     def _chapter_scopes_for_star(self, lines: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
         """
-        在“需求/要求/标准/任务书”类章节中提取星标条款，不限定必须是第三章。
+        查找招标文件中"需求/要求/标准/任务书"类章节的范围，
+        仅在符合条件的章节内提取星标条款，避免全文抓取误伤。
         """
         if not lines:
             return []
@@ -363,9 +393,14 @@ class DeviationChecker:
         return selected
 
     def _extract_bid_deviation_sections(self, bid_payload: dict) -> dict[str, Any]:
+        """
+        从投标文件中提取商务偏离表、技术偏离表等区段，
+        并解析出表格行数据用于后续匹配。
+        """
         line_items = self._page_lines(bid_payload)
         business = self._collect_sections(line_items, self.BUSINESS_TITLES)
         technical = self._collect_sections(line_items, self.TECH_TITLES)
+        # 如果未找到明确的商务/技术表，尝试通用关键词“偏离表”进行分配
         if not business and not technical:
             generic = self._collect_sections(line_items, ("偏离表",))
             for sec in generic:
@@ -385,9 +420,11 @@ class DeviationChecker:
         return {"business": business, "technical": technical, "combined_text": combined, "rows": rows}
 
     def _is_table_row_start(self, line: str) -> bool:
+        """判断一行文本是否为表格行的起始（以数字开头）。"""
         return bool(re.match(r"^\s*\d{1,3}(?:\s*[.,)\u3001\uff0e\uff09]|\s+)", str(line or "")))  
 
     def _looks_like_response_row(self, line: str) -> bool:
+        """判断一行文本是否包含偏离响应信息（如页码引用或偏离关键词）。"""
         text = str(line or "")
         if not self._is_table_row_start(text):
             return False
@@ -398,6 +435,7 @@ class DeviationChecker:
         return False
 
     def _collect_table_coverage(self, sections: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """统计商务/技术偏离表的覆盖情况（是否包含响应行等）。"""
         coverage: dict[str, dict[str, Any]] = {}
         for group in ("business", "technical"):
             best = {
@@ -428,12 +466,14 @@ class DeviationChecker:
             coverage[group] = best
         return coverage
 
+    # 以下为偏离表行提取及匹配方法（包含逻辑表格和纯文本两种来源）
     def _extract_deviation_rows(
         self,
         bid_payload: dict,
         business_sections: list[dict[str, Any]],
         technical_sections: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """从投标文件的逻辑表格和段落中提取所有可能的偏离响应行。"""
         rows: list[dict[str, Any]] = []
         doc = self._doc_container(bid_payload)
         section_hints = technical_sections + business_sections
@@ -449,6 +489,7 @@ class DeviationChecker:
         for section in business_sections:
             rows.extend(self._extract_rows_from_section(section, "business"))
 
+        # 去重
         out: list[dict[str, Any]] = []
         seen = set()
         for row in rows:
@@ -465,6 +506,7 @@ class DeviationChecker:
         *,
         section_hints: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        """解析一个逻辑表格，将其记录转换为偏离行结构。"""
         out: list[dict[str, Any]] = []
         headers = [str(x or "").strip() for x in (table.get("headers") or [])]
         pages = [x for x in (table.get("pages") or []) if isinstance(x, int)]
@@ -487,6 +529,7 @@ class DeviationChecker:
         if out:
             return out
 
+        # 尝试从 rows 列表构建记录
         rows = table.get("rows")
         if not isinstance(rows, list):
             native_headers, native_records = self._extract_native_table_records(table)
@@ -518,6 +561,7 @@ class DeviationChecker:
         return out
 
     def _extract_native_table_records(self, table: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        """从表格的 HTML 或文本内容中解析出表头和数据行。"""
         raw_html = table.get("block_content") or table.get("html") or table.get("text") or ""
         if not isinstance(raw_html, str) or not raw_html.strip():
             return [], []
@@ -545,6 +589,7 @@ class DeviationChecker:
         return headers, records
 
     def _parse_html_table_rows(self, raw_html: str) -> list[list[str]]:
+        """简易 HTML 表格解析，提取每行每列的文本。"""
         html = str(raw_html or "")
         if "<tr" not in html.lower() or ("<td" not in html.lower() and "<th" not in html.lower()):
             return []
@@ -563,6 +608,7 @@ class DeviationChecker:
         return rows
 
     def _looks_like_header_row(self, values: list[str]) -> bool:
+        """判断一行文本是否为表头（包含需求、条款等关键词）。"""
         if not isinstance(values, list) or not values:
             return False
         joined = "".join(str(value or "").strip() for value in values)
@@ -575,6 +621,7 @@ class DeviationChecker:
         page_no: int | None,
         section_hints: list[dict[str, Any]] | None = None,
     ) -> str:
+        """通过周围区段的标题或表格自身属性推断表格标题。"""
         best_nearby_title = ""
         best_nearby_rank: tuple[int, int] | None = None
         for section in section_hints or []:
@@ -614,6 +661,7 @@ class DeviationChecker:
         return f"第{page_no}页表格" if page_no is not None else "logical_table"
 
     def _is_generic_table_title(self, title: str) -> bool:
+        """检查是否为通用表格标题（没有具体含义的默认命名）。"""
         compact = re.sub(r"\s+", "", str(title or ""))
         if not compact:
             return True
@@ -629,6 +677,7 @@ class DeviationChecker:
         page_no: int | None,
         title: str,
     ) -> dict[str, Any] | None:
+        """将表格中的一行记录转换为偏离分析所需的结构（含需求/响应/偏离文本）。"""
         ordered_keys = list(record.keys())
         if headers and all(str(h or "").strip() in record for h in headers):
             ordered_keys = [str(h or "").strip() for h in headers]
@@ -655,6 +704,7 @@ class DeviationChecker:
             return None
 
         if not requirement_parts:
+            # 无明确需求列时，尝试按位置推断
             inferred = self._infer_generic_row_columns(ordered_cells)
             if inferred is None:
                 return None
@@ -684,6 +734,7 @@ class DeviationChecker:
         }
 
     def _infer_generic_row_columns(self, ordered_cells: list[tuple[str, str]]) -> tuple[str, str, str] | None:
+        """无表头时通过内容特征推断需求/响应/偏离列。"""
         values = [value for _, value in ordered_cells if value]
         if len(values) < 2:
             return None
@@ -721,6 +772,7 @@ class DeviationChecker:
         return requirement, response, deviation
 
     def _column_role(self, label: str) -> str | None:
+        """根据列标题推断其角色（需求/响应/偏离）。"""
         text = str(label or "").strip().lower()
         if not text:
             return None
@@ -733,6 +785,7 @@ class DeviationChecker:
         return None
 
     def _extract_rows_from_section(self, section: dict[str, Any], group: str) -> list[dict[str, Any]]:
+        """从纯文本区段中提取标记为★或含偏离响应的行。"""
         out: list[dict[str, Any]] = []
         title = str(section.get("title") or "")
         raw_text = re.sub(r"\s+", " ", str(section.get("text") or "")).strip()
@@ -766,6 +819,7 @@ class DeviationChecker:
         return out
 
     def _split_table_row_segments(self, text: str) -> list[str]:
+        """将偏离表文本按条号分割为独立的段落。"""
         raw = re.sub(r"\s+", " ", str(text or "")).strip()
         if not raw:
             return []
@@ -788,6 +842,7 @@ class DeviationChecker:
         if not segments and ("★" in raw or "偏离" in raw or "响应" in raw):
             segments = [raw]
 
+        # 合并粘在一起的子编号（如 (1)(2) 连续且无响应信息时合并）
         merged_segments: list[str] = []
         idx = 0
         while idx < len(segments):
@@ -822,6 +877,7 @@ class DeviationChecker:
         return out
 
     def _guess_row_group(self, title: str, text: str) -> str:
+        """根据标题和内容猜测该偏离行属于商务组还是技术组。"""
         joined = f"{title}\n{text}"
         if any(token in joined for token in ("商务", "合同", "付款", "交货", "质保", "资质", "售后", "工期")):
             return "business"
@@ -830,6 +886,7 @@ class DeviationChecker:
         return "unknown"
 
     def _match_one_star_from_rows(self, requirement: dict[str, Any], rows: list[dict[str, Any]]) -> dict | None:
+        """从已解析的表格行中寻找与某条星标要求最佳匹配的行。"""
         req_norm = requirement["normalized_requirement"]
         frags = requirement["fragments"]
         best_row: dict[str, Any] | None = None
@@ -914,6 +971,7 @@ class DeviationChecker:
         }
 
     def _row_has_response(self, row: dict[str, Any]) -> bool:
+        """判断偏离行是否实际包含响应内容（文本、页码引用或偏离标记）。"""
         if row.get("response_norm") or row.get("deviation_norm"):
             return True
         joined = str(row.get("joined_text") or "")
@@ -924,12 +982,14 @@ class DeviationChecker:
         return bool(re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", joined, re.IGNORECASE))
 
     def _match_one_star(self, requirement: dict[str, Any], sections: dict[str, Any]) -> dict:
+        """综合匹配一条星标要求：优先匹配偏离表行，其次全文段落。"""
         row_match = self._match_one_star_from_rows(requirement, sections.get("rows") or [])
         if row_match is not None:
             row_match.pop("_match_hits", None)
             row_match.pop("_match_long_hit", None)
             return row_match
 
+        # 表格行匹配失败则回退到段落扫描
         search_order = ("technical", "business") if requirement["section_type"] == "technical" else ("business", "technical")
         best = {
             "matched": False,
@@ -969,7 +1029,6 @@ class DeviationChecker:
                     if "偏离" in line:
                         score += 0.05
 
-                    # 收集多个可能命中的条款，再统一判断偏离类型。
                     line_is_hit = bool(score >= 0.62 or (hits >= 2 and score >= 0.45) or long_hit)
                     if line_is_hit:
                         candidate_texts.append(str(line or "").strip())
@@ -987,6 +1046,7 @@ class DeviationChecker:
                             "long_hit": long_hit,
                         }
 
+                # 若整段未直接命中但存在长片段，则视为弱匹配
                 if not best["matched"]:
                     sec_norm = self._norm(sec.get("text", ""))
                     if any(len(f) >= 6 and f in sec_norm for f in frags):
@@ -1005,11 +1065,8 @@ class DeviationChecker:
         strict_match = bool(best["matched"] and (best["score"] >= 0.72 or (best["hits"] >= 2 and best["score"] >= 0.48) or best["long_hit"]))
         matched = bool(strict_match or candidate_texts)
 
-        # 判定优先级：
-        # 1) 只要存在负偏离就判定为负偏离
-        # 2) 否则只要存在无偏离/正偏离就判定为通过
-        # 3) 其余情况判定为不明确
         merged_candidates = "\n".join(candidate_texts)
+        # 根据命中的候选文本综合判定偏离类型
         if matched and self._match_patterns(merged_candidates, self.NEG_DEV_PATTERNS):
             dev_type = "negative_deviation"
         elif matched and self._match_patterns(merged_candidates, self.POS_DEV_PATTERNS):
@@ -1039,6 +1096,7 @@ class DeviationChecker:
         }
 
     def _dev_type(self, text: str) -> str:
+        """根据文本内容判断偏离类型。"""
         if self._match_patterns(text, self.NO_DEV_PATTERNS):
             return "no_deviation"
         if self._match_patterns(text, self.NEG_DEV_PATTERNS):
@@ -1048,6 +1106,7 @@ class DeviationChecker:
         return "unclear"
 
     def _overall_status(self, total: int, missing: int, negative: int, unclear: int) -> tuple[str, str, str]:
+        """根据统计结果生成总体状态和摘要。"""
         if total == 0:
             return "pass", "no_star_requirements", "未发现带 ★ 的强制性要求，已跳过比对。"
         if missing > 0 or negative > 0:
@@ -1058,7 +1117,9 @@ class DeviationChecker:
             )
         return "pass", "pass", "偏离响应部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"
 
+    # 以下为各种辅助解析、清洗、匹配方法
     def _extract_pair(self, payload: dict) -> tuple[dict, dict] | None:
+        """尝试从单个输入的字典中自动提取招标文件和投标文件的配对。"""
         keys = (
             ("tender_document", "business_bid_document"),
             ("tender", "business_bid"),
@@ -1092,6 +1153,7 @@ class DeviationChecker:
         anchors: tuple[str, ...],
         window: int = 220,
     ) -> list[dict[str, Any]]:
+        """在行列表中收集以给定 anchor 字符串开头的段落（如“商务偏离表”），直到遇到边界。"""
         out: list[dict[str, Any]] = []
         texts = [str(item.get("text") or "") for item in line_items]
         for i, item in enumerate(line_items):
@@ -1102,6 +1164,7 @@ class DeviationChecker:
             if self._is_catalog_like_line(line):
                 continue
             end = min(len(line_items), i + window)
+            # 判断是否为表格模式（含招标/投标/响应等字样）
             table_mode = any(
                 "招标文件" in probe and "投标文件" in probe and ("响应" in probe or "偏离" in probe)
                 for probe in texts[i : min(i + 12, len(texts))]
@@ -1138,6 +1201,7 @@ class DeviationChecker:
         return out
 
     def _dedupe_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """移除内容重复的区段（以归一化后的文本为键）。"""
         out = []
         seen = set()
         for s in sections:
@@ -1148,6 +1212,7 @@ class DeviationChecker:
         return out
 
     def _detect_global_no_deviation(self, text: str) -> dict:
+        """检测投标文件中是否有整体性的"无偏离"声明。"""
         pats = (
             r"(全部|所有).{0,8}(响应|满足).{0,18}(无偏离|未偏离|没有偏离)",
             r"(无偏离|未偏离).{0,18}(全部|所有).{0,8}(响应|满足)",
@@ -1160,6 +1225,7 @@ class DeviationChecker:
         return {"detected": False, "matched_text": "", "coverage_type": "none"}
 
     def _coerce_payload(self, value: Any) -> dict:
+        """将原始输入规范化成字典，支持 JSON 字符串自动解析。"""
         if isinstance(value, dict):
             return value
         if isinstance(value, str):
@@ -1174,6 +1240,7 @@ class DeviationChecker:
         return {}
 
     def _has_extractable_fields(self, obj: Any) -> bool:
+        """判断字典中是否含有可提取的文档字段。"""
         if not isinstance(obj, dict):
             return False
         return any(
@@ -1190,6 +1257,7 @@ class DeviationChecker:
         )
 
     def _merge_unique_parts(self, parts: list[str], *, norm_cap: int = 240) -> list[str]:
+        """合并并去重文本片段。"""
         merged: list[str] = []
         seen = set()
         for item in parts:
@@ -1201,6 +1269,7 @@ class DeviationChecker:
         return merged
 
     def _section_text(self, section: Any) -> str:
+        """从区段中提取所有可能的文本内容（含表格、记录等）。"""
         if isinstance(section, str):
             return section.strip()
         if not isinstance(section, dict):
@@ -1242,6 +1311,7 @@ class DeviationChecker:
         return "\n".join(self._merge_unique_parts(parts)).strip()
 
     def _normalize_markup_text(self, value: Any, *, preserve_lines: bool) -> str:
+        """清洗 HTML 标记，保留换行或纯文本。"""
         text = unescape(str(value or ""))
         if not text.strip():
             return ""
@@ -1274,6 +1344,7 @@ class DeviationChecker:
         return text
 
     def _section_items(self, doc: dict) -> list[dict[str, Any]]:
+        """从文档中提取所有标准化区段（按页码、类型排序）。"""
         sections: list[dict[str, Any]] = []
         seen = set()
 
@@ -1327,7 +1398,9 @@ class DeviationChecker:
             )
         )
         return sections
+
     def _doc_container(self, payload: dict) -> dict:
+        """从可能的嵌套结构（如 data, document）中找到包含实际内容的字典。"""
         if self._has_extractable_fields(payload):
             return payload
         data = payload.get("data")
@@ -1339,6 +1412,7 @@ class DeviationChecker:
         return payload
 
     def _extract_text(self, payload: dict) -> str:
+        """将文档对象的所有文本内容合并为一个字符串。"""
         doc = self._doc_container(payload)
         parts: list[str] = []
         for key in ("content", "text"):
@@ -1355,6 +1429,7 @@ class DeviationChecker:
         return "\n".join(self._merge_unique_parts(parts)).strip()
 
     def _page_lines(self, payload: dict) -> list[dict[str, Any]]:
+        """将文档按页、按行拆分为带页码信息的结构列表。"""
         doc = self._doc_container(payload)
         pages = doc.get("pages")
         out: list[dict[str, Any]] = []
@@ -1385,6 +1460,7 @@ class DeviationChecker:
         return out
 
     def _merge_req_line(self, lines: list[dict[str, Any]], idx: int, max_idx: int | None = None) -> str:
+        """合并星标行及其后续较短的行（用于构建完整的星标要求文本）。"""
         cur = lines[idx]["text"]
         if len(self._norm(cur)) >= 18:
             return cur
@@ -1412,6 +1488,7 @@ class DeviationChecker:
         end_idx: int,
         chapter_title: str,
     ) -> list[dict[str, Any]]:
+        """在指定行范围内遍历并提取每一条带星标的要求条目。"""
         entries: list[dict[str, Any]] = []
         current: dict[str, Any] | None = None
 
@@ -1441,6 +1518,7 @@ class DeviationChecker:
 
             prefix, segments = self._split_numbered_segments(line)
             if segments:
+                # 处理带有 (1)、(2) 等编号的行
                 if prefix and current is not None:
                     current["parts"].append(prefix)
                 elif prefix and current is None and self._has_star_marker(prefix):
@@ -1460,6 +1538,7 @@ class DeviationChecker:
                     }
                 continue
 
+            # 无编号的普通行，可能延续前一条要求
             if current is not None and self._can_append_requirement_line(current, line, item["page"]):
                 current["parts"].append(line)
                 continue
@@ -1478,6 +1557,7 @@ class DeviationChecker:
         return entries
 
     def _split_numbered_segments(self, text: str) -> tuple[str, list[str]]:
+        """将一行文本按条目编号（如 (1)、(2)）拆分为多个段落，返回前缀和段落列表。"""
         raw = str(text or "").strip()
         if not raw:
             return "", []
@@ -1502,6 +1582,7 @@ class DeviationChecker:
         line: str,
         page_no: int | None,
     ) -> bool:
+        """判断当前行是否可以追加到正在构建的要求条目中。"""
         if self._is_boundary(line):
             return False
         merged = " ".join(str(part or "").strip() for part in current.get("parts", []) if str(part or "").strip())
@@ -1513,6 +1594,7 @@ class DeviationChecker:
         return True
 
     def _infer_section(self, lines: list[dict[str, Any]], idx: int) -> str:
+        """根据上下文推断当前要求的类型（商务或技术）。"""
         ctx = "\n".join(x["text"] for x in lines[max(0, idx - 6) : idx + 1])
         if any(k in ctx for k in ("技术", "参数", "指标", "性能", "配置", "功能")):
             return "technical"
@@ -1521,6 +1603,7 @@ class DeviationChecker:
         return "unknown"
 
     def _fragments(self, text: str) -> list[str]:
+        """将要求文本拆分为用于匹配的关键片段（长度>=4）。"""
         segs = re.split(r"[，,。；;：:\s（）()【】《》\"'‘’、\-]+", self._clean_req(text))
         vals = []
         for s in segs:
@@ -1541,6 +1624,7 @@ class DeviationChecker:
         return out
 
     def _split_lines(self, text: str) -> list[str]:
+        """将文本按换行符（或句号等）分割成行。"""
         t = (
             str(text or "")
             .replace("\\r\\n", "\n")
@@ -1556,6 +1640,7 @@ class DeviationChecker:
         return [re.sub(r"[ \t\f\v]+", " ", x).strip() for x in t.split("\n") if x and x.strip()]
 
     def _clean_req(self, text: str) -> str:
+        """清洗星标条款文本：去掉星号、数学标记、编号前缀。"""
         t = self.STAR_RE.sub("", str(text or ""))
         t = self._normalize_math_text(t)
         t = re.sub(
@@ -1566,6 +1651,7 @@ class DeviationChecker:
         return re.sub(r"\s+", " ", t).strip("，,；; ")
 
     def _norm(self, text: str) -> str:
+        """文本归一化：去星号、数学符号、标点、空白，转为小写。"""
         t = self.STAR_RE.sub("", str(text or ""))
         t = self._normalize_math_text(t)
         t = re.sub(r"[\s\u3000\xa0]+", "", t)
@@ -1575,6 +1661,7 @@ class DeviationChecker:
         return t.lower()
 
     def _normalize_math_text(self, text: str) -> str:
+        """将 LaTeX 风格的数学符号转为普通字符，便于文本匹配。"""
         t = str(text or "")
         replacements = (
             ("\\leq", "≤"),
@@ -1596,6 +1683,7 @@ class DeviationChecker:
         return re.sub(r"\s+", " ", t).strip()
 
     def _is_boundary(self, line: str) -> bool:
+        """判断当前行是否为章节/标题等边界。"""
         c = re.sub(r"\s+", "", str(line or ""))
         if not c:
             return False
@@ -1604,6 +1692,7 @@ class DeviationChecker:
         return bool(re.match(r"^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.．]|[0-9]{1,2}[、.．])", c) and len(c) <= 40)
 
     def _is_section_boundary(self, line: str) -> bool:
+        """更严格的分节边界判断（用于段落收集的终止）。"""
         c = re.sub(r"\s+", "", str(line or ""))
         if not c:
             return False
@@ -1612,16 +1701,20 @@ class DeviationChecker:
         return bool(re.match(r"^(第[一二三四五六七八九十百]+[章节部分]|[一二三四五六七八九十]+[、.．])", c) and len(c) <= 40)
 
     def _match_patterns(self, text: str, patterns: tuple[str, ...]) -> bool:
+        """检查文本是否匹配给定的任一正则模式。"""
         return any(re.search(p, text or "", re.IGNORECASE) for p in patterns)
 
     def _clip(self, text: str, max_chars: int) -> str:
+        """将文本截断到指定长度，并添加省略号。"""
         t = re.sub(r"\s+", " ", str(text or "").strip())
         return t if len(t) <= max_chars else f"{t[:max_chars].rstrip()}..."
 
     def _has_star_marker(self, text: str) -> bool:
+        """检查文本中是否包含星标符号。"""
         return bool(self.STAR_RE.search(text or ""))
 
     def _is_catalog_like_line(self, line: str) -> bool:
+        """判断文本是否类似目录行（含大量点号及页码），避免收集为正文。"""
         compact = re.sub(r"\s+", "", str(line or ""))
         if not compact:
             return False

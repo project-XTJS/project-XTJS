@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+MinIO 对象存储服务模块。
+
+封装 MinIO 客户端操作，提供文件上传、删除、预签名 URL、
+对象存在性检查、URL 解析等能力，并包含审计日志记录。
+"""
+
 import os
 import logging
 from datetime import datetime, timedelta
@@ -15,11 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class MinioService:
-    """Service layer for MinIO object operations."""
+    """MinIO 对象操作服务层，封装桶管理、文件上传、预签名及辅助解析。"""
 
+    # 不支持的 Word 文件扩展名
     UNSUPPORTED_WORD_EXTENSIONS = {"doc", "docx"}
 
     def __init__(self) -> None:
+        """初始化 MinIO 客户端，从全局配置读取连接信息和桶名。"""
         self.client = Minio(
             endpoint=settings.MINIO_ENDPOINT,
             access_key=settings.MINIO_ACCESS_KEY,
@@ -35,6 +45,7 @@ class MinioService:
         object_name: str | None = None,
         detail: str | None = None,
     ) -> None:
+        """记录 MinIO 操作审计日志。"""
         logger.info(
             "minio_audit action=%s status=%s bucket=%s object_name=%s endpoint=%s detail=%s",
             action,
@@ -47,6 +58,7 @@ class MinioService:
 
     @staticmethod
     def _get_file_size(file: UploadFile) -> int:
+        """尝试获取上传文件的大小（字节），失败时返回 0。"""
         try:
             file_obj = file.file
             file_obj.seek(0, os.SEEK_END)
@@ -57,6 +69,7 @@ class MinioService:
             return 0
 
     def validate_upload_file(self, file: UploadFile) -> None:
+        """校验上传文件的类型、大小，不允许 Word 及不支持的类型。"""
         size = self._get_file_size(file)
         if size <= 0 or size > settings.MINIO_MAX_FILE_SIZE:
             max_mb = settings.MINIO_MAX_FILE_SIZE // 1024 // 1024
@@ -73,6 +86,7 @@ class MinioService:
 
     @staticmethod
     def generate_object_name(filename: str, object_name: str | None = None) -> str:
+        """生成唯一对象名：基于原文件名、时间戳和随机后缀。"""
         if object_name:
             return object_name
         basename = os.path.basename(filename or "file")
@@ -83,6 +97,7 @@ class MinioService:
 
     @staticmethod
     def build_file_url(object_name: str, bucket_name: str | None = None) -> str:
+        """构建系统内部使用的 minio:// URL。"""
         if not object_name or not object_name.strip():
             raise ValueError("Object name cannot be empty")
 
@@ -95,11 +110,13 @@ class MinioService:
 
     @staticmethod
     def guess_content_type(object_name: str, default: str = "application/octet-stream") -> str:
+        """根据对象名推断 MIME 类型。"""
         guessed, _ = guess_type(str(object_name or "").strip())
         return guessed or default
 
     @staticmethod
     def is_presigned_url(file_url: str) -> bool:
+        """判断给定的 URL 是否为 MinIO 预签名 URL。"""
         if not file_url:
             return False
 
@@ -117,6 +134,7 @@ class MinioService:
         return any(field in query for field in signature_fields)
 
     def _object_exists(self, object_name: str) -> bool:
+        """检查 MinIO 中对象是否存在。"""
         try:
             self.client.stat_object(self.bucket_name, object_name)
             return True
@@ -128,6 +146,7 @@ class MinioService:
             raise RuntimeError(f"Error while checking object existence: {exc}") from exc
 
     def _resolve_upload_object_name(self, filename: str, object_name: str | None) -> str:
+        """确定上传对象名：若传入且不冲突则直接使用，否则生成唯一名。"""
         if object_name:
             if self._object_exists(object_name):
                 raise ValueError(f"Object already exists: {object_name}")
@@ -140,6 +159,7 @@ class MinioService:
         raise RuntimeError("Failed to generate a unique object name")
 
     def ensure_bucket(self) -> None:
+        """确保 MinIO 桶存在，不存在则创建。"""
         if not self.bucket_name or not self.bucket_name.strip():
             raise RuntimeError("Fixed MinIO bucket name is empty")
 
@@ -167,6 +187,7 @@ class MinioService:
             raise RuntimeError(f"MinIO bucket operation error: {exc}") from exc
 
     def upload_file(self, file: UploadFile, object_name: str | None = None) -> dict:
+        """上传文件至 MinIO，返回对象名、桶名、内部 URL 和预签名 URL。"""
         self.validate_upload_file(file)
         size = self._get_file_size(file)
         if size <= 0:
@@ -214,6 +235,7 @@ class MinioService:
             raise RuntimeError(f"MinIO upload error: {exc}") from exc
 
     def get_presigned_url(self, object_name: str, bucket_name: str | None = None) -> str:
+        """生成指定对象的预签名下载 URL，默认过期天数由配置决定。"""
         if not object_name or not object_name.strip():
             raise ValueError("Object name cannot be empty")
 
@@ -248,6 +270,7 @@ class MinioService:
             raise RuntimeError(f"Error while generating presigned URL: {exc}") from exc
 
     def delete_file(self, object_name: str) -> None:
+        """删除 MinIO 中的指定对象，不存在时抛出 ValueError。"""
         if not object_name or not object_name.strip():
             raise ValueError("Object name cannot be empty")
 
@@ -285,6 +308,7 @@ class MinioService:
         object_name: str,
         bucket_name: str | None = None,
     ) -> tuple[bytes, str]:
+        """下载对象并返回字节内容和 MIME 类型。"""
         resolved_object_name = str(object_name or "").strip()
         if not resolved_object_name:
             raise ValueError("Object name cannot be empty")
@@ -335,18 +359,22 @@ class MinioService:
                 except Exception:
                     pass
 
+    # 预签名 URL 解析工具
     @staticmethod
     def object_name_from_presigned_url(file_url: str) -> str:
+        """从预签名 URL 提取对象名。"""
         _, object_name = MinioService.bucket_and_object_from_presigned_url(file_url)
         return object_name
 
     @staticmethod
     def bucket_name_from_presigned_url(file_url: str) -> str:
+        """从预签名 URL 提取桶名。"""
         bucket_name, _ = MinioService.bucket_and_object_from_presigned_url(file_url)
         return bucket_name
 
     @staticmethod
     def bucket_and_object_from_presigned_url(file_url: str) -> tuple[str, str]:
+        """解析预签名 URL，返回 (桶名, 对象名)。"""
         parsed = urlparse(file_url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("Invalid MinIO presigned URL")
@@ -357,18 +385,22 @@ class MinioService:
             raise ValueError("Invalid MinIO presigned URL: missing bucket/object")
         return parts[0], parts[1]
 
+    # 内部 file_url 解析工具
     @staticmethod
     def object_name_from_file_url(file_url: str) -> str:
+        """从内部 minio:// URL 提取对象名。"""
         _, object_name = MinioService.bucket_and_object_from_file_url(file_url)
         return object_name
 
     @staticmethod
     def bucket_name_from_file_url(file_url: str) -> str:
+        """从内部 minio:// URL 提取桶名。"""
         bucket_name, _ = MinioService.bucket_and_object_from_file_url(file_url)
         return bucket_name
 
     @staticmethod
     def bucket_and_object_from_file_url(file_url: str) -> tuple[str, str]:
+        """解析内部 minio:// URL，返回 (桶名, 对象名)。"""
         parsed = urlparse(file_url)
         if parsed.scheme != "minio":
             raise ValueError("Invalid MinIO storage URL")

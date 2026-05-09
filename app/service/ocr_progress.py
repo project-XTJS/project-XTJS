@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+OCR 进度监控器。
+
+在 OCR 任务的整个生命周期中收集性能指标（CPU/GPU/内存），
+按阶段生成进度条输出，并支持心跳线程定时刷屏。
+"""
+
 import os
 import subprocess
 import threading
@@ -13,6 +21,9 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 
 class OCRProgressMonitor:
+    """OCR 任务进度与系统资源监控器。"""
+
+    # 各阶段的进度占比区间（0~1）
     _STAGE_RANGES: dict[str, tuple[float, float]] = {
         "prepare": (0.0, 0.08),
         "predict": (0.08, 0.72),
@@ -34,6 +45,7 @@ class OCRProgressMonitor:
         keep_recent_updates: int,
         heartbeat_seconds: float,
     ) -> None:
+        """初始化监控器，设置任务元信息和输出参数。"""
         self.file_path = file_path
         self.file_type = file_type
         self.device = str(device or "cpu")
@@ -41,6 +53,7 @@ class OCRProgressMonitor:
         self.enabled = bool(enabled)
         self.bar_width = max(12, int(bar_width or 24))
         self.heartbeat_seconds = max(0.5, float(heartbeat_seconds or 2.0))
+        # 保留最近若干条更新记录用于汇总报告
         self._recent_updates = deque(maxlen=max(1, int(keep_recent_updates or 12)))
 
         self._job_name = f"{Path(file_path).name}@{self.device}"
@@ -50,6 +63,7 @@ class OCRProgressMonitor:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
 
+        # 时间与阶段状态
         self._started_at = 0.0
         self._finished_at = 0.0
         self._stage = "prepare"
@@ -62,10 +76,14 @@ class OCRProgressMonitor:
         self._status = "running"
         self._error_message = ""
         self._latest_snapshot: dict[str, Any] = {}
+        # 资源指标累积值（用于计算均值）
         self._aggregates: dict[str, dict[str, float]] = {}
         self._last_emitted_at = 0.0
 
+    # ── 公共接口 ─────────────────────────────────
+
     def start(self) -> None:
+        """启动监控，记录开始时间，触发初始状态，并启动心跳线程。"""
         if self._started_at:
             return
 
@@ -74,7 +92,7 @@ class OCRProgressMonitor:
 
         if psutil:
             try:
-                psutil.cpu_percent(interval=None)
+                psutil.cpu_percent(interval=None)  # 预热 CPU 计数
             except Exception:
                 pass
         self.update(stage="prepare", current=0, total=max(self.total_pages, 1), detail="preparing", emit=False)
@@ -89,6 +107,10 @@ class OCRProgressMonitor:
         detail: str = "",
         emit: bool = False,
     ) -> None:
+        """
+        更新进度数据：切换阶段、记录已处理页数、计算进度比例。
+        若 emit=True，则立即输出进度行。
+        """
         line: str | None = None
         with self._lock:
             self._switch_stage_locked(stage)
@@ -98,6 +120,7 @@ class OCRProgressMonitor:
             if total is not None and total > 0:
                 self.total_pages = max(self.total_pages, int(total))
 
+            # 各阶段分别记录已处理页面数
             if stage == "predict":
                 self._predict_pages = max(self._predict_pages, int(current))
             elif stage == "postprocess":
@@ -115,6 +138,7 @@ class OCRProgressMonitor:
             print(line, flush=True)
 
     def finish(self, *, success: bool, error_message: str = "") -> dict[str, Any]:
+        """任务结束，将状态置为完成或失败，停止心跳并返回汇总字典。"""
         line: str | None = None
         with self._lock:
             self._latest_snapshot = self._collect_snapshot()
@@ -132,41 +156,8 @@ class OCRProgressMonitor:
             print(line, flush=True)
         return self.build_summary()
 
-    def _start_heartbeat(self) -> None:
-        if not self.enabled or self._heartbeat_thread is not None:
-            return
-
-        self._heartbeat_stop.clear()
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            name=f"ocr-progress-{self._job_name}",
-            daemon=True,
-        )
-        self._heartbeat_thread.start()
-
-    def _stop_heartbeat(self) -> None:
-        self._heartbeat_stop.set()
-        thread = self._heartbeat_thread
-        self._heartbeat_thread = None
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=0.2)
-
-    def _heartbeat_loop(self) -> None:
-        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
-            line: str | None = None
-            with self._lock:
-                if self._status != "running" or not self._started_at:
-                    continue
-                now = time.perf_counter()
-                if now - self._last_emitted_at < self.heartbeat_seconds * 0.9:
-                    continue
-                self._latest_snapshot = self._collect_snapshot()
-                self._record_snapshot_locked(self._latest_snapshot)
-                line = self._emit_locked()
-            if line:
-                print(line, flush=True)
-
     def build_summary(self) -> dict[str, Any]:
+        """构建包含性能指标与阶段耗时的最终汇总字典。"""
         with self._lock:
             elapsed = self._elapsed_locked()
             total_pages = max(self.total_pages, self._postprocess_pages, self._predict_pages)
@@ -202,7 +193,73 @@ class OCRProgressMonitor:
             }
             return summary
 
+    # ── 心跳线程 ─────────────────────────────────
+
+    def _start_heartbeat(self) -> None:
+        """启动守护心跳线程，周期性输出进度。"""
+        if not self.enabled or self._heartbeat_thread is not None:
+            return
+
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name=f"ocr-progress-{self._job_name}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_heartbeat(self) -> None:
+        """停止心跳线程并等待其退出。"""
+        self._heartbeat_stop.set()
+        thread = self._heartbeat_thread
+        self._heartbeat_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=0.2)
+
+    def _heartbeat_loop(self) -> None:
+        """心跳循环：每隔 heartbeat_seconds 秒采集并输出一次进度。"""
+        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
+            line: str | None = None
+            with self._lock:
+                if self._status != "running" or not self._started_at:
+                    continue
+                now = time.perf_counter()
+                if now - self._last_emitted_at < self.heartbeat_seconds * 0.9:
+                    continue
+                self._latest_snapshot = self._collect_snapshot()
+                self._record_snapshot_locked(self._latest_snapshot)
+                line = self._emit_locked()
+            if line:
+                print(line, flush=True)
+
+    # ── 进度计算与阶段切换 ───────────────────────
+
+    def _compute_progress(self, stage: str, current: int, total: int) -> float:
+        """根据当前阶段和已完成比例计算全局进度（0~1）。"""
+        start, end = self._STAGE_RANGES.get(stage, (0.0, 1.0))
+        if end <= start:
+            return end
+
+        safe_total = max(1, int(total or 1))
+        ratio = max(0.0, min(1.0, float(current) / float(safe_total)))
+        return start + ((end - start) * ratio)
+
+    def _switch_stage_locked(self, stage: str) -> None:
+        """切换阶段并累加上一阶段耗时。"""
+        if stage == self._stage:
+            return
+        now = time.perf_counter()
+        if self._stage_entered_at > 0:
+            self._stage_durations[self._stage] = self._stage_durations.get(self._stage, 0.0) + (
+                now - self._stage_entered_at
+            )
+        self._stage = stage
+        self._stage_entered_at = now
+
+    # ── 资源快照采集 ─────────────────────────────
+
     def _collect_snapshot(self) -> dict[str, Any]:
+        """采集当前时刻的 CPU/内存/GPU 使用情况。"""
         snapshot: dict[str, Any] = {
             "timestamp": self._round(self._elapsed_now()),
             "cpu_percent": None,
@@ -235,6 +292,7 @@ class OCRProgressMonitor:
         return snapshot
 
     def _collect_gpu_snapshot(self) -> dict[str, Any]:
+        """调用 nvidia-smi 获取指定 GPU 的利用率和内存（单位 MB）。"""
         if self._gpu_index is None:
             return {}
 
@@ -248,7 +306,7 @@ class OCRProgressMonitor:
 
         startupinfo = None
         creationflags = 0
-        if os.name == "nt":
+        if os.name == "nt":  # Windows 下隐藏命令行窗口
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -288,6 +346,7 @@ class OCRProgressMonitor:
         }
 
     def _record_snapshot_locked(self, snapshot: dict[str, Any]) -> None:
+        """将非时间字段的数值累加到聚合器中，用于计算均值。"""
         for key, value in snapshot.items():
             if key == "timestamp" or value is None:
                 continue
@@ -300,7 +359,10 @@ class OCRProgressMonitor:
             aggregate["count"] += 1.0
             aggregate["max"] = max(aggregate["max"], numeric_value)
 
+    # ── 输出构建 ─────────────────────────────────
+
     def _emit_locked(self) -> str | None:
+        """构建事件、记录更新并返回格式化进度行。"""
         if not self.enabled:
             return None
         event = self._build_event_locked()
@@ -309,6 +371,7 @@ class OCRProgressMonitor:
         return self._format_line(event)
 
     def _build_event_locked(self) -> dict[str, Any]:
+        """组装单次进度事件（含进度、速度和各项资源均值）。"""
         total_pages = max(self.total_pages, self._predict_pages, self._postprocess_pages)
         eta_seconds = self._estimate_remaining_seconds_locked()
         event = {
@@ -325,6 +388,7 @@ class OCRProgressMonitor:
             ),
             "estimated_remaining_seconds": self._round(eta_seconds),
         }
+        # 附加资源消耗均值
         event.update(
             {
                 "cpu_percent_avg": self._round(self._aggregate_avg_locked("cpu_percent")),
@@ -351,6 +415,7 @@ class OCRProgressMonitor:
         return event
 
     def _format_line(self, event: dict[str, Any]) -> str:
+        """将进度事件转为终端进度条字符串。"""
         progress = max(0.0, min(100.0, float(event.get("progress_percent") or 0.0)))
         filled = int(round((progress / 100.0) * self.bar_width))
         bar = "#" * filled + "-" * max(0, self.bar_width - filled)
@@ -389,27 +454,10 @@ class OCRProgressMonitor:
             parts.append(f"detail={event['detail']}")
         return " ".join(parts)
 
-    def _compute_progress(self, stage: str, current: int, total: int) -> float:
-        start, end = self._STAGE_RANGES.get(stage, (0.0, 1.0))
-        if end <= start:
-            return end
-
-        safe_total = max(1, int(total or 1))
-        ratio = max(0.0, min(1.0, float(current) / float(safe_total)))
-        return start + ((end - start) * ratio)
-
-    def _switch_stage_locked(self, stage: str) -> None:
-        if stage == self._stage:
-            return
-        now = time.perf_counter()
-        if self._stage_entered_at > 0:
-            self._stage_durations[self._stage] = self._stage_durations.get(self._stage, 0.0) + (
-                now - self._stage_entered_at
-            )
-        self._stage = stage
-        self._stage_entered_at = now
+    # ── 统计与估计 ───────────────────────────────
 
     def _resolved_stage_durations_locked(self) -> dict[str, float]:
+        """返回包含当前阶段未结算耗时的阶段持续时间。"""
         durations = dict(self._stage_durations)
         if self._stage_entered_at > 0:
             durations[self._stage] = durations.get(self._stage, 0.0) + (
@@ -418,9 +466,11 @@ class OCRProgressMonitor:
         return durations
 
     def _stage_duration_locked(self, stage: str) -> float:
+        """获取指定阶段的已结算耗时（秒）。"""
         return self._resolved_stage_durations_locked().get(stage, 0.0)
 
     def _aggregate_avg_locked(self, key: str) -> float | None:
+        """计算指定资源指标的均值。"""
         aggregate = self._aggregates.get(key)
         if not aggregate:
             return None
@@ -430,6 +480,7 @@ class OCRProgressMonitor:
         return float(aggregate.get("sum", 0.0)) / count
 
     def _build_system_summary_locked(self) -> dict[str, Any]:
+        """构建系统资源指标汇总（均值与峰值）。"""
         summary: dict[str, Any] = {}
         for key, aggregate in self._aggregates.items():
             count = aggregate.get("count", 0.0)
@@ -448,17 +499,20 @@ class OCRProgressMonitor:
         return summary
 
     def _elapsed_locked(self) -> float:
+        """已耗时（秒），若未开始返回0。"""
         if not self._started_at:
             return 0.0
         end = self._finished_at or time.perf_counter()
         return max(0.0, end - self._started_at)
 
     def _elapsed_now(self) -> float:
+        """当前时刻的实时已耗时。"""
         if not self._started_at:
             return 0.0
         return max(0.0, time.perf_counter() - self._started_at)
 
     def _estimate_total_seconds_locked(self) -> float | None:
+        """根据当前进度线性估算总耗时。"""
         elapsed = self._elapsed_locked()
         progress = max(0.0, min(1.0, float(self._progress)))
         if elapsed < 5.0 or progress < 0.12 or progress >= 1.0:
@@ -469,6 +523,7 @@ class OCRProgressMonitor:
         return estimated_total
 
     def _estimate_remaining_seconds_locked(self) -> float | None:
+        """估算剩余时间（秒）。"""
         estimated_total = self._estimate_total_seconds_locked()
         if estimated_total is None:
             return None
@@ -477,8 +532,11 @@ class OCRProgressMonitor:
             return 0.0
         return remaining
 
+    # ── 静态工具函数 ─────────────────────────────
+
     @staticmethod
     def _parse_gpu_index(device: str) -> int | None:
+        """从设备字符串（如 'gpu:0'）解析 GPU 编号。"""
         normalized = str(device or "").strip().lower()
         if not normalized.startswith("gpu"):
             return None
@@ -492,6 +550,7 @@ class OCRProgressMonitor:
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
+        """安全转浮点数。"""
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -499,12 +558,14 @@ class OCRProgressMonitor:
 
     @staticmethod
     def _rate(units: int, elapsed_seconds: float) -> float | None:
+        """计算速率（单位/秒）。"""
         if units <= 0 or elapsed_seconds <= 0:
             return None
         return round(float(units) / float(elapsed_seconds), 3)
 
     @staticmethod
     def _round(value: Any) -> float | None:
+        """安全四舍五入到3位小数。"""
         if value is None:
             return None
         try:
@@ -514,6 +575,7 @@ class OCRProgressMonitor:
 
     @staticmethod
     def _format_duration(seconds: Any) -> str:
+        """将秒数格式化为 h/m/s 表示。"""
         try:
             total_seconds = max(0, int(round(float(seconds))))
         except (TypeError, ValueError):

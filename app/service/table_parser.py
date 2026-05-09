@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+表格结构解析与逻辑表格构建模块。
+
+支持从 HTML、Markdown、制表符分隔的纯文本等格式中提取表格结构，
+并组装为统一的行列视图，同时提供跨页表格合并能力。
+"""
+
 from __future__ import annotations
 
 import html
@@ -5,7 +13,7 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
-
+# 用于判定表头的关键词集合
 _HEADER_KEYWORDS = (
     "序号",
     "条款内容",
@@ -29,12 +37,15 @@ _HEADER_KEYWORDS = (
     "税额",
 )
 
+# 将表头关键词归一化为流水 token，按长度降序排列方便前缀匹配
 _HEADER_KEYWORD_TOKENS = tuple(sorted({_normalize_key for _normalize_key in (
     re.sub(r"[\s_/|]+", "", str(item or "")).lower() for item in _HEADER_KEYWORDS
 ) if _normalize_key}, key=len, reverse=True))
 
 
 class _HTMLTableParser(HTMLParser):
+    """基础 HTML 解析器，提取表格的行与单元格（含 rowspan/colspan 支持）。"""
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.rows: list[list[dict[str, Any]]] = []
@@ -98,6 +109,8 @@ class _HTMLTableParser(HTMLParser):
         self._current_cell["text_parts"].append(data)
 
 
+# 公开接口：从多种格式构建表格结构
+
 def build_table_structure(
     *,
     html_parts: list[str] | None = None,
@@ -105,6 +118,10 @@ def build_table_structure(
     cell_texts: list[str] | None = None,
     raw_text: str = "",
 ) -> dict[str, Any] | None:
+    """
+    按优先级尝试解析表格结构：HTML > Markdown > 单元格制表符文本 > 纯文本。
+    返回标准化的表格结构字典（包含行列、表头、记录），失败返回 None。
+    """
     html_parts = _dedupe_text_parts(html_parts or [])
     markdown_parts = _dedupe_text_parts(markdown_parts or [])
     cell_texts = _dedupe_text_parts(cell_texts or [])
@@ -124,6 +141,10 @@ def build_table_structure(
 
 
 def build_logical_tables(layout_sections: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """
+    从版面区段中提取所有表格结构，合并跨页连续表格，返回逻辑表格列表。
+    每个区段的 type 须为 'table' 且包含 table_structure。
+    """
     if not isinstance(layout_sections, list):
         return []
 
@@ -159,6 +180,7 @@ def build_logical_tables(layout_sections: list[dict[str, Any]] | None) -> list[d
         current["row_count"] = len(current["rows"])
         current["data_row_count"] = len(current["records"])
 
+        # 若与前一个表格结构兼容则合并，否则作为新表格
         if logical_tables and _can_merge_logical_tables(logical_tables[-1], current):
             _merge_logical_table(logical_tables[-1], current)
             continue
@@ -169,6 +191,8 @@ def build_logical_tables(layout_sections: list[dict[str, Any]] | None) -> list[d
         table["id"] = f"table_{index}"
     return logical_tables
 
+
+# 内部分发：根据解析器名称选择具体解析策略
 
 def _parse_table_structure(parser_name: str, payload: str) -> dict[str, Any] | None:
     if parser_name == "html":
@@ -233,6 +257,8 @@ def _parse_plain_text_table_structure(payload: str, *, parser_name: str) -> dict
     return _build_structured_table_from_raw_rows(raw_rows, parser_name=parser_name)
 
 
+# 核心：将原始行列信息构建为统一结构
+
 def _build_structured_table_from_raw_rows(
     raw_rows: list[list[dict[str, Any]]],
     *,
@@ -242,6 +268,7 @@ def _build_structured_table_from_raw_rows(
     if not raw_rows:
         return None
 
+    # 一、展开 rowspan / colspan 填充网格
     grid: list[list[dict[str, Any] | None]] = []
     for row_index, raw_row in enumerate(raw_rows):
         while len(grid) <= row_index:
@@ -293,6 +320,7 @@ def _build_structured_table_from_raw_rows(
     if column_count <= 0:
         return None
 
+    # 二、将网格转换为统一的 rows 列表与 spans
     rows: list[list[str]] = []
     spans: list[dict[str, Any]] = []
     header_flags: list[list[bool]] = []
@@ -333,6 +361,7 @@ def _build_structured_table_from_raw_rows(
     if not rows:
         return None
 
+    # 三、后处理：压缩空列、去除标题行、检测表头、构建记录
     rows, header_flags, spans = _compress_empty_columns(rows, header_flags, spans)
     if not rows or max((len(row) for row in rows), default=0) <= 0:
         return None
@@ -366,6 +395,8 @@ def _build_structured_table_from_raw_rows(
     return result
 
 
+# 文本行分割
+
 def _split_text_row(line: str) -> list[str]:
     normalized = _normalize_text(line, preserve_lines=True)
     if not normalized:
@@ -397,6 +428,8 @@ def _is_markdown_separator_row(cells: list[str]) -> bool:
         return False
     return all(bool(re.fullmatch(r":?-{3,}:?", item)) for item in cleaned if item)
 
+
+# 表头检测
 
 def _detect_header_row_count(rows: list[list[str]], header_flags: list[list[bool]]) -> int:
     if not rows:
@@ -491,6 +524,8 @@ def _header_cell_score(normalized_cell: str) -> int:
     return 0
 
 
+# 空列压缩
+
 def _compress_empty_columns(
     rows: list[list[str]],
     header_flags: list[list[bool]],
@@ -534,6 +569,8 @@ def _compress_empty_columns(
     return compressed_rows, compressed_flags, compressed_spans
 
 
+# 去除前导标题行
+
 def _strip_leading_title_rows(
     rows: list[list[str]],
     header_flags: list[list[bool]],
@@ -576,6 +613,8 @@ def _is_title_like_row(row: list[str]) -> bool:
         return len(non_empty[0]) >= 4
     return len(set(non_empty)) == 1 and len(non_empty[0]) >= 4
 
+
+# 构建表头与记录
 
 def _build_headers(rows: list[list[str]], header_row_count: int) -> list[str]:
     column_count = max((len(row) for row in rows), default=0)
@@ -688,6 +727,8 @@ def _ensure_unique_headers(headers: list[str]) -> list[str]:
         resolved.append(base if count == 1 else f"{base}_{count}")
     return resolved
 
+
+# 跨页表格合并逻辑
 
 def _can_merge_logical_tables(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_pages = [page for page in left.get("pages", []) if isinstance(page, int)]
@@ -893,6 +934,8 @@ def _attach_leading_continuation_row(target_rows: list[list[str]], source_rows: 
     previous_row[col_index] = f"{previous_text}{text}"
     return source_rows[1:]
 
+
+# 文本与表头规范化工具
 
 def _normalize_header_token(value: str) -> str:
     normalized = _normalize_text(value)

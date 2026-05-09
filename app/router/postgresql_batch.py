@@ -1,4 +1,10 @@
-"""项目批量识别与上传 JSON 商务标审查路由。"""
+# -*- coding: utf-8 -*-
+"""
+项目批量识别与上传 JSON 商务标审查路由。
+
+提供批量文档识别、项目创建并上传、技术标 OCR 继续等接口，
+包含并行处理、项目绑定、商务阶段自动审查等逻辑。
+"""
 
 import asyncio
 from typing import Optional
@@ -41,6 +47,7 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 
+# 从配置读取批处理数量限制，兼容新旧字段名
 PROJECT_BATCH_MIN_BID_GROUPS = max(
     1,
     int(
@@ -60,6 +67,7 @@ PROJECT_BATCH_MAX_BID_GROUPS = int(
 )
 
 
+# 批量识别文档的通用异步处理
 async def _recognize_batch_documents(
     *,
     files: list[UploadFile],
@@ -71,6 +79,7 @@ async def _recognize_batch_documents(
     analysis_service,
     recognition_kwargs: dict,
 ) -> list[dict]:
+    """对一组文件执行上传、OCR 提取并创建文档记录，通过信号量控制并发。"""
     normalized_files = [upload for upload in (files or []) if upload is not None]
     if not normalized_files:
         return []
@@ -112,6 +121,7 @@ async def _recognize_batch_documents(
     )
 
 
+# 批量上传文件（不执行 OCR）
 async def _upload_batch_documents_without_ocr(
     *,
     files: list[UploadFile],
@@ -121,6 +131,7 @@ async def _upload_batch_documents_without_ocr(
     db_service: PostgreSQLService,
     oss_service: MinioService,
 ) -> list[dict]:
+    """批量上传文件至 MinIO 并创建文档记录，但不触发 OCR 提取。"""
     normalized_files = [upload for upload in (files or []) if upload is not None]
     if not normalized_files:
         return []
@@ -160,7 +171,9 @@ async def _upload_batch_documents_without_ocr(
     )
 
 
+# 批量处理结果汇总
 def _summarize_batch_items(items: list[dict]) -> dict:
+    """根据条目列表统计成功/失败数量，返回带整体状态的汇总字典。"""
     total = len(items)
     success = sum(1 for item in items if item.get("status") == "success")
     failed = total - success
@@ -179,6 +192,7 @@ def _summarize_batch_items(items: list[dict]) -> dict:
     }
 
 
+# 持久化项目分析结果
 def _persist_result_item(
     *,
     db_service: PostgreSQLService,
@@ -186,6 +200,7 @@ def _persist_result_item(
     result_key: str,
     result_value: dict,
 ) -> dict:
+    """将单个分析结果写入项目结果存储。"""
     return db_service.upsert_project_result_item(
         project_identifier_id=project_identifier,
         result_key=result_key,
@@ -200,6 +215,7 @@ def _persist_merge_result_items(
     source_result_key: str,
     raw_result: dict,
 ) -> dict[str, dict]:
+    """将雷同检查的原始结果拆分为多个合并项并分别持久化。"""
     merged_results = build_duplicate_merge_results(
         raw_result=raw_result,
         source_result_key=source_result_key,
@@ -213,6 +229,7 @@ def _persist_merge_result_items(
     return merged_results
 
 
+# 路由：上传 OCR JSON 并执行商务标形式审查
 @router.post(
     "/projects/business-bid-format-review/upload-json",
     summary="上传 OCR JSON 并执行商务标形式审查",
@@ -241,6 +258,7 @@ async def upload_business_bid_format_review(
     ),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """上传招投标 OCR JSON 文件，创建项目并执行商务标形式审查。"""
     uploads = [upload for upload in business_bid_json_files if upload is not None]
     if not uploads:
         raise HTTPException(status_code=400, detail="business_bid_json_files 不能为空。")
@@ -294,6 +312,7 @@ async def upload_business_bid_format_review(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+# 路由：批量识别项目文档（上传并 OCR，同时绑定项目关系）
 @router.post("/projects/batch/recognize", summary="批量识别项目文档")
 async def batch_recognize_project_documents(
     tender_file: UploadFile = File(...),
@@ -306,6 +325,7 @@ async def batch_recognize_project_documents(
     oss_service: MinioService = Depends(get_oss_service),
     analysis_service=Depends(get_text_analysis_service),
 ):
+    """批量上传招投标文件，执行 OCR 并自动绑定项目关系。"""
     business_count = len(business_bid_files or [])
     technical_count = len(technical_bid_files or [])
     if business_count != technical_count:
@@ -334,6 +354,7 @@ async def batch_recognize_project_documents(
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
+    # 处理招标文件
     tender_result = await upload_extract_and_create_document(
         file=tender_file,
         document_type=DOCUMENT_TYPE_TENDER,
@@ -357,6 +378,7 @@ async def batch_recognize_project_documents(
         technical_file_name = (technical_bid_file.filename or "").strip() or f"technical_bid_{index}"
 
         async with semaphore:
+            # 商务标 OCR
             business_result = await upload_extract_and_create_document(
                 file=business_bid_file,
                 document_type=DOCUMENT_TYPE_BUSINESS_BID,
@@ -377,6 +399,7 @@ async def batch_recognize_project_documents(
                     "status_code": business_result["status_code"],
                 }
 
+            # 技术标 OCR
             technical_result = await upload_extract_and_create_document(
                 file=technical_bid_file,
                 document_type=DOCUMENT_TYPE_TECHNICAL_BID,
@@ -399,6 +422,7 @@ async def batch_recognize_project_documents(
                     "business_bid_upload": business_result["upload"],
                 }
 
+        # 绑定项目文档关系
         business_bid_document = business_result["document"]
         technical_bid_document = technical_result["document"]
         try:
@@ -490,6 +514,7 @@ async def batch_recognize_project_documents(
     }
 
 
+# 路由：创建项目并上传全部文件后启动商务阶段 OCR 及审查
 @router.post("/projects/batch/ingest-recognize", summary="创建项目并上传全部文件后启动商务阶段 OCR")
 async def ingest_and_recognize_project_documents(
     project_name: str = Form(..., description="项目名称；当前作为项目标识使用"),
@@ -509,6 +534,7 @@ async def ingest_and_recognize_project_documents(
     analysis_service=Depends(get_text_analysis_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """分阶段处理：先上传并 OCR 招标文件、商务标，技术标仅上传；随后自动执行商务标形式审查和雷同检查。"""
     normalized_project_name = (project_name or "").strip()
     if not normalized_project_name:
         raise HTTPException(status_code=400, detail="project_name 不能为空。")
@@ -556,6 +582,7 @@ async def ingest_and_recognize_project_documents(
     tender_document_identifier = tender_result["document"]["identifier_id"]
 
     effective_parallelism = max(1, min(int(bid_group_parallelism), bid_group_count))
+    # 并行处理商务标 OCR 和技术标上传（无 OCR）
     business_results, technical_results = await asyncio.gather(
         _recognize_batch_documents(
             files=normalized_business_files,
@@ -577,6 +604,7 @@ async def ingest_and_recognize_project_documents(
         ),
     )
 
+    # 绑定商务标与技术标文档关系
     binding_items: list[dict] = []
     for business_item, technical_item in zip(business_results, technical_results):
         index = int(business_item.get("index") or technical_item.get("index") or 0)
@@ -656,6 +684,7 @@ async def ingest_and_recognize_project_documents(
     binding_summary = _summarize_batch_items(binding_items)
 
     successful_binding_count = sum(1 for item in binding_items if item.get("status") == "success")
+    # 如果成功绑定，自动执行商务阶段的形式审查和雷同检查
     business_phase: dict = {
         "status": "pending",
         "completed_steps": [
@@ -747,6 +776,7 @@ async def ingest_and_recognize_project_documents(
             "error": "未形成有效的项目绑定关系，商务阶段审查未启动。",
         }
 
+    # 综合整体状态
     status_items = ["success"]
     status_items.extend(item.get("status") or "failed" for item in business_results)
     status_items.extend(item.get("status") or "failed" for item in technical_results)
@@ -783,6 +813,7 @@ async def ingest_and_recognize_project_documents(
     }
 
 
+# 路由：继续执行项目技术标 OCR
 @router.post("/projects/{identifier_id}/continue-technical-ocr", summary="继续执行项目技术标 OCR")
 async def continue_project_technical_ocr(
     identifier_id: str,
@@ -791,10 +822,12 @@ async def continue_project_technical_ocr(
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
+    """对项目中尚未执行 OCR 的技术标文档补充 OCR 提取。"""
     payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
 
+    # 筛选未提取的技术标文档
     pending_technical_documents: list[dict] = []
     seen: set[str] = set()
     for record in payload.get("documents") or []:

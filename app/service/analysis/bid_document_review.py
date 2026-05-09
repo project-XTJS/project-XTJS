@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+投标文件审查服务。
+
+提供基于规则的错别字检测、人员信息提取及跨文档人员复用分析功能，
+主要用于商务标/技术标的自动化审查。
+"""
+
 from __future__ import annotations
 
 import html
@@ -14,6 +22,8 @@ from app.core.document_types import (
 
 
 class _TableHTMLParser(HTMLParser):
+    """用于审查模块的轻量 HTML 表格解析器，提取单元格文本及 rowspan/colspan。"""
+
     def __init__(self) -> None:
         super().__init__()
         self.rows: list[list[dict[str, Any]]] = []
@@ -67,15 +77,23 @@ class _TableHTMLParser(HTMLParser):
 
 
 class BidDocumentReviewService:
+    """投标文件审查服务，提供错别字检查和人员复用分析。"""
+
     SUPPORTED_DOCUMENT_TYPES = (
         DOCUMENT_TYPE_BUSINESS_BID,
         DOCUMENT_TYPE_TECHNICAL_BID,
     )
+
+    # 分句正则
     SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])|[\r\n]+")
+    # 人名标题匹配（如 "1. 张三"）
     NUMBERED_NAME_HEADING_PATTERN = re.compile(r"^\s*\d+\s*[.、]?\s*([\u4e00-\u9fa5A-Za-z]{2,20})\s*$")
+    # 人员字段正则（如 "姓名：张三"）
     FIELD_NAME_PATTERN = re.compile(
         r"(?:姓名|缴费人名称|法定代表人|授权代表|授权委托人|委托代理人|被授权人)[^：:\n]{0,12}[：:]\s*([A-Za-z\u4e00-\u9fa5\[\]【】()（）]{2,30})"
     )
+
+    # 人员相关章节标题关键词
     PERSONNEL_SECTION_HINTS = (
         "项目人员情况",
         "人员组成名单",
@@ -89,7 +107,9 @@ class BidDocumentReviewService:
         "团队成员",
         "人员配置",
     )
+    # 表头中代表岗位的列名
     ROLE_HEADER_HINTS = ("岗位", "职位", "职务", "职责")
+    # 常见岗位名称
     ROLE_TEXT_HINTS = (
         "项目经理",
         "项目负责人",
@@ -106,6 +126,8 @@ class BidDocumentReviewService:
         "授权代表",
         "法定代表人",
     )
+
+    # 错别字检查停用词（含这些词的句子才检查，避免大量无关内容）
     TYPO_STOPWORDS = {
         "项目",
         "服务",
@@ -134,6 +156,7 @@ class BidDocumentReviewService:
         "职位",
         "姓名",
     }
+    # 人名占位符（非真实姓名）
     PERSON_NAME_PLACEHOLDERS = {
         "已签字",
         "已盖章",
@@ -145,7 +168,8 @@ class BidDocumentReviewService:
         "签名",
         "已签",
     }
-    KNOWN_TYPO_MAP = {    
+    # 已知常见错别字映射
+    KNOWN_TYPO_MAP = {
         "釆用": "采用",
         "釆购": "采购",
         "按装": "安装",
@@ -164,6 +188,7 @@ class BidDocumentReviewService:
     }
     SKIP_REASON_MISSING_CONTENT = "missing_or_unusable_ocr_content"
 
+    # 主要服务入口：对项目文档进行审查
     def check_project_documents(
         self,
         *,
@@ -172,6 +197,10 @@ class BidDocumentReviewService:
         document_records: list[dict[str, Any]],
         document_types: list[str] | None = None,
     ) -> dict[str, Any]:
+        """
+        对项目文档执行错别字检查和人员复用分析。
+        返回按文档类型分组的结果字典。
+        """
         requested_types = self._normalize_requested_types(document_types)
         prepared_groups: dict[str, list[dict[str, Any]]] = {
             item: [] for item in requested_types
@@ -284,6 +313,7 @@ class BidDocumentReviewService:
                 ),
             },
         }
+        # 若只请求了单一类型，则提供扁平结构方便调用
         if len(requested_types) == 1:
             single_group = groups[requested_types[0]]
             result["documents"] = single_group["documents"]
@@ -292,6 +322,7 @@ class BidDocumentReviewService:
             result["personnel_reuse_check"] = single_group["personnel_reuse_check"]
         return result
 
+    # 文档预处理：提取人员信息、统计基础信息
     def _prepare_document(
         self,
         record: dict[str, Any],
@@ -328,6 +359,7 @@ class BidDocumentReviewService:
             "personnel_pages": personnel_pages,
         }, None
 
+    # 错别字检查：基于内置词典扫描文档内容
     def _run_typo_check(self, documents: list[dict[str, Any]]) -> dict[str, Any]:
         issue_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         document_issue_items: list[dict[str, Any]] = []
@@ -349,6 +381,7 @@ class BidDocumentReviewService:
             for issue in document_issues:
                 issue_groups[str(issue.get("issue_key") or "")].append(issue)
 
+        # 统计跨文档的共同错别字
         shared_issues: list[dict[str, Any]] = []
         for issue_key, items in issue_groups.items():
             document_ids = {
@@ -401,6 +434,7 @@ class BidDocumentReviewService:
             ],
         }
 
+    # 人员复用分析：聚合同名人员信息
     def _run_personnel_reuse_check(self, documents: list[dict[str, Any]]) -> dict[str, Any]:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         total_personnel_count = 0
@@ -478,6 +512,7 @@ class BidDocumentReviewService:
             ],
         }
 
+    # 错别字问题提取：对单个文档逐句扫描已知错误词
     def _extract_document_typo_issues(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
         seen_keys: set[tuple[Any, ...]] = set()
@@ -504,6 +539,7 @@ class BidDocumentReviewService:
         )
         return issues
 
+    # 遍历文档中可用于错别字检查的句子
     def _iter_typo_sentences(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         personnel_pages = set(document.get("personnel_pages") or set())
@@ -535,6 +571,7 @@ class BidDocumentReviewService:
         return items
 
     def _should_skip_typo_sentence(self, text: str) -> bool:
+        """判断句子是否应跳过错别字检查（过短、无中文、主要是数字/URL等）。"""
         compact = self._compact(text)
         if not compact:
             return True
@@ -556,6 +593,7 @@ class BidDocumentReviewService:
         sentence: dict[str, Any],
         document: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """在句子中查找已知错别字并生成问题条目。"""
         issues: list[dict[str, Any]] = []
         text = str(sentence.get("text") or "")
         compact = self._compact(text)
@@ -578,6 +616,7 @@ class BidDocumentReviewService:
             )
         return issues
 
+    # 人员信息提取：从表格和段落中找出人名及岗位
     def _extract_personnel_entries(
         self,
         *,
@@ -595,6 +634,7 @@ class BidDocumentReviewService:
             if section_entries:
                 entries.extend(section_entries)
 
+        # 去重后按姓名、页码、角色排序
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
         for entry in entries:
@@ -624,6 +664,7 @@ class BidDocumentReviewService:
         record: dict[str, Any],
         table: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从表格中按姓名列提取人员。"""
         rows = self._parse_html_table_rows(table)
         if not rows:
             return []
@@ -661,6 +702,7 @@ class BidDocumentReviewService:
         record: dict[str, Any],
         section: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从段落中通过正则提取职务-姓名对（如法定代表人：张三）。"""
         text = str(section.get("text") or "").strip()
         if not text:
             return []
@@ -697,6 +739,7 @@ class BidDocumentReviewService:
         evidence_text: str,
         source_type: str,
     ) -> dict[str, Any]:
+        """构造一条人员信息字典。"""
         return {
             "name": name,
             "role": role,
@@ -709,7 +752,9 @@ class BidDocumentReviewService:
             "file_name": record.get("file_name"),
         }
 
+    # HTML 表格行解析
     def _parse_html_table_rows(self, table: dict[str, Any]) -> list[list[str]]:
+        """解析表格的 HTML 或纯文本，返回展开 rowspan/colspan 的二维字符串列表。"""
         block_content = str(table.get("block_content") or table.get("html") or "").strip()
         if "<table" not in block_content.lower():
             fallback_text = self._normalize_text(table.get("text") or table.get("raw_text") or "")
@@ -766,10 +811,12 @@ class BidDocumentReviewService:
         return expanded_rows
 
     def _looks_like_personnel_header(self, header: list[str]) -> bool:
+        """检查表头是否包含人员信息（同时存在'姓名'和岗位列）。"""
         compact_header = "".join(header)
         return "姓名" in compact_header and any(token in compact_header for token in self.ROLE_HEADER_HINTS)
 
     def _detect_personnel_section_pages(self, sections: list[dict[str, Any]]) -> set[int]:
+        """从 heading 类型区段中识别人员章节所在页码集合。"""
         pages: set[int] = set()
         for section in sections:
             if str(section.get("type") or "").strip().lower() != "heading":
@@ -781,7 +828,9 @@ class BidDocumentReviewService:
                     pages.add(page)
         return pages
 
+    # 工具方法
     def _personnel_reuse_risk_level(self, roles: list[str], document_count: int) -> str:
+        """根据复用文档数和关键岗位判断风险级别。"""
         if document_count >= 3:
             return "high"
         if any(role in {"项目经理", "项目负责人", "总负责人", "技术负责人"} for role in roles):
@@ -814,6 +863,7 @@ class BidDocumentReviewService:
         return text[:24]
 
     def _clean_person_name(self, value: Any) -> str | None:
+        """清洗人名，过滤掉占位符及明显非人名的字符串。"""
         text = self._normalize_text(value)
         if not text:
             return None
@@ -887,7 +937,9 @@ class BidDocumentReviewService:
             return DOCUMENT_TYPE_TECHNICAL_BID
         return normalized
 
+    # 数据提取辅助（安全的 JSON 解析、标准化等）
     def _coerce_payload(self, payload: Any) -> dict[str, Any]:
+        """将可能为字符串的 JSON 转为字典。"""
         if isinstance(payload, dict):
             return payload
         if not isinstance(payload, str):
@@ -902,10 +954,12 @@ class BidDocumentReviewService:
         return parsed if isinstance(parsed, dict) else {}
 
     def _container(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """解包可能包裹在 'data' 字段中的真实数据。"""
         data = payload.get("data")
         return data if isinstance(data, dict) else payload
 
     def _sections(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """从 OCR 结果中提取标准化的版面区段列表。"""
         container = self._container(payload)
         raw_sections = container.get("layout_sections")
         if not isinstance(raw_sections, list):
@@ -931,6 +985,7 @@ class BidDocumentReviewService:
         return items
 
     def _native_tables(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """从 OCR 结果中提取标准化的表格列表。"""
         container = self._container(payload)
         raw_tables = container.get("native_tables") or container.get("logical_tables")
         if not isinstance(raw_tables, list):
@@ -958,6 +1013,7 @@ class BidDocumentReviewService:
         return items
 
     def _normalize_text(self, value: Any) -> str:
+        """文本归一化：反转义、替换全角空格、统一换行。"""
         text = html.unescape(str(value or ""))
         text = text.replace("\u3000", " ").replace("\xa0", " ")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -966,9 +1022,11 @@ class BidDocumentReviewService:
         return text.strip()
 
     def _compact(self, value: Any) -> str:
+        """去除所有空白字符，用于关键词匹配。"""
         return re.sub(r"\s+", "", self._normalize_text(value))
 
     def _normalize_bbox(self, value: Any) -> list[int] | None:
+        """将各种 bbox 格式统一为 [x, y, w, h] 整数列表。"""
         if value is None:
             return None
         if isinstance(value, (list, tuple)):
@@ -995,5 +1053,6 @@ class BidDocumentReviewService:
         return None
 
     def _bbox_top(self, bbox: Any) -> int:
+        """获取 bbox 的顶部 y 坐标，用于排序。"""
         normalized = self._normalize_bbox(bbox)
         return normalized[1] if normalized else 0

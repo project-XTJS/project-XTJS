@@ -1,4 +1,11 @@
-# app/service/analysis_service.py
+# -*- coding: utf-8 -*-
+"""
+文本分析与 OCR 提取服务模块。
+
+提供 AnalysisService（单一设备）与 AnalysisServiceDispatcher（多设备负载均衡），
+并包含设备发现与解析逻辑。
+"""
+
 from functools import lru_cache
 import os
 import subprocess
@@ -17,9 +24,12 @@ from app.service.analysis.verification import VerificationChecker
 
 
 class AnalysisService:
+    """单个 OCR 设备的文本提取与分析服务，封装所有分析检查器。"""
+
     SUPPORTED_EXTENSIONS = ["pdf", "jpg", "jpeg", "png"]
 
     def __init__(self, ocr_service: OCRService) -> None:
+        """初始化服务并创建所有分析检查器实例。"""
         self.ocr_service = ocr_service
         self.integrity = IntegrityChecker()
         self.consistency = ConsistencyChecker()
@@ -29,9 +39,15 @@ class AnalysisService:
         self.verification = VerificationChecker(ocr_service)
 
     def get_supported_extensions(self) -> list[str]:
+        """返回支持的文件扩展名列表副本。"""
         return self.SUPPORTED_EXTENSIONS.copy()
 
     def extract_text_result(self, file_path: str, file_extension: str) -> dict:
+        """
+        对指定文件执行 OCR 提取，返回标准化的结果字典。
+
+        包含文本、页面、版面段落、表格、印章/签名信息及识别元数据。
+        """
         normalized_extension = file_extension.lower().lstrip(".")
         if normalized_extension not in self.SUPPORTED_EXTENSIONS:
             raise ValueError(
@@ -61,6 +77,7 @@ class AnalysisService:
         except (TypeError, ValueError):
             signature_count = 0
 
+        # 从版面区段中筛选出表格类型
         table_sections = [
             section
             for section in layout_sections
@@ -106,6 +123,7 @@ class AnalysisService:
         }
 
     def run_full_analysis(self, text: str, extraction_meta: dict) -> dict:
+        """执行完整文本分析（完整性、价格合理性、清单逻辑、偏差、印章验证）。"""
         clean_text = preprocess_text(text)
         return {
             "integrity_result": self.integrity.check_integrity(clean_text),
@@ -117,7 +135,7 @@ class AnalysisService:
 
 
 class AnalysisServiceDispatcher:
-    """Dispatch OCR requests across multiple AnalysisService workers."""
+    """在多设备 AnalysisService 实例间进行负载均衡的分发器。"""
 
     def __init__(
         self,
@@ -134,6 +152,7 @@ class AnalysisServiceDispatcher:
         self._services = services
         self._devices = devices
         self._capacity = max(1, int(max_inflight_per_device))
+        # 每个设备一个信号量，控制并发数
         self._permits = [
             threading.BoundedSemaphore(value=self._capacity)
             for _ in services
@@ -142,6 +161,7 @@ class AnalysisServiceDispatcher:
         self._state_lock = threading.Lock()
         self._rr_cursor = 0
 
+        # 将第一台设备的分析器引用暴露，供纯文本分析使用
         primary = services[0]
         self.integrity = primary.integrity
         self.consistency = primary.consistency
@@ -154,13 +174,19 @@ class AnalysisServiceDispatcher:
         return self._services[0].get_supported_extensions()
 
     def run_full_analysis(self, text: str, extraction_meta: dict) -> dict:
+        # 文本分析无需特殊路由，直接使用第一台设备
         return self._services[0].run_full_analysis(text, extraction_meta)
 
     def _acquire_slot(self) -> int:
+        """
+        获取一个可用设备槽位，优先负载最低的设备。
+        若所有设备已满，则阻塞等待。
+        """
         total = len(self._services)
         while True:
             with self._state_lock:
                 start = self._rr_cursor
+                # 按当前 inflight 数排序，同时尽量轮询
                 ordered = sorted(
                     range(total),
                     key=lambda idx: (self._inflight[idx], (idx - start) % total),
@@ -173,6 +199,7 @@ class AnalysisServiceDispatcher:
                         self._inflight[idx] += 1
                     return idx
 
+            # 无可用槽时，阻塞等待第一个设备
             fallback_idx = ordered[0]
             self._permits[fallback_idx].acquire()
             with self._state_lock:
@@ -180,11 +207,13 @@ class AnalysisServiceDispatcher:
             return fallback_idx
 
     def _release_slot(self, idx: int) -> None:
+        """释放指定设备的槽位，减少 inflight 计数并归还信号量。"""
         with self._state_lock:
             self._inflight[idx] = max(0, self._inflight[idx] - 1)
         self._permits[idx].release()
 
     def extract_text_result(self, file_path: str, file_extension: str) -> dict:
+        """获取槽位后，在对应设备上执行 OCR 文本提取。"""
         idx = self._acquire_slot()
         try:
             service = self._services[idx]
@@ -199,6 +228,7 @@ class AnalysisServiceDispatcher:
             self._release_slot(idx)
 
 
+# 设备标识规范化：数字转为 "gpu:数字" 格式
 def _normalize_device_token(raw_value: str) -> str:
     token = str(raw_value or "").strip()
     if not token:
@@ -208,7 +238,10 @@ def _normalize_device_token(raw_value: str) -> str:
     return token
 
 
+# 自动发现系统中可用的 GPU 设备
 def _discover_visible_gpu_devices() -> list[str]:
+    """按优先级通过环境变量、nvidia-smi、paddle 库探测可用 GPU 列表。"""
+    # 1) 检查 CUDA_VISIBLE_DEVICES / NVIDIA_VISIBLE_DEVICES
     for env_name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
         raw_value = str(os.environ.get(env_name, "") or "").strip()
         if not raw_value:
@@ -226,6 +259,7 @@ def _discover_visible_gpu_devices() -> list[str]:
             if entries:
                 return [f"gpu:{idx}" for idx in range(len(entries))]
 
+    # 2) 尝试 nvidia-smi 命令
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
@@ -241,6 +275,7 @@ def _discover_visible_gpu_devices() -> list[str]:
     except Exception:
         pass
 
+    # 3) 通过 paddle 库探测
     try:
         import paddle
 
@@ -257,7 +292,12 @@ def _discover_visible_gpu_devices() -> list[str]:
     return []
 
 
+# 解析配置中的设备池字符串，返回最终的设备列表
 def _resolve_ocr_device_pool() -> list[str]:
+    """
+    根据配置 PADDLE_OCR_DEVICE_POOL / PADDLE_OCR_DEVICE 确定待使用的设备列表。
+    支持 "auto"、"all" 等自动发现关键字。
+    """
     raw_pool = str(getattr(settings, "PADDLE_OCR_DEVICE_POOL", "") or "").strip()
     if not raw_pool:
         return [_normalize_device_token(settings.PADDLE_OCR_DEVICE)]
@@ -284,8 +324,13 @@ def _resolve_ocr_device_pool() -> list[str]:
     return [fallback_device] if fallback_device else ["cpu"]
 
 
+# 模块级单例工厂，缓存分析服务实例
 @lru_cache(maxsize=1)
 def get_analysis_service() -> AnalysisService | AnalysisServiceDispatcher:
+    """
+    创建并缓存分析服务实例。
+    单设备时返回 AnalysisService，多设备时返回 AnalysisServiceDispatcher。
+    """
     devices = _resolve_ocr_device_pool()
     if len(devices) <= 1:
         preferred = devices[0] if devices else None

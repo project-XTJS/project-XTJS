@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+报价合理性检查模块。
+
+支持直接报价的大小写一致性校验和下浮率报价的合规性校验，
+并可从招标文件中提取最高限价，与投标总金额进行比对。
+"""
+
 import json
 import os
 import re
@@ -5,12 +13,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 class ReasonablenessChecker:
-    """报价合理性检查类（保留直接报价逻辑，仅增强下浮率报价逻辑）"""
+    """报价合理性检查类，支持直接报价与下浮率报价两种模式。"""
 
     def __init__(self, min_float_rate: float = 1.5):
-        # 仅作为兜底阈值；优先使用文档中抽取到的规则
+        # 兜底下浮率阈值，优先使用文档中抽取到的规则
         self.min_float_rate = min_float_rate
 
+        # 中文大写数字映射
         self.CAPITAL_NUM = {
             "零": 0, "〇": 0,
             "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
@@ -26,6 +35,7 @@ class ReasonablenessChecker:
             "亿": 100000000
         }
 
+        # 用于定位“开标一览表”等目标区段的标题关键词
         self.BID_OPENING_TITLES = [
             "开标一览表",
             "报价一览表",
@@ -37,6 +47,7 @@ class ReasonablenessChecker:
             "分项报价表",
         ]
 
+        # 用于界定一览表区段结束的其他章节标题
         self.SECTION_END_TITLES = [
             "分项报价表",
             "已标价工程量清单",
@@ -55,6 +66,7 @@ class ReasonablenessChecker:
             "承诺函",
         ]
 
+        # 下浮率规则描述中的比较词
         self.FLOAT_RULE_PHRASES = [
             "低于或等于",
             "高于或等于",
@@ -69,8 +81,10 @@ class ReasonablenessChecker:
             "等于",
         ]
 
+        # 常见税率值，用于区分百分比是税率还是下浮率
         self.COMMON_TAX_RATES = {3.0, 6.0, 9.0, 13.0}
 
+        # 招标最高限价 / 控制价 / 预算 相关关键词
         self.TENDER_LIMIT_STRONG_KEYWORDS = [
             "最高限价",
             "最高投标限价",
@@ -81,7 +95,6 @@ class ReasonablenessChecker:
             "最高控制价",
             "最高总价",
         ]
-
         self.TENDER_LIMIT_MEDIUM_KEYWORDS = [
             "采购预算",
             "预算金额",
@@ -95,7 +108,6 @@ class ReasonablenessChecker:
             "采购金额",
             "最高采购限价",
         ]
-
         self.TENDER_LIMIT_WEAK_KEYWORDS = [
             "资金来源",
             "财政资金",
@@ -103,7 +115,7 @@ class ReasonablenessChecker:
             "国库资金",
             "专项资金",
         ]
-
+        # 这些词出现时表示上下文并非最高限价，需要排除
         self.TENDER_LIMIT_EXCLUDE_KEYWORDS = [
             "营业收入",
             "净利润",
@@ -136,6 +148,7 @@ class ReasonablenessChecker:
             "投标一览表",
         ]
 
+        # 投标文件中表示总金额的关键词
         self.BID_TOTAL_KEYWORDS = [
             "参选总价",
             "投标总价",
@@ -146,19 +159,21 @@ class ReasonablenessChecker:
             "合计",
         ]
 
-    # =========================================================
-    # 1. 通用基础
-    # =========================================================
+    # 通用基础方法
+
     def _normalize(self, s: str) -> str:
+        """去除所有空白字符，便于关键词匹配。"""
         if s is None:
             return ""
         return re.sub(r"\s+", "", str(s))
 
     def _contains_bid_opening_title(self, text: str) -> bool:
+        """判断文本中是否包含开标/报价一览表的标题关键词。"""
         normalized = self._normalize(text)
         return any(title in normalized for title in self.BID_OPENING_TITLES)
 
     def _has_page_heading_title(self, page_sections: List[Dict], titles: List[str]) -> bool:
+        """判断某一页的区段列表中是否出现了给定的 heading 标题。"""
         for sec in page_sections:
             text = str(sec.get("text") or "").strip()
             if not text:
@@ -179,6 +194,7 @@ class ReasonablenessChecker:
         return False
 
     def _contains_direct_price_keywords(self, text: str) -> bool:
+        """判断文本中是否含有直接报价的大写/小写特征。"""
         normalized = self._normalize(text)
         return (
                 ("小写" in normalized and "大写" in normalized)
@@ -188,6 +204,7 @@ class ReasonablenessChecker:
         )
 
     def _contains_float_rate_keywords(self, text: str) -> bool:
+        """判断文本中是否含有下浮率报价特征关键词。"""
         normalized = self._normalize(text)
         return (
                 "下浮率" in normalized
@@ -196,6 +213,7 @@ class ReasonablenessChecker:
         )
 
     def _safe_float(self, value: str) -> Optional[float]:
+        """安全地将字符串转换为浮点数，失败返回 None。"""
         if value is None:
             return None
         try:
@@ -204,6 +222,7 @@ class ReasonablenessChecker:
             return None
 
     def _clean_percent(self, s: Any) -> Optional[float]:
+        """清洗百分数字符串，去除百分号和逗号后转为浮点数。"""
         if s is None:
             return None
         text = str(s).strip()
@@ -218,6 +237,7 @@ class ReasonablenessChecker:
             return None
 
     def _clean_number(self, s: Any) -> Optional[float]:
+        """清洗数字字符串（去除逗号、单位等），返回浮点数。"""
         if s is None:
             return None
         text = str(s).strip()
@@ -240,6 +260,7 @@ class ReasonablenessChecker:
         pages: Optional[List[int]] = None,
         locations: Optional[List[Dict]] = None,
     ) -> Dict:
+        """构建统一格式的检查结果字典。"""
         normalized_pages = []
         seen_pages = set()
         for page in pages or []:
@@ -284,6 +305,7 @@ class ReasonablenessChecker:
         pages: Optional[List[int]] = None,
         locations: Optional[List[Dict]] = None,
     ) -> Dict:
+        """快捷生成“失败”状态的检查结果。"""
         return self._build_result(
             "失败",
             "未识别",
@@ -292,16 +314,17 @@ class ReasonablenessChecker:
             locations=locations,
         )
 
-    # =========================================================
-    # 2. 输入解析：支持 OCR JSON / JSON 字符串 / 纯文本
-    # =========================================================
+    # 输入解析：支持 OCR JSON / JSON 字符串 / 纯文本
+
     def _parse_input(self, source: Any) -> Dict:
+        """将各种输入格式统一解析为内部使用的结构化字典。"""
         if isinstance(source, dict):
             return self._parse_json_dict(source)
 
         if isinstance(source, str):
             stripped = source.strip()
 
+            # 如果是本地 JSON 文件路径，尝试加载
             if os.path.isfile(stripped) and stripped.lower().endswith(".json"):
                 try:
                     with open(stripped, "r", encoding="utf-8") as f:
@@ -310,6 +333,7 @@ class ReasonablenessChecker:
                 except Exception:
                     pass
 
+            # 如果是 JSON 字符串
             if stripped.startswith("{") and stripped.endswith("}"):
                 try:
                     data = json.loads(stripped)
@@ -317,6 +341,7 @@ class ReasonablenessChecker:
                 except Exception:
                     pass
 
+            # 视为纯文本
             return {
                 "raw_text": source,
                 "sections": [{"page": None, "type": "text", "text": source}],
@@ -333,6 +358,7 @@ class ReasonablenessChecker:
         }
 
     def _parse_json_dict(self, data: Dict) -> Dict:
+        """从 OCR JSON 结构中扁平化提取 layout_sections、table_sections 等。"""
         payload = data.get("data", data)
 
         layout_sections = payload.get("layout_sections", []) or []
@@ -371,10 +397,10 @@ class ReasonablenessChecker:
             "logical_tables": logical_tables
         }
 
-    # =========================================================
-    # 3. 动态定位“开标/报价一览表”正文所在页
-    # =========================================================
+    # 动态定位“开标/报价一览表”正文所在页
+
     def _is_catalog_line(self, line: str) -> bool:
+        """判断一行是否为目录行（不应作为报价内容）。"""
         normalized = self._normalize(line)
 
         if "目录" in normalized:
@@ -391,6 +417,7 @@ class ReasonablenessChecker:
         if re.search(r"…+\-?\d+", normalized):
             return True
 
+        # 若一行包含多个章节标题关键词，很可能是目录
         catalog_title_hits = sum(
             1 for token in [
                 "投标保证书",
@@ -418,9 +445,11 @@ class ReasonablenessChecker:
         return False
 
     def _score_page_candidate(self, page_sections: List[Dict]) -> int:
+        """对某一页的区段列表评分，判断其包含开标一览表的可能性。"""
         page_text = "\n".join(sec["text"] for sec in page_sections if sec["text"])
         normalized_page_text = self._normalize(page_text)
 
+        # 如果是分项报价表，大幅降低得分
         if self._has_page_heading_title(page_sections, self.ITEMIZED_SECTION_TITLES):
             return -1000
 
@@ -450,6 +479,7 @@ class ReasonablenessChecker:
         return score
 
     def _group_sections_by_page(self, sections: List[Dict]) -> Dict[int, List[Dict]]:
+        """将扁平区段列表按页码分组。"""
         page_map: Dict[int, List[Dict]] = {}
         for sec in sections:
             page = sec.get("page")
@@ -459,6 +489,7 @@ class ReasonablenessChecker:
         return page_map
 
     def _locate_bid_opening_page_and_text(self, parsed: Dict) -> Tuple[Optional[int], str]:
+        """定位开标一览表所在的页码并提取连续的文本内容。"""
         sections = parsed.get("sections", [])
         page_map = self._group_sections_by_page(sections)
 
@@ -474,10 +505,12 @@ class ReasonablenessChecker:
                 best_text = "\n".join(sec["text"] for sec in page_sections if sec["text"])
 
         if best_page is None or best_score < 3:
+            # 若基于页码的定位效果不佳，退回全文提取
             raw_text = parsed.get("raw_text", "")
             extracted = self._extract_bid_opening_section_from_text(raw_text)
             return None, extracted
 
+        # 从最佳页开始向后收集文本，直到遇到下一个章节标题
         ordered_sections = sections
         collected = []
         started = False
@@ -509,6 +542,7 @@ class ReasonablenessChecker:
         return best_page, merged_text
 
     def _extract_bid_opening_section_from_text(self, text: str) -> str:
+        """在纯文本中寻找最像开标一览表的连续段落。"""
         if not text or not text.strip():
             return ""
 
@@ -551,10 +585,10 @@ class ReasonablenessChecker:
 
         return "\n".join(lines[best_idx:end_idx]).strip()
 
-    # =========================================================
-    # 4. 金额处理（直接报价）——保持你的原代码不变
-    # =========================================================
+    # 金额处理（直接报价）
+
     def _clean_small_price(self, s: str) -> Optional[float]:
+        """从小写金额字符串中提取数值。"""
         if not s:
             return None
 
@@ -575,6 +609,7 @@ class ReasonablenessChecker:
             return None
 
     def _strip_price_markup(self, text: str) -> str:
+        """去除 LaTeX 标记等可能混入报价文本的噪声。"""
         if not text:
             return ""
         cleaned = str(text)
@@ -585,6 +620,7 @@ class ReasonablenessChecker:
         return re.sub(r"\s+", " ", cleaned).strip()
 
     def _parse_capital_integer(self, s: str) -> int:
+        """解析中文大写数字的整数部分。"""
         total = 0
         section = 0
         number = 0
@@ -610,6 +646,7 @@ class ReasonablenessChecker:
         return total + section + number
 
     def _capital_to_number(self, capital_str: str) -> Optional[float]:
+        """将中文大写金额字符串转换为浮点数（元）。"""
         if not capital_str or not capital_str.strip():
             return None
 
@@ -644,6 +681,7 @@ class ReasonablenessChecker:
         return round(integer_value + jiao + fen, 2)
 
     def _extract_direct_price_pairs(self, section_text: str) -> List[Dict]:
+        """从文本中抽取小写/大写金额对。"""
         if not section_text or not section_text.strip():
             return []
 
@@ -715,10 +753,10 @@ class ReasonablenessChecker:
 
         return pairs
 
-    # =========================================================
-    # 4A. 招标最高限价 / 投标总金额提取（新增，不影响原直接报价与下浮率逻辑）
-    # =========================================================
+    # 招标最高限价 / 投标总金额提取
+
     def _iter_all_text_blocks(self, parsed: Dict) -> List[Dict]:
+        """遍历所有文本块（sections + table_sections）。"""
         blocks = []
 
         for sec in parsed.get("sections", []) or []:
@@ -742,6 +780,7 @@ class ReasonablenessChecker:
         return blocks
 
     def _merge_texts_by_page(self, parsed: Dict) -> Dict[Optional[int], str]:
+        """将同一页的文本块合并为一个字符串。"""
         page_map: Dict[Optional[int], List[str]] = {}
         for block in self._iter_all_text_blocks(parsed):
             page = block.get("page")
@@ -752,6 +791,7 @@ class ReasonablenessChecker:
         }
 
     def _convert_amount_to_yuan(self, value: float, unit: str) -> float:
+        """将带单位的金额（亿/万）转换为元。"""
         unit = (unit or "").strip()
         if unit in {"亿", "亿元"}:
             return value * 100000000
@@ -760,9 +800,11 @@ class ReasonablenessChecker:
         return value
 
     def _format_amount_yuan(self, value: float) -> str:
+        """格式化金额为带两位小数的字符串。"""
         return f"{value:.2f}元"
 
     def _extract_money_candidates_from_text(self, text: str) -> List[Dict]:
+        """从文本中提取所有可能的金额候选（阿拉伯数字与大写）。"""
         if not text or not str(text).strip():
             return []
 
@@ -814,6 +856,7 @@ class ReasonablenessChecker:
                 "is_capital": True,
             })
 
+        # 完全相同位置和金额仅保留一条
         dedup: Dict[Tuple[float, int, int], Dict] = {}
         for cand in candidates:
             key = (cand["amount_yuan"], cand["start"], cand["end"])
@@ -822,6 +865,7 @@ class ReasonablenessChecker:
         return list(dedup.values())
 
     def _pick_keyword_near_amount(self, context: str) -> str:
+        """在金额上下文附近寻找最相关的限价/预算关键词。"""
         normalized = self._normalize(context)
         for keyword in self.TENDER_LIMIT_STRONG_KEYWORDS + self.TENDER_LIMIT_MEDIUM_KEYWORDS + self.TENDER_LIMIT_WEAK_KEYWORDS:
             if keyword in normalized:
@@ -829,6 +873,7 @@ class ReasonablenessChecker:
         return ""
 
     def _score_tender_limit_candidate(self, context: str, raw_amount: str, amount_yuan: float) -> int:
+        """为金额候选评分，判断其为招标最高限价的可信度。"""
         normalized = self._normalize(context)
         score = 0
 
@@ -847,6 +892,7 @@ class ReasonablenessChecker:
         if "本项目" in normalized or "项目名称" in normalized or "采购项目" in normalized:
             score += 10
 
+        # 紧密邻接的关键词额外加分
         near_patterns = [
             r"(最高限价|最高投标限价|最高响应限价|最高报价限价|招标控制价|控制价|采购预算|预算金额|项目预算|最高总价|限价)[^\n]{0,20}"
             + re.escape(raw_amount)
@@ -854,6 +900,7 @@ class ReasonablenessChecker:
         if any(re.search(p, context) for p in near_patterns):
             score += 40
 
+        # 如果是单价/年/月等，减分
         if any(token in context for token in
                ["每月", "每年", "每人", "每日", "每次", "单价", "/月", "/年", "/人", "/次"]):
             score -= 30
@@ -874,6 +921,7 @@ class ReasonablenessChecker:
         return score
 
     def _collect_tender_limit_candidates(self, parsed: Dict) -> List[Dict]:
+        """收集文档中所有可能的最高限价候选。"""
         page_text_map = self._merge_texts_by_page(parsed)
         all_candidates: List[Dict] = []
         all_keywords = self.TENDER_LIMIT_STRONG_KEYWORDS + self.TENDER_LIMIT_MEDIUM_KEYWORDS + self.TENDER_LIMIT_WEAK_KEYWORDS
@@ -885,6 +933,7 @@ class ReasonablenessChecker:
             lines = [line.strip() for line in str(page_text).splitlines() if line and str(line).strip()]
             normalized_page = self._normalize(page_text)
 
+            # 如果页面包含相关关键词，提取该页所有金额并评分
             if any(k in normalized_page for k in all_keywords):
                 money_candidates = self._extract_money_candidates_from_text(page_text)
                 for cand in money_candidates:
@@ -898,6 +947,7 @@ class ReasonablenessChecker:
                         "context": page_text[:400],
                     })
 
+            # 以行级别更精细地寻找
             for idx, line in enumerate(lines):
                 normalized_line = self._normalize(line)
                 if not any(k in normalized_line for k in all_keywords):
@@ -919,6 +969,7 @@ class ReasonablenessChecker:
                         "context": context,
                     })
 
+        # 去重并选最高分
         dedup: Dict[Tuple[Optional[int], float, str], Dict] = {}
         for cand in all_candidates:
             key = (cand["page"], round(cand["amount_yuan"], 2), cand["keyword"])
@@ -929,6 +980,7 @@ class ReasonablenessChecker:
         return ordered
 
     def _extract_tender_max_limit(self, tender_source: Any) -> Optional[Dict]:
+        """从招标文件中提取最可能的最高限价。"""
         parsed = self._parse_input(tender_source)
         candidates = self._collect_tender_limit_candidates(parsed)
         if not candidates:
@@ -940,6 +992,7 @@ class ReasonablenessChecker:
         return best
 
     def _extract_bid_total_amount(self, bid_source: Any) -> Optional[Dict]:
+        """从投标文件中提取总报价金额。"""
         parsed = self._parse_input(bid_source)
         bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
 
@@ -972,6 +1025,7 @@ class ReasonablenessChecker:
                         "context": normalized_opening_text[:400] or bid_opening_text[:400],
                     }
 
+        # 备用：通过大小写金额对提取
         price_pairs = self._extract_direct_price_pairs(normalized_opening_text)
         for pair in price_pairs:
             small_price = pair.get("small_price")
@@ -984,6 +1038,7 @@ class ReasonablenessChecker:
                 "context": bid_opening_text[:400],
             }
 
+        # 再备用：匹配合计行
         line_patterns = [
             r"(合计)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
@@ -1004,6 +1059,7 @@ class ReasonablenessChecker:
         return None
 
     def check_bid_price_against_tender_limit(self, tender_source: Any, bid_source: Any) -> Dict:
+        """检查投标总金额是否超过招标最高限价。"""
         tender_limit = self._extract_tender_max_limit(tender_source)
         if not tender_limit:
             return {
@@ -1061,10 +1117,10 @@ class ReasonablenessChecker:
             "locations": locations,
         }
 
-    # =========================================================
-    # 5. 下浮率逻辑（增强版）
-    # =========================================================
+    # 下浮率逻辑
+
     def _normalize_biz_name(self, name: str) -> str:
+        """归一化业务名称，去除表格中的固定标签词。"""
         n = self._normalize(name)
         for token in [
             "业务名称", "单位工程名称", "建设工程名称", "项目名称",
@@ -1076,6 +1132,7 @@ class ReasonablenessChecker:
         return n.strip("：:()（）-—_/、 ")
 
     def _char_ngrams(self, s: str, n: int = 2) -> set:
+        """生成字符级 n-gram 集合，用于模糊匹配业务名称。"""
         if not s:
             return set()
         if len(s) <= n:
@@ -1083,6 +1140,7 @@ class ReasonablenessChecker:
         return {s[i:i + n] for i in range(len(s) - n + 1)}
 
     def _name_similarity(self, a: str, b: str) -> float:
+        """计算两个业务名称的相似度。"""
         aa = self._normalize_biz_name(a)
         bb = self._normalize_biz_name(b)
         if not aa or not bb:
@@ -1098,6 +1156,7 @@ class ReasonablenessChecker:
         return len(ga & gb) / max(len(ga | gb), 1)
 
     def _phrase_to_operator(self, phrase: str) -> str:
+        """将自然语言比较词转换为数学运算符。"""
         mapping = {
             "低于或等于": "<=",
             "高于或等于": ">=",
@@ -1114,12 +1173,14 @@ class ReasonablenessChecker:
         return mapping.get(phrase, ">=")
 
     def _split_rule_sentences(self, text: str) -> List[str]:
+        """将规则文本按句号、换行等切分为短句。"""
         if not text:
             return []
         parts = re.split(r"[。\n；;]", text)
         return [p.strip() for p in parts if p and p.strip()]
 
     def _extract_float_rate_rules(self, section_text: str) -> Dict[str, Dict]:
+        """从开标一览表文本中提取下浮率规则（按业务名称分类）。"""
         if not section_text or not section_text.strip():
             return {}
 
@@ -1161,6 +1222,7 @@ class ReasonablenessChecker:
                     "threshold": threshold
                 }
 
+        # 通用规则
         generic_patterns = [
             r"本项目下浮率(?:须|应|必须|需|不得)?(低于或等于|高于或等于|不低于|不少于|不高于|不大于|大于|高于|低于|小于|等于)[“\"']?(\d+(?:\.\d+)?)%[”\"']?",
             r"下浮率(?:须|应|必须|需|不得)?(低于或等于|高于或等于|不低于|不少于|不高于|不大于|大于|高于|低于|小于|等于)[“\"']?(\d+(?:\.\d+)?)%[”\"']?",
@@ -1181,7 +1243,7 @@ class ReasonablenessChecker:
                 }
                 break
 
-        # 语义收紧
+        # 语义收紧：当出现“否决”等词语时，将宽松的比较改为严格比较
         if (
                 "低于或等于所要求的下浮比例" in normalized_text or "低于或等于所要求下浮比例" in normalized_text) and "否决" in normalized_text:
             for key in rules:
@@ -1197,6 +1259,7 @@ class ReasonablenessChecker:
         return rules
 
     def _compare_by_rule(self, actual: float, op: str, threshold: float) -> bool:
+        """根据运算符判断实际值是否满足规则。"""
         if op == ">":
             return actual > threshold
         if op == ">=":
@@ -1210,6 +1273,7 @@ class ReasonablenessChecker:
         return False
 
     def _match_rule_for_row(self, biz_name: str, rules: Dict[str, Dict]) -> Optional[Dict]:
+        """为给定的业务名称匹配最合适的下浮率规则。"""
         normalized_biz = self._normalize_biz_name(biz_name)
 
         if normalized_biz in rules:
@@ -1235,6 +1299,7 @@ class ReasonablenessChecker:
         return None
 
     def _table_has_float_keywords(self, tb: Dict) -> bool:
+        """判断一张逻辑表格是否包含下浮率相关列。"""
         texts: List[str] = []
 
         for h in tb.get("headers", []) or []:
@@ -1263,12 +1328,14 @@ class ReasonablenessChecker:
         )
 
     def _is_generic_table_headers(self, headers: List[str]) -> bool:
+        """判断表头是否全为自动生成的占位列名（col_1, col_2...）。"""
         normalized_headers = [self._normalize(h) for h in headers if self._normalize(h)]
         if not normalized_headers:
             return True
         return all(re.fullmatch(r"col_\d+", h, re.IGNORECASE) for h in normalized_headers)
 
     def _is_header_like_cell(self, cell: Any) -> bool:
+        """判断一个单元格内容是否像表头（业务名称、下浮率等）。"""
         normalized = self._normalize(cell)
         if not normalized:
             return False
@@ -1279,6 +1346,7 @@ class ReasonablenessChecker:
         return any(token in normalized for token in header_tokens)
 
     def _pick_bid_opening_logical_tables(self, parsed: Dict, bid_page: Optional[int]) -> List[Dict]:
+        """从文档的逻辑表格中筛选出可能与开标一览表相关的下浮率表格。"""
         logical_tables = parsed.get("logical_tables", []) or []
         if not logical_tables:
             return []
@@ -1294,13 +1362,14 @@ class ReasonablenessChecker:
         if candidates:
             return candidates
 
+        # 放宽页面限制再搜一次
         for tb in logical_tables:
             if self._table_has_float_keywords(tb):
                 candidates.append(tb)
         return candidates
 
     def _find_key_by_candidates(self, record: Dict, candidates: List[str]) -> Optional[str]:
-        """优先精确匹配，再做弱匹配，避免“报价”误命中“投标下浮率”之类字段。"""
+        """在字典的键中匹配候选字段名，优先精确匹配。"""
         keys = list(record.keys())
         normalized_map = {self._normalize(k): k for k in keys}
 
@@ -1309,6 +1378,7 @@ class ReasonablenessChecker:
             if nc in normalized_map:
                 return normalized_map[nc]
 
+        # 宽松匹配
         for real_key in keys:
             nk = self._normalize(real_key)
             for cand in candidates:
@@ -1333,6 +1403,7 @@ class ReasonablenessChecker:
         return None
 
     def _extract_float_rate_rows_from_record_table(self, tb: Dict) -> List[Dict]:
+        """从 records 形式的逻辑表格中解析下浮率行。"""
         rows = []
         records = tb.get("records", []) or []
         table_pages = [page for page in (tb.get("pages") or []) if isinstance(page, int)]
@@ -1380,6 +1451,7 @@ class ReasonablenessChecker:
         return rows
 
     def _find_logical_table_data_start(self, raw_rows: List[List[Any]]) -> int:
+        """在 rows 形式的表格中寻找第一个非表头的数据行。"""
         for idx, row in enumerate(raw_rows):
             cells = [str(x).strip() for x in row if str(x).strip()]
             if not cells:
@@ -1393,6 +1465,7 @@ class ReasonablenessChecker:
         return len(raw_rows)
 
     def _extract_float_rate_rows_from_row_table(self, tb: Dict) -> List[Dict]:
+        """从 rows 形式的逻辑表格中解析下浮率行。"""
         rows = []
         raw_rows = tb.get("rows", []) or []
         if not raw_rows:
@@ -1418,6 +1491,7 @@ class ReasonablenessChecker:
             if "合计" in normalized_joined or all(self._is_header_like_cell(c) for c in non_empty):
                 continue
 
+            # 找到业务名称列
             biz_idx = None
             biz_name_raw = ""
             for idx, cell in enumerate(cells):
@@ -1437,6 +1511,7 @@ class ReasonablenessChecker:
             if not biz_name or biz_name in {"合计", "总计"}:
                 continue
 
+            # 提取该行中的数值 token
             tokens = []
             for idx, cell in enumerate(cells):
                 if idx == biz_idx:
@@ -1500,6 +1575,7 @@ class ReasonablenessChecker:
         return rows
 
     def _extract_float_rate_rows_from_logical_tables(self, parsed: Dict, bid_page: Optional[int]) -> List[Dict]:
+        """综合 records 和 rows 两种格式从逻辑表格中提取下浮率行。"""
         rows = []
         tables = self._pick_bid_opening_logical_tables(parsed, bid_page)
 
@@ -1516,6 +1592,7 @@ class ReasonablenessChecker:
         return rows
 
     def _parse_flat_row_numbers(self, segment: str) -> Optional[Dict]:
+        """从一行扁平文本中解析出暂估金额、税率、下浮率、报价。"""
         if not segment or not segment.strip():
             return None
 
@@ -1574,6 +1651,7 @@ class ReasonablenessChecker:
         rules: Dict[str, Dict],
         bid_page: Optional[int] = None,
     ) -> List[Dict]:
+        """在没有结构化表格时，从扁平文本中提取下浮率行。"""
         if not bid_opening_text or not bid_opening_text.strip():
             return []
 
@@ -1612,6 +1690,7 @@ class ReasonablenessChecker:
 
         for text in search_texts:
             working_text = text
+            # 截掉表头部分，只保留数据
             if "业务名称" in working_text and "备注" in working_text:
                 working_text = working_text.split("备注", 1)[1].strip()
             elif "业务名称" in working_text and "投标报价" in working_text:
@@ -1674,6 +1753,7 @@ class ReasonablenessChecker:
                     "pages": [bid_page] if isinstance(bid_page, int) else [],
                 })
 
+        # 去重
         dedup = {}
         for row in rows:
             key = (row["biz_name"], round(row["float_rate"], 4))
@@ -1684,16 +1764,16 @@ class ReasonablenessChecker:
 
     def _extract_float_rate_rows(self, parsed: Dict, bid_page: Optional[int], bid_opening_text: str,
                                  rules: Dict[str, Dict]) -> List[Dict]:
-        # 1) 优先用结构化 logical_tables
+        """综合各来源提取下浮率行：逻辑表格优先，扁平文本兜底。"""
         rows = self._extract_float_rate_rows_from_logical_tables(parsed, bid_page)
         if rows:
             return rows
 
-        # 2) 再从扁平表格文本兜底
         rows = self._extract_float_rate_rows_from_flat_text(bid_opening_text, rules, bid_page=bid_page)
         return rows
 
     def _check_float_rate_rows_compliance(self, rows: List[Dict], rules: Dict[str, Dict]) -> Tuple[bool, List[str]]:
+        """检查下浮率行的合规性并生成摘要。"""
         if not rows:
             return False, ["未找到下浮率业务行"]
 
@@ -1727,24 +1807,20 @@ class ReasonablenessChecker:
         return all_passed, summary
 
     def _extract_single_float_rate_from_logical_tables(self, parsed: Dict, bid_page: Optional[int]) -> Optional[float]:
+        """若逻辑表格中只有唯一的下浮率行，直接返回该下浮率。"""
         rows = self._extract_float_rate_rows_from_logical_tables(parsed, bid_page)
         if len(rows) == 1:
             return rows[0]["float_rate"]
         return None
 
-    def _extract_single_float_rate_from_table(self, parsed: Dict, bid_page: Optional[int], bid_opening_text: str) -> \
-            Optional[float]:
-        """
-        优先从 logical_tables 中提取单一下浮率；
-        如果没有，再从表格/正文中兜底，但要避免误取规则门槛值和编号行。
-        """
+    def _extract_single_float_rate_from_table(self, parsed: Dict, bid_page: Optional[int], bid_opening_text: str) -> Optional[float]:
+        """从任何表格或文本中提取单一下浮率（兜底逻辑）。"""
         val = self._extract_single_float_rate_from_logical_tables(parsed, bid_page)
         if val is not None:
             return val
 
         candidates = []
 
-        # table_sections 扁平文本兜底
         for sec in parsed.get("table_sections", []):
             page = sec.get("page")
             if bid_page is not None and page is not None and page != bid_page:
@@ -1754,7 +1830,6 @@ class ReasonablenessChecker:
             if "下浮率" not in self._normalize(table_text):
                 continue
 
-            # 从“下浮率”字段附近取百分比
             matches = re.findall(r"下浮率[^0-9]{0,8}(\d+(?:\.\d+)?)\s*%", table_text)
             for m in matches:
                 v = self._safe_float(m)
@@ -1783,6 +1858,7 @@ class ReasonablenessChecker:
         return candidates[0]
 
     def _extract_single_float_rate_fallback(self, text: str) -> Optional[float]:
+        """从文本中兜底提取一个下浮率数值。"""
         if not text or not text.strip():
             return None
 
@@ -1803,7 +1879,7 @@ class ReasonablenessChecker:
                    ["大于", "高于", "不低于", "不少于", "低于", "小于", "不高于", "不大于", "等于", "否决", "否则"]):
                 continue
 
-            # 跳过纯编号说明行，例如：1. / 2. / 3.
+            # 跳过纯编号说明行
             if re.match(r"^\d+[\.、:：]", raw_line):
                 continue
 
@@ -1816,10 +1892,10 @@ class ReasonablenessChecker:
 
         return None
 
-    # =========================================================
-    # 6. 核心校验
-    # =========================================================
+    # 核心校验
+
     def check_price_compliance(self, source: Any) -> Dict:
+        """执行报价合规性检查，自动识别直接报价或下浮率模式。"""
         parsed = self._parse_input(source)
         bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
         fallback_pages = [bid_page] if isinstance(bid_page, int) else []
@@ -1832,7 +1908,7 @@ class ReasonablenessChecker:
                 locations=fallback_locations,
             )
 
-        # 1) 直接报价 —— 保持你的原逻辑
+        # 1) 直接报价：大小写金额对
         price_pairs = self._extract_direct_price_pairs(bid_opening_text)
         if price_pairs:
             summary = []
@@ -1897,7 +1973,7 @@ class ReasonablenessChecker:
                 locations=row_locations,
             )
 
-        # 3) 单一下浮率兜底
+        # 3) 单一下浮率兜底（无明细表格，仅有一个下浮率数值）
         single_float_rate = self._extract_single_float_rate_from_table(parsed, bid_page, bid_opening_text)
 
         if single_float_rate is not None:
@@ -1934,4 +2010,5 @@ class ReasonablenessChecker:
         )
 
     def check_price_reasonableness(self, source: Any) -> Dict:
+        """外部调用的价格合理性入口，等同于 check_price_compliance。"""
         return self.check_price_compliance(source)

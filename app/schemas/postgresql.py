@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+PostgreSQL 相关请求模型定义。
+
+包含项目、文档、关系、分析结果等 CRUD 操作所需的 Pydantic 模型，
+以及查重范围枚举。
+"""
+
 from enum import Enum
 from typing import Any, Optional
 
@@ -5,12 +13,14 @@ from pydantic import BaseModel, Field
 
 
 class DocumentDataModel(BaseModel):
+    """文档基础数据模型（标识、文件名、URL）。"""
     identifier_id: str
     file_name: str
     file_url: str
 
 
 class ProjectCreateRequest(BaseModel):
+    """创建项目请求，可指定标识，省略时自动生成。"""
     identifier_id: Optional[str] = Field(
         default=None,
         description="项目业务标识，省略时自动生成。",
@@ -18,6 +28,7 @@ class ProjectCreateRequest(BaseModel):
 
 
 class DocumentCreateRequest(BaseModel):
+    """创建文档请求，需提供文件名和文件 URL。"""
     identifier_id: Optional[str] = Field(
         default=None,
         description="文档业务标识，省略时自动生成。",
@@ -30,16 +41,19 @@ class DocumentCreateRequest(BaseModel):
 
 
 class ProjectBindDocumentsRequest(BaseModel):
+    """绑定招标、商务标、技术标到项目。"""
     tender_document_identifier: str
     business_bid_document_identifier: str
     technical_bid_document_identifier: Optional[str] = None
 
 
 class ProjectUpdateRequest(BaseModel):
+    """更新项目标识请求。"""
     new_identifier_id: Optional[str] = None
 
 
 class DocumentUpdateRequest(BaseModel):
+    """更新文档信息请求。"""
     file_name: Optional[str] = None
     file_url: Optional[str] = Field(
         default=None,
@@ -48,12 +62,14 @@ class DocumentUpdateRequest(BaseModel):
 
 
 class ProjectRelationUpdateRequest(BaseModel):
+    """更新项目文档绑定关系请求。"""
     tender_document_identifier: str
     business_bid_document_identifier: str
     technical_bid_document_identifier: Optional[str] = None
 
 
 class IdentifierBatchDeleteRequest(BaseModel):
+    """批量删除标识请求（适用于项目或文档）。"""
     identifier_ids: list[str] = Field(
         ...,
         min_length=1,
@@ -62,6 +78,7 @@ class IdentifierBatchDeleteRequest(BaseModel):
 
 
 class RelationBatchDeleteRequest(BaseModel):
+    """批量删除关联关系请求。"""
     relation_ids: list[int] = Field(
         ...,
         min_length=1,
@@ -70,21 +87,25 @@ class RelationBatchDeleteRequest(BaseModel):
 
 
 class ProjectResultUpsertRequest(BaseModel):
+    """创建或覆盖项目分析结果请求。"""
     project_identifier_id: str = Field(..., description="项目业务标识。")
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 
 class ProjectResultUpdateRequest(BaseModel):
+    """更新项目分析结果请求。"""
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 
 class DuplicateCheckScope(str, Enum):
+    """查重范围枚举。"""
     ALL = "all"
     BUSINESS_BID = "business_bid"
     TECHNICAL_BID = "technical_bid"
 
 
 class ProjectDuplicateCheckRequest(BaseModel):
+    """项目查重请求参数。"""
     document_types: Optional[list[str]] = Field(
         default=None,
         description="仅检查指定文档类型，允许值：business_bid、technical_bid；为空时同时检查两类。",

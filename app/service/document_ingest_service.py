@@ -1,4 +1,10 @@
-"""文档上传、识别与入库的通用服务函数。"""
+# -*- coding: utf-8 -*-
+"""
+文档上传、识别与入库的通用服务函数。
+
+提供从文件上传到 OCR 提取、数据库记录的完整流程，
+以及仅上传（不 OCR）、对已有文档追加 OCR 等能力。
+"""
 
 import logging
 import os
@@ -16,8 +22,13 @@ from app.utils.text_utils import cleanup_temp_file, save_temp_file
 logger = logging.getLogger(__name__)
 
 
+# 工具函数：URL 归一化与结果精简
+
 def normalize_file_url(file_url: str) -> str:
-    """将预签名 URL 归一化为系统内部 file_url。"""
+    """
+    将外部传入的预签名 URL 转换为系统内部的 MinIO file URL 格式。
+    若已是内部格式则原样返回。
+    """
     normalized_file_url = file_url.strip()
     if not normalized_file_url:
         raise ValueError("file_url cannot be empty")
@@ -30,7 +41,10 @@ def normalize_file_url(file_url: str) -> str:
 
 
 def compact_document_payload(document: dict[str, Any]) -> dict[str, Any]:
-    """提取文档核心字段，减少返回体体积。"""
+    """
+    提取文档记录的核心字段，减少接口返回体体积。
+    避免向前端暴露内部大字段（如 content）。
+    """
     fields = (
         "id",
         "identifier_id",
@@ -45,8 +59,13 @@ def compact_document_payload(document: dict[str, Any]) -> dict[str, Any]:
     return {key: document.get(key) for key in fields if key in document}
 
 
+# 异常处理与资源回滚
+
 def _rollback_uploaded_object(upload_result: Optional[dict], oss_service: MinioService) -> Optional[str]:
-    """当后续步骤失败时，回滚已上传的 MinIO 对象。"""
+    """
+    当后续入库步骤失败时，尝试删除已上传至 MinIO 的对象。
+    返回回滚失败的错误信息，成功时返回 None。
+    """
     if not upload_result:
         return None
     object_name = upload_result.get("object_name")
@@ -60,37 +79,11 @@ def _rollback_uploaded_object(upload_result: Optional[dict], oss_service: MinioS
         return str(cleanup_exc)
 
 
-def _extract_recognition_content(
-    file_bytes: bytes,
-    file_name: str,
-    analysis_service,
-) -> dict:
-    """对单文件执行识别，并输出用于存储的精简识别结果。"""
-    file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
-    allowed_extensions = set(analysis_service.get_supported_extensions())
-    if file_extension not in allowed_extensions:
-        raise ValueError(
-            f"Unsupported file type: {file_extension}. "
-            f"Supported types: {', '.join(sorted(allowed_extensions))}."
-        )
-
-    temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
-    try:
-        recognition_result = analysis_service.extract_text_result(
-            temp_file_path,
-            file_extension,
-        )
-        # 去掉大字段，避免把完整文本和分页内容直接写入数据库。
-        recognition_result.pop("content", None)
-        recognition_result.pop("pages", None)
-        recognition_result["filename"] = file_name
-        return recognition_result
-    finally:
-        cleanup_temp_file(temp_file_path)
-
-
 def _format_upload_create_error(exc: Exception, rollback_error: Optional[str]) -> tuple[int, str]:
-    """将内部异常统一映射为 HTTP 状态码和错误信息。"""
+    """
+    将上传/识别/入库过程中抛出的异常统一映射为 (HTTP 状态码, 错误描述)，
+    并在回滚失败时附加回滚错误提示。
+    """
     if isinstance(exc, ValueError):
         status_code = 400
         detail = str(exc)
@@ -110,6 +103,42 @@ def _format_upload_create_error(exc: Exception, rollback_error: Optional[str]) -
     return status_code, detail
 
 
+# OCR 识别辅助
+
+def _extract_recognition_content(
+    file_bytes: bytes,
+    file_name: str,
+    analysis_service,
+) -> dict:
+    """
+    对单文件执行 OCR 提取，返回精简的识别结果字典。
+    已移除 content、pages 等大字段，避免直接存入数据库主表。
+    """
+    file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
+    allowed_extensions = set(analysis_service.get_supported_extensions())
+    if file_extension not in allowed_extensions:
+        raise ValueError(
+            f"Unsupported file type: {file_extension}. "
+            f"Supported types: {', '.join(sorted(allowed_extensions))}."
+        )
+
+    temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
+    try:
+        recognition_result = analysis_service.extract_text_result(
+            temp_file_path,
+            file_extension,
+        )
+        # 精简识别内容，避免数据库膨胀
+        recognition_result.pop("content", None)
+        recognition_result.pop("pages", None)
+        recognition_result["filename"] = file_name
+        return recognition_result
+    finally:
+        cleanup_temp_file(temp_file_path)
+
+
+# 核心流程：上传 + 识别 + 入库
+
 async def upload_extract_and_create_document(
     *,
     file: UploadFile,
@@ -122,10 +151,16 @@ async def upload_extract_and_create_document(
     object_name: Optional[str] = None,
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
-    """执行上传、识别、入库一体化流程。"""
+    """
+    一体化文档处理流程：
+    1) 上传文件至 MinIO
+    2) 对文件执行 OCR 提取
+    3) 在数据库中创建文档记录并写入识别内容
+    失败时自动回滚已上传的对象。
+    """
     upload_result: Optional[dict] = None
     try:
-        # 第一步：上传文件到对象存储。
+        # 步骤1：上传文件
         upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
         resolved_file_name = (
             (document_name or "").strip()
@@ -135,7 +170,7 @@ async def upload_extract_and_create_document(
         if not resolved_file_name:
             raise ValueError("document_name cannot be empty")
 
-        # 第二步：读取文件内容并执行识别。
+        # 步骤2：读取并 OCR
         await file.seek(0)
         file_bytes = await file.read()
         if not file_bytes:
@@ -148,7 +183,7 @@ async def upload_extract_and_create_document(
             analysis_service,
         )
 
-        # 第三步：写入文档记录与识别内容。
+        # 步骤3：写入数据库
         creation_result = await run_in_threadpool(
             db_service.create_document_with_content,
             resolved_file_name,
@@ -166,7 +201,6 @@ async def upload_extract_and_create_document(
             "resolved_file_name": resolved_file_name,
         }
     except Exception as exc:
-        # 失败时尝试回滚上传对象，并统一返回错误信息。
         rollback_error = _rollback_uploaded_object(upload_result, oss_service)
         status_code, detail = _format_upload_create_error(exc, rollback_error)
         if raise_http_exception:
@@ -190,6 +224,10 @@ async def upload_and_create_document_without_ocr(
     object_name: Optional[str] = None,
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
+    """
+    仅上传文件并创建文档记录，不执行 OCR 提取。
+    适用于延迟 OCR（如技术标分阶段处理）的场景。
+    """
     upload_result: Optional[dict] = None
     try:
         upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
@@ -228,6 +266,8 @@ async def upload_and_create_document_without_ocr(
         }
 
 
+# 已有文档追加 OCR
+
 async def recognize_existing_document(
     *,
     document_identifier: str,
@@ -236,6 +276,10 @@ async def recognize_existing_document(
     analysis_service,
     raise_http_exception: bool = True,
 ) -> dict[str, Any]:
+    """
+    对数据库中已存在的文档进行 OCR 识别，并更新其识别内容。
+    适用于分阶段处理流程，例如先上传技术标，后续再执行 OCR。
+    """
     try:
         document = await run_in_threadpool(db_service.get_document_by_identifier, document_identifier)
         if not document:
@@ -245,6 +289,7 @@ async def recognize_existing_document(
         if not file_url:
             raise ValueError(f"document file_url is empty: {document_identifier}")
 
+        # 解析 MinIO 对象路径
         if file_url.startswith("minio://"):
             bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
         elif MinioService.is_presigned_url(file_url):

@@ -1,4 +1,10 @@
-"""OCR 抽取与规则分析路由。"""
+# -*- coding: utf-8 -*-
+"""
+OCR 抽取与规则分析路由。
+
+提供文档解析（文本提取）、统一分析（文本/项目服务）等接口，
+包含完整的文本清洗、结构化数据构建、项目级分析服务编排逻辑。
+"""
 
 import html
 import json
@@ -31,22 +37,39 @@ from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_f
 
 router = APIRouter()
 
-
+# 文本清洗辅助函数
 def _clean_inline_text(value: Any) -> str:
+    """
+    行内文本精细化清洗：
+    - 反转义 HTML 实体
+    - 替换全角空格、不间断空格为普通空格
+    - 压缩连续空白为单个空格
+    - 移除中文之间的空格
+    - 修正中英文标点前的多余空格
+    """
     normalized = html.unescape(str(value or ""))
     normalized = normalized.replace("\u3000", " ")
     normalized = normalized.replace("\xa0", " ")
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if not normalized:
         return ""
+    # 去除中文之间的空格，避免分词打断
     normalized = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", normalized)
+    # 去掉英文标点前的空格
     normalized = re.sub(r"\s+([,.;:!?%])", r"\1", normalized)
+    # 去掉中文标点前的空格
     normalized = re.sub(r"\s+([，。；：！？、）】》])", r"\1", normalized)
+    # 去掉中文左括号后的空格
     normalized = re.sub(r"([（【《])\s+", r"\1", normalized)
     return normalized.strip()
 
 
 def _is_noise_line(line: str) -> bool:
+    """
+    判断一行是否为噪声行：
+    - 空白行
+    - 不包含任何数字、字母或中文字符（纯粹由标点符号等组成且长度 >= 2）
+    """
     stripped = str(line or "").strip()
     if not stripped:
         return True
@@ -56,6 +79,12 @@ def _is_noise_line(line: str) -> bool:
 
 
 def _build_clean_text(raw_value: Any) -> str:
+    """
+    从原始内容构建清洗后的完整文本：
+    - 预处理换行符、全角空格等
+    - 逐行清洗并过滤噪声行
+    - 将所有有效行用空格连接为一段干净文本
+    """
     normalized = html.unescape(str(raw_value or ""))
     normalized = normalized.replace("\u3000", " ")
     normalized = normalized.replace("\xa0", " ")
@@ -72,7 +101,14 @@ def _build_clean_text(raw_value: Any) -> str:
     return _clean_inline_text(" ".join(parts))
 
 
+# 结构化数据构建（区段、表格）
 def _build_public_sections(sections: list[dict] | None) -> list[dict]:
+    """
+    将 OCR 产出的区段列表转换为对外统一的格式：
+    - 清洗文本
+    - 标准化字段名（type, text, page, bbox, bbox_ocr）
+    - 基于 (page, type, text, bbox) 去重
+    """
     public_sections: list[dict] = []
     seen = set()
 
@@ -103,6 +139,12 @@ def _build_public_sections(sections: list[dict] | None) -> list[dict]:
 
 
 def _build_public_native_table_value(value: Any) -> Any:
+    """
+    递归清洗一个值以用于对外暴露的 native_table / logical_table：
+    - 基本类型直接返回
+    - 字符串：HTML 反转义、全角空格处理、换行统一
+    - 列表/字典：递归处理每个元素
+    """
     if value is None or isinstance(value, (int, float, bool)):
         return value
     if isinstance(value, str):
@@ -122,6 +164,7 @@ def _build_public_native_table_value(value: Any) -> Any:
 
 
 def _build_public_logical_tables(tables: list[dict] | None) -> list[dict]:
+    """对外格式的表格列表清洗，直接应用 _build_public_native_table_value 到每个表格。"""
     public_tables: list[dict] = []
     for table in tables or []:
         if not isinstance(table, dict):
@@ -131,6 +174,10 @@ def _build_public_logical_tables(tables: list[dict] | None) -> list[dict]:
 
 
 def _rebuild_logical_tables_from_native(native_tables: list[dict] | None) -> list[dict]:
+    """
+    从 native_tables 中筛选出包含 HTML 表格的条目，重新解析出 logic_tables。
+    用于当提取流水线未直接给出 logical_tables 时的兜底重建。
+    """
     layout_sections: list[dict] = []
     for table in native_tables or []:
         if not isinstance(table, dict):
@@ -155,6 +202,7 @@ def _rebuild_logical_tables_from_native(native_tables: list[dict] | None) -> lis
     return build_logical_tables(layout_sections)
 
 
+# 单文件解析响应构建
 def _build_analyze_file_response(
     upload: UploadFile,
     *,
@@ -162,6 +210,10 @@ def _build_analyze_file_response(
     file_extension: str,
     extraction_result: dict,
 ) -> dict:
+    """
+    将 OCR 提取结果组装为统一的分析文件响应体，
+    包含元数据、区段、逻辑表格、识别详情、印章/签名信息。
+    """
     metadata = build_analyze_file_metadata(
         filename=upload.filename,
         file_type=file_extension,
@@ -226,7 +278,9 @@ def _build_analyze_file_response(
     }
 
 
+# 源文件路径解析与校验
 def _coerce_source_path(raw_value: Any) -> Path | None:
+    """将输入值转为绝对路径，若为空则返回 None；若非绝对路径则抛出 400。"""
     if raw_value is None:
         return None
 
@@ -242,6 +296,12 @@ def _coerce_source_path(raw_value: Any) -> Path | None:
 
 
 def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list[Path | None]:
+    """
+    解析 source_paths_json 表单值：
+    - 空值或未提供时返回与文件数量一致的 None 列表
+    - 单文件时可接收纯字符串路径
+    - 多文件时必须是 JSON 数组且长度匹配
+    """
     if expected_count <= 0:
         return []
 
@@ -277,6 +337,10 @@ def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list
 
 
 def _resolve_source_path(upload: UploadFile, explicit_source_path: Path | None) -> Path | None:
+    """
+    确定最终用于保存 JSON 的源文件路径：
+    优先使用显式指定的 source_path，否则尝试从文件名推导绝对路径。
+    """
     if explicit_source_path is not None:
         return explicit_source_path
 
@@ -288,12 +352,14 @@ def _resolve_source_path(upload: UploadFile, explicit_source_path: Path | None) 
     return Path(filename)
 
 
+# JSON 保存结果构建
 def _build_save_result(
     status: str,
     *,
     json_path: Path | None = None,
     message: str | None = None,
 ) -> dict:
+    """构建保存操作的状态响应。"""
     result = {
         "status": status,
         "json_path": str(json_path) if json_path is not None else None,
@@ -303,6 +369,7 @@ def _build_save_result(
     return result
 
 
+# 项目级分析服务编排
 _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
     "business_bid_duplicate_check": "business_bid_duplicate_check",
@@ -313,6 +380,7 @@ _PROJECT_SERVICE_RESULT_KEYS = {
 
 
 def _normalize_selected_services(services: list[str] | None) -> list[str]:
+    """去重并过滤空字符串，返回规范化的服务名列表。"""
     normalized: list[str] = []
     seen: set[str] = set()
     for service_name in services or []:
@@ -325,6 +393,7 @@ def _normalize_selected_services(services: list[str] | None) -> list[str]:
 
 
 def _http_exception_detail_to_text(detail: Any) -> str:
+    """HTTPException 的 detail 转换为纯文本（用于统一错误记录）。"""
     if isinstance(detail, str):
         return detail
     return json.dumps(detail, ensure_ascii=False)
@@ -340,6 +409,14 @@ async def _run_selected_project_services(
     duplicate_check_service: Any,
     bid_document_review_service: Any,
 ) -> dict:
+    """
+    按请求的服务列表依次执行项目级分析任务：
+    - 商务标格式审查
+    - 商务标/技术标雷同检查
+    - 人员复用检查
+    - 错别字检查
+    返回包含各服务执行状态和结果的聚合响应。
+    """
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     items: list[dict] = []
     results: dict[str, Any] = {}
@@ -459,12 +536,17 @@ async def _run_selected_project_services(
     }
 
 
+# 单文件解析及 JSON 保存
 def _save_analyze_file_json(
     payload: dict,
     *,
     source_path: Path | None,
     enabled: bool,
 ) -> dict:
+    """
+    当 enabled 且提供了有效的源文件路径时，
+    将解析结果 JSON 写入源文件同目录下（.json 后缀）。
+    """
     if not enabled:
         return _build_save_result(
             "disabled",
@@ -478,16 +560,9 @@ def _save_analyze_file_json(
         )
 
     target_path = source_path.with_suffix(".json")
-    save_result = _build_save_result(
-        "saved",
-        json_path=target_path,
-        message="解析后的 JSON 已保存到源文件同目录。",
-    )
-    serialized_payload = dict(payload)
-
     try:
         target_path.write_text(
-            json.dumps(serialized_payload, ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception as exc:
@@ -497,7 +572,11 @@ def _save_analyze_file_json(
             message=str(exc),
         )
 
-    return save_result
+    return _build_save_result(
+        "saved",
+        json_path=target_path,
+        message="解析后的 JSON 已保存到源文件同目录。",
+    )
 
 
 async def _analyze_single_upload(
@@ -507,6 +586,10 @@ async def _analyze_single_upload(
     explicit_source_path: Path | None,
     save_json_to_source: bool,
 ) -> dict:
+    """
+    处理单个文件上传的完整流程：
+    校验扩展名 -> 保存临时文件 -> 调用 OCR 提取 -> 构建响应体 -> 可选保存 JSON。
+    """
     allowed_extensions = set(analysis_service.get_supported_extensions())
     filename = str(upload.filename or "")
     file_extension = os.path.splitext(filename)[1].lower().lstrip(".")
@@ -545,21 +628,17 @@ async def _analyze_single_upload(
         cleanup_temp_file(temp_file_path)
 
 
+# 接口：文档解析（抽取文本）
 @router.post("/analyze-file", summary="文档解析（抽取文本）")
 async def analyze_file(
     file: list[UploadFile] = File(...),
     source_paths_json: str | None = Form(
         default=None,
-        description=(
-            "可选的 JSON 字符串或 JSON 数组，需要与上传文件一一对应。"
-            "每个路径都会用于将解析后的 JSON 保存到对应源文件同目录。"
-        ),
+        description="可选的 JSON 字符串或 JSON 数组，需与上传文件一一对应，路径将用于保存解析 JSON。",
     ),
     save_json_to_source: bool = Form(
         default=True,
-        description=(
-            "当存在可用源文件路径时，是否将每个解析结果 JSON 保存到源文件同目录。"
-        ),
+        description="当存在可用源文件路径时，是否将每个解析结果 JSON 保存到源文件同目录。",
     ),
     analysis_service=Depends(get_text_analysis_service),
 ):
@@ -570,6 +649,7 @@ async def analyze_file(
 
     source_paths = _parse_source_paths_json(source_paths_json, len(uploads))
 
+    # 单文件直接返回细节
     if len(uploads) == 1:
         try:
             return await _analyze_single_upload(
@@ -583,6 +663,7 @@ async def analyze_file(
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # 多文件时汇总每个文件的状态
     items: list[dict] = []
     success_count = 0
 
@@ -594,16 +675,7 @@ async def analyze_file(
                 explicit_source_path=source_path,
                 save_json_to_source=save_json_to_source,
             )
-        except ValueError as exc:
-            items.append(
-                {
-                    "filename": str(upload.filename or ""),
-                    "status": "failed",
-                    "error": str(exc),
-                }
-            )
-            continue
-        except RuntimeError as exc:
+        except (ValueError, RuntimeError) as exc:
             items.append(
                 {
                     "filename": str(upload.filename or ""),
@@ -651,6 +723,7 @@ async def analyze_file(
     }
 
 
+# 接口：统一分析（文本/项目服务）
 @router.post("/run", summary="统一分析接口（文本/项目服务）")
 async def run_text_analysis(
     payload: TextAnalysisRequest,
@@ -659,9 +732,10 @@ async def run_text_analysis(
     duplicate_check_service=Depends(get_duplicate_check_service),
     bid_document_review_service=Depends(get_bid_document_review_service),
 ):
-    """统一执行文本分析或项目级业务分析。"""
+    """统一执行文本分析或项目级业务分析，根据传入参数自动路由。"""
     selected_services = _normalize_selected_services(payload.services)
     if selected_services:
+        # 项目级分析模式下必须提供 project_identifier
         identifier_id = str(payload.project_identifier or "").strip()
         if not identifier_id:
             raise HTTPException(status_code=400, detail="project_identifier 不能为空。")
@@ -675,6 +749,7 @@ async def run_text_analysis(
             bid_document_review_service=bid_document_review_service,
         )
 
+    # 纯文本分析模式
     if payload.task_type is None:
         raise HTTPException(
             status_code=400,
@@ -686,6 +761,7 @@ async def run_text_analysis(
         raise HTTPException(status_code=400, detail="text 不能为空。")
     text = preprocess_text(raw_text)
 
+    # 按任务类型分发
     if payload.task_type == "integrity_check":
         return analysis_service.integrity.check_integrity(text)
     if payload.task_type == "pricing_reason":
