@@ -13,7 +13,7 @@ from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID
 from app.service.analysis.consistency import ConsistencyChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.integrity import IntegrityChecker
-from app.service.analysis.itemized_pricing import ItemizedPricingChecker
+from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.pricing_reasonableness import ReasonablenessChecker
 from app.service.analysis.template_extractor import TemplateExtractor
 from app.service.analysis.verification import VerificationChecker

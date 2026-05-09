@@ -22,7 +22,7 @@ from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TE
 from app.service.minio_service import MinioService
 
 from .deviation import DeviationChecker
-from .itemized_pricing import ItemizedPricingChecker
+from .itemized import ItemizedPricingChecker
 from .template_extractor import SectionClassifier
 
 
