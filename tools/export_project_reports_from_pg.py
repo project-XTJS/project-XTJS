@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+从 PostgreSQL 导出项目报告脚本。
+
+根据环境变量指定的项目标识，从数据库中读取招投标文档、
+执行各项分析并生成 HTML 报告及汇总页面。
+"""
+
 import os
 import difflib
 import re
@@ -8,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from types import MethodType
 
+# 确保项目根目录在搜索路径中
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -31,11 +40,14 @@ from app.service.analysis.visualizer import ReportVisualizer
 from app.service.postgresql_service import PostgreSQLService
 
 
+# 环境变量与配置
 PROJECT_IDENTIFIER = os.getenv("XTJS_PROJECT_IDENTIFIER", "").strip()
 OUTPUT_DIR = Path(os.getenv("XTJS_PROJECT_REPORT_DIR", f"./test_reports/{PROJECT_IDENTIFIER or 'project_from_pg'}"))
 API_BASE_URL = os.getenv("XTJS_REPORT_API_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 USE_STORED_PROJECT_RESULTS = os.getenv("XTJS_REPORT_USE_STORED_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
 RECOMPUTE_MISSING_PROJECT_RESULTS = os.getenv("XTJS_REPORT_RECOMPUTE_MISSING_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
+
+# 项目审查展示选项（控制报告中哪些部分可见）
 PROJECT_REVIEW_DISPLAY_OPTIONS = {
     "show_business_duplicates": True,
     "show_technical_duplicates": True,
@@ -45,7 +57,14 @@ PROJECT_REVIEW_DISPLAY_OPTIONS = {
 }
 
 
+# 修补 ReportVisualizer 的查重展示逻辑
 def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
+    """
+    动态增强 ReportVisualizer，添加更精细的查重证据高亮、
+    定位框计算、聚类渲染等功能，以便在导出报告时使用。
+    """
+
+    # --- 内部辅助函数（bbox 规范化、文本压缩等）---
     def _normalize_locator_bbox(self, bbox):
         if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
             return None
@@ -87,6 +106,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return re.sub(r"\s+", " ", str(value or "")).strip()
 
     def _common_highlight_phrase(self, left_text, right_text):
+        """从两段文本中找出最长的公共子串作为高亮短语。"""
         left = _normalize_highlight_source(self, left_text)
         right = _normalize_highlight_source(self, right_text)
         if not left or not right:
@@ -111,6 +131,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return ""
 
     def _highlight_excerpt_html(self, text, phrase, *, exact=False, limit=180):
+        """生成带高亮标记的文本片段 HTML。"""
         raw = _normalize_highlight_source(self, text)
         if not raw:
             return "<span class='issue-muted'>暂无命中文本</span>"
@@ -146,7 +167,9 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             f"{html.escape(after + suffix)}"
         )
 
+    # --- 证据项定位与渲染方法 ---
     def _occurrence_highlight_html(self, occurrence, file_name, other_file_name, *, source_lookup):
+        """根据证据对象生成高亮块 HTML。"""
         docs = occurrence.get("docs") or {}
         doc = docs.get(file_name) or {}
         other_doc = docs.get(other_file_name) or {}
@@ -182,6 +205,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         )
 
     def _iter_locator_candidates(self, payload, page):
+        """遍历文档解析结果中指定页的表格和区段作为定位候选。"""
         if not isinstance(payload, dict):
             return []
         candidates = []
@@ -219,6 +243,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return candidates
 
     def _occurrence_match_texts(self, occurrence, file_name):
+        """获取某条证据中指定文件侧的关键文本列表。"""
         item = occurrence.get("item") or {}
         evidence = occurrence.get("evidence") or {}
         family = str(occurrence.get("family") or "block")
@@ -248,6 +273,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return deduped
 
     def _locator_candidate_score(self, candidate_text, texts, *, family):
+        """计算候选区域与目标文本的匹配得分。"""
         compact_candidate = _compact_locator_text(self, candidate_text)
         if not compact_candidate:
             return 0.0
@@ -276,6 +302,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return 0.0
 
     def _occurrence_bbox_for_file_page(self, occurrence, file_name, page, *, source_lookup):
+        """尝试在文档指定页中找到与证据最匹配的定位框。"""
         entry = source_lookup.get(file_name) or {}
         payload = entry.get("_payload_data")
         if not isinstance(payload, dict):
@@ -302,7 +329,9 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                 best_bbox = candidate.get("bbox")
         return best_bbox if best_score > 0 else None
 
+    # --- 页面范围分割与证据爆炸 ---
     def _split_occurrence_ranges(self, left_pages, right_pages):
+        """将左右页面范围配对拆分为多个 (左页列表, 右页列表)。"""
         left_ranges = self._coalesce_page_ranges(self._project_normalize_pages(left_pages))
         right_ranges = self._coalesce_page_ranges(self._project_normalize_pages(right_pages))
         if not left_ranges and not right_ranges:
@@ -340,6 +369,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         ]
 
     def _explode_evidence_occurrences(self, evidence, kind):
+        """将复合页面范围的证据拆分为多个单页证据对象。"""
         if not isinstance(evidence, dict):
             return [evidence]
         if kind in {"block", "similar_block"}:
@@ -373,6 +403,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             exploded.append(entry)
         return exploded or [evidence]
 
+    # --- 聚类相关的属性与方法 ---
     def _cluster_family(self, kind):
         return kind[8:] if kind.startswith("similar_") else kind
 
@@ -395,6 +426,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return text
 
     def _occurrence_tokens(self, kind, evidence):
+        """从证据中提取用于聚类的 token 列表。"""
         candidates = []
         if kind in {"section", "similar_section"}:
             candidates.extend(
@@ -506,6 +538,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return True
 
     def _occurrence_preview(self, kind, evidence, side):
+        """根据类型和侧边提取证据预览文本。"""
         if kind in {"section", "similar_section"}:
             if side == "left":
                 raw = evidence.get("left_preview") or evidence.get("left_title") or evidence.get("preview") or "-"
@@ -544,7 +577,9 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             return " / ".join(parts) if parts else "相同图片"
         return "-"
 
+    # --- 渲染方法，输出 HTML 字符串 ---
     def _build_exact_range_links_html(self, source_lookup, file_name, ranges):
+        """为精确匹配构建页码范围链接 HTML。"""
         if not ranges:
             return "<span class='issue-muted'>页码待补充</span>"
         entry = source_lookup.get(file_name) or {}
@@ -573,6 +608,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
         return "<span class='issue-page-links'>" + " ".join(fragments) + "</span>"
 
     def _build_source_doc_cell_exact_html(self, source_lookup, file_name, ranges):
+        """构建精确查重文档单元格 HTML。"""
         entry = source_lookup.get(file_name) or {}
         display_name = str(entry.get("display_name") or file_name or "-")
         json_name = str(entry.get("json_name") or file_name or "")
@@ -715,6 +751,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             f"{html.escape(str(label))}</button>"
         )
 
+    # --- 查重概览表格与详情页渲染 ---
     def _render_duplicate_rows(self, result, doc_type, *, source_lookup, issue_pages, current_files=None):
         items = list(self._project_iter_duplicate_items(result, doc_type, current_files=current_files))
         if not items:
@@ -831,6 +868,7 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
             source_lookup=source_lookup,
         )
 
+    # 将以上方法绑定到 visualizer 实例
     visualizer._project_duplicate_cluster_items = MethodType(_cluster_items, visualizer)
     visualizer._project_duplicate_cluster_anchor = MethodType(_cluster_anchor, visualizer)
     visualizer._project_duplicate_cluster_metrics = MethodType(_cluster_metrics, visualizer)
@@ -844,18 +882,22 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
     visualizer._project_cluster_locator_targets_debug = MethodType(_cluster_locator_targets, visualizer)
 
 
+# 工具函数
 def unwrap_document_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """从文档 payload 中提取实际数据（可能嵌套在 data 字段中）。"""
     data = payload.get("data")
     return data if isinstance(data, dict) else payload
 
 
 def safe_slug(value: str, fallback: str) -> str:
+    """生成安全的文件名 slug。"""
     text = Path(str(value or "").strip()).stem or fallback
     normalized = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", text, flags=re.UNICODE).strip("_")
     return normalized or fallback
 
 
 def build_record_slug(record: dict[str, Any], fallback: str) -> str:
+    """根据文档记录生成唯一 slug（文件名 + 标识后6位）。"""
     base = safe_slug(str(record.get("file_name") or ""), fallback)
     identifier = str(record.get("identifier_id") or "").strip()
     if not identifier:
@@ -864,6 +906,7 @@ def build_record_slug(record: dict[str, Any], fallback: str) -> str:
 
 
 def guess_source_kind(record: dict[str, Any]) -> str:
+    """推测文档类型（pdf 或 image）。"""
     target = str(record.get("file_name") or record.get("file_url") or "").lower()
     if target.endswith(".pdf"):
         return "pdf"
@@ -877,6 +920,9 @@ def build_source_lookup(
     records: list[dict[str, Any]],
     api_base_url: str,
 ) -> dict[str, dict[str, Any]]:
+    """
+    为所有文档记录构建源文件查找字典，包含显示名称、URL、预览模板等。
+    """
     lookup: dict[str, dict[str, Any]] = {}
     for record in records:
         file_name = str(record.get("file_name") or "").strip()
@@ -913,6 +959,7 @@ def extend_preview_config_with_project_sources(
     preview_config: dict[str, Any],
     source_lookup: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
+    """将项目级别的源文件信息扩展到预览配置中。"""
     documents = dict((preview_config or {}).get("documents") or {})
     for entry in source_lookup.values():
         if not isinstance(entry, dict):
@@ -938,6 +985,7 @@ def build_document_preview_config(
     tender_record: dict[str, Any],
     api_base_url: str,
 ) -> dict[str, Any]:
+    """构建投标方和招标文件的预览配置。"""
     def build_entry(record: dict[str, Any], default_title: str) -> dict[str, Any]:
         payload = unwrap_document_payload(record.get("content") or {})
         identifier_id = str(record.get("identifier_id") or "").strip()
@@ -968,6 +1016,7 @@ def build_document_preview_config(
 
 
 def build_business_infos(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """构建商务标文件信息列表，用于报告切换器。"""
     raw_items: list[dict[str, str]] = []
     for record in records:
         payload = unwrap_document_payload(record.get("content") or {})
@@ -996,11 +1045,13 @@ def build_business_infos(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return infos
 
 
+# 项目结果加载与重新计算
 def load_stored_project_results(
     *,
     db_service: PostgreSQLService,
     project_identifier: str,
 ) -> dict[str, Any]:
+    """从数据库加载已存储的项目分析结果。"""
     record = db_service.get_project_result(project_identifier)
     if not record:
         return {}
@@ -1015,6 +1066,10 @@ def recompute_and_persist_project_result(
     document_records: list[dict[str, Any]],
     result_key: str,
 ) -> dict[str, Any]:
+    """
+    重新计算指定的项目分析结果并持久化到数据库。
+    支持的 result_key：查重、文档审查、商务标形式审查。
+    """
     duplicate_service = DuplicateCheckService()
     review_service = BidDocumentReviewService()
 
@@ -1066,6 +1121,10 @@ def resolve_project_results(
     project_identifier: str,
     document_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """
+    解析项目分析结果，优先使用已存储的结果，
+    若允许且缺失则重新计算。
+    """
     stored = load_stored_project_results(
         db_service=db_service,
         project_identifier=project_identifier,
@@ -1111,6 +1170,7 @@ def resolve_project_results(
     return result_bundle
 
 
+# 报告生成
 def generate_business_report(
     *,
     visualizer: ReportVisualizer,
@@ -1122,6 +1182,9 @@ def generate_business_report(
     source_lookup: dict[str, dict[str, Any]],
     issue_pages: dict[str, str],
 ) -> None:
+    """
+    生成单个商务标的 HTML 报告，包含各项分析结果及项目审查部分。
+    """
     bidder_payload = bidder_record.get("content") or {}
     tender_payload = tender_record.get("content") or {}
 
@@ -1196,6 +1259,7 @@ def generate_business_report(
 
 
 def main() -> None:
+    """脚本主入口：读取项目数据、执行分析、生成报告。"""
     if not PROJECT_IDENTIFIER:
         raise SystemExit("请先设置 XTJS_PROJECT_IDENTIFIER")
 

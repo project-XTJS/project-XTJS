@@ -1,77 +1,100 @@
-# PROJECT-XTJS 项目开发手册
+# XTJS —— 招投标文件智能审查平台
 
-## 1. 项目简介
-本项目基于 **FastAPI** 框架构建，当前统一采用 **PaddleOCR-VL-1.5** 作为文档解析主引擎，对投标文件执行版面、表格、印章与正文识别，并完成后续合规性自动化分析。系统集成了 **PostgreSQL** 数据库、**MinIO** 对象存储以及 **Celery** 异步任务处理。
----
-
-## 2. 业务开发分工
-为便于多人协作，将分析逻辑解耦至 `app/service/analysis/` 目录下的独立文件中。
-
-| 业务模块 | 核心负责人 | 对应代码文件 | 任务说明 |
-| :--- | :--- | :--- | :--- |
-| **OCR 识别调优** | 高海斌 | `app/service/ocr_service.py` | 优化模型加载、GPU/CPU 切换逻辑、提高识别精度。 |
-| **偏离条款检查** | 高海斌 | `app/service/analysis/deviation.py` | 实现招标与投标文件之间的条款差异化比对算法。 |
-| **完整性审查** | 虞光勇、陶明宇 | `app/service/analysis/integrity.py` | 校验必备章节是否缺失，评估文档完整度。 |
-| **格式一致性检查** | 虞光勇、陶明宇 | `app/utils/text_utils.py` | 校验文档字体、段落间距等排版是否符合规范。 |
-| **报价合理性检查** | 曾俊、滑鹏鹏 | `app/service/analysis/pricing_reasonableness.py` | 提取总报价，校验大小写匹配及数值合理性。 |
-| **分项报价表检查** | 江宇 | `app/service/analysis/itemized_pricing.py` | 解析分项报价表格，校验合计数与总价逻辑。 |
-| **签字/盖章/日期** | 镇昊天、张化飞 | `app/service/analysis/verification.py` | 验证印章状态及自动提取校验签署日期。 |
+基于 FastAPI、PaddleOCR、PostgreSQL、MinIO 构建的综合性招投标文件自动化审查系统，提供文档解析、内容查重、商务标形式审查、报价合理性分析、完整性校验、签章日期验证等多种能力。
 
 ---
 
-## 3. 开发指引
-同步代码：
-git pull
-获取 Commit ID：
-git log --oneline
-执行部署：
-make commit_id=<commit_id>
+## 技术栈
 
-## 4. 部署流程
-本地部署：
+- **后端框架**：FastAPI + Uvicorn
+- **OCR引擎**： PaddleOCR‑VL（PaddleX）
+- **数据库**：  PostgreSQL（psycopg2 连接池）
+- **对象存储**：MinIO（文件上传/预签名 URL）
+- **异步任务**：Celery + Redis（可选）
+- **其他依赖**：PyMuPDF、Pillow、SequenceMatcher、nvidia‑smi 等
+
+---
+
+## 项目结构
+PROJECT-XTJS/
+├── run.py      # 应用启动入口
+├── app/
+│ ├── main.py           # FastAPI 应用工厂，中间件、路由注册
+│ ├── config/
+│ │ └── settings.py             # 全局配置
+│ ├── core/
+│ │ ├── document_types.py       # 文档类型常量与映射
+│ │ └── response.py             # 统一响应模型与异常处理器
+│ ├── router/
+│ │ ├── analysis.py                 # 文档解析与文本分析接口
+│ │ ├── dependencies.py             # FastAPI 依赖注入（服务获取）
+│ │ ├── file.py                     # 文件对象操作（MinIO 预签名/删除）
+│ │ ├── postgresql.py               # 项目、文档、结果 CRUD 及业务分析接口
+│ │ ├── postgresql_batch.py         # 批量上传、识别、项目绑定接口
+│ │ └── uploaded_json_support.py    # 上传 JSON 文档的解析与持久化
+│ ├── schemas/
+│ │ ├── analysis.py                 # 分析请求模型
+│ │ ├── postgresql.py               # 数据库相关请求模型
+│ │ └── recognition.py              # OCR 识别元数据与响应模型
+│ ├── service/
+│ │ ├── analysis/
+│ │ │ ├── bid_document_review.py        # 投标文件审查（错别字、人员复用）
+│ │ │ ├── consistency.py                # 模板一致性比对
+│ │ │ ├── deviation.py                  # 偏离条款检查（★星标条款）
+│ │ │ ├── duplicate_check.py            # 内容查重（精确+相似度）
+│ │ │ ├── duplicate_merge.py            # 查重结果聚类合并
+│ │ │ ├── integrity.py                  # 完整性校验（附件/材料清单）
+│ │ │ ├── itemized_pricing.py           # 分项报价算术与一致性检查
+│ │ │ ├── pricing_reasonableness.py     # 报价合理性（大小写、下浮率、限价）
+│ │ │ ├── template_extractor.py         # 招标文件模板/条款提取
+│ │ │ ├── unified_business_review.py    # 统一商务标审查服务
+│ │ │ ├── verification.py               # 签章、日期、公章校验
+│ │ │ └── visualizer.py                 # 审查结果可视化（HTML 报告生成）
+│ │ ├── analysis_service.py         # 文本分析服务（OCR + 各检查器）
+│ │ ├── document_ingest_service.py  # 文档上传、识别、入库流程
+│ │ ├── minio_service.py            # MinIO 对象存储服务封装
+│ │ ├── ocr_progress.py             # OCR 进度监控器
+│ │ ├── ocr_service.py              # PaddleOCR‑VL 服务封装
+│ │ ├── postgresql_service.py       # 数据库 CRUD 服务层
+│ │ ├── table_parser.py             # 表格结构解析（HTML/Markdown/文本）
+│ │ └── tasks/                      # Celery 异步任务（预留）
+│ └── utils/
+│   └── text_utils.py               # 文本预处理、分块、临时文件工具
+
+
+## 部署流程
 python -m venv venv
 ./venv/Scripts/activate
 pip install -r requirements.txt
-在初始化环境后，还需要手动安装对应cuda的paddle库才支持gpu版本，查看requirements.txt
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/ 
 python run.py
-服务启动后将自动打开 http://127.0.0.1:8080/docs 查看交互式 API 文档。
+需要手动选择对应的cuda版本
 
-## 5. 通过API交互测试
-运行run.py启动服务，找到 POST /api/analysis/run (统一文本分析接口)，点击右侧的 "Try it out" 按钮。
-在 Request body 中修改 JSON 内容：
-task_type: 选择任务类型{
-    "integrity_check",     # 完整性审查
-    "pricing_reason",      # 报价合理性
-    "itemized_pricing",    # 分项报价
-    "deviation_check",     # 偏离检查
-    "full_analysis"        # 全量分析
-}
-text: 粘贴一段从 PDF 或 Word 中复制的测试文本；
-点击蓝色的 "Execute" 按钮，在下方 Responses 区域查看返回的 JSON 结果。
 
-## 6. 业务模块独立自测
-为了提高开发效率，无需启动整个项目即可测试自己的 `.py` 代码：
-**运行测试**：可在_test目录下测试自己的模块
-
-## 7. 目录结构说明
-PROJECT-XTJS/
-├── app/
-│   ├── config/           # 全局配置参数目录 (settings.py)
-│   ├── core/             # 框架核心：统一响应格式、全局异常拦截
-│   ├── router/           # API 路由分发中心
-│   │   ├── analysis.py   # 核心分析接口 (前端对接主力)
-│   │   ├── dependencies.py # 依赖注入机制
-│   │   ├── file.py       # 文件上传与 MinIO 交互
-│   │   └── postgresql.py # DB 测试接口
-│   ├── schemas/          # 数据契约：Pydantic 请求/响应模型验证
-│   ├── service/          # 业务逻辑层
-│   │   ├── analysis/     # 各业务子模块独立文件
-│   │   ├── analysis_service.py   # 统一调度中心：负责串联各子模块
-│   │   ├── minio_service.py      # OSS 对象存储服务
-│   │   ├── ocr_service.py        # 底层 OCR 识别与印章定位服务
-│   │   └── postgresql_service.py # 数据库交互服务
-│   ├── tasks/            # Celery 异步任务定义
-│   └── utils/            # 通用工具链 (text_utils.py)
-├── db/                   # 数据库 SQL 迁移脚本
-├── requirements.txt      # 依赖包列表
-└── run.py                # 本地一键启动脚本
+## 主要接口
+方法	                路径	                                                    说明
+POST	    /api/analysis/analyze-file	                                    上传文件进行 OCR 文本解析
+POST	    /api/analysis/run	                                            统一分析（文本分析或项目服务）
+GET/POST	/api/postgresql/projects	                                    项目 CRUD
+POST	    /api/postgresql/projects/duplicate-check	                    项目查重（商务/技术）
+POST	    /api/postgresql/projects/business-bid-format-review	            商务标形式审查
+POST	    /api/postgresql/projects/business-bid-duplicate-check	        商务标内容查重
+POST	    /api/postgresql/projects/technical-bid-duplicate-check	        技术标内容查重
+POST	    /api/postgresql/projects/personnel-reuse-check	                一人多用检查
+POST	    /api/postgresql/projects/typo-check	                            错别字检查
+GET	        /api/postgresql/projects/{id}/results	                        查看项目分析结果
+GET	        /api/postgresql/projects/{id}/results/{key}	                    查看项目单项分析结果
+GET	        /api/postgresql/projects/{id}/merged-results	                查看查重合并结果
+GET	        /api/postgresql/projects/{id}/visualization-data	            项目可视化聚合数据
+GET	        /api/postgresql/documents	                                    查询文档列表
+POST	    /api/postgresql/documents	                                    上传并创建文档
+GET	        /api/postgresql/documents/{id}	                                查询文档详情
+PUT	        /api/postgresql/documents/{id}	                                更新文档信息
+DELETE	    /api/postgresql/documents/{id}	                                删除文档
+GET	        /api/postgresql/documents/{id}/source	                        获取文档源文件（重定向至 MinIO）
+GET	        /api/postgresql/documents/{id}/preview/pages/{page}	            文档页面预览（base64，支持高亮）
+POST	    /api/postgresql/projects/batch/recognize	                    批量上传并 OCR 项目文档
+POST	    /api/postgresql/projects/batch/ingest-recognize	                创建项目并分阶段执行 OCR 与审查
+POST	    /api/postgresql/projects/{id}/continue-technical-ocr	        继续执行技术标 OCR
+POST	    /api/postgresql/projects/business-bid-format-review/upload-json	上传 JSON 并执行商务标形式审查
+GET	        /health	                                                        健康检查接口

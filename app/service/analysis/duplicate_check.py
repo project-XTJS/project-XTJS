@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+文档查重服务模块。
+
+对投标文件（商务标/技术标）执行内容查重分析，包括精确匹配、基于句子/段落/表格的相似度检测、
+图片重复识别，并支持从分项报价和偏离表中提取查重范围，排除招标文件模板内容。
+"""
+
 from __future__ import annotations
 
 from difflib import SequenceMatcher
@@ -19,6 +27,8 @@ from .template_extractor import SectionClassifier
 
 
 class _TableHTMLParser(HTMLParser):
+    """简易 HTML 表格解析器，用于提取表格的行文本。"""
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.rows: list[list[str]] = []
@@ -55,78 +65,64 @@ class _TableHTMLParser(HTMLParser):
 
 
 class DuplicateCheckService:
+    """文档查重服务，支持精确匹配和基于相似度的内容分析。"""
+
+    # 支持的文档类型
     SUPPORTED_DOCUMENT_TYPES = (DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID)
+
+    # 各种预编译的正则和常量
     PAGE_NUMBER_PATTERN = re.compile(r"^\d+$")
     SPLIT_LINE_PATTERN = re.compile(r"[\r\n]+")
     SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[。！？!?；;])|(?<=\.)(?=\s|$)")
+
+    # 文档被跳过的原因标识
     BUSINESS_SCOPE_SKIP_REASON = "missing_business_duplicate_scope_content"
     TEMPLATE_EXCLUDED_SKIP_REASON = "content_fully_covered_by_tender_template"
-    MIN_SENTENCE_COMPACT_LENGTH = 10
-    BUSINESS_SIMILARITY_MIN_KEY_LENGTH = 8
+
+    # 文本处理阈值
+    MIN_SENTENCE_COMPACT_LENGTH = 10           # 最小句子紧凑长度
+    BUSINESS_SIMILARITY_MIN_KEY_LENGTH = 8     # 相似度匹配的最小键长度
+
+    # 相似度阈值
     BUSINESS_BLOCK_SIMILARITY_THRESHOLD = 0.78
     BUSINESS_SECTION_SIMILARITY_THRESHOLD = 0.72
     BUSINESS_TABLE_SIMILARITY_THRESHOLD = 0.72
+
+    # 查重范围中需要过滤的常见表头关键词
     COMMON_DUPLICATE_HEADER_TOKENS = (
-        "序号",
-        "项目名称",
-        "招标编号",
-        "项目编号",
-        "招标文件",
-        "采购文件",
-        "投标文件",
-        "响应文件",
-        "采购规格",
-        "响应规格",
-        "偏离说明",
-        "商务条款",
-        "技术条款",
-        "分项名称",
-        "分项说明",
-        "单价",
-        "合计",
-        "备注",
-        "对应投标文件所在页",
+        "序号", "项目名称", "招标编号", "项目编号", "招标文件", "采购文件",
+        "投标文件", "响应文件", "采购规格", "响应规格", "偏离说明",
+        "商务条款", "技术条款", "分项名称", "分项说明", "单价", "合计",
+        "备注", "对应投标文件所在页",
     )
+    # 招标文件中的固定要求模板词，不应作为查重内容
     COMMON_DUPLICATE_REQUIREMENT_TOKENS = (
-        "提供复印件",
-        "项目管理经验",
-        "相关领域",
-        "工程师认证证书",
-        "认证证书",
-        "毕业时间为准",
-        "投标人送交",
-        "第三方进行计量",
-        "提供证书",
-        "招标人提供",
-        "培训相关费用",
-        "合同总价",
-        "正式验收",
-        "现场初验收",
-        "试运行及终验",
+        "提供复印件", "项目管理经验", "相关领域", "工程师认证证书",
+        "认证证书", "毕业时间为准", "投标人送交", "第三方进行计量",
+        "提供证书", "招标人提供", "培训相关费用", "合同总价",
+        "正式验收", "现场初验收", "试运行及终验",
     )
+    # 偏离响应中表示具体应答的关键词
     DEVIATION_RESPONSE_TOKENS = (
-        "我方",
-        "我公司",
-        "响应",
-        "偏离",
-        "详见",
-        "技术文件",
-        "商务文件",
-        "技术分册",
-        "商务分册",
-        "技术册",
-        "商务册",
+        "我方", "我公司", "响应", "偏离", "详见", "技术文件",
+        "商务文件", "技术分册", "商务分册", "技术册", "商务册",
     )
+    # 模板化行首的正则模式
     COMMON_DUPLICATE_TEMPLATE_PATTERNS = (
         re.compile(r"^(?:项目名称|项目编号|招标编号|采购编号|招标人|采购人|投标人|供应商)\s*[:：_]"),
         re.compile(r"^(?:GB|GJB|ISO|IEC|YD/T|SJ/T)[A-Z0-9./ -]*[;；。]?$", re.IGNORECASE),
     )
 
     def __init__(self) -> None:
+        # 依赖的其他检查器用于提取范围
         self._itemized_checker = ItemizedPricingChecker()
         self._deviation_checker = DeviationChecker()
+        # MinIO 服务延迟初始化
         self._minio_service: MinioService | None = None
+        # 图片 hash 缓存，避免重复从 MinIO 下载
         self._document_image_cache: dict[str, list[dict[str, Any]]] = {}
+
+    # ── 公共入口 ─────────────────────────────────
 
     def check_project_documents(
         self,
@@ -138,6 +134,7 @@ class DuplicateCheckService:
         max_evidence_sections: int = 5,
         max_pairs_per_type: int = 0,
     ) -> dict[str, Any]:
+        """主入口：对项目中的文档分组进行两两比较，返回查重分析结果。"""
         requested_types = self._normalize_requested_types(document_types)
         prepared_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
         skipped_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
@@ -167,15 +164,12 @@ class DuplicateCheckService:
                 continue
             dedupe_keys.add(dedupe_key)
 
+            # 准备模板上下文，用于排除招标文件中相同的内容
             template_context = self._get_tender_template_context(
-                record,
-                role=role,
-                cache=template_cache,
+                record, role=role, cache=template_cache,
             )
             prepared, skip_reason = self._prepare_document(
-                record,
-                role=role,
-                template_context=template_context,
+                record, role=role, template_context=template_context,
             )
             if prepared is None:
                 skipped_groups[role].append(
@@ -197,6 +191,7 @@ class DuplicateCheckService:
 
         for role in requested_types:
             documents = prepared_groups[role]
+            # 对所有文档进行两两组合并比较
             pair_items = [
                 self._compare_documents(left, right, role=role, max_evidence_sections=max_evidence_sections)
                 for left, right in combinations(documents, 2)
@@ -264,40 +259,7 @@ class DuplicateCheckService:
             },
         }
 
-    def _normalize_requested_types(self, document_types: list[str] | None) -> tuple[str, ...]:
-        if not document_types:
-            return self.SUPPORTED_DOCUMENT_TYPES
-
-        normalized: list[str] = []
-        for item in document_types:
-            role = self._normalize_document_role(item)
-            if role not in self.SUPPORTED_DOCUMENT_TYPES:
-                raise ValueError(f"Unsupported duplicate-check document type: {item}")
-            if role not in normalized:
-                normalized.append(role)
-        return tuple(normalized) if normalized else self.SUPPORTED_DOCUMENT_TYPES
-
-    def _normalize_document_role(self, value: Any) -> str:
-        normalized = str(value or "").strip().lower()
-        if normalized in {"business", "business_bid"}:
-            return DOCUMENT_TYPE_BUSINESS_BID
-        if normalized in {"technical", "technical_bid"}:
-            return DOCUMENT_TYPE_TECHNICAL_BID
-        return normalized
-
-    def _pair_sort_key(self, item: dict[str, Any]) -> tuple[Any, ...]:
-        metrics = item.get("metrics") or {}
-        return (
-            self._risk_rank(item.get("risk_level")),
-            bool(item.get("exact_duplicate")),
-            float(item.get("match_score") or item.get("exact_match_score") or 0.0),
-            int(metrics.get("similar_table_count") or 0),
-            int(metrics.get("similar_section_count") or 0),
-            int(metrics.get("similar_block_count") or 0),
-            int(metrics.get("exact_table_count") or 0),
-            int(metrics.get("exact_section_count") or 0),
-            int(metrics.get("exact_block_count") or 0),
-        )
+    # ── 文档预处理 ───────────────────────────────
 
     def _prepare_document(
         self,
@@ -306,41 +268,26 @@ class DuplicateCheckService:
         role: str,
         template_context: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
+        """对单条文档记录提取内容，排除模板，返回可用于比较的结构化对象。"""
         payload = self._coerce_payload(record.get("content"))
         ordered_blocks, table_entries, empty_reason = self._extract_document_content(payload, role=role)
         if not ordered_blocks:
-            prepared = self._build_prepared_document(
-                record,
-                [],
-                table_entries,
-                role=role,
-            )
+            # 即使没有区块，仍尝试仅用表格构建文档，供表格重复检测
+            prepared = self._build_prepared_document(record, [], table_entries, role=role)
             if prepared is not None:
                 return prepared, None
             return None, empty_reason
 
         ordered_blocks, table_entries = self._exclude_template_content(
-            ordered_blocks,
-            table_entries,
-            template_context=template_context,
+            ordered_blocks, table_entries, template_context=template_context,
         )
         if not ordered_blocks:
-            prepared = self._build_prepared_document(
-                record,
-                [],
-                table_entries,
-                role=role,
-            )
+            prepared = self._build_prepared_document(record, [], table_entries, role=role)
             if prepared is not None:
                 return prepared, None
             return None, self.TEMPLATE_EXCLUDED_SKIP_REASON
 
-        prepared = self._build_prepared_document(
-            record,
-            ordered_blocks,
-            table_entries,
-            role=role,
-        )
+        prepared = self._build_prepared_document(record, ordered_blocks, table_entries, role=role)
         return prepared, None if prepared is not None else empty_reason
 
     def _extract_document_content(
@@ -349,7 +296,9 @@ class DuplicateCheckService:
         *,
         role: str,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        """按文档角色提取可供查重的区块和表格，返回 (blocks, tables, skip_reason)。"""
         if role == DOCUMENT_TYPE_BUSINESS_BID:
+            # 商务标需通过分项报价和偏离表提取查重范围
             scoped_segments = self._extract_business_duplicate_segments(payload)
             if not scoped_segments:
                 return [], [], self.BUSINESS_SCOPE_SKIP_REASON
@@ -360,6 +309,7 @@ class DuplicateCheckService:
         ordered_blocks, table_entries = self._extract_ordered_blocks(container)
 
         if not ordered_blocks:
+            # 回退到纯文本全文
             fallback_text = self._fallback_text(container)
             if fallback_text:
                 exact_key = self._compact_raw_text(fallback_text)
@@ -382,6 +332,7 @@ class DuplicateCheckService:
         role: str,
         cache: dict[tuple[str, str], dict[str, Any] | None],
     ) -> dict[str, Any] | None:
+        """获取招标文件的模板内容（用于排除投标文件中相同的部分）。"""
         tender_identifier = str(record.get("tender_identifier_id") or "").strip()
         if not tender_identifier:
             return None
@@ -412,6 +363,8 @@ class DuplicateCheckService:
         }
         return cache[cache_key]
 
+    # ── 模板排除逻辑 ─────────────────────────────
+
     def _exclude_template_content(
         self,
         ordered_blocks: list[dict[str, Any]],
@@ -419,12 +372,14 @@ class DuplicateCheckService:
         *,
         template_context: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """根据招标模板上下文移除重复的固定文案区块和表格。"""
         if template_context is None:
             return ordered_blocks, table_entries
 
         block_hashes = set(template_context.get("block_hashes") or [])
         table_hashes = set(template_context.get("table_hashes") or [])
         placeholder_patterns = list(template_context.get("placeholder_patterns") or [])
+
         filtered_blocks = [
             block
             for block in ordered_blocks
@@ -442,6 +397,7 @@ class DuplicateCheckService:
         self,
         blocks: list[dict[str, Any]],
     ) -> list[re.Pattern[str]]:
+        """从招标文本中生成带占位符的正则模式，用于识别模板化语句。"""
         patterns: list[re.Pattern[str]] = []
         seen = set()
         for block in blocks:
@@ -456,6 +412,7 @@ class DuplicateCheckService:
         return patterns
 
     def _template_placeholder_pattern(self, text: str) -> re.Pattern[str] | None:
+        """为包含下划线、省略号、格式占位符的文本生成正则模式。"""
         normalized = self._normalize_plain_text(text)
         changed = False
         format_tokens = re.findall(r"[（(][^）)]{0,80}格式[^）)]*[）)]", normalized)
@@ -485,10 +442,13 @@ class DuplicateCheckService:
         block: dict[str, Any],
         patterns: list[re.Pattern[str]],
     ) -> bool:
+        """判断文本块是否完全匹配模板占位符模式。"""
         if not patterns:
             return False
         text = self._normalize_plain_text(block.get("text") or "")
         return any(pattern.fullmatch(text) for pattern in patterns)
+
+    # ── 文档结构化构建 ───────────────────────────
 
     def _build_prepared_document(
         self,
@@ -498,6 +458,7 @@ class DuplicateCheckService:
         *,
         role: str,
     ) -> dict[str, Any] | None:
+        """构建可供比较的内部文档结构，包含区块、区段、表格、图片等映射。"""
         sections = self._build_sections(ordered_blocks)
         full_text = "\n".join(block["text"] for block in ordered_blocks if block.get("text"))
         exact_key = self._compact_raw_text(full_text)
@@ -514,6 +475,7 @@ class DuplicateCheckService:
             for item in image_entries
             if str(item.get("exact_hash") or "")
         }
+
         if len(exact_key) < 16 and not exact_table_map and not exact_image_map:
             return None
 
@@ -555,6 +517,7 @@ class DuplicateCheckService:
         self,
         ordered_blocks: list[dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
+        """将区块划分为句子并建立精确哈希映射。"""
         sentence_map: dict[str, dict[str, Any]] = {}
         for block in ordered_blocks:
             if block.get("type") == "heading":
@@ -564,6 +527,7 @@ class DuplicateCheckService:
         return sentence_map
 
     def _sentence_units_from_block(self, block: dict[str, Any]) -> list[dict[str, Any]]:
+        """从文本块中拆分句子并计算哈希。"""
         text = self._normalize_plain_text(block.get("text") or "")
         if not text:
             return []
@@ -585,6 +549,7 @@ class DuplicateCheckService:
         return items
 
     def _split_sentences(self, text: str) -> list[str]:
+        """按句子边界分割文本并去重。"""
         normalized = self._normalize_plain_text(text)
         if not normalized:
             return []
@@ -621,21 +586,27 @@ class DuplicateCheckService:
             deduped.append(normalized_sentence)
         return deduped
 
+    # ── 商务标查重范围提取 ───────────────────────
+
     def _extract_business_duplicate_segments(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """从商务标中提取分项报价和偏离表相关段落作为查重范围。"""
         segments: list[dict[str, Any]] = []
 
+        # 分项报价部分
         itemized_document = self._itemized_checker._prepare_document(payload)
         for section in itemized_document.get("item_sections") or []:
             segment = self._segment_from_itemized_section(section)
             if segment is not None:
                 segments.append(segment)
 
+        # 偏离表部分
         deviation_payload = self._deviation_checker._coerce_payload(payload)
         deviation_sections = self._deviation_checker._extract_bid_deviation_sections(deviation_payload)
         row_segments = self._segments_from_deviation_rows(deviation_sections)
         for segment in row_segments:
             segments.append(segment)
 
+        # 补充未被行覆盖的偏离表章节
         covered_page_keys = {
             tuple(int(page) for page in (segment.get("pages") or []) if isinstance(page, int))
             for segment in row_segments
@@ -660,6 +631,7 @@ class DuplicateCheckService:
         self,
         deviation_sections: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从已解析的偏离行中构建查重段落。"""
         section_pages = {
             int(section.get("page"))
             for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or [])
@@ -718,6 +690,7 @@ class DuplicateCheckService:
         response: str,
         deviation: str,
     ) -> bool:
+        """判断偏离行是否具有重复检查意义。"""
         compact_requirement = self._compact_raw_text(requirement)
         compact_response = self._compact_raw_text(response)
         compact_deviation = self._compact_raw_text(deviation)
@@ -744,6 +717,7 @@ class DuplicateCheckService:
         return False
 
     def _segment_from_itemized_section(self, section: dict[str, Any]) -> dict[str, Any] | None:
+        """将分项报价区段标准化为查重段落。"""
         lines = self._normalize_scope_lines(section.get("lines") or [])
         if not lines:
             return None
@@ -762,6 +736,7 @@ class DuplicateCheckService:
         }
 
     def _segment_from_deviation_section(self, section: dict[str, Any]) -> dict[str, Any] | None:
+        """将偏离表区段标准化为查重段落。"""
         raw_lines = section.get("lines")
         if not isinstance(raw_lines, list) or not raw_lines:
             raw_lines = self.SPLIT_LINE_PATTERN.split(str(section.get("text") or ""))
@@ -795,6 +770,7 @@ class DuplicateCheckService:
         }
 
     def _trim_deviation_section_lines(self, values: list[Any]) -> list[str]:
+        """截断偏离表章节中超出边界的行。"""
         trimmed: list[str] = []
         for raw_value in values:
             text = self._normalize_plain_text(raw_value)
@@ -806,6 +782,7 @@ class DuplicateCheckService:
         return trimmed
 
     def _is_deviation_scope_boundary(self, text: str) -> bool:
+        """识别是否到达偏离表范围的边界。"""
         compact = self._compact_raw_text(text)
         if not compact:
             return False
@@ -826,12 +803,15 @@ class DuplicateCheckService:
             )
         )
 
+    # ── 文本清理与规范化工具 ──────────────────────
+
     def _normalize_scope_lines(
         self,
         values: list[Any],
         *,
         preserve_common_lines: bool = False,
     ) -> list[str]:
+        """对范围内的文本行进行规范化并去重。"""
         normalized: list[str] = []
         seen = set()
         for value in values:
@@ -851,6 +831,7 @@ class DuplicateCheckService:
         return normalized
 
     def _strip_scope_serial_prefix(self, text: str) -> str:
+        """移除文本开头的序号前缀。"""
         normalized = self._normalize_plain_text(text)
         if not normalized:
             return ""
@@ -862,6 +843,7 @@ class DuplicateCheckService:
         return stripped.strip()
 
     def _is_common_duplicate_scope_line(self, text: str) -> bool:
+        """判断是否为应忽略的公共模板行（如表头、固定提示语等）。"""
         compact = self._compact_raw_text(text)
         if not compact:
             return True
@@ -902,6 +884,7 @@ class DuplicateCheckService:
         return False
 
     def _is_deviation_response_line(self, text: str) -> bool:
+        """判断文本行是否为偏离表中的具体响应行。"""
         compact = self._compact_raw_text(text)
         if not compact:
             return False
@@ -914,6 +897,7 @@ class DuplicateCheckService:
         return False
 
     def _dedupe_scoped_segments(self, segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """对查重段落进行去重。"""
         deduped: list[dict[str, Any]] = []
         seen = set()
         for segment in segments:
@@ -928,6 +912,7 @@ class DuplicateCheckService:
         return deduped
 
     def _scoped_segment_sort_key(self, segment: dict[str, Any]) -> tuple[int, int, str]:
+        """定义查重段落的排序键。"""
         pages = [page for page in (segment.get("pages") or []) if isinstance(page, int)]
         first_page = min(pages) if pages else 1
         source = str(segment.get("source") or "")
@@ -939,6 +924,7 @@ class DuplicateCheckService:
         self,
         segments: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """将查重段落转换为内部的区块和表格结构。"""
         blocks: list[dict[str, Any]] = []
         tables: list[dict[str, Any]] = []
 
@@ -992,7 +978,10 @@ class DuplicateCheckService:
 
         return blocks, tables
 
+    # ── 通用数据解析 ──────────────────────────────
+
     def _coerce_payload(self, value: Any) -> dict[str, Any]:
+        """将可能的字符串 JSON 或纯文本转换为字典。"""
         if isinstance(value, dict):
             return value
         if isinstance(value, str):
@@ -1007,6 +996,7 @@ class DuplicateCheckService:
         return {}
 
     def _container(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """提取 payload 中的实际内容容器（优先使用 data 字段）。"""
         if isinstance(payload.get("data"), dict):
             return payload["data"]
         return payload
@@ -1015,6 +1005,7 @@ class DuplicateCheckService:
         self,
         container: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """从文档容器中提取顺序排列的区块和表格。"""
         table_queues, table_entries = self._build_table_queues(container)
         layout_sections = self._layout_sections(container)
         ordered_blocks: list[dict[str, Any]] = []
@@ -1055,6 +1046,7 @@ class DuplicateCheckService:
         return ordered_blocks, table_entries
 
     def _layout_sections(self, container: dict[str, Any]) -> list[dict[str, Any]]:
+        """获取并按位置排序布局区段。"""
         items = container.get("layout_sections")
         if not isinstance(items, list):
             return []
@@ -1083,6 +1075,7 @@ class DuplicateCheckService:
         return normalized
 
     def _bbox_anchor(self, bbox: Any) -> tuple[int, int]:
+        """获取 bbox 左上角坐标，用于排序。"""
         if isinstance(bbox, (list, tuple)) and len(bbox) >= 2:
             if all(isinstance(item, (int, float)) for item in bbox[:2]):
                 return (int(round(float(bbox[0]))), int(round(float(bbox[1]))))
@@ -1101,6 +1094,7 @@ class DuplicateCheckService:
         self,
         container: dict[str, Any],
     ) -> tuple[dict[int, list[str]], list[dict[str, Any]]]:
+        """构建按页码索引的表格文本队列和表格条目列表。"""
         candidates: list[Any] = []
         if isinstance(container.get("logical_tables"), list):
             candidates.extend(container.get("logical_tables") or [])
@@ -1143,6 +1137,7 @@ class DuplicateCheckService:
         return page_queues, table_entries
 
     def _table_to_lines(self, table: dict[str, Any]) -> list[str]:
+        """将表格的多种表示形式统一转换为行列表。"""
         rows = table.get("rows")
         if isinstance(rows, list) and rows:
             result = []
@@ -1197,7 +1192,10 @@ class DuplicateCheckService:
 
         return []
 
+    # ── 文本规范化 ────────────────────────────────
+
     def _normalize_plain_text(self, value: Any) -> str:
+        """基础文本规范化：反转义、统一空格和换行。"""
         text = html.unescape(str(value or ""))
         text = text.replace("\u3000", " ").replace("\xa0", " ")
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -1206,10 +1204,12 @@ class DuplicateCheckService:
         return text.strip()
 
     def _compact_raw_text(self, text: str) -> str:
+        """将文本中所有空白字符去除，用于精确哈希比较。"""
         normalized = self._normalize_plain_text(text)
         return re.sub(r"\s+", "", normalized)
 
     def _is_noise_block(self, text: str, section_type: str) -> bool:
+        """判断文本块是否为噪声（页码、目录、过短等）。"""
         compact = self._compact_raw_text(text)
         if not compact:
             return True
@@ -1221,7 +1221,10 @@ class DuplicateCheckService:
             return True
         return False
 
+    # ── 区段构建 ─────────────────────────────────
+
     def _build_sections(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """将区块按标题聚合为区段。"""
         sections: list[dict[str, Any]] = []
         current = self._new_section("document_prelude")
 
@@ -1277,6 +1280,7 @@ class DuplicateCheckService:
         blocks: list[dict[str, Any]],
         chunk_size: int = 10,
     ) -> list[dict[str, Any]]:
+        """将内容块等距分组成区段，作为无法按标题聚合时的回退方案。"""
         content_blocks = [block for block in blocks if block["type"] != "heading"]
         if len(content_blocks) < 4:
             return []
@@ -1310,7 +1314,10 @@ class DuplicateCheckService:
             )
         return sections
 
+    # ── 相似度匹配辅助 ───────────────────────────
+
     def _business_similarity_key(self, value: Any) -> str:
+        """将文本转换为适合相似度比较的规范化键（替换页码、数字等）。"""
         text = self._strip_scope_serial_prefix(self._normalize_plain_text(value))
         if not text:
             return ""
@@ -1324,6 +1331,7 @@ class DuplicateCheckService:
         return text.strip()
 
     def _similarity_ratio(self, left: str, right: str) -> float:
+        """计算两段文本的相似度（0~1）。"""
         if not left or not right:
             return 0.0
         if left == right:
@@ -1334,6 +1342,7 @@ class DuplicateCheckService:
         self,
         document: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从文档中构建用于相似度比较的块单元。"""
         units: list[dict[str, Any]] = []
         for block in document.get("blocks") or []:
             if str(block.get("type") or "") == "heading":
@@ -1356,6 +1365,7 @@ class DuplicateCheckService:
         self,
         document: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从文档中构建用于相似度比较的区段单元。"""
         units: list[dict[str, Any]] = []
         for section in document.get("sections") or []:
             similarity_key = self._business_similarity_key(section.get("text") or "")
@@ -1377,6 +1387,7 @@ class DuplicateCheckService:
         self,
         document: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        """从文档中构建用于相似度比较的表格单元。"""
         units: list[dict[str, Any]] = []
         for table in document.get("tables") or []:
             rows = self._normalize_scope_lines(table.get("rows") or [])
@@ -1413,6 +1424,10 @@ class DuplicateCheckService:
         key_getter,
         exact_match_getter=None,
     ) -> list[tuple[float, dict[str, Any], dict[str, Any]]]:
+        """
+        通用相似单元匹配算法：返回 (分数, 左单元, 右单元) 列表，
+        每个单元最多匹配一次。
+        """
         candidates: list[tuple[float, int, int]] = []
         for left_index, left_unit in enumerate(left_units):
             left_key = str(key_getter(left_unit) or "")
@@ -1447,6 +1462,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """比较两个文档的块级别相似度。"""
         left_units = self._build_business_similarity_block_units(left)
         right_units = self._build_business_similarity_block_units(right)
         matches = self._match_similarity_units(
@@ -1486,6 +1502,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """比较两个文档的区段级别相似度。"""
         left_units = self._build_business_similarity_section_units(left)
         right_units = self._build_business_similarity_section_units(right)
         matches = self._match_similarity_units(
@@ -1518,6 +1535,7 @@ class DuplicateCheckService:
         }
 
     def _table_similarity_ratio(self, left_rows: list[str], right_rows: list[str]) -> float:
+        """计算两个表格行列表的相似度（基于行匹配比例）。"""
         if not left_rows or not right_rows:
             return 0.0
         matches = self._match_similarity_units(
@@ -1536,6 +1554,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """比较两个文档的表格级别相似度。"""
         left_units = self._build_business_similarity_table_units(left)
         right_units = self._build_business_similarity_table_units(right)
         candidates: list[tuple[float, int, int]] = []
@@ -1588,6 +1607,8 @@ class DuplicateCheckService:
             "items": items,
         }
 
+    # ── 评分与风险判定 ───────────────────────────
+
     def _business_similarity_match_score(
         self,
         *,
@@ -1595,6 +1616,7 @@ class DuplicateCheckService:
         similar_section_match_ratio: float,
         similar_table_match_ratio: float,
     ) -> float:
+        """加权计算商务标相似度综合匹配分数（0~1）。"""
         score = (
             (0.45 * similar_section_match_ratio)
             + (0.35 * similar_block_overlap_ratio)
@@ -1603,6 +1625,7 @@ class DuplicateCheckService:
         return min(round(score, 4), 0.9999)
 
     def _supports_similarity_matching(self, role: str) -> bool:
+        """当前文档角色是否支持相似度匹配。"""
         return role in {DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID}
 
     def _business_risk_level(
@@ -1623,6 +1646,7 @@ class DuplicateCheckService:
         similar_section_overlap_ratio: float,
         similar_table_overlap_ratio: float,
     ) -> str:
+        """综合精确匹配和相似度匹配判断商务标的最终风险等级。"""
         exact_risk = self._exact_risk_level(
             exact_duplicate=exact_duplicate,
             exact_match_score=exact_match_score,
@@ -1647,6 +1671,7 @@ class DuplicateCheckService:
         return exact_risk
 
     def _fallback_text(self, container: dict[str, Any]) -> str:
+        """从容器中提取回退全文文本。"""
         for key in ("content", "text", "full_text"):
             value = container.get(key)
             if isinstance(value, str) and value.strip():
@@ -1664,6 +1689,8 @@ class DuplicateCheckService:
 
         return ""
 
+    # ── 文档比较核心 ─────────────────────────────
+
     def _compare_documents(
         self,
         left: dict[str, Any],
@@ -1672,6 +1699,7 @@ class DuplicateCheckService:
         role: str,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """执行两个文档的完整比较（精确+相似度），返回结构化比较记录。"""
         block_metrics = self._compare_blocks(left, right, max_evidence_sections=max_evidence_sections)
         section_metrics = self._compare_sections(left, right, max_evidence_sections=max_evidence_sections)
         table_metrics = self._compare_tables(left, right, max_evidence_sections=max_evidence_sections)
@@ -1703,19 +1731,13 @@ class DuplicateCheckService:
         similar_match_score = 0.0
         if self._supports_similarity_matching(role):
             similar_block_metrics = self._compare_business_similarity_blocks(
-                left,
-                right,
-                max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=max_evidence_sections,
             )
             similar_section_metrics = self._compare_business_similarity_sections(
-                left,
-                right,
-                max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=max_evidence_sections,
             )
             similar_table_metrics = self._compare_business_similarity_tables(
-                left,
-                right,
-                max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=max_evidence_sections,
             )
             similar_match_score = self._business_similarity_match_score(
                 similar_block_overlap_ratio=float(similar_block_metrics["similar_overlap_ratio"]),
@@ -1799,6 +1821,8 @@ class DuplicateCheckService:
             "notes": notes,
         }
 
+    # ── 精确比较方法 ─────────────────────────────
+
     def _compare_blocks(
         self,
         left: dict[str, Any],
@@ -1806,6 +1830,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """基于句子哈希精确比较两个文档的区块重复度。"""
         common_hashes = left["exact_block_hashes"] & right["exact_block_hashes"]
         overlap_ratio = self._dice_ratio(left["exact_block_hashes"], right["exact_block_hashes"])
 
@@ -1842,6 +1867,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """基于区段哈希精确比较两个文档的段落重复度。"""
         common_hashes = left["exact_section_hashes"] & right["exact_section_hashes"]
         exact_match_ratio = len(common_hashes) / max(
             1,
@@ -1881,6 +1907,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """基于表格哈希精确比较两个文档的表格重复度。"""
         common_hashes = left["exact_table_hashes"] & right["exact_table_hashes"]
         exact_match_ratio = len(common_hashes) / max(
             1,
@@ -1919,6 +1946,7 @@ class DuplicateCheckService:
         *,
         max_evidence_sections: int,
     ) -> dict[str, Any]:
+        """基于图像哈希精确比较两个文档的图片重复度。"""
         common_hashes = left["exact_image_hashes"] & right["exact_image_hashes"]
         exact_match_ratio = len(common_hashes) / max(
             1,
@@ -1951,7 +1979,10 @@ class DuplicateCheckService:
             "items": items,
         }
 
+    # ── 评分与风险工具 ───────────────────────────
+
     def _dice_ratio(self, left: set[Any], right: set[Any]) -> float:
+        """计算两个集合的 Dice 系数。"""
         if not left or not right:
             return 0.0
         if left == right:
@@ -1968,6 +1999,7 @@ class DuplicateCheckService:
         exact_table_match_ratio: float,
         exact_image_match_ratio: float,
     ) -> float:
+        """加权计算精确匹配分数（0~1）。"""
         if exact_duplicate:
             return 1.0
         score = (
@@ -1989,6 +2021,7 @@ class DuplicateCheckService:
         exact_image_count: int,
         exact_block_overlap_ratio: float,
     ) -> str:
+        """根据精确匹配指标判定风险等级。"""
         if exact_duplicate:
             return "high"
         if exact_table_count >= 2:
@@ -2006,10 +2039,14 @@ class DuplicateCheckService:
         return "none"
 
     def _risk_rank(self, risk_level: Any) -> int:
+        """将风险等级字符串转换为数值（用于排序）。"""
         mapping = {"high": 3, "medium": 2, "low": 1, "none": 0}
         return mapping.get(str(risk_level or "none"), 0)
 
+    # ── 图片提取 ─────────────────────────────────
+
     def _get_minio_service(self) -> MinioService:
+        """延迟初始化 MinIO 服务。"""
         if self._minio_service is None:
             self._minio_service = MinioService()
         return self._minio_service
@@ -2020,6 +2057,7 @@ class DuplicateCheckService:
         *,
         role: str,
     ) -> list[dict[str, Any]]:
+        """从文档记录中提取图片条目（仅技术标支持）。"""
         if role != DOCUMENT_TYPE_TECHNICAL_BID:
             return []
 
@@ -2033,8 +2071,7 @@ class DuplicateCheckService:
         try:
             bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
             file_bytes, content_type = self._get_minio_service().get_object_bytes(
-                object_name,
-                bucket_name=bucket_name,
+                object_name, bucket_name=bucket_name,
             )
             images = self._extract_image_entries_from_file_bytes(
                 file_bytes,
@@ -2054,6 +2091,7 @@ class DuplicateCheckService:
         file_name: str,
         content_type: str,
     ) -> list[dict[str, Any]]:
+        """根据文件字节和类型提取图片条目。"""
         normalized_name = str(file_name or "").strip().lower()
         normalized_type = str(content_type or "").strip().lower()
         if normalized_name.endswith(".pdf") or "pdf" in normalized_type:
@@ -2061,6 +2099,7 @@ class DuplicateCheckService:
         return self._extract_raster_image_entries(file_bytes)
 
     def _extract_pdf_image_entries(self, file_bytes: bytes) -> list[dict[str, Any]]:
+        """从 PDF 文件中提取所有图片并计算哈希。"""
         try:
             import fitz
         except Exception:
@@ -2085,10 +2124,7 @@ class DuplicateCheckService:
                     image_bytes = extracted.get("image")
                     if not image_bytes:
                         continue
-                    image_entry = self._build_image_entry(
-                        image_bytes=image_bytes,
-                        page=page_index + 1,
-                    )
+                    image_entry = self._build_image_entry(image_bytes=image_bytes, page=page_index + 1)
                     if image_entry is None:
                         continue
                     image_hash = str(image_entry.get("exact_hash") or "")
@@ -2109,6 +2145,7 @@ class DuplicateCheckService:
         return sorted(entries_by_hash.values(), key=lambda item: (item.get("pages") or [10**9])[0])
 
     def _extract_raster_image_entries(self, file_bytes: bytes) -> list[dict[str, Any]]:
+        """将光栅图片（如 PNG/JPG）作为单张图片提取。"""
         image_entry = self._build_image_entry(image_bytes=file_bytes, page=1)
         return [image_entry] if image_entry is not None else []
 
@@ -2118,6 +2155,7 @@ class DuplicateCheckService:
         image_bytes: bytes,
         page: int,
     ) -> dict[str, Any] | None:
+        """根据图片字节构建图片条目，计算 SHA256 哈希。"""
         try:
             from PIL import Image
         except Exception:
@@ -2143,10 +2181,52 @@ class DuplicateCheckService:
             "exact_hash": exact_hash,
         }
 
+    # ── 通用工具 ─────────────────────────────────
+
+    def _pair_sort_key(self, item: dict[str, Any]) -> tuple[Any, ...]:
+        """定义比较结果对（pair）的排序键，风险高的优先。"""
+        metrics = item.get("metrics") or {}
+        return (
+            self._risk_rank(item.get("risk_level")),
+            bool(item.get("exact_duplicate")),
+            float(item.get("match_score") or item.get("exact_match_score") or 0.0),
+            int(metrics.get("similar_table_count") or 0),
+            int(metrics.get("similar_section_count") or 0),
+            int(metrics.get("similar_block_count") or 0),
+            int(metrics.get("exact_table_count") or 0),
+            int(metrics.get("exact_section_count") or 0),
+            int(metrics.get("exact_block_count") or 0),
+        )
+
+    def _normalize_requested_types(self, document_types: list[str] | None) -> tuple[str, ...]:
+        """标准化请求的文档类型列表，默认返回全部支持类型。"""
+        if not document_types:
+            return self.SUPPORTED_DOCUMENT_TYPES
+
+        normalized: list[str] = []
+        for item in document_types:
+            role = self._normalize_document_role(item)
+            if role not in self.SUPPORTED_DOCUMENT_TYPES:
+                raise ValueError(f"Unsupported duplicate-check document type: {item}")
+            if role not in normalized:
+                normalized.append(role)
+        return tuple(normalized) if normalized else self.SUPPORTED_DOCUMENT_TYPES
+
+    def _normalize_document_role(self, value: Any) -> str:
+        """将文档角色字符串标准化为内部常量。"""
+        normalized = str(value or "").strip().lower()
+        if normalized in {"business", "business_bid"}:
+            return DOCUMENT_TYPE_BUSINESS_BID
+        if normalized in {"technical", "technical_bid"}:
+            return DOCUMENT_TYPE_TECHNICAL_BID
+        return normalized
+
     def _hash_text(self, text: str) -> str:
+        """计算文本的 SHA256 哈希（UTF-8 编码）。"""
         return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
 
     def _clip(self, text: str, max_chars: int) -> str:
+        """将文本截断到指定长度，超长部分用省略号表示。"""
         if len(text) <= max_chars:
             return text
         return f"{text[:max_chars].rstrip()}..."

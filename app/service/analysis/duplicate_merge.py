@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+查重结果合并模块。
+
+负责将原始查重结果中的证据项按文本相似度和页面范围进行聚类，
+生成便于前端展示的合并后的聚类视图。
+"""
+
 from __future__ import annotations
 
 import html
@@ -11,20 +19,24 @@ from app.core.document_types import (
 )
 
 
+# 按文档类型映射到聚类结果键名
 MERGED_RESULT_KEY_BY_DOC_TYPE = {
     DOCUMENT_TYPE_BUSINESS_BID: "business_bid_duplicate_clusters",
     DOCUMENT_TYPE_TECHNICAL_BID: "technical_bid_duplicate_clusters",
 }
 
+# 按文档类型映射到原始查重结果键名
 RAW_RESULT_KEY_BY_DOC_TYPE = {
     DOCUMENT_TYPE_BUSINESS_BID: "business_bid_duplicate_check",
     DOCUMENT_TYPE_TECHNICAL_BID: "technical_bid_duplicate_check",
 }
 
+# 逆映射：由聚类结果键名反向获取文档类型
 DOC_TYPE_BY_MERGED_RESULT_KEY = {
     value: key for key, value in MERGED_RESULT_KEY_BY_DOC_TYPE.items()
 }
 
+# 按源结果键名获取对应的文档类型列表（用于处理合并后的查重结果）
 DOC_TYPES_BY_SOURCE_RESULT_KEY = {
     "duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID],
     "business_bid_duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID],
@@ -33,14 +45,23 @@ DOC_TYPES_BY_SOURCE_RESULT_KEY = {
 
 
 class DuplicateResultMerger:
+    """查重结果聚类合并器，将多个比较对中发现的重叠证据聚类为分组。"""
+
     def __init__(self, helper: Any) -> None:
+        """helper 需提供 _coalesce_page_ranges、_project_normalize_pages 等辅助方法。"""
         self.helper = helper
+
+    # ── 页面范围分割 ─────────────────────────────
 
     def _split_occurrence_ranges(
         self,
         left_pages: Any,
         right_pages: Any,
     ) -> list[tuple[list[int], list[int]]]:
+        """
+        将左右页面的范围列表拆分为多组 (左页列表, 右页列表)，
+        用于将跨页的证据爆炸为多个单页或短范围条目。
+        """
         left_ranges = self.helper._coalesce_page_ranges(
             self.helper._project_normalize_pages(left_pages)
         )
@@ -84,7 +105,13 @@ class DuplicateResultMerger:
             for index in range(pair_count)
         ]
 
+    # ── 证据爆炸 ─────────────────────────────────
+
     def _explode_evidence_occurrences(self, evidence: Any, kind: str) -> list[dict[str, Any]]:
+        """
+        将一条包含页面范围的证据拆分为多个独立条目，
+        每个条目仅对应一组具体的左右页码，以便后续聚类。
+        """
         if not isinstance(evidence, dict):
             return [evidence]
         if kind in {"block", "similar_block"}:
@@ -124,13 +151,18 @@ class DuplicateResultMerger:
             exploded.append(entry)
         return exploded or [evidence]
 
+    # ── 聚类属性提取 ─────────────────────────────
+
     def _cluster_family(self, kind: str) -> str:
+        """从证据种类中提取家族名称（去除 similar_ 前缀）。"""
         return kind[8:] if kind.startswith("similar_") else kind
 
     def _cluster_mode(self, kind: str) -> str:
+        """根据证据种类前缀判断是精确匹配还是相似匹配。"""
         return "similar" if kind.startswith("similar_") else "exact"
 
     def _normalize_cluster_token(self, value: Any) -> str:
+        """将证据中的文本或数据转换为可用于聚类的规范化 token。"""
         if value is None:
             return ""
         if isinstance(value, (list, dict)):
@@ -146,6 +178,7 @@ class DuplicateResultMerger:
         return text
 
     def _occurrence_tokens(self, kind: str, evidence: dict[str, Any]) -> list[str]:
+        """根据证据类型提取用于聚类的 token 列表。"""
         candidates: list[Any] = []
         if kind in {"section", "similar_section"}:
             candidates.extend(
@@ -197,6 +230,7 @@ class DuplicateResultMerger:
         return tokens
 
     def _cluster_rank(self, cluster: dict[str, Any]) -> int:
+        """为聚类分配合并优先级数值（精确表格 > 精确段落 > ... > 相似句子）。"""
         mode = str(cluster.get("mode") or "similar")
         family = str(cluster.get("family") or "block")
         rank_map = {
@@ -210,6 +244,8 @@ class DuplicateResultMerger:
         }
         return rank_map.get((mode, family), 0)
 
+    # ── 嵌套关系判断 ─────────────────────────────
+
     def _ranges_cover(
         self,
         container_ranges: list[tuple[int, int]],
@@ -217,6 +253,7 @@ class DuplicateResultMerger:
         *,
         tolerance: int = 0,
     ) -> bool:
+        """检查 container 的页面范围是否完全覆盖 candidate 的范围。"""
         if not container_ranges or not candidate_ranges:
             return False
         for candidate_start, candidate_end in candidate_ranges:
@@ -237,6 +274,7 @@ class DuplicateResultMerger:
         strong: dict[str, Any],
         weak: dict[str, Any],
     ) -> bool:
+        """判断两个聚类的 token 是否有交集或包含关系。"""
         strong_tokens = [token for token in (strong.get("tokens") or []) if token]
         weak_tokens = [token for token in (weak.get("tokens") or []) if token]
         if not strong_tokens or not weak_tokens:
@@ -257,6 +295,7 @@ class DuplicateResultMerger:
         strong: dict[str, Any],
         weak: dict[str, Any],
     ) -> bool:
+        """检查弱聚类的页面范围是否完全被强聚类覆盖。"""
         strong_family = str(strong.get("family") or "block")
         weak_family = str(weak.get("family") or "block")
         common_files = set(strong.get("files") or []) & set(weak.get("files") or [])
@@ -270,7 +309,10 @@ class DuplicateResultMerger:
                 return False
         return True
 
+    # ── 展示文本与聚类标题 ─────────────────────────
+
     def _occurrence_preview(self, kind: str, evidence: dict[str, Any], side: str) -> str:
+        """根据证据类型和左右侧提取用于展示的预览文本。"""
         if kind in {"section", "similar_section"}:
             if side == "left":
                 raw = evidence.get("left_preview") or evidence.get("left_title") or evidence.get("preview") or "-"
@@ -310,6 +352,7 @@ class DuplicateResultMerger:
         return "-"
 
     def _cluster_title(self, cluster: dict[str, Any]) -> str:
+        """生成聚类的展示标题，包含类型前缀和预览文本。"""
         family = str(cluster.get("family") or "block")
         mode = str(cluster.get("mode") or "exact")
         title_map = {
@@ -334,6 +377,7 @@ class DuplicateResultMerger:
         return f"{prefix}：{preview_text}" if preview_text else prefix
 
     def _cluster_id(self, doc_type: str, cluster: dict[str, Any]) -> str:
+        """生成聚类的唯一标识符。"""
         files = cluster.get("files") or []
         parts = [doc_type, cluster.get("family"), cluster.get("mode"), *files]
         for file_name in files:
@@ -343,7 +387,14 @@ class DuplicateResultMerger:
             parts.append(str(token)[:48])
         return f"duplicate-cluster-{doc_type}-{self.helper._project_make_stable_token(*parts)}"
 
+    # ── 主聚类方法 ───────────────────────────────
+
     def cluster_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        将查重比较对中的各类证据（精确/相似，段落/句子/表格/图片）
+        按文本 token 的共有性聚合为聚类，并消除嵌套子集。
+        """
+        # 定义需要处理的证据组键名和对应的种类
         evidence_groups = (
             ("duplicate_sections", "section"),
             ("duplicate_blocks", "block"),
@@ -406,6 +457,7 @@ class DuplicateResultMerger:
         if not occurrences:
             return []
 
+        # 并查集：按 token 共有性将 occurrences 合并到同一聚类
         parent = list(range(len(occurrences)))
 
         def find(index: int) -> int:
@@ -430,12 +482,15 @@ class DuplicateResultMerger:
                 else:
                     union(index, owner)
 
+        # 按根节点分组
         grouped: dict[int, list[dict[str, Any]]] = {}
         for index, occurrence in enumerate(occurrences):
             grouped.setdefault(find(index), []).append(occurrence)
 
+        # 为每个分组构建聚类
         clusters: list[dict[str, Any]] = []
         for members in grouped.values():
+            # 若包含精确匹配，则仅使用精确匹配成员作为聚类核心
             has_exact = any(member.get("mode") == "exact" for member in members)
             active_mode = "exact" if has_exact else "similar"
             active_members = [member for member in members if member.get("mode") == active_mode]
@@ -477,6 +532,7 @@ class DuplicateResultMerger:
             if metric_key in metrics:
                 metrics[metric_key] = 1
 
+            # 选取风险最高/分数最高的成员作为聚类代表
             best_member = max(
                 active_members,
                 key=lambda member: (
@@ -514,6 +570,7 @@ class DuplicateResultMerger:
             }
             clusters.append(cluster)
 
+        # 按优先级排序并消除被高优先级聚类完全覆盖的低优先级聚类
         sorted_clusters = sorted(
             clusters,
             key=lambda cluster: (
@@ -541,6 +598,7 @@ class DuplicateResultMerger:
                     continue
                 if not self._clusters_have_nested_ranges(strong, weak):
                     continue
+                # 将弱聚类合并到强聚类
                 for file_name in weak.get("files") or []:
                     if file_name not in strong["files"]:
                         strong["files"].append(file_name)
@@ -566,6 +624,8 @@ class DuplicateResultMerger:
             if index not in dropped_indexes
         ]
 
+    # ── 构建最终合并结果字典 ──────────────────────
+
     def build_merge_payload(
         self,
         *,
@@ -573,6 +633,9 @@ class DuplicateResultMerger:
         doc_type: str,
         source_result_key: Optional[str] = None,
     ) -> dict[str, Any]:
+        """
+        为指定文档类型构建合并后的聚类视图，包含摘要统计和序列化聚类信息。
+        """
         source_key = source_result_key or RAW_RESULT_KEY_BY_DOC_TYPE.get(doc_type) or "duplicate_check"
         group = ((raw_result.get("groups") or {}).get(doc_type) or {})
         items = list(self.helper._project_iter_duplicate_items(raw_result, doc_type))
@@ -653,15 +716,20 @@ class DuplicateResultMerger:
         }
 
 
+# ── 公开构建函数 ────────────────────────────────
+
 def build_duplicate_merge_results(
     *,
     raw_result: dict[str, Any],
     source_result_key: str,
     helper: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
+    """
+    根据原始查重结果和源键名，为涉及的每一个文档类型生成合并后的聚类视图。
+    返回 { merged_result_key: merge_payload } 的字典。
+    """
     if helper is None:
         from app.service.analysis.visualizer import ReportVisualizer
-
         helper = ReportVisualizer()
 
     merger = DuplicateResultMerger(helper)

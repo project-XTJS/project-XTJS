@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""
+OCR 服务核心模块。
+
+封装 PaddleOCR-VL 的初始化和调用，提供文档预处理、版面分析、
+文本提取、印章/签名识别、页眉页脚清理以及后处理流水线。
+"""
+
 import html
 import os
 from pathlib import Path
@@ -15,11 +23,16 @@ from app.service.table_parser import build_logical_tables, build_table_structure
 
 
 class OCRService:
+    """OCR 服务，封装 PaddleOCR-VL 的初始化、调用及后处理。"""
+
+    # 页眉标题的正则（第X章、一、等）
     RUNNING_HEADER_HEADING_RE = re.compile(
         r"^第[一二三四五六七八九十0-9]+章|^[一二三四五六七八九十]+、|^[（(][一二三四五六七八九十A-Za-z0-9]+[)）]|^\d+\s*[)）.．、]|^(附件|附表|附录)\s*\d+(?:-\d+)?"
     )
 
+    # 签名锚点关键词
     SIGNATURE_ANCHOR_TOKENS = ("签字", "签章", "签名", "手签")
+    # 签名占位符候选词
     SIGNATURE_PLACEHOLDER_TOKENS = (
         "手写签字",
         "签字",
@@ -29,6 +42,7 @@ class OCRService:
         "签字或盖章",
         "盖章",
     )
+    # 签名候选区块排除词
     SIGNATURE_CANDIDATE_BLOCKED_WORDS = (
         "签字",
         "签章",
@@ -43,11 +57,13 @@ class OCRService:
         "项目",
         "投标",
     )
+    # 签名候选区块排除字符集
     SIGNATURE_CANDIDATE_BLOCKED_CHARS = set("签章盖日期公司项目设备授权代表投标")
 
     DEFAULT_SIGNATURE_PLACEHOLDER_TEXT = "已签字"
 
     def __init__(self, preferred_device: str | None = None):
+        """初始化 OCR 服务，准备运行时环境并加载模型。"""
         self.available = False
         self.pipeline = None
         self.preferred_device = str(preferred_device or "").strip() or None
@@ -58,13 +74,17 @@ class OCRService:
         self._prepare_runtime_env()
         self._init_engine()
 
+    # ── 运行环境与引擎初始化 ─────────────────────────────
+
     def _describe_document(self, file_path: str, file_type: str, total_pages: int) -> str:
+        """生成文档描述字符串用于日志输出。"""
         file_name = Path(file_path).name
         normalized_type = str(file_type or "").strip().lower().lstrip(".") or "unknown"
         page_label = total_pages if total_pages > 0 else "unknown"
         return f"file={file_name}, type={normalized_type}, estimated_pages={page_label}"
 
     def _runtime_cache_dirs(self) -> tuple[str, ...]:
+        """返回模型缓存相关目录路径元组。"""
         runtime_root = settings.OCR_STORAGE_ROOT
         return (
             str(runtime_root / ".cache"),
@@ -75,6 +95,7 @@ class OCRService:
         )
 
     def _prepare_runtime_dirs(self) -> None:
+        """创建 OCR 运行时所需的所有目录。"""
         for path in (
             settings.OCR_STORAGE_ROOT,
             settings.PADDLE_PDX_CACHE_HOME,
@@ -84,6 +105,7 @@ class OCRService:
             os.makedirs(path, exist_ok=True)
 
     def _prepare_runtime_env(self) -> None:
+        """设置 PaddleOCR 和相关缓存所需的环境变量。"""
         runtime_tmp = str(settings.OCR_RUNTIME_TEMP_DIR)
         runtime_root = settings.OCR_STORAGE_ROOT
 
@@ -101,6 +123,7 @@ class OCRService:
         os.environ["AISTUDIO_CACHE_HOME"] = str(runtime_root / "aistudio-cache")
 
     def _patch_paddle_tensor_int(self) -> None:
+        """修补 paddle 张量转 int 时的 shape 问题。"""
         try:
             import numpy as np
             import paddle
@@ -112,7 +135,6 @@ class OCRService:
         if current_int is None or getattr(current_int, "_xtjs_len1_tensor_patch", False):
             return
 
-        # PaddleOCR-VL's processor may produce shape=[1] tensors before casting.
         def _patched_tensor_int(value: Any) -> int:
             try:
                 return current_int(value)
@@ -126,6 +148,7 @@ class OCRService:
         tensor_type.__int__ = _patched_tensor_int
 
     def _candidate_devices(self) -> list[str]:
+        """根据配置生成尝试的设备列表，支持 CPU 回退。"""
         primary_device = self.preferred_device or settings.PADDLE_OCR_DEVICE
         candidates = [primary_device]
         if self.preferred_device is None and settings.PADDLE_OCR_DEVICE.startswith("gpu:"):
@@ -141,6 +164,7 @@ class OCRService:
         return unique_candidates
 
     def _build_pipeline_kwargs(self, device: str) -> dict[str, Any]:
+        """构建初始化 PaddleOCRVL 的参数字典。"""
         return {
             "device": device,
             "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
@@ -157,10 +181,12 @@ class OCRService:
         }
 
     def _extract_unknown_argument(self, exc: Exception) -> str | None:
+        """从异常信息中提取未知参数名（用于兼容性重试）。"""
         match = re.search(r"Unknown argument:\s*([A-Za-z0-9_]+)", str(exc or ""))
         return match.group(1) if match else None
 
     def _instantiate_pipeline(self, pipeline_cls: Any, device: str) -> tuple[Any, list[str]]:
+        """实例化 pipeline 并处理可能的未知参数。"""
         kwargs = dict(self._build_pipeline_kwargs(device))
         disabled_args: list[str] = []
 
@@ -180,10 +206,9 @@ class OCRService:
                 )
 
     def _init_engine(self) -> None:
+        """初始化 OCR 引擎，根据设备候选列表依次尝试。"""
         if os.name == "nt":
             try:
-                # On Windows, importing torch first can avoid a DLL search-order issue
-                # triggered when paddleocr/modelscope pulls torch in later.
                 import torch  # noqa: F401
             except Exception as exc:
                 print(
@@ -230,7 +255,10 @@ class OCRService:
         self.available = False
         print(f"OCRService bootstrap failed: {last_error}", flush=True)
 
+    # ── 页数估计与进度监控 ─────────────────────────────
+
     def _estimate_total_pages(self, file_path: str, file_type: str) -> int:
+        """预估文档总页数（图片默认1页，PDF 通过 pypdfium2 读取）。"""
         normalized_type = str(file_type or "").strip().lower().lstrip(".")
         if normalized_type in {"jpg", "jpeg", "png", "bmp", "tif", "tiff"}:
             return 1
@@ -239,7 +267,6 @@ class OCRService:
 
         try:
             import pypdfium2 as pdfium
-
             document = pdfium.PdfDocument(file_path)
             try:
                 return len(document)
@@ -257,6 +284,7 @@ class OCRService:
         file_type: str,
         total_pages: int,
     ) -> OCRProgressMonitor:
+        """根据配置构建进度监控器。"""
         return OCRProgressMonitor(
             file_path=file_path,
             file_type=file_type,
@@ -269,6 +297,7 @@ class OCRService:
         )
 
     def _stage_input_for_pipeline(self, file_path: str) -> tuple[str, Path | None]:
+        """若路径含非 ASCII 字符，将其复制到临时目录以避免编码问题。"""
         source = Path(file_path)
         try:
             source_str = str(source)
@@ -373,6 +402,7 @@ class OCRService:
         progress_page_offset: int = 0,
         progress_total_pages: int | None = None,
     ) -> list[Any]:
+        """执行 pipeline 推理，支持页面重构。"""
         if not self.available or self.pipeline is None:
             raise RuntimeError("PaddleOCR-VL-1.5 is unavailable.")
 
@@ -435,7 +465,10 @@ class OCRService:
             )
         return results
 
+    # ── 数据类型转换与文本清洗 ─────────────────────────────
+
     def _to_builtin(self, value: Any) -> Any:
+        """递归将模型返回的特殊对象转为 Python 内置类型。"""
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
 
@@ -465,6 +498,7 @@ class OCRService:
         return value
 
     def _dedupe_text_parts(self, parts: list[str]) -> list[str]:
+        """去重文本片段列表。"""
         deduped: list[str] = []
         seen = set()
         for item in parts:
@@ -478,10 +512,12 @@ class OCRService:
         return deduped
 
     def _merge_text_parts(self, parts: list[str], *, join_char: str = "\n") -> str:
+        """合并文本片段并去重。"""
         filtered = self._dedupe_text_parts(parts)
         return join_char.join(filtered).strip()
 
     def _normalize_section_text(self, text: Any, *, preserve_lines: bool = False) -> str:
+        """清洗文本：反转义 HTML、归一化空白，可选保留换行/制表。"""
         normalized = html.unescape(str(text or ""))
         if preserve_lines:
             normalized = re.sub(r"\r\n?", "\n", normalized)
@@ -512,18 +548,23 @@ class OCRService:
         return normalized
 
     def _normalize_bbox(self, value: Any) -> Any:
+        """将 bbox 转为基础类型，空值返回 None。"""
         builtin_value = self._to_builtin(value)
         if builtin_value in (None, ""):
             return None
         return builtin_value
 
     def _signature_placeholder_text(self) -> str:
+        """获取配置的签名占位文本。"""
         configured = self._normalize_section_text(
             getattr(settings, "OCR_SIGNATURE_PLACEHOLDER_TEXT", self.DEFAULT_SIGNATURE_PLACEHOLDER_TEXT)
         )
         return configured or self.DEFAULT_SIGNATURE_PLACEHOLDER_TEXT
 
+    # ── 坐标转换与投影 ─────────────────────────────
+
     def _xywh_to_bbox(self, bbox: list[int] | None) -> list[int] | None:
+        """将 (x, y, w, h) 转换为 (x1, y1, x2, y2)。"""
         if bbox is None or len(bbox) < 4:
             return None
         left, top, width, height = [int(round(float(item))) for item in bbox[:4]]
@@ -534,6 +575,7 @@ class OCRService:
         bbox: list[int] | None,
         page_size: tuple[int, int] | None,
     ) -> list[int] | None:
+        """将 xywh 裁剪到页面范围内。"""
         if bbox is None or len(bbox) < 4:
             return bbox
         if page_size is None:
@@ -551,6 +593,7 @@ class OCRService:
         return [left, top, width, height]
 
     def _page_payload_size(self, page_payload: dict[str, Any]) -> tuple[int, int] | None:
+        """从页面解析结果中提取宽高。"""
         try:
             width = int(round(float(page_payload.get("width") or 0)))
             height = int(round(float(page_payload.get("height") or 0)))
@@ -562,6 +605,7 @@ class OCRService:
         return (width, height)
 
     def _load_pdf_page_sizes(self, file_path: str, file_type: str) -> dict[int, tuple[float, float]]:
+        """对于 PDF，读取每一页的实际尺寸。"""
         normalized_type = str(file_type or "").strip().lower().lstrip(".")
         if normalized_type != "pdf":
             return {}
@@ -604,6 +648,7 @@ class OCRService:
         ocr_image_size: tuple[int, int] | None,
         pdf_page_size: tuple[float, float] | None,
     ) -> Any:
+        """将 bbox 从 OCR 图像坐标缩放到 PDF 坐标。"""
         builtin_bbox = self._to_builtin(bbox)
         if builtin_bbox is None or ocr_image_size is None or pdf_page_size is None:
             return self._normalize_bbox(builtin_bbox)
@@ -656,6 +701,7 @@ class OCRService:
         ocr_image_size: tuple[int, int] | None,
         pdf_page_size: tuple[float, float] | None,
     ) -> list[int] | None:
+        """将 xywh bbox 从 OCR 图像坐标缩放到 PDF 坐标。"""
         if bbox is None or len(bbox) < 4 or ocr_image_size is None or pdf_page_size is None:
             return bbox
 
@@ -680,6 +726,7 @@ class OCRService:
         page_no: int,
         pdf_page_sizes: dict[int, tuple[float, float]] | None,
     ) -> dict[str, Any]:
+        """获取页面的坐标上下文信息（尺寸与坐标空间）。"""
         ocr_image_size = self._page_payload_size(page_payload)
         pdf_page_size = (pdf_page_sizes or {}).get(page_no)
         bbox_coordinate_space = "pdf" if ocr_image_size and pdf_page_size else "ocr_image"
@@ -694,6 +741,7 @@ class OCRService:
         section: dict[str, Any],
         coordinate_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """将 section 的 bbox 投影到 PDF 坐标空间。"""
         projected = dict(section)
         bbox = self._normalize_bbox(section.get("bbox"))
         if bbox is None:
@@ -712,6 +760,7 @@ class OCRService:
         info: dict[str, Any],
         coordinate_context: dict[str, Any],
     ) -> dict[str, Any]:
+        """投影印章/签名检测信息到输出坐标。"""
         projected = {
             "count": int(info.get("count", 0) or 0),
             "texts": list(info.get("texts") or []),
@@ -735,6 +784,7 @@ class OCRService:
         return projected
 
     def _bbox_anchor(self, bbox: Any) -> tuple[float, float]:
+        """获取 bbox 的左上角锚点 (x, y)。"""
         builtin_bbox = self._to_builtin(bbox)
         if builtin_bbox is None:
             return (1e9, 1e9)
@@ -754,6 +804,7 @@ class OCRService:
         return (1e9, 1e9)
 
     def _bbox_to_xywh(self, bbox: Any) -> list[int] | None:
+        """将各种 bbox 格式转换为 [x, y, w, h]。"""
         builtin_bbox = self._to_builtin(bbox)
         if builtin_bbox is None:
             return None
@@ -790,10 +841,12 @@ class OCRService:
         return None
 
     def _bbox_signature_key(self, bbox: Any) -> tuple[int, int, int, int] | None:
+        """获取 bbox 的四元组键，用于签名去重。"""
         xywh = self._bbox_to_xywh(bbox)
         return tuple(xywh) if xywh is not None else None
 
     def _normalize_layout_type(self, value: str) -> str:
+        """将版面标签规范化为内部类型（heading/text/table/seal/signature）。"""
         normalized = str(value or "").strip().lower()
         if not normalized:
             return "text"
@@ -810,6 +863,7 @@ class OCRService:
         return "text"
 
     def _extract_text_value(self, value: Any) -> str:
+        """递归提取并清洗文本内容。"""
         builtin_value = self._to_builtin(value)
         if isinstance(builtin_value, str):
             return self._normalize_section_text(builtin_value, preserve_lines=True)
@@ -836,7 +890,10 @@ class OCRService:
             return (raw_page_index + 1 + page_offset) if raw_page_index >= 0 else fallback_page_no
         return fallback_page_no
 
+    # ── 表格提取 ─────────────────────────────
+
     def _build_table_section(self, page_no: int, block: dict[str, Any]) -> dict[str, Any] | None:
+        """构建表格类型的 section，包含 OCR 文本和 HTML 解析。"""
         raw_text = str(block.get("text") or "")
         normalized_raw_text = self._normalize_section_text(raw_text, preserve_lines=True)
         if len(normalized_raw_text) < 2:
@@ -869,6 +926,7 @@ class OCRService:
         return section
 
     def _extract_native_table_payload(self, block: dict[str, Any], page_no: int) -> dict[str, Any] | None:
+        """提取原始表格数据（包含 bbox 和内容）。"""
         raw_payload = self._to_builtin(block.get("_raw"))
         if not isinstance(raw_payload, dict):
             raw_payload = {}
@@ -891,6 +949,7 @@ class OCRService:
         return native_payload
 
     def _collect_native_tables(self, layout_sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """从版面区段中收集所有原始表格。"""
         native_tables: list[dict[str, Any]] = []
         for section in layout_sections:
             if not isinstance(section, dict):
@@ -902,7 +961,10 @@ class OCRService:
                 native_tables.append(dict(native_table))
         return native_tables
 
+    # ── 版面块与区段提取 ─────────────────────────────
+
     def _extract_layout_blocks(self, page_payload: dict[str, Any], page_no: int) -> list[dict[str, Any]]:
+        """从页面解析结果中提取所有布局块。"""
         blocks: list[dict[str, Any]] = []
         parsing_res_list = page_payload.get("parsing_res_list") or []
         for item_index, item in enumerate(parsing_res_list):
@@ -940,6 +1002,7 @@ class OCRService:
         return blocks
 
     def _simplify_layout_sections(self, layout_blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """将布局块合并去重，简化为版面区段。"""
         if not layout_blocks:
             return []
 
@@ -997,7 +1060,10 @@ class OCRService:
 
         return sections
 
+    # ── 签名识别与处理 ─────────────────────────────
+
     def _is_signature_placeholder_text(self, text: Any) -> bool:
+        """判断文本是否为签名占位符（如“签字”、“手写签字”等）。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return False
@@ -1009,6 +1075,7 @@ class OCRService:
         return compact.endswith("签字") and len(compact) <= 6
 
     def _normalize_signature_candidate_text(self, text: Any) -> str:
+        """清洗并判断是否为可能的签名文本（人名）。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return ""
@@ -1036,6 +1103,7 @@ class OCRService:
         return ""
 
     def _is_signature_anchor_text(self, text: Any) -> bool:
+        """判断文本是否为签名锚点（如法定代表人、签字等）。"""
         compact = re.sub(r"\s+", "", self._normalize_section_text(text))
         return bool(compact and any(token in compact for token in self.SIGNATURE_ANCHOR_TOKENS))
 
@@ -1047,6 +1115,7 @@ class OCRService:
         max_dx: int = 260,
         max_dy: int = 120,
     ) -> bool:
+        """判断两个框是否位置相近。"""
         if left_bbox is None or right_bbox is None:
             return False
 
@@ -1062,6 +1131,7 @@ class OCRService:
         return (same_band and horizontal_overlap) or below
 
     def _bbox_distance(self, source_bbox: list[int] | None, target_bbox: list[int] | None) -> int:
+        """计算两个框中心点的曼哈顿距离。"""
         if source_bbox is None or target_bbox is None:
             return 10**9
 
@@ -1079,6 +1149,7 @@ class OCRService:
         signature_section: dict[str, Any],
         page_blocks: list[dict[str, Any]],
     ) -> str:
+        """从相邻文本块解析签名实际文本。"""
         raw_text = self._normalize_section_text(signature_section.get("text") or "")
         if raw_text and not self._is_signature_placeholder_text(raw_text):
             return raw_text
@@ -1116,6 +1187,7 @@ class OCRService:
         signature_section: dict[str, Any],
         page_sections: list[dict[str, Any]],
     ) -> None:
+        """将签名文本合并到最近的锚点（如“法定代表人”）文本中。"""
         signature_text = self._normalize_section_text(signature_section.get("text") or "")
         if not signature_text:
             return
@@ -1173,6 +1245,7 @@ class OCRService:
         page_sections: list[dict[str, Any]],
         page_blocks: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """丰富签名区段信息：解析文本并合并到锚点。"""
         if not page_sections:
             return page_sections
 
@@ -1187,12 +1260,11 @@ class OCRService:
 
         return page_sections
 
-    def _include_section_in_page_text(self, section: dict[str, Any]) -> bool:
-        if section.get("_merged"):
-            return False
-        return str(section.get("type") or "") in {"heading", "text", "table", "seal", "signature"}
+    # ── 签名锚点高级处理（第二个重载版本） ─────────────
 
+    # _is_signature_placeholder_text（重复方法，保留原始第二个版本）
     def _is_signature_placeholder_text(self, text: Any) -> bool:
+        """判断文本是否为签名占位符（第二个实现，与配置占位符比较）。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return False
@@ -1206,6 +1278,7 @@ class OCRService:
         return compact.endswith("签字") and len(compact) <= 6
 
     def _is_signature_anchor_text(self, text: Any) -> bool:
+        """判断文本是否为签名锚点（第二个重载，增加表格锚点检测）。"""
         compact = re.sub(r"\s+", "", self._normalize_section_text(text))
         if not compact:
             return False
@@ -1217,6 +1290,7 @@ class OCRService:
         )
 
     def _is_table_signature_anchor_text(self, text: Any) -> bool:
+        """检测表格中的签名锚点关键词。"""
         compact = re.sub(r"\s+", "", self._normalize_section_text(text))
         if not compact:
             return False
@@ -1231,6 +1305,7 @@ class OCRService:
         self,
         text: Any,
     ) -> tuple[str, int, int, str, str] | None:
+        """在文本中查找签名锚点匹配，返回匹配详情。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return None
@@ -1257,6 +1332,7 @@ class OCRService:
         return best_match
 
     def _extract_signature_anchor_value(self, text: Any) -> str:
+        """提取签名锚点后的值（即签名文本）。"""
         match = self._find_signature_anchor_match(text)
         if match is None:
             return ""
@@ -1265,6 +1341,7 @@ class OCRService:
         return re.sub(r"^[_＿\-\u2014~.·•\s]+|[_＿\-\u2014~.·•\s]+$", "", value)
 
     def _strip_signature_anchor_value(self, text: Any) -> str:
+        """去除签名锚点后的值，只保留前缀。"""
         match = self._find_signature_anchor_match(text)
         normalized = self._normalize_section_text(text)
         if match is None or not normalized:
@@ -1274,6 +1351,7 @@ class OCRService:
         return f"{normalized[:start]}{prefix}"
 
     def _build_signature_anchor_text(self, text: Any) -> str:
+        """为文本构造完整的签名锚点字符串（含占位符）。"""
         match = self._find_signature_anchor_match(text)
         placeholder = self._signature_placeholder_text()
         if match is None:
@@ -1290,6 +1368,7 @@ class OCRService:
         return self._clean_signature_anchor_text(f"{normalized[:start]}{prefix}{placeholder}{normalized[end:]}")
 
     def _clean_signature_anchor_text(self, text: Any) -> str:
+        """清理签名锚点文本中多余的字符。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return ""
@@ -1315,11 +1394,14 @@ class OCRService:
         normalized = re.sub(r"\s{2,}", " ", normalized).strip()
         return normalized
 
+    # ── 签名框估计 ─────────────────────────────
+
     def _estimate_signature_bbox_from_anchor(
         self,
         anchor_bbox: Any,
         page_image_size: tuple[int, int] | None,
     ) -> list[int] | None:
+        """根据锚点框估计签名框。"""
         anchor_xywh = self._bbox_to_xywh(anchor_bbox)
         if anchor_xywh is None:
             return None
@@ -1340,6 +1422,7 @@ class OCRService:
         page_blocks: list[dict[str, Any]],
         page_image_size: tuple[int, int] | None,
     ) -> list[int] | None:
+        """根据文本锚点及相邻印章估计签名框。"""
         anchor_xywh = self._bbox_to_xywh(anchor_section.get("bbox"))
         if anchor_xywh is None:
             return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
@@ -1366,6 +1449,7 @@ class OCRService:
         page_sections: list[dict[str, Any]],
         page_blocks: list[dict[str, Any]],
     ) -> list[int] | None:
+        """在页面中查找距离参考框最近的印章 bbox。"""
         if reference_bbox is None:
             return None
 
@@ -1391,6 +1475,7 @@ class OCRService:
         page_blocks: list[dict[str, Any]],
         page_image_size: tuple[int, int] | None,
     ) -> list[int] | None:
+        """从表格锚点估计签名框。"""
         table_bbox = self._bbox_to_xywh(anchor_section.get("bbox"))
         if table_bbox is None:
             return None
@@ -1422,6 +1507,7 @@ class OCRService:
         page_blocks: list[dict[str, Any]],
         page_image_size: tuple[int, int] | None,
     ) -> list[int] | None:
+        """获取签名锚点的参考框（用于匹配签名）。"""
         section_type = str(anchor_section.get("type") or "").strip().lower()
         if section_type == "table":
             return self._estimate_signature_bbox_from_table_anchor(
@@ -1444,6 +1530,7 @@ class OCRService:
         page_blocks: list[dict[str, Any]],
         page_image_size: tuple[int, int] | None,
     ) -> bool:
+        """检测锚点附近是否有签名或印章证据。"""
         anchor_value = self._extract_signature_anchor_value(anchor_section.get("text") or "")
         compact_value = re.sub(r"\s+", "", anchor_value)
         if compact_value and not self._is_signature_placeholder_text(compact_value):
@@ -1494,6 +1581,7 @@ class OCRService:
         signatures: list[dict[str, Any]],
         anchors: list[dict[str, Any]],
     ) -> list[tuple[int, int]]:
+        """将签名与锚点进行最佳匹配。"""
         if not signatures or not anchors:
             return []
 
@@ -1541,6 +1629,7 @@ class OCRService:
         page_blocks: list[dict[str, Any]],
         page_image_size: tuple[int, int] | None,
     ) -> list[dict[str, Any]]:
+        """完整签名增强：补全签名占位，匹配签名与锚点，并合并文本和位置。"""
         if not page_sections and not page_blocks:
             return page_sections
 
@@ -1557,6 +1646,7 @@ class OCRService:
             if inferred_page_no > 0:
                 break
 
+        # 从 page_blocks 中补全未识别的签名区块
         for block in page_blocks:
             if str(block.get("type") or "").strip().lower() != "signature":
                 continue
@@ -1675,17 +1765,22 @@ class OCRService:
         )
         return sections
 
+    # ── 页眉页脚清理 ─────────────────────────────
+
     def _include_section_in_page_text(self, section: dict[str, Any]) -> bool:
+        """判断 section 是否应包含在输出文本中。"""
         if section.get("_merged"):
             return False
         return str(section.get("type") or "") in {"heading", "text", "table", "seal", "signature"}
 
     def _normalize_running_header_signature(self, text: Any) -> str:
+        """归一化页眉文本用于指纹比较。"""
         normalized = self._normalize_section_text(text)
         normalized = re.sub(r"\s+", "", normalized)
         return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", normalized)
 
     def _is_running_header_candidate(self, section: dict[str, Any], page_extents: dict[int, int]) -> bool:
+        """判断一个 heading 是否为页眉。"""
         if str(section.get("type") or "") != "heading":
             return False
 
@@ -1709,6 +1804,7 @@ class OCRService:
         return "招标文件" in text or "投标文件" in text
 
     def _strip_running_headers(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """移除重复出现的页眉。"""
         if not sections:
             return []
 
@@ -1746,6 +1842,7 @@ class OCRService:
         return filtered
 
     def _rebuild_pages_from_sections(self, sections: list[dict[str, Any]], page_numbers: list[int]) -> list[dict[str, Any]]:
+        """根据区段重新构建每页的文本。"""
         by_page: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for section in sections:
             page_no = int(section.get("page", 0) or 0)
@@ -1766,7 +1863,10 @@ class OCRService:
             pages.append({"page": page_no, "text": page_text})
         return pages
 
+    # ── 印章与签名提取 ─────────────────────────────
+
     def _extract_page_seals(self, page_payload: dict[str, Any], page_no: int) -> dict[str, Any]:
+        """提取页面中的所有印章。"""
         seal_info = {"count": 0, "texts": [], "locations": []}
         parsing_res_list = page_payload.get("parsing_res_list") or []
         for item in parsing_res_list:
@@ -1807,6 +1907,7 @@ class OCRService:
         page_sections: list[dict[str, Any]],
         page_no: int,
     ) -> dict[str, Any]:
+        """提取页面中的所有签名。"""
         signature_info = {"count": 0, "texts": [], "locations": []}
         seen_bbox_keys: set[tuple[int, int, int, int] | None] = set()
 
@@ -1847,6 +1948,7 @@ class OCRService:
         page_sections: list[dict[str, Any]],
         page_payload: dict[str, Any],
     ) -> str:
+        """从页面区段中组合最终文本。"""
         section_text = self._merge_text_parts(
             [
                 str(section.get("text") or "")
@@ -1858,6 +1960,7 @@ class OCRService:
         if section_text:
             return section_text
 
+        # 回退方案：直接从原始区块提取文本
         fallback_parts: list[str] = []
         for item in page_payload.get("parsing_res_list") or []:
             built_item = self._to_builtin(item)
@@ -1880,6 +1983,7 @@ class OCRService:
         return self._merge_text_parts(fallback_parts, join_char="\n")
 
     def _attach_table_outputs(self, result: dict[str, Any] | None) -> dict[str, Any]:
+        """将原始表格和逻辑表格附加到结果中。"""
         payload = dict(result or {})
         layout_sections = payload.get("layout_sections") or []
         if not isinstance(layout_sections, list):
@@ -1892,6 +1996,7 @@ class OCRService:
         return payload
 
     def _resolve_postprocess_workers(self, total_pages: int) -> int:
+        """根据总页数和配置决定后处理线程数。"""
         if total_pages <= 1:
             return 1
 
@@ -1900,12 +2005,15 @@ class OCRService:
             configured = min(4, os.cpu_count() or 1)
         return max(1, min(configured, total_pages))
 
+    # ── 页面后处理核心 ─────────────────────────────
+
     def _postprocess_page_payload(
         self,
         page_payload: dict[str, Any],
         fallback_page_no: int,
         pdf_page_sizes: dict[int, tuple[float, float]] | None,
     ) -> dict[str, Any]:
+        """对单个页面 payload 进行后处理：提取区块、区段、印章和签名。"""
         page_no = self._page_number_from_payload(page_payload, fallback_page_no)
         coordinate_context = self._page_coordinate_context(page_payload, page_no, pdf_page_sizes)
         page_blocks = self._extract_layout_blocks(page_payload, page_no)
@@ -1939,7 +2047,10 @@ class OCRService:
             "coordinate_context": coordinate_context,
         }
 
+    # ── 主入口：extract_all ─────────────────────────────
+
     def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
+        """执行完整的 OCR 提取流程：推理、后处理、表格构建，返回统一字典。"""
         total_pages = self._estimate_total_pages(file_path, file_type)
         print(
             "OCRService: OCR inference started "
@@ -2048,7 +2159,7 @@ class OCRService:
                             total=max(total_result_pages, completed_count, 1),
                             detail=f"parsed page {page_result['page_no']}",
                             emit=True,
-                    )
+                        )
             else:
                 for completed_count, (fallback_page_no, page_payload) in enumerate(page_payloads, start=1):
                     page_result = self._postprocess_page_payload(

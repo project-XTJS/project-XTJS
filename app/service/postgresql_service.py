@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+PostgreSQL 数据访问服务模块。
+
+提供连接池管理及项目、文档、关联关系、分析结果的 CRUD 操作。
+"""
+
 import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
@@ -20,10 +27,12 @@ from app.core.document_types import (
 
 logger = logging.getLogger(__name__)
 
+# 全局连接池（模块级单例）
 _db_pool = None
 
 
 def get_db_pool():
+    """返回 PostgreSQL 线程安全连接池，首次调用时初始化。"""
     global _db_pool
     if _db_pool is None:
         try:
@@ -40,11 +49,15 @@ def get_db_pool():
 
 
 class PostgreSQLService:
+    """PostgreSQL 数据库服务层，封装项目、文档、关系及结果操作。"""
+
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
     SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
 
+    # 连接管理
     @contextmanager
     def _get_connection(self):
+        """获取数据库连接上下文，使用完毕后自动归还连接池。"""
         pool = get_db_pool()
         conn = pool.getconn()
         try:
@@ -53,13 +66,16 @@ class PostgreSQLService:
         finally:
             pool.putconn(conn)
 
+    # 标识/字段清理工具
     @staticmethod
     def _normalize_identifier(identifier_id: Optional[str]) -> str:
+        """若传入标识为空则自动生成 UUID。"""
         identifier = (identifier_id or "").strip()
         return identifier or str(uuid4())
 
     @staticmethod
     def _normalize_required_identifier(identifier_id: str, field_name: str) -> str:
+        """验证标识非空并返回清理后的值。"""
         normalized = (identifier_id or "").strip()
         if not normalized:
             raise ValueError(f"{field_name} cannot be empty")
@@ -67,6 +83,7 @@ class PostgreSQLService:
 
     @staticmethod
     def _normalize_file_value(value: Optional[str], field_name: str) -> str:
+        """验证文件名字段非空并返回清理后的值。"""
         normalized = (value or "").strip()
         if not normalized:
             raise ValueError(f"{field_name} cannot be empty")
@@ -80,6 +97,7 @@ class PostgreSQLService:
         offset: int,
         items: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """构建标准分页响应字典。"""
         page_size = max(1, limit)
         page = max(1, (offset // page_size) + 1)
         return {
@@ -93,12 +111,14 @@ class PostgreSQLService:
 
     @classmethod
     def _normalize_document_type(cls, document_type: str) -> str:
+        """验证文档类型是否在活跃列表中，返回小写。"""
         normalized = (document_type or "").strip().lower()
         if normalized not in cls.ACTIVE_DOCUMENT_TYPES:
             allowed = ", ".join(sorted(cls.ACTIVE_DOCUMENT_TYPES))
             raise ValueError(f"document_type 必须是以下之一：{allowed}")
         return normalized
 
+    # 内部记录获取
     def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
         cursor.execute(
             """
@@ -133,6 +153,7 @@ class PostgreSQLService:
         role_label: str,
         allowed_types: set[str],
     ) -> Dict[str, Any]:
+        """获取文档记录并校验其类型是否符合预期角色。"""
         document = self._get_document_record(cursor, identifier_id)
         if not document:
             raise ValueError(f"{role_label}不存在：{identifier_id}")
@@ -147,10 +168,12 @@ class PostgreSQLService:
             )
         return document
 
+    # 项目 CRUD
     def create_project(
         self,
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """创建项目，支持自动生成标识。"""
         identifier = self._normalize_identifier(identifier_id)
         query = """
             INSERT INTO xtjs_projects (identifier_id)
@@ -168,6 +191,7 @@ class PostgreSQLService:
         offset: int = 0,
         keyword: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """分页查询项目列表，支持关键字搜索。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
@@ -274,6 +298,7 @@ class PostgreSQLService:
         )
 
     def list_project_identifiers(self) -> List[str]:
+        """获取所有未删除项目的标识列表。"""
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -287,6 +312,7 @@ class PostgreSQLService:
                 return [str(identifier_id) for (identifier_id,) in cursor.fetchall()]
 
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """根据标识获取项目记录。"""
         query = """
             SELECT id, identifier_id, deleted, create_time, update_time
             FROM xtjs_projects
@@ -303,6 +329,7 @@ class PostgreSQLService:
         identifier_id: str,
         new_identifier_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """更新项目标识（仅允许修改标识）。"""
         updates: List[str] = []
         values: List[Any] = []
         if new_identifier_id is not None:
@@ -324,6 +351,7 @@ class PostgreSQLService:
                 return dict(updated) if updated else None
 
     def soft_delete_project(self, identifier_id: str) -> bool:
+        """软删除项目（设置删除标记）。"""
         query = """
             UPDATE xtjs_projects
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
@@ -335,6 +363,7 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def soft_delete_projects(self, identifier_ids: list[str]) -> int:
+        """批量软删除项目。"""
         normalized_ids = [
             self._normalize_required_identifier(identifier_id, "identifier_id")
             for identifier_id in identifier_ids
@@ -352,6 +381,7 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
+    # 文档 CRUD
     def create_document(
         self,
         file_name: str,
@@ -359,6 +389,7 @@ class PostgreSQLService:
         document_type: str,
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """创建文档记录（不含识别内容）。"""
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
@@ -403,6 +434,7 @@ class PostgreSQLService:
         recognition_content: Dict[str, Any],
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """创建文档记录并同时写入识别内容。"""
         identifier = self._normalize_identifier(identifier_id)
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
@@ -463,6 +495,7 @@ class PostgreSQLService:
         document_type: Optional[str] = None,
         extracted: Optional[bool] = None,
     ) -> Dict[str, Any]:
+        """分页查询文档列表，支持多种过滤。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
@@ -520,6 +553,7 @@ class PostgreSQLService:
         )
 
     def get_document_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """根据标识获取文档完整信息。"""
         query = """
             SELECT
                 id,
@@ -549,6 +583,7 @@ class PostgreSQLService:
         file_name: Optional[str] = None,
         file_url: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """更新文档的文件名或存储 URL。"""
         updates: List[str] = []
         values: List[Any] = []
 
@@ -591,6 +626,7 @@ class PostgreSQLService:
         identifier_id: str,
         recognition_content: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
+        """覆盖写入文档的识别内容，并标记为已提取。"""
         normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         if not isinstance(recognition_content, dict):
             raise ValueError("recognition_content 必须是 JSON 对象")
@@ -618,6 +654,7 @@ class PostgreSQLService:
                 return dict(updated) if updated else None
 
     def soft_delete_document(self, identifier_id: str) -> bool:
+        """软删除文档。"""
         query = """
             UPDATE xtjs_documents
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
@@ -629,6 +666,7 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def soft_delete_documents(self, identifier_ids: list[str]) -> int:
+        """批量软删除文档。"""
         normalized_ids = [
             self._normalize_required_identifier(identifier_id, "identifier_id")
             for identifier_id in identifier_ids
@@ -646,6 +684,7 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
+    # 项目-文档关系管理
     def bind_project_documents(
         self,
         project_identifier: str,
@@ -653,6 +692,7 @@ class PostgreSQLService:
         business_bid_document_identifier: str,
         technical_bid_document_identifier: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """绑定招标、商务标、技术标到项目，并校验文档类型。"""
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 project = self._get_project_record(cursor, project_identifier)
@@ -683,6 +723,7 @@ class PostgreSQLService:
                         allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
                     )
 
+                # 检查是否已存在完全相同的绑定关系
                 cursor.execute(
                     """
                     SELECT id
@@ -740,6 +781,7 @@ class PostgreSQLService:
                 }
 
     def get_relation_by_id(self, relation_id: int) -> Optional[Dict[str, Any]]:
+        """根据关系 ID 获取绑定详情。"""
         query = """
             SELECT
                 pd.id AS relation_id,
@@ -778,6 +820,7 @@ class PostgreSQLService:
         keyword: Optional[str] = None,
         project_identifier: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """分页查询项目文档绑定关系列表。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
@@ -864,6 +907,7 @@ class PostgreSQLService:
         business_bid_document_identifier: str,
         technical_bid_document_identifier: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
+        """更新已有的项目文档绑定关系。"""
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
@@ -902,6 +946,7 @@ class PostgreSQLService:
                         allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
                     )
 
+                # 检查新组合是否与其他记录冲突
                 cursor.execute(
                     """
                     SELECT id
@@ -978,6 +1023,7 @@ class PostgreSQLService:
         technical_bid_document_identifier: str,
         tender_document_identifier: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """向已有的商务标绑定关系附加技术标（用于分阶段上传）。"""
         normalized_project_identifier = self._normalize_required_identifier(
             project_identifier,
             "project_identifier",
@@ -1071,6 +1117,7 @@ class PostgreSQLService:
                 )
 
     def delete_relation(self, relation_id: int) -> bool:
+        """物理删除一条项目文档关系。"""
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -1083,6 +1130,7 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def delete_relations(self, relation_ids: list[int]) -> int:
+        """批量物理删除项目文档关系。"""
         normalized_ids = [int(relation_id) for relation_id in relation_ids if relation_id is not None]
         if not normalized_ids:
             return 0
@@ -1097,7 +1145,9 @@ class PostgreSQLService:
                 )
                 return int(cursor.rowcount or 0)
 
+    # 项目详情及查重/审查文档集
     def get_project_detail(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """获取项目基本信息及其所有文档绑定关系。"""
         project = self.get_project_by_identifier(identifier_id)
         if not project:
             return None
@@ -1136,6 +1186,7 @@ class PostgreSQLService:
         self,
         identifier_id: str,
     ) -> Optional[Dict[str, Any]]:
+        """获取项目下所有文档记录（含内容），用于查重/审查服务。"""
         project = self.get_project_by_identifier(identifier_id)
         if not project:
             return None
@@ -1204,7 +1255,9 @@ class PostgreSQLService:
 
         return {"project": project, "documents": documents}
 
+    # 分析结果管理
     def get_project_result(self, project_identifier_id: str) -> Optional[Dict[str, Any]]:
+        """获取项目分析结果记录。"""
         query = """
             SELECT
                 id,
@@ -1228,6 +1281,7 @@ class PostgreSQLService:
         offset: int = 0,
         keyword: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """分页查询项目结果记录列表。"""
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
@@ -1276,6 +1330,7 @@ class PostgreSQLService:
         project_identifier_id: str,
         result: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """创建或完全覆盖项目的分析结果。"""
         normalized_project_identifier = self._normalize_required_identifier(
             project_identifier_id,
             "project_identifier_id",
@@ -1307,6 +1362,7 @@ class PostgreSQLService:
                 return dict(cursor.fetchone())
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
+        """删除项目分析结果记录。"""
         normalized_project_identifier = self._normalize_required_identifier(
             project_identifier_id,
             "project_identifier_id",
@@ -1321,6 +1377,7 @@ class PostgreSQLService:
                 return cursor.rowcount > 0
 
     def delete_project_results(self, project_identifier_ids: list[str]) -> int:
+        """批量删除项目分析结果记录。"""
         normalized_ids = [
             self._normalize_required_identifier(project_identifier_id, "project_identifier_id")
             for project_identifier_id in project_identifier_ids
@@ -1343,6 +1400,7 @@ class PostgreSQLService:
         result_key: str,
         result_value: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """向项目结果中合并一个键值对（保留已有键）。"""
         normalized_project_identifier = self._normalize_required_identifier(
             project_identifier_id,
             "project_identifier_id",

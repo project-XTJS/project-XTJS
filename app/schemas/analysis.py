@@ -1,7 +1,15 @@
+# -*- coding: utf-8 -*-
+"""
+统一分析请求的 Pydantic 模型。
+
+定义文本分析任务类型、项目分析服务类型，以及 TextAnalysisRequest。
+"""
+
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# 文本分析任务类型
 TextTaskType = Literal[
     "integrity_check",
     "consistency_check",
@@ -12,6 +20,7 @@ TextTaskType = Literal[
     "full_analysis",
 ]
 
+# 项目级分析服务类型
 ProjectAnalysisService = Literal[
     "business_bid_format_review",
     "business_bid_duplicate_check",
@@ -22,11 +31,11 @@ ProjectAnalysisService = Literal[
 
 
 class TextAnalysisRequest(BaseModel):
-    """统一分析请求模型。"""
+    """统一分析请求模型，可同时用于文本分析或项目级业务分析。"""
 
     task_type: TextTaskType | None = Field(
         default=None,
-        description="文本分析任务类型。",
+        description="文本分析任务类型（文本分析模式使用）。",
     )
     text: str | None = Field(
         default=None,
@@ -40,7 +49,7 @@ class TextAnalysisRequest(BaseModel):
     )
     project_identifier: str | None = Field(
         default=None,
-        description="项目标识；用于按项目执行业务分析服务。",
+        description="项目标识（项目分析模式使用）。",
     )
     services: list[ProjectAnalysisService] | None = Field(
         default=None,

@@ -1,4 +1,10 @@
-"""项目与文档 CRUD 路由。"""
+# -*- coding: utf-8 -*-
+"""
+项目与文档 CRUD 路由。
+
+提供项目、文档、关系、分析结果的增删改查接口，
+包含文档预览（含高亮）、重复检查、形式审查、人员复用检查、错别字检查等功能。
+"""
 
 import base64
 import json
@@ -65,19 +71,23 @@ from app.service.postgresql_service import PostgreSQLService
 
 router = APIRouter()
 
+# 预览缓存容量与过期时间（可通过环境变量调整）
 _PREVIEW_CACHE_MAX_ITEMS = max(8, min(int(os.getenv("XTJS_PREVIEW_CACHE_MAX_ITEMS", "64")), 512))
 _PREVIEW_CACHE_TTL_SECONDS = max(30, int(os.getenv("XTJS_PREVIEW_CACHE_TTL_SECONDS", "900")))
 _DOCUMENT_PREVIEW_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, dict]]" = OrderedDict()
 _DOCUMENT_PREVIEW_CACHE_LOCK = Lock()
+# 用于从高亮短语中提取有效 token 的正则
 _HIGHLIGHT_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]+")
 
 
+# 将查重范围枚举转换为文档类型列表
 def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]]:
     if scope == DuplicateCheckScope.ALL:
         return None
     return [scope.value]
 
 
+# 统一分页参数解析（兼容 page/limit 两种方式）
 def _resolve_pagination(
     *,
     page: int,
@@ -94,6 +104,7 @@ def _resolve_pagination(
     return normalized_page_size, (normalized_page - 1) * normalized_page_size
 
 
+# 根据文件名/URL 后缀判断文档源类型（pdf 或 image）
 def _document_source_kind(document: dict) -> str:
     file_name = str(document.get("file_name") or "").strip()
     file_url = str(document.get("file_url") or "").strip()
@@ -106,6 +117,7 @@ def _document_source_kind(document: dict) -> str:
     return "unknown"
 
 
+# 从文档记录中解析 MinIO 的 bucket 和 object 名称
 def _resolve_document_source_object(document: dict) -> tuple[str, str, str]:
     file_url = str(document.get("file_url") or "").strip()
     if not file_url:
@@ -122,6 +134,7 @@ def _resolve_document_source_object(document: dict) -> tuple[str, str, str]:
     return bucket_name, object_name, file_name
 
 
+# 从 MinIO 下载文档原始字节
 def _load_document_source_bytes(
     *,
     document: dict,
@@ -132,12 +145,14 @@ def _load_document_source_bytes(
     return data, content_type, object_name
 
 
+# 构建预览缓存的唯一键（基于文档标识、版本、页码和高亮参数）
 def _preview_cache_key(document: dict, page: int, variant: str = "") -> tuple[str, str, int, str]:
     identifier_id = str(document.get("identifier_id") or "").strip()
     version = str(document.get("update_time") or document.get("file_url") or "").strip()
     return identifier_id, version, int(page), variant
 
 
+# 清理预览缓存中过期的条目
 def _preview_cache_prune(now: float) -> None:
     expired_keys = [
         key for key, (created_at, _payload) in _DOCUMENT_PREVIEW_CACHE.items()
@@ -147,6 +162,7 @@ def _preview_cache_prune(now: float) -> None:
         _DOCUMENT_PREVIEW_CACHE.pop(key, None)
 
 
+# 从缓存获取预览数据（线程安全）
 def _preview_cache_get(document: dict, page: int, variant: str = "") -> Optional[dict]:
     cache_key = _preview_cache_key(document, page, variant)
     now = time.monotonic()
@@ -159,10 +175,11 @@ def _preview_cache_get(document: dict, page: int, variant: str = "") -> Optional
         if now - created_at > _PREVIEW_CACHE_TTL_SECONDS:
             _DOCUMENT_PREVIEW_CACHE.pop(cache_key, None)
             return None
-        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)
+        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)  # LRU 提升
         return dict(payload)
 
 
+# 将预览数据写入缓存（线程安全，并控制总量）
 def _preview_cache_set(document: dict, page: int, payload: dict, variant: str = "") -> None:
     cache_key = _preview_cache_key(document, page, variant)
     now = time.monotonic()
@@ -174,6 +191,7 @@ def _preview_cache_set(document: dict, page: int, payload: dict, variant: str = 
             _DOCUMENT_PREVIEW_CACHE.popitem(last=False)
 
 
+# 将 PDF/图片的字节渲染为带 base64 的预览数据（支持高亮）
 def _preview_payload_from_source(
     *,
     file_bytes: bytes,
@@ -196,6 +214,7 @@ def _preview_payload_from_source(
                 raise ValueError(f"page {page} is out of range, max page is {page_count}")
             pdf_page = pdf.load_page(page - 1)
             rect = pdf_page.rect
+            # 优先用文本定位高亮
             text_rects = _apply_pdf_text_highlights(
                 pdf_page,
                 highlight_phrases=highlight_phrases or [],
@@ -203,6 +222,7 @@ def _preview_payload_from_source(
             )
             direct_rects = []
             if not text_rects:
+                # 文本高亮失败则用 OCR 精修后的矩形框
                 refined_rects = _refine_highlight_rects_via_ocr(
                     pdf_page,
                     highlight_rects=highlight_rects or [],
@@ -254,6 +274,7 @@ def _preview_payload_from_source(
     raise ValueError("document source kind does not support preview")
 
 
+# 归一化高亮关键词列表（去噪、去重、限制长度）
 def _normalize_preview_highlight_phrases(raw_values: Optional[list[str]]) -> list[str]:
     normalized: list[str] = []
     for value in raw_values or []:
@@ -272,6 +293,7 @@ def _normalize_preview_highlight_phrases(raw_values: Optional[list[str]]) -> lis
     return normalized
 
 
+# 归一化单个高亮边界框（逗号分隔的四个数字）
 def _normalize_preview_highlight_bbox(raw_bbox: Optional[str]) -> Optional[list[float]]:
     if not raw_bbox:
         return None
@@ -290,6 +312,7 @@ def _normalize_preview_highlight_bbox(raw_bbox: Optional[str]) -> Optional[list[
     return [x0, y0, x1, y1]
 
 
+# 生成高亮变体签名（用于缓存键，区分不同高亮参数组合）
 def _preview_variant_signature(
     highlight_phrases: Optional[list[str]],
     highlight_bbox: Optional[list[float]],
@@ -316,6 +339,7 @@ def _preview_variant_signature(
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
+# 从短语中提取用于匹配的 token（去标点、小写、排序）
 def _highlight_tokens_from_phrases(phrases: list[str]) -> list[str]:
     tokens: list[str] = []
     for phrase in phrases:
@@ -327,10 +351,11 @@ def _highlight_tokens_from_phrases(phrases: list[str]) -> list[str]:
                 continue
             if token not in tokens:
                 tokens.append(token)
-    tokens.sort(key=len, reverse=True)
+    tokens.sort(key=len, reverse=True)  # 长 token 优先匹配
     return tokens[:48]
 
 
+# 判断 PDF 中的单词是否匹配任一高亮 token
 def _word_matches_highlight_token(word_text: str, tokens: list[str]) -> bool:
     normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", str(word_text or ""), flags=re.UNICODE).lower()
     if len(normalized) < 2:
@@ -345,6 +370,7 @@ def _word_matches_highlight_token(word_text: str, tokens: list[str]) -> bool:
     return False
 
 
+# 收集 PDF 页内需要高亮的矩形（基于文本词级定位）
 def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], highlight_bbox: Optional[list[float]]):
     import fitz
 
@@ -378,6 +404,7 @@ def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], high
             )
         return matched
 
+    # 先在指定 bbox 内匹配，若无效再全文匹配
     matches = iter_matches(restrict_bbox=True)
     if not matches and bbox_rect is not None:
         matches = iter_matches(restrict_bbox=False)
@@ -385,6 +412,7 @@ def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], high
     if not matches:
         return []
 
+    # 合并同行相邻单词的矩形
     merged: list[fitz.Rect] = []
     current_rect = None
     current_key = None
@@ -415,6 +443,7 @@ def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], high
     return merged
 
 
+# 在 PDF 页面上绘制文本匹配的高亮矩形
 def _apply_pdf_text_highlights(pdf_page, *, highlight_phrases: list[str], highlight_bbox: Optional[list[float]]):
     rects = _collect_pdf_highlight_rects(
         pdf_page,
@@ -435,6 +464,7 @@ def _apply_pdf_text_highlights(pdf_page, *, highlight_phrases: list[str], highli
     return rects
 
 
+# 归一化 JSON 格式的高亮矩形数组
 def _normalize_preview_highlight_rects(raw_value: Optional[str]) -> list[list[float]]:
     if not raw_value:
         return []
@@ -458,6 +488,7 @@ def _normalize_preview_highlight_rects(raw_value: Optional[str]) -> list[list[fl
     return rects[:24]
 
 
+# 将外部传来的矩形坐标转换到 PDF 页面坐标系（处理缩放）
 def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Optional[list[float]]:
     import fitz
 
@@ -474,6 +505,7 @@ def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Option
     page_width = max(float(page_rect.width), 1.0)
     page_height = max(float(page_rect.height), 1.0)
 
+    # 自动猜测缩放比例
     scale = 1.0
     max_ratio = max(x1 / page_width, y1 / page_height)
     if max_ratio > 1.05:
@@ -489,6 +521,7 @@ def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Option
     x1 /= scale
     y1 /= scale
 
+    # 裁剪到页面范围内
     x0 = min(max(x0, 0.0), page_width)
     y0 = min(max(y0, 0.0), page_height)
     x1 = min(max(x1, 0.0), page_width)
@@ -499,6 +532,7 @@ def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Option
     return [x0, y0, x1, y1]
 
 
+# 在 PDF 页面上绘制用户指定的矩形高亮
 def _apply_pdf_rect_highlights(pdf_page, *, highlight_rects: list[list[float]]):
     import fitz
 
@@ -522,6 +556,7 @@ def _apply_pdf_rect_highlights(pdf_page, *, highlight_rects: list[list[float]]):
     return rects
 
 
+# 获取可用的 OCR 服务实例（用于预览时的 OCR 辅助定位）
 def _get_preview_ocr_service():
     try:
         analysis_service = get_text_analysis_service()
@@ -541,10 +576,12 @@ def _get_preview_ocr_service():
     return None
 
 
+# 紧凑化文本（去除所有非字母数字汉字的字符）
 def _compact_highlight_text(text: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(text or ""), flags=re.UNICODE).lower()
 
 
+# 在文本中查找短语的紧凑匹配范围（用于 OCR 结果中定位高亮短语）
 def _find_compact_substring_ranges(text: str, phrase: str) -> list[tuple[int, int]]:
     source = str(text or "")
     target = str(phrase or "")
@@ -571,6 +608,7 @@ def _find_compact_substring_ranges(text: str, phrase: str) -> list[tuple[int, in
     return ranges
 
 
+# 在 OCR 区段内按词语匹配生成子矩形（用于 OCR 精修高亮）
 def _section_subrects_for_phrases(section_text: str, section_bbox: list[float], phrases: list[str]) -> list[list[float]]:
     if not section_text or not phrases:
         return []
@@ -594,6 +632,7 @@ def _section_subrects_for_phrases(section_text: str, section_bbox: list[float], 
     return rects
 
 
+# 当文本高亮失败时，利用 OCR 对 PDF 页面截图进行识别，并精修高亮区域
 def _refine_highlight_rects_via_ocr(pdf_page, *, highlight_rects: list[list[float]], highlight_phrases: list[str]) -> list[list[float]]:
     ocr_service = _get_preview_ocr_service()
     if ocr_service is None:
@@ -670,6 +709,7 @@ def _refine_highlight_rects_via_ocr(pdf_page, *, highlight_rects: list[list[floa
     return refined or highlight_rects
 
 
+# 执行项目重复检查，并持久化结果和合并聚类
 def _run_project_duplicate_check(
     *,
     identifier_id: str,
@@ -706,6 +746,7 @@ def _run_project_duplicate_check(
     return duplicate_result
 
 
+# 执行投标文件整体审查并持久化结果
 def _run_project_bid_document_review(
     *,
     identifier_id: str,
@@ -732,6 +773,7 @@ def _run_project_bid_document_review(
     return review_result
 
 
+# 从审查结果中提取“一人多用”分析视图
 def _build_personnel_reuse_result(review_result: dict) -> dict:
     groups = {}
     total_document_count = 0
@@ -788,6 +830,7 @@ def _build_personnel_reuse_result(review_result: dict) -> dict:
     }
 
 
+# 从审查结果中提取“错别字检查”分析视图
 def _build_typo_check_result(review_result: dict) -> dict:
     groups = {}
     total_document_count = 0
@@ -851,6 +894,7 @@ def _build_typo_check_result(review_result: dict) -> dict:
     return result
 
 
+# 项目人员复用检查（组合调用审查+构建视图）
 def _run_project_personnel_reuse_check(
     *,
     identifier_id: str,
@@ -873,6 +917,7 @@ def _run_project_personnel_reuse_check(
     return personnel_result
 
 
+# 项目错别字检查（组合调用审查+构建视图）
 def _run_project_typo_check(
     *,
     identifier_id: str,
@@ -895,10 +940,12 @@ def _run_project_typo_check(
     return typo_result
 
 
+# 构建项目快照（仅含标识）
 def _project_snapshot(project_identifier: str) -> dict:
     return {"identifier_id": project_identifier}
 
 
+# 为项目生成相关 API 链接
 def _project_api_links(project_identifier: str) -> dict[str, str]:
     quoted_identifier = quote(project_identifier, safe="")
     return {
@@ -909,6 +956,7 @@ def _project_api_links(project_identifier: str) -> dict[str, str]:
     }
 
 
+# 为文档生成相关 API 链接
 def _document_api_links(document_identifier: str) -> dict[str, str]:
     quoted_identifier = quote(document_identifier, safe="")
     return {
@@ -918,6 +966,7 @@ def _document_api_links(document_identifier: str) -> dict[str, str]:
     }
 
 
+# 从项目详情的关系中收集所有文档标识
 def _collect_project_document_identifiers(project_detail: dict[str, Any]) -> list[str]:
     identifiers: list[str] = []
     seen: set[str] = set()
@@ -935,6 +984,7 @@ def _collect_project_document_identifiers(project_detail: dict[str, Any]) -> lis
     return identifiers
 
 
+# 提取结果记录的元信息（轻量版）
 def _build_result_record_meta(result_record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     if not isinstance(result_record, dict) or not result_record:
         return None
@@ -946,6 +996,7 @@ def _build_result_record_meta(result_record: Optional[dict[str, Any]]) -> Option
     }
 
 
+# 压缩显示结果（移除原始的查重合并键）
 def _compact_display_results_for_response(display_results: dict[str, Any]) -> dict[str, Any]:
     compact_results = dict(display_results)
     compact_results.pop("duplicate_check", None)
@@ -954,6 +1005,7 @@ def _compact_display_results_for_response(display_results: dict[str, Any]) -> di
     return compact_results
 
 
+# 组装项目可视化数据（前端大屏用）
 def _build_project_visualization_payload(
     *,
     identifier_id: str,
@@ -1016,6 +1068,7 @@ def _build_project_visualization_payload(
     return payload
 
 
+# 统一持久化上传的 JSON 文件，并返回项目信息与文档记录
 async def _persist_uploaded_analysis_documents(
     *,
     tender_json_file: UploadFile,
@@ -1049,6 +1102,7 @@ async def _persist_uploaded_analysis_documents(
     return persisted_documents, document_records
 
 
+# 将分析结果写入项目结果表
 def _persist_uploaded_result(
     *,
     db_service: PostgreSQLService,
@@ -1063,6 +1117,7 @@ def _persist_uploaded_result(
     )
 
 
+# 持久化查重合并结果（多个 key）
 def _persist_duplicate_merge_results(
     *,
     db_service: PostgreSQLService,
@@ -1083,6 +1138,7 @@ def _persist_duplicate_merge_results(
     return merged_results
 
 
+# 查找合并结果对应的原始结果键和值
 def _resolve_merged_result_source(
     *,
     merged_result_key: str,
@@ -1100,6 +1156,7 @@ def _resolve_merged_result_source(
     return None, None
 
 
+# 按需加载或重建项目的合并查重结果
 def _load_or_build_project_merged_results(
     *,
     identifier_id: str,
@@ -1164,6 +1221,7 @@ def _load_or_build_project_merged_results(
     return refreshed_result_record or result_record or {}, merged_payloads
 
 
+# 构建项目展示用结果（含合并查重的替换）
 def _build_project_display_results(
     *,
     identifier_id: str,
@@ -1200,11 +1258,15 @@ def _build_project_display_results(
     return refreshed_record or result_record or {}, raw_results, display_results
 
 
+# ======================== 路由定义 ========================
+
+# 项目 CRUD
 @router.post("/projects", summary="创建项目")
 async def create_project(
     payload: ProjectCreateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """创建新项目，若项目标识已存在则返回 409。"""
     try:
         return db_service.create_project(
             identifier_id=payload.identifier_id,
@@ -1224,6 +1286,7 @@ async def list_projects(
     keyword: Optional[str] = Query(default=None, description="按项目标识模糊搜索"),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """分页查询项目列表，支持关键字搜索。"""
     try:
         resolved_limit, resolved_offset = _resolve_pagination(
             page=page,
@@ -1245,6 +1308,7 @@ async def batch_delete_projects(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """软删除指定标识集合中的项目。"""
     try:
         deleted_count = db_service.soft_delete_projects(payload.identifier_ids)
         return {
@@ -1262,6 +1326,7 @@ async def get_project_detail(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """按项目标识返回项目详情（含绑定关系）。"""
     try:
         detail = db_service.get_project_detail(identifier_id)
         if not detail:
@@ -1273,6 +1338,49 @@ async def get_project_detail(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+@router.put("/projects/{identifier_id}", summary="更新项目标识")
+async def update_project(
+    identifier_id: str,
+    payload: ProjectUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """修改项目标识为新的标识字符串。"""
+    try:
+        updated = db_service.update_project(
+            identifier_id=identifier_id,
+            new_identifier_id=payload.new_identifier_id,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return updated
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        if getattr(exc, "pgcode", None) == "23505":
+            raise HTTPException(status_code=409, detail="项目标识已存在") from exc
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.delete("/projects/{identifier_id}", summary="删除项目")
+async def delete_project(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """软删除项目。"""
+    try:
+        deleted = db_service.soft_delete_project(identifier_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return {"status": "deleted"}
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+# 项目分析结果
 @router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
 async def get_project_results(
     identifier_id: str,
@@ -1280,16 +1388,11 @@ async def get_project_results(
         default="display",
         description="display=默认返回 merge 后的展示结果，raw=返回原始结果",
     ),
-    include_raw_results: bool = Query(
-        default=False,
-        description="是否额外返回 raw_results；默认关闭以减少响应体积",
-    ),
-    include_result_record: bool = Query(
-        default=False,
-        description="是否额外返回完整 result_record；默认只返回轻量元信息",
-    ),
+    include_raw_results: bool = Query(default=False),
+    include_result_record: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """获取项目的分析结果，支持展示视图和原始视图，可附加返回原始数据。"""
     try:
         project = db_service.get_project_by_identifier(identifier_id)
         if not project:
@@ -1334,16 +1437,11 @@ async def get_project_results(
 async def get_project_result_item(
     identifier_id: str,
     result_key: str,
-    view: Literal["display", "raw"] = Query(
-        default="display",
-        description="display=展示用结果（查重优先返回 merge 后结构），raw=原始结果。",
-    ),
-    include_result_record: bool = Query(
-        default=False,
-        description="是否额外返回完整 result_record；默认只返回轻量元信息",
-    ),
+    view: Literal["display", "raw"] = Query(default="display"),
+    include_result_record: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """获取项目下特定键的分析结果。"""
     try:
         project = db_service.get_project_by_identifier(identifier_id)
         if not project:
@@ -1379,16 +1477,11 @@ async def get_project_result_item(
 @router.get("/projects/{identifier_id}/merged-results", summary="查询项目查重合并结果")
 async def get_project_merged_results(
     identifier_id: str,
-    result_key: Optional[str] = Query(
-        default=None,
-        description="可选：business_bid_duplicate_clusters 或 technical_bid_duplicate_clusters",
-    ),
-    include_result_record: bool = Query(
-        default=False,
-        description="是否额外返回完整 result_record；默认只返回轻量元信息",
-    ),
+    result_key: Optional[str] = Query(default=None),
+    include_result_record: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """获取查重后的合并结果（聚类视图）。"""
     try:
         project = db_service.get_project_by_identifier(identifier_id)
         if not project:
@@ -1429,20 +1522,12 @@ async def get_project_merged_results(
 @router.get("/projects/{identifier_id}/visualization-data", summary="查询项目可视化聚合数据")
 async def get_project_visualization_data(
     identifier_id: str,
-    include_document_content: bool = Query(
-        default=False,
-        description="是否包含文档 OCR JSON 原始内容，默认不返回以减少体积",
-    ),
-    include_raw_results: bool = Query(
-        default=False,
-        description="是否额外返回 raw_results；默认关闭以减少响应体积",
-    ),
-    include_result_record: bool = Query(
-        default=False,
-        description="是否额外返回完整 result_record；默认只返回轻量元信息",
-    ),
+    include_document_content: bool = Query(default=False),
+    include_raw_results: bool = Query(default=False),
+    include_result_record: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """返回前端可视化所需的聚合数据（项目、文档、关系、结果）。"""
     try:
         project_detail = db_service.get_project_detail(identifier_id)
         if not project_detail:
@@ -1464,15 +1549,17 @@ async def get_project_visualization_data(
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
+# 全局结果管理（不限定项目）
 @router.get("/results", summary="查询结果表列表")
 async def list_results(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     offset: Optional[int] = Query(default=None, ge=0),
-    keyword: Optional[str] = Query(default=None, description="按项目标识模糊搜索"),
+    keyword: Optional[str] = Query(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """分页查看所有项目的结果记录。"""
     try:
         resolved_limit, resolved_offset = _resolve_pagination(
             page=page,
@@ -1494,6 +1581,7 @@ async def create_or_replace_result(
     payload: ProjectResultUpsertRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """创建或完全替换某个项目的结果数据。"""
     try:
         return db_service.create_or_replace_project_result(
             project_identifier_id=payload.project_identifier_id,
@@ -1510,6 +1598,7 @@ async def get_result_record(
     project_identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """按项目标识获取结果记录。"""
     try:
         result_record = db_service.get_project_result(project_identifier_id)
         if not result_record:
@@ -1527,6 +1616,7 @@ async def update_result_record(
     payload: ProjectResultUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """更新指定项目的结果数据（覆盖）。"""
     try:
         return db_service.create_or_replace_project_result(
             project_identifier_id=project_identifier_id,
@@ -1543,6 +1633,7 @@ async def delete_result_record(
     project_identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """删除某个项目的所有分析结果。"""
     try:
         deleted = db_service.delete_project_result(project_identifier_id)
         if not deleted:
@@ -1559,6 +1650,7 @@ async def batch_delete_result_records(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """批量删除多个项目的结果记录。"""
     try:
         deleted_count = db_service.delete_project_results(payload.identifier_ids)
         return {
@@ -1571,28 +1663,17 @@ async def batch_delete_result_records(
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
+# 业务检查接口（查重、形式审查、人员复用、错别字）
 @router.post("/projects/duplicate-check", summary="项目商务标/技术标查重")
 async def project_duplicate_check(
-    identifier_id: str = Query(..., description="选择需要执行查重的项目"),
-    document_scope: DuplicateCheckScope = Query(
-        default=DuplicateCheckScope.ALL,
-        description="查重范围：business_bid=商务标，technical_bid=技术标，all=全部",
-    ),
-    max_evidence_sections: int = Query(
-        default=5,
-        ge=1,
-        le=20,
-        description="每组最多返回的证据章节数。",
-    ),
-    max_pairs_per_type: int = Query(
-        default=0,
-        ge=0,
-        le=500,
-        description="每类文档最多返回的对比对数，0 表示不截断。",
-    ),
+    identifier_id: str = Query(...),
+    document_scope: DuplicateCheckScope = Query(default=DuplicateCheckScope.ALL),
+    max_evidence_sections: int = Query(default=5, ge=1, le=20),
+    max_pairs_per_type: int = Query(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """执行项目的商务标/技术标内容查重，结果持久化。"""
     try:
         return await run_in_threadpool(
             _run_project_duplicate_check,
@@ -1614,9 +1695,10 @@ async def project_duplicate_check(
 
 @router.post("/projects/business-bid-format-review", summary="项目商务标形式审查")
 async def project_business_bid_format_review(
-    identifier_id: str = Query(..., description="选择需要执行商务标形式审查的项目"),
+    identifier_id: str = Query(...),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """对项目中的商务标进行格式合规性检查。"""
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     try:
         return await run_in_threadpool(
@@ -1634,12 +1716,13 @@ async def project_business_bid_format_review(
 
 @router.post("/projects/business-bid-duplicate-check", summary="项目商务标内容查重")
 async def project_business_bid_duplicate_check(
-    identifier_id: str = Query(..., description="选择需要执行商务标内容查重的项目"),
+    identifier_id: str = Query(...),
     max_evidence_sections: int = Query(default=5, ge=1, le=20),
     max_pairs_per_type: int = Query(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """仅对商务标进行内容查重。"""
     try:
         return await run_in_threadpool(
             _run_project_duplicate_check,
@@ -1659,26 +1742,18 @@ async def project_business_bid_duplicate_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/business-bid-duplicate-check/upload-json",
-    summary="上传 OCR JSON 并执行商务标内容查重",
-)
+@router.post("/projects/business-bid-duplicate-check/upload-json", summary="上传 OCR JSON 并执行商务标内容查重")
 async def upload_business_bid_duplicate_check(
-    tender_json_file: UploadFile = File(..., description="招标文件 OCR JSON"),
-    business_bid_json_files: list[UploadFile] = File(
-        ...,
-        description="一个或多个商务标 OCR JSON 文件",
-    ),
-    technical_bid_json_files: Optional[list[UploadFile]] = File(
-        default=None,
-        description="可选的技术标 OCR JSON 文件，按上传顺序与商务标对齐以便绑定项目关系",
-    ),
+    tender_json_file: UploadFile = File(...),
+    business_bid_json_files: list[UploadFile] = File(...),
+    technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     project_identifier: Optional[str] = Form(default=None),
     max_evidence_sections: int = Form(default=5, ge=1, le=20),
     max_pairs_per_type: int = Form(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """上传招投标 OCR JSON 文件，直接执行商务标内容查重。"""
     uploads = [upload for upload in business_bid_json_files if upload is not None]
     if not uploads:
         raise HTTPException(status_code=400, detail="business_bid_json_files 不能为空。")
@@ -1733,12 +1808,13 @@ async def upload_business_bid_duplicate_check(
 
 @router.post("/projects/technical-bid-duplicate-check", summary="项目技术标内容查重")
 async def project_technical_bid_duplicate_check(
-    identifier_id: str = Query(..., description="选择需要执行技术标内容查重的项目"),
+    identifier_id: str = Query(...),
     max_evidence_sections: int = Query(default=5, ge=1, le=20),
     max_pairs_per_type: int = Query(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """仅对技术标进行内容查重。"""
     try:
         return await run_in_threadpool(
             _run_project_duplicate_check,
@@ -1758,26 +1834,18 @@ async def project_technical_bid_duplicate_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/technical-bid-duplicate-check/upload-json",
-    summary="上传 OCR JSON 并执行技术标内容查重",
-)
+@router.post("/projects/technical-bid-duplicate-check/upload-json", summary="上传 OCR JSON 并执行技术标内容查重")
 async def upload_technical_bid_duplicate_check(
-    tender_json_file: UploadFile = File(..., description="招标文件 OCR JSON"),
-    technical_bid_json_files: list[UploadFile] = File(
-        ...,
-        description="一个或多个技术标 OCR JSON 文件",
-    ),
-    business_bid_json_files: Optional[list[UploadFile]] = File(
-        default=None,
-        description="可选的商务标 OCR JSON 文件，按上传顺序与技术标对齐以便绑定项目关系",
-    ),
+    tender_json_file: UploadFile = File(...),
+    technical_bid_json_files: list[UploadFile] = File(...),
+    business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     project_identifier: Optional[str] = Form(default=None),
     max_evidence_sections: int = Form(default=5, ge=1, le=20),
     max_pairs_per_type: int = Form(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
+    """上传招投标 OCR JSON 文件，直接执行技术标内容查重。"""
     uploads = [upload for upload in technical_bid_json_files if upload is not None]
     if not uploads:
         raise HTTPException(status_code=400, detail="technical_bid_json_files 不能为空。")
@@ -1832,10 +1900,11 @@ async def upload_technical_bid_duplicate_check(
 
 @router.post("/projects/personnel-reuse-check", summary="项目一人多用检查")
 async def project_personnel_reuse_check(
-    identifier_id: str = Query(..., description="选择需要执行一人多用检查的项目"),
+    identifier_id: str = Query(...),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    """检查商务标中是否存在同一人员出现在多家投标单位的情况。"""
     try:
         return await run_in_threadpool(
             _run_project_personnel_reuse_check,
@@ -1851,24 +1920,16 @@ async def project_personnel_reuse_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/personnel-reuse-check/upload-json",
-    summary="上传 OCR JSON 并执行一人多用检查",
-)
+@router.post("/projects/personnel-reuse-check/upload-json", summary="上传 OCR JSON 并执行一人多用检查")
 async def upload_personnel_reuse_check(
-    tender_json_file: UploadFile = File(..., description="招标文件 OCR JSON"),
-    business_bid_json_files: list[UploadFile] = File(
-        ...,
-        description="一个或多个商务标 OCR JSON 文件",
-    ),
-    technical_bid_json_files: Optional[list[UploadFile]] = File(
-        default=None,
-        description="可选的技术标 OCR JSON 文件，按上传顺序与商务标对齐以便绑定项目关系",
-    ),
+    tender_json_file: UploadFile = File(...),
+    business_bid_json_files: list[UploadFile] = File(...),
+    technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     project_identifier: Optional[str] = Form(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    """上传招投标 OCR JSON 文件，直接执行人员复用检查。"""
     uploads = [upload for upload in business_bid_json_files if upload is not None]
     if not uploads:
         raise HTTPException(status_code=400, detail="business_bid_json_files 不能为空。")
@@ -1921,10 +1982,11 @@ async def upload_personnel_reuse_check(
 
 @router.post("/projects/typo-check", summary="项目错别字检查")
 async def project_typo_check(
-    identifier_id: str = Query(..., description="选择需要执行错别字检查的项目"),
+    identifier_id: str = Query(...),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    """对项目中的文档进行错别字扫描。"""
     try:
         return await run_in_threadpool(
             _run_project_typo_check,
@@ -1940,31 +2002,20 @@ async def project_typo_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/typo-check/upload-json",
-    summary="上传 OCR JSON 并执行错别字检查",
-)
+@router.post("/projects/typo-check/upload-json", summary="上传 OCR JSON 并执行错别字检查")
 async def upload_typo_check(
-    tender_json_file: UploadFile = File(..., description="招标文件 OCR JSON"),
-    business_bid_json_files: Optional[list[UploadFile]] = File(
-        default=None,
-        description="可选的商务标 OCR JSON 文件",
-    ),
-    technical_bid_json_files: Optional[list[UploadFile]] = File(
-        default=None,
-        description="可选的技术标 OCR JSON 文件",
-    ),
+    tender_json_file: UploadFile = File(...),
+    business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
+    technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     project_identifier: Optional[str] = Form(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    """上传招投标 OCR JSON 文件，直接执行错别字检查。"""
     business_uploads = [upload for upload in (business_bid_json_files or []) if upload is not None]
     technical_uploads = [upload for upload in (technical_bid_json_files or []) if upload is not None]
     if not business_uploads and not technical_uploads:
-        raise HTTPException(
-            status_code=400,
-            detail="business_bid_json_files 和 technical_bid_json_files 至少需要传一个。",
-        )
+        raise HTTPException(status_code=400, detail="至少需要上传一份商务标或技术标文件。")
 
     try:
         persisted_documents, document_records = await _persist_uploaded_analysis_documents(
@@ -2014,14 +2065,12 @@ async def upload_typo_check(
 
 @router.post("/projects/bid-document-review", summary="项目投标文件审查")
 async def project_bid_document_review(
-    identifier_id: str = Query(..., description="选择需要执行投标文件审查的项目。"),
-    document_scope: DuplicateCheckScope = Query(
-        default=DuplicateCheckScope.ALL,
-        description="审查范围：business_bid=商务标，technical_bid=技术标，all=全部。",
-    ),
+    identifier_id: str = Query(...),
+    document_scope: DuplicateCheckScope = Query(default=DuplicateCheckScope.ALL),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    """综合审查投标文件（可指定商务标/技术标范围）。"""
     try:
         return await run_in_threadpool(
             _run_project_bid_document_review,
@@ -2039,42 +2088,25 @@ async def project_bid_document_review(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/technical-bid-review",
-    summary="旧版项目投标文件审查",
-    include_in_schema=False,
-)
+# 旧版兼容路由（不在 Swagger 文档中展示）
+@router.post("/projects/technical-bid-review", summary="旧版项目投标文件审查", include_in_schema=False)
 async def project_technical_bid_review_legacy(
-    identifier_id: str = Query(..., description="选择需要执行投标文件审查的项目。"),
-    document_scope: DuplicateCheckScope = Query(
-        default=DuplicateCheckScope.ALL,
-        description="审查范围：business_bid=商务标，technical_bid=技术标，all=全部。",
-    ),
+    identifier_id: str = Query(...),
+    document_scope: DuplicateCheckScope = Query(default=DuplicateCheckScope.ALL),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
-    try:
-        return await run_in_threadpool(
-            _run_project_bid_document_review,
-            identifier_id=identifier_id,
-            document_types=_document_types_from_scope(document_scope),
-            result_key="bid_document_review",
-            db_service=db_service,
-            bid_document_review_service=bid_document_review_service,
-        )
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+    return await run_in_threadpool(
+        _run_project_bid_document_review,
+        identifier_id=identifier_id,
+        document_types=_document_types_from_scope(document_scope),
+        result_key="bid_document_review",
+        db_service=db_service,
+        bid_document_review_service=bid_document_review_service,
+    )
 
 
-@router.post(
-    "/projects/{identifier_id}/duplicate-check",
-    summary="项目商务标/技术标查重",
-    include_in_schema=False,
-)
+@router.post("/projects/{identifier_id}/duplicate-check", summary="项目商务标/技术标查重", include_in_schema=False)
 async def project_duplicate_check_legacy(
     identifier_id: str,
     payload: Optional[ProjectDuplicateCheckRequest] = None,
@@ -2082,71 +2114,26 @@ async def project_duplicate_check_legacy(
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
     request_payload = payload or ProjectDuplicateCheckRequest()
-    try:
-        return await run_in_threadpool(
-            _run_project_duplicate_check,
-            identifier_id=identifier_id,
-            document_types=request_payload.document_types,
-            max_evidence_sections=request_payload.max_evidence_sections,
-            max_pairs_per_type=request_payload.max_pairs_per_type,
-            result_key="duplicate_check",
-            db_service=db_service,
-            duplicate_check_service=duplicate_check_service,
-        )
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+    return await run_in_threadpool(
+        _run_project_duplicate_check,
+        identifier_id=identifier_id,
+        document_types=request_payload.document_types,
+        max_evidence_sections=request_payload.max_evidence_sections,
+        max_pairs_per_type=request_payload.max_pairs_per_type,
+        result_key="duplicate_check",
+        db_service=db_service,
+        duplicate_check_service=duplicate_check_service,
+    )
 
 
-@router.put("/projects/{identifier_id}", summary="更新项目标识")
-async def update_project(
-    identifier_id: str,
-    payload: ProjectUpdateRequest,
-    db_service: PostgreSQLService = Depends(get_db_service),
-):
-    try:
-        updated = db_service.update_project(
-            identifier_id=identifier_id,
-            new_identifier_id=payload.new_identifier_id,
-        )
-        if not updated:
-            raise HTTPException(status_code=404, detail="项目不存在")
-        return updated
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        if getattr(exc, "pgcode", None) == "23505":
-            raise HTTPException(status_code=409, detail="项目标识已存在") from exc
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
-
-
-@router.delete("/projects/{identifier_id}", summary="删除项目")
-async def delete_project(
-    identifier_id: str,
-    db_service: PostgreSQLService = Depends(get_db_service),
-):
-    try:
-        deleted = db_service.soft_delete_project(identifier_id)
-        if not deleted:
-            raise HTTPException(status_code=404, detail="项目不存在")
-        return {"status": "deleted"}
-    except HTTPException:
-        raise
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
-
-
+# 文档与绑定关系管理
 @router.post("/projects/{identifier_id}/bind-documents", summary="绑定招标/商务标/技术标文件")
 async def bind_project_documents(
     identifier_id: str,
     payload: ProjectBindDocumentsRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """将三个文档标识绑定到项目下形成一个关系记录。"""
     try:
         return db_service.bind_project_documents(
             identifier_id,
@@ -2166,10 +2153,11 @@ async def list_relations(
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     offset: Optional[int] = Query(default=None, ge=0),
-    keyword: Optional[str] = Query(default=None, description="按项目或文档标识/文件名模糊搜索"),
-    project_identifier: Optional[str] = Query(default=None, description="按项目标识过滤"),
+    keyword: Optional[str] = Query(default=None),
+    project_identifier: Optional[str] = Query(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """分页查询项目文档绑定关系。"""
     try:
         resolved_limit, resolved_offset = _resolve_pagination(
             page=page,
@@ -2192,6 +2180,7 @@ async def get_relation_detail(
     relation_id: int,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """按 ID 获取单条绑定关系。"""
     try:
         relation = db_service.get_relation_by_id(relation_id)
         if not relation:
@@ -2209,6 +2198,7 @@ async def update_relation(
     payload: ProjectRelationUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """修改已有的文档绑定关系。"""
     try:
         updated = db_service.update_relation(
             relation_id=relation_id,
@@ -2232,6 +2222,7 @@ async def delete_relation(
     relation_id: int,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """删除一条文档绑定关系。"""
     try:
         deleted = db_service.delete_relation(relation_id)
         if not deleted:
@@ -2248,6 +2239,7 @@ async def batch_delete_relations(
     payload: RelationBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """批量删除绑定关系。"""
     try:
         deleted_count = db_service.delete_relations(payload.relation_ids)
         return {
@@ -2258,6 +2250,7 @@ async def batch_delete_relations(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+# 文档 CUD 与预览
 @router.post("/documents", summary="上传并创建文档")
 async def create_document(
     file: UploadFile = File(...),
@@ -2270,6 +2263,7 @@ async def create_document(
     oss_service: MinioService = Depends(get_oss_service),
     analysis_service=Depends(get_text_analysis_service),
 ):
+    """上传文件并触发 OCR 提取，创建文档记录。"""
     result = await upload_extract_and_create_document(
         file=file,
         document_type=document_type,
@@ -2294,11 +2288,12 @@ async def list_documents(
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     offset: Optional[int] = Query(default=None, ge=0),
-    keyword: Optional[str] = Query(default=None, description="按文档标识或文件名模糊搜索"),
-    document_type: Optional[str] = Query(default=None, description="按文档类型过滤"),
-    extracted: Optional[bool] = Query(default=None, description="按是否已完成 OCR 过滤"),
+    keyword: Optional[str] = Query(default=None),
+    document_type: Optional[str] = Query(default=None),
+    extracted: Optional[bool] = Query(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """分页查询文档列表，支持按类型、提取状态过滤。"""
     try:
         resolved_limit, resolved_offset = _resolve_pagination(
             page=page,
@@ -2322,6 +2317,7 @@ async def batch_delete_documents(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """软删除一批文档。"""
     try:
         deleted_count = db_service.soft_delete_documents(payload.identifier_ids)
         return {
@@ -2339,11 +2335,56 @@ async def get_document(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
+    """按标识获取单个文档详情。"""
     try:
         document = db_service.get_document_by_identifier(identifier_id)
         if not document:
             raise HTTPException(status_code=404, detail="文档不存在")
         return document
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.put("/documents/{identifier_id}", summary="更新文档")
+async def update_document(
+    identifier_id: str,
+    payload: DocumentUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """更新文档的文件名或文件 URL。"""
+    try:
+        normalized_file_url = (
+            normalize_file_url(payload.file_url) if payload.file_url is not None else None
+        )
+        updated = db_service.update_document(
+            identifier_id=identifier_id,
+            file_name=payload.file_name,
+            file_url=normalized_file_url,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return updated
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.delete("/documents/{identifier_id}", summary="删除文档")
+async def delete_document(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """软删除文档。"""
+    try:
+        deleted = db_service.soft_delete_document(identifier_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return {"status": "deleted"}
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -2357,6 +2398,7 @@ async def get_document_source(
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
+    """重定向到文档在 MinIO 中的预签名下载 URL，支持 PDF 页码锚点。"""
     try:
         document = db_service.get_document_by_identifier(identifier_id)
         if not document:
@@ -2382,11 +2424,12 @@ async def get_document_page_preview(
     identifier_id: str,
     page: int,
     highlight: Optional[list[str]] = Query(default=None, description="需要高亮的关键词，可传多个"),
-    highlight_bbox: Optional[str] = Query(default=None, description="单个高亮框，格式为 JSON 字符串"),
-    highlight_rects: Optional[str] = Query(default=None, description="多个高亮框，格式为 JSON 字符串数组"),
+    highlight_bbox: Optional[str] = Query(default=None, description="单个高亮框，格式为逗号分隔四个数字"),
+    highlight_rects: Optional[str] = Query(default=None, description="多个高亮框的 JSON 数组字符串"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
+    """返回文档指定页的 base64 预览图，支持文本/区域高亮。结果会被缓存。"""
     try:
         document = db_service.get_document_by_identifier(identifier_id)
         if not document:
@@ -2420,6 +2463,7 @@ async def get_document_page_preview(
                 highlight_rects=normalized_highlight_rects,
             )
         except Exception:
+            # 高亮渲染失败时回退到无高亮预览
             payload = _preview_payload_from_source(
                 file_bytes=file_bytes,
                 source_kind=source_kind,
@@ -2442,7 +2486,7 @@ async def get_document_page_preview(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc    
 
 
 @router.put("/documents/{identifier_id}", summary="更新文档")

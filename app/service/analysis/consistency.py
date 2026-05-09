@@ -1,14 +1,23 @@
+# -*- coding: utf-8 -*-
+"""
+文档一致性检查模块。
+
+包含段落处理器（DocumentProcessor）和一致性校验器（ConsistencyChecker），
+用于将投标文件按模板切分段落，并比对招标模型与投标文件之间的内容一致性。
+"""
+
 import re
 from difflib import SequenceMatcher
 from typing import List, Dict
 
-# 假设 TemplateExtractor 已在同目录下定义
 from .template_extractor import TemplateExtractor 
 from .verification import VerificationChecker
 
-class DocumentProcessor:
-    """段落处理器：将文档切分为与模板对应的段落"""
 
+class DocumentProcessor:
+    """段落处理器：将投标文件段落按模板标题进行匹配与切分。"""
+
+    # 可识别的标题关键词（用于匹配模板）
     TITLE_TOKEN_PATTERNS = (
         "法定代表人授权委托书",
         "法定代表人资格证明书",
@@ -50,6 +59,8 @@ class DocumentProcessor:
         "凭证",
         "执照",
     )
+
+    # 标题前缀模式（如“附件1”、“第一章”、“1.”等）
     TITLE_PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
         r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
@@ -57,6 +68,8 @@ class DocumentProcessor:
         r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
         r'^\s*\d+[)）]\s*',
     )
+
+    # 标题中需要移除的噪声内容
     TITLE_NOISE_PATTERNS = (
         r'附件|附表|附录|格式',
         r'按要求加盖公章',
@@ -69,6 +82,8 @@ class DocumentProcessor:
         r'及身份证',
         r'如为分支机构投标则须总公司唯一授权函',
     )
+
+    # 标题关键词片段（用于 token 提取）
     TITLE_FRAGMENT_PATTERNS = (
         "法定代表人",
         "单位负责人",
@@ -98,6 +113,7 @@ class DocumentProcessor:
 
     @classmethod
     def _strip_title_prefix(cls, text: str) -> str:
+        """反复移除标题前缀，直到结果不再变化。"""
         value = str(text or "").strip()
         previous = None
         while value and value != previous:
@@ -108,9 +124,11 @@ class DocumentProcessor:
 
     @classmethod
     def _normalize_title_key(cls, text: str) -> str:
+        """将标题归一化为关键词（去噪、去括号、标准化）。"""
         value = cls._strip_title_prefix(text)
         value = re.sub(r'\(.*?\)|（.*?）', ' ', value)
         value = re.split(r'[；;。]', value, maxsplit=1)[0]
+        # 同义词标准化
         for pattern, repl in (
             (r'法定代表人资格证明书', '法定代表人证明书'),
             (r'法定代表人身份证明', '法定代表人证明书'),
@@ -124,6 +142,7 @@ class DocumentProcessor:
 
     @classmethod
     def _title_tokens(cls, text: str) -> List[str]:
+        """提取标题中的关键词 token 列表。"""
         title_key = cls._normalize_title_key(text)
         if not title_key:
             return []
@@ -140,6 +159,7 @@ class DocumentProcessor:
 
     @classmethod
     def _title_match_score(cls, left: str, right: str) -> float:
+        """计算两个标题的相似度评分（0~1）。"""
         left_key = cls._normalize_title_key(left)
         right_key = cls._normalize_title_key(right)
         if not left_key or not right_key:
@@ -167,7 +187,7 @@ class DocumentProcessor:
 
     @classmethod
     def _compile_template_patterns(cls, templates: List[Dict]) -> None:
-        """抽取独立方法：预编译模板匹配模式"""
+        """为每个模板预编译正则表达式，加速后续标题匹配。"""
         for temp in templates:
             core = cls._normalize_title_key(temp['title'])
             temp['title_key'] = core
@@ -182,10 +202,9 @@ class DocumentProcessor:
 
     @classmethod
     def _find_matching_template_idx(cls, clean_text: str, templates: List[Dict], current_idx: int) -> int:
-        """抽取独立方法：寻找匹配的模板索引（包含乱序回退逻辑）"""
-        # 优先向后找
+        """在模板列表中查找与当前文本最匹配的模板索引，支持乱序查找。"""
+        # 优先向后找，再向前找（兼容乱序）
         search_order = list(range(current_idx + 1, len(templates)))
-        # 如果后面没找到，再回头从前面找（兼容乱序）
         search_order.extend(range(0, current_idx + 1))
 
         best = None
@@ -200,9 +219,8 @@ class DocumentProcessor:
 
     @classmethod
     def segment_document(cls, raw_json: dict, templates: list, is_test_file: bool = False) -> List[Dict]:
+        """将文档段落按模板切分，返回每个模板对应的 {title, text} 列表。"""
         data_node = raw_json.get('data', raw_json)
-        
-        # 解析 logical_tables 并在预处理时传递，保留正文中的表格结构
         logical_tables = data_node.get('logical_tables', [])
         sections, headers = TemplateExtractor.preprocess_sections(
             data_node.get('layout_sections', []), 
@@ -210,10 +228,11 @@ class DocumentProcessor:
         )
         
         cls._compile_template_patterns(templates)
-        current_idx = -1
+        current_idx = -1  # 当前已匹配的模板索引，-1 表示未匹配
 
         for sec in sections:
             text = sec['text']
+            # 跳过噪声段落
             if not text or TemplateExtractor._is_noise(text, headers, sec.get('type')) or (sec.get('type') == 'text' and text.strip().isdigit()): 
                 continue
                 
@@ -236,14 +255,14 @@ class DocumentProcessor:
                     matched_idx = cls._find_matching_template_idx(clean_text, templates, current_idx)
                 
                     if matched_idx != -1:
-                        # 忽略后文重复出现的标题模板 (防重入)
+                        # 防止相同模板因为重复标题而无限累积
                         if len(templates[matched_idx]['buffer']) > 3: 
                             if current_idx != -1: 
                                 templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
                             current_idx = -1
                             continue
                         
-                        # 成功匹配新标题：保存上一个的状态，并切换到新状态
+                        # 切换模板状态：保存上一个模板的内容，开始新模板
                         if current_idx != -1: 
                             templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
                         
@@ -256,17 +275,17 @@ class DocumentProcessor:
                         current_idx = -1
                         continue
                 
-                # 遇到大章节断点，主动终止当前收集状态
+                # 遇到大章节断点，终止当前模板的收集
                 is_chapter_break = re.search(r'^第[一二三四五六七八九十百]+[章节部分]', text) or "技术文件" in text
                 if current_idx != -1 and is_chapter_break:
                     templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
                     current_idx = -1
 
-            # 如果当前处于“收集状态”，则将正文追加到对应模板的缓冲区
+            # 将当前正文追加到已匹配模板的缓冲区
             if current_idx != -1: 
                 templates[current_idx]['buffer'].append(text)
 
-        # 循环结束，收尾最后一个模板
+        # 收尾最后一个模板
         if current_idx != -1: 
             templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
             
@@ -274,18 +293,19 @@ class DocumentProcessor:
 
 
 class ConsistencyChecker:
-    """一致性校验器：比对正文细节差异"""
+    """一致性校验器：比对招标模型段落与投标文件段落的内容差异。"""
 
+    # 正式标题行模式（如“附件1”、“第一章”）
     FORMAL_TITLE_LINE_RE = re.compile(
-        r"^\s*(?:"
-        r"(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*"
-        r"|第[一二三四五六七八九十百0-9]+[章节部分]"
-        r")"
+        r"^\s*(?:" r"(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*"
+        r"|第[一二三四五六七八九十百0-9]+[章节部分]" r")"
     )
+    # 非正文区块起始标记
     NON_BODY_BLOCK_MARKERS = (
         "与本项目有关的一切正式往来通讯请寄",
         "正式往来通讯请寄",
     )
+    # 非正文行标记（如落款处的签名栏）
     NON_BODY_LINE_MARKERS = (
         "参选人法定代表人",
         "法定代表人或授权代表签字或盖章",
@@ -296,16 +316,16 @@ class ConsistencyChecker:
         "日期",
         "已签字",
     )
+    # 注释/说明引导行
     NOTE_LEAD_RE = re.compile(r"^\s*(?:注|说明)\s*[:：]?\s*$")
+
     def __init__(self):
-        # NORM_PATTERN: 用于最后比对时，过滤一切非核心字符
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
-        
-        # GAP_PATTERN: 匹配一切非中文、非字母、非数字的字符
         self.GAP_PATTERN = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9]+')
         self._verification_checker = VerificationChecker(None)
 
     def _normalize(self, text: str) -> str:
+        """提取文本中的中英文字母和数字，去除所有其他字符。"""
         if not text:
             return ""
         normalized = str(text)
@@ -315,6 +335,7 @@ class ConsistencyChecker:
         return "".join(self.NORM_PATTERN.findall(normalized))
 
     def _normalize_title(self, text: str) -> str:
+        """归一化标题：去括号、去噪声、去序号。"""
         if not text:
             return ""
         no_brackets = re.sub(r'\(.*?\)|（.*?）', '', text)
@@ -322,9 +343,11 @@ class ConsistencyChecker:
         return re.sub(r'^[\d一二三四五六七八九十百]+', '', clean)
 
     def _is_formal_title_line(self, text: str) -> bool:
+        """判断是否为正式的标题行（附件号或章节）。"""
         return bool(self.FORMAL_TITLE_LINE_RE.match(str(text or "").strip()))
 
     def _strip_title_line(self, text: str, title: str) -> str:
+        """若文本首行与标题重复则移除首行。"""
         if not text:
             return ""
         lines = [line for line in text.splitlines() if line.strip()]
@@ -342,9 +365,11 @@ class ConsistencyChecker:
         return "\n".join(lines).strip()
 
     def _is_non_body_line(self, normalized_line: str) -> bool:
+        """检查归一化后的行是否是落款等非正文行。"""
         return any(marker in normalized_line for marker in self.NON_BODY_LINE_MARKERS)
 
     def _trim_non_body_lines(self, text: str) -> str:
+        """移除正文中的通讯地址块和落款行。"""
         if not text:
             return ""
 
@@ -375,6 +400,7 @@ class ConsistencyChecker:
         return "\n".join(kept)
 
     def _trim_instruction_note_block(self, text: str) -> str:
+        """移除正文中的注释/说明块（以“注：”或“说明：”开头的内容）。"""
         if not text:
             return ""
 
@@ -410,6 +436,10 @@ class ConsistencyChecker:
         return "\n".join(kept)
 
     def _build_attachment_lookup(self, test_json: dict, templates: List[Dict]) -> tuple[dict[str, dict], list[dict]]:
+        """
+        从投标文件 JSON 中提取所有附件（如附件1、附件2等），
+        返回按附件号索引的字典和合并后的附件列表。
+        """
         expected_attachments = []
         seen = set()
         for temp in templates:
@@ -429,10 +459,7 @@ class ConsistencyChecker:
             )
 
         sections = self._verification_checker._attachment_sections(
-            test_json,
-            [],
-            [],
-            expected_attachments,
+            test_json, [], [], expected_attachments,
         )
         merged_sections: list[dict] = []
         by_number: dict[str, dict] = {}
@@ -456,6 +483,7 @@ class ConsistencyChecker:
                 merged_sections.append(copied)
                 continue
 
+            # 合并相同附件号下的内容
             existing["pages"] = list(dict.fromkeys((existing.get("pages") or []) + (item.get("pages") or [])))
             existing["seal_texts"] = list(dict.fromkeys((existing.get("seal_texts") or []) + (item.get("seal_texts") or [])))
             existing["signature_texts"] = list(dict.fromkeys((existing.get("signature_texts") or []) + (item.get("signature_texts") or [])))
@@ -473,6 +501,7 @@ class ConsistencyChecker:
         return by_number, merged_sections
 
     def _serialize_section_locations(self, section: dict | None) -> List[Dict]:
+        """将附件区段中的页面/位置信息序列化为列表。"""
         if not isinstance(section, dict):
             return []
         locations: List[Dict] = []
@@ -498,29 +527,24 @@ class ConsistencyChecker:
         return locations
 
     def _get_anchors(self, text: str) -> List[str]:
-        # 1. 抹平括号（防止文本粘连）
+        """从文本中提取用于比对的锚点词（长度>=2的中英文词）。"""
         text = re.sub(r'\(.*?\)|（.*?）', ' ', text)
-        
-        # 2. 核心业务逻辑保留
         text = text.replace('年月日', '年 月 日')
-        
-        # 3. 使用预编译的非空白/字母/数字正则进行切割
         parts = self.GAP_PATTERN.split(text)
-        
         anchors = []
         for p in parts:
             norm = self._normalize(p)
-            # 业务跳过规则
             if '粘贴' in norm or ('签字' in norm and '盖章' in norm) or norm.isdigit(): 
                 continue
-            # 保留长度>=2的词汇，以及单字的“年月日”
             if len(norm) >= 2 or norm in ['年', '月', '日']: 
                 anchors.append(norm)
-                
         return anchors
 
-    # 在 compare_raw_data 方法中增加特殊附件判断
     def compare_raw_data(self, model_json: dict, test_json: dict) -> List[Dict]:
+        """
+        主比对方法：将招标文件模板与投标文件段落进行比对，
+        返回每个模板的通过状态及缺失锚点列表。
+        """
         temps = TemplateExtractor.extract_consistency_templates(model_json)
         model_segments = [{"title": t['title'], "text": "\n".join(t['content'])} for t in temps]
         test_segments = DocumentProcessor.segment_document(test_json, temps, is_test_file=True)
@@ -531,6 +555,7 @@ class ConsistencyChecker:
             m_txt = m_seg['text']
             title = m_seg['title']
             fallback_txt = test_segments[i]['text']
+
             attachment_probe = {
                 "attachment_number": self._verification_checker._attachment_number(title),
                 "title": self._verification_checker._attachment_title(title),
@@ -540,6 +565,7 @@ class ConsistencyChecker:
                 t_txt = matched_section.get("text") or ""
             else:
                 t_txt = fallback_txt
+                # 如果附件号存在但完全没匹配到内容，则直接标记为缺失
                 if attachment_probe["attachment_number"] is not None and not str(t_txt or "").strip():
                     results.append(
                         {
@@ -578,6 +604,7 @@ class ConsistencyChecker:
                 })
                 continue
 
+            # 法定代表人相关模板：仅检查核心关键词
             if "法定代表人" in title and ("证明书" in title or "授权委托书" in title):
                 relaxed_anchors = ["法定代表人"]
                 if "证明书" in title:
