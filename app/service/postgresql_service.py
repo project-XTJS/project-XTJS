@@ -53,14 +53,16 @@ class PostgreSQLService:
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
     SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
-    # 项目解析状态：0 仅完成入库，1 完成招标/商务 OCR，2 完成技术标 OCR。
-    PARSING_STATUS_UPLOADED = 0
-    PARSING_STATUS_BUSINESS_OCR_COMPLETED = 1
-    PARSING_STATUS_TECHNICAL_OCR_COMPLETED = 2
+    # 项目解析状态：0 表示仍有文档未 OCR，1 表示项目内全部文档 OCR 完成。
+    PARSING_STATUS_PENDING = 0
+    PARSING_STATUS_COMPLETED = 1
+    # 兼容旧代码里曾用到的常量名，统一收敛到当前的两态状态值。
+    PARSING_STATUS_UPLOADED = PARSING_STATUS_PENDING
+    PARSING_STATUS_BUSINESS_OCR_COMPLETED = PARSING_STATUS_COMPLETED
+    PARSING_STATUS_TECHNICAL_OCR_COMPLETED = PARSING_STATUS_COMPLETED
     PARSING_STATUS_LABELS = {
-        PARSING_STATUS_UPLOADED: "uploaded",
-        PARSING_STATUS_BUSINESS_OCR_COMPLETED: "business_ocr_completed",
-        PARSING_STATUS_TECHNICAL_OCR_COMPLETED: "technical_ocr_completed",
+        PARSING_STATUS_PENDING: "pending",
+        PARSING_STATUS_COMPLETED: "completed",
     }
 
     # 连接管理
@@ -100,13 +102,12 @@ class PostgreSQLService:
 
     @classmethod
     def _normalize_parsing_status(cls, parsing_status: Optional[int]) -> int:
-        # 统一把外部传入状态收敛到系统支持的 0/1/2。
+        # 历史上数据库里可能出现过 2，这里统一把所有正数状态收敛为“已完成”。
         try:
             normalized = int(parsing_status or 0)
         except (TypeError, ValueError):
-            normalized = cls.PARSING_STATUS_UPLOADED
-        if normalized not in cls.PARSING_STATUS_LABELS:
-            normalized = cls.PARSING_STATUS_UPLOADED
+            normalized = cls.PARSING_STATUS_PENDING
+        normalized = cls.PARSING_STATUS_COMPLETED if normalized > 0 else cls.PARSING_STATUS_PENDING
         return normalized
 
     @classmethod
@@ -403,6 +404,60 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_status, normalized_identifier))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
+
+    def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """按项目下文档的 extracted 状态重新计算 parsing_status。"""
+        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
+        status_query = """
+            WITH project_row AS (
+                SELECT id
+                FROM xtjs_projects
+                WHERE identifier_id = %s AND deleted = FALSE
+            ),
+            document_flags AS (
+                SELECT
+                    COALESCE(td.extracted, FALSE) AS tender_extracted,
+                    COALESCE(bbd.extracted, FALSE) AS business_extracted,
+                    CASE
+                        WHEN pd.technical_bid_document_id IS NULL THEN TRUE
+                        ELSE COALESCE(tbd.extracted, FALSE)
+                    END AS technical_extracted
+                FROM project_row pr
+                JOIN xtjs_project_documents pd
+                  ON pd.project_id = pr.id
+                JOIN xtjs_documents td
+                  ON td.id = pd.tender_document_id
+                 AND td.deleted = FALSE
+                JOIN xtjs_documents bbd
+                  ON bbd.id = pd.business_bid_document_id
+                 AND bbd.deleted = FALSE
+                LEFT JOIN xtjs_documents tbd
+                  ON tbd.id = pd.technical_bid_document_id
+                 AND tbd.deleted = FALSE
+            )
+            SELECT CASE
+                WHEN EXISTS (SELECT 1 FROM document_flags)
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM document_flags
+                     WHERE tender_extracted = FALSE
+                        OR business_extracted = FALSE
+                        OR technical_extracted = FALSE
+                 )
+                THEN 1
+                ELSE 0
+            END AS parsing_status
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(status_query, (normalized_identifier,))
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                return self.update_project_parsing_status(
+                    normalized_identifier,
+                    int(row.get("parsing_status") or 0),
+                )
 
     def soft_delete_project(self, identifier_id: str) -> bool:
         """软删除项目（设置删除标记）。"""
