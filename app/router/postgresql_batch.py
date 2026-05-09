@@ -7,7 +7,12 @@
 """
 
 import asyncio
+import contextlib
 import logging
+import os
+from pathlib import Path
+import subprocess
+import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -71,6 +76,198 @@ def _get_ocr_task_lock() -> asyncio.Lock:
     if _OCR_TASK_LOCK is None:
         _OCR_TASK_LOCK = asyncio.Lock()
     return _OCR_TASK_LOCK
+
+
+class _CrossProcessOCRLock:
+    """跨进程文件锁，避免多个服务实例同时把 OCR 任务压到同一张 GPU。"""
+
+    def __init__(self, lock_path: Path) -> None:
+        self.lock_path = Path(lock_path)
+        self._file = None
+
+    def try_acquire(self) -> bool:
+        # 锁文件不存在时自动创建，多个进程竞争同一个 1 字节文件锁。
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(self.lock_path, "a+b")
+        try:
+            lock_file.seek(0)
+            lock_file.write(b"0")
+            lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            return False
+
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"pid={os.getpid()} ts={int(time.time())}\n".encode("utf-8"))
+        lock_file.flush()
+        self._file = lock_file
+        return True
+
+    def release(self) -> None:
+        lock_file = self._file
+        self._file = None
+        if lock_file is None:
+            return
+        try:
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
+def _parse_gpu_index_from_device(device: str) -> int | None:
+    """从 gpu:0 这类设备字符串里提取 GPU 编号。"""
+    normalized = str(device or "").strip().lower()
+    if not normalized.startswith("gpu"):
+        return None
+    if ":" not in normalized:
+        return 0
+    try:
+        return int(normalized.split(":", 1)[1].strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _query_gpu_free_memory_mb(gpu_index: int) -> tuple[float | None, float | None]:
+    """通过 nvidia-smi 读取指定 GPU 的剩余显存和总显存（MB）。"""
+    command = [
+        "nvidia-smi",
+        "-i",
+        str(gpu_index),
+        "--query-gpu=memory.free,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None, None
+
+    for raw_line in completed.stdout.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        parts = [item.strip() for item in line.split(",")]
+        if len(parts) < 2:
+            continue
+        try:
+            return float(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+    return None, None
+
+
+async def _acquire_cross_process_ocr_lock(identifier_id: str, ocr_type: str) -> _CrossProcessOCRLock:
+    """跨进程等待全局 OCR 锁，防止多个实例同时发起 GPU OCR。"""
+    lock = _CrossProcessOCRLock(Path(settings.OCR_GPU_QUEUE_LOCK_FILE))
+    poll_seconds = max(0.5, float(settings.OCR_GPU_QUEUE_POLL_SECONDS or 3.0))
+    timeout_seconds = max(0.0, float(settings.OCR_GPU_QUEUE_MAX_WAIT_SECONDS or 0.0))
+    started_at = time.monotonic()
+    has_waited = False
+    while not lock.try_acquire():
+        # 第一次抢不到锁时记一条排队日志，后续只静默轮询。
+        if not has_waited:
+            logger.info(
+                "project ocr task queued identifier=%s ocr_type=%s reason=global_lock",
+                identifier_id,
+                ocr_type,
+            )
+            has_waited = True
+        if timeout_seconds and (time.monotonic() - started_at) >= timeout_seconds:
+            raise RuntimeError("等待全局 OCR 队列超时，请稍后重试。")
+        await asyncio.sleep(poll_seconds)
+    if has_waited:
+        logger.info(
+            "project ocr task dequeued identifier=%s ocr_type=%s source=global_lock",
+            identifier_id,
+            ocr_type,
+        )
+    return lock
+
+
+async def _wait_for_gpu_memory_ready(identifier_id: str, ocr_type: str) -> None:
+    """显存不足时继续等待，避免多个实例同时抢占显存导致 OOM。"""
+    gpu_index = _parse_gpu_index_from_device(settings.PADDLE_OCR_DEVICE)
+    if gpu_index is None:
+        return
+
+    required_free_mb = max(0, int(settings.OCR_GPU_MIN_FREE_MEMORY_MB or 0))
+    if required_free_mb <= 0:
+        return
+
+    poll_seconds = max(0.5, float(settings.OCR_GPU_QUEUE_POLL_SECONDS or 3.0))
+    timeout_seconds = max(0.0, float(settings.OCR_GPU_QUEUE_MAX_WAIT_SECONDS or 0.0))
+    started_at = time.monotonic()
+    has_waited = False
+    while True:
+        # 每轮都重新读取可用显存，只有达到阈值才允许真正开跑。
+        free_mb, total_mb = await run_in_threadpool(_query_gpu_free_memory_mb, gpu_index)
+        if free_mb is None:
+            logger.warning(
+                "project ocr task gpu memory probe skipped identifier=%s ocr_type=%s gpu_index=%s",
+                identifier_id,
+                ocr_type,
+                gpu_index,
+            )
+            return
+        if free_mb >= required_free_mb:
+            if has_waited:
+                logger.info(
+                    "project ocr task dequeued identifier=%s ocr_type=%s source=gpu_memory free_mb=%.0f total_mb=%.0f",
+                    identifier_id,
+                    ocr_type,
+                    free_mb,
+                    total_mb or 0.0,
+                )
+            return
+        if not has_waited:
+            logger.info(
+                "project ocr task queued identifier=%s ocr_type=%s reason=gpu_memory free_mb=%.0f required_mb=%s total_mb=%.0f",
+                identifier_id,
+                ocr_type,
+                free_mb,
+                required_free_mb,
+                total_mb or 0.0,
+            )
+            has_waited = True
+        if timeout_seconds and (time.monotonic() - started_at) >= timeout_seconds:
+            raise RuntimeError("等待 GPU 可用显存超时，请稍后重试。")
+        await asyncio.sleep(poll_seconds)
+
+
+@contextlib.asynccontextmanager
+async def _reserve_ocr_execution_slot(identifier_id: str, ocr_type: str):
+    """先拿到进程内锁，再拿到跨进程锁，并确认显存满足门槛。"""
+    async with _get_ocr_task_lock():
+        # 进程内先串行，避免同一个服务实例里重复排队。
+        process_lock = await _acquire_cross_process_ocr_lock(identifier_id, ocr_type)
+        try:
+            await _wait_for_gpu_memory_ready(identifier_id, ocr_type)
+            yield
+        finally:
+            process_lock.release()
 
 
 def _collect_tender_documents(payload: dict) -> list[dict]:
@@ -145,7 +342,8 @@ async def _run_project_ocr_task(
 ) -> None:
     """后台串行执行指定类型 OCR，结束后刷新项目总状态。"""
     try:
-        async with _get_ocr_task_lock():
+        # 进入真正 OCR 前，必须同时满足“全局无并发”和“显存足够”。
+        async with _reserve_ocr_execution_slot(identifier_id, ocr_type):
             logger.info(
                 "project ocr task started identifier=%s ocr_type=%s pending_count=%s",
                 identifier_id,
@@ -226,7 +424,7 @@ async def _build_async_ocr_response(
     return {
         "status": "accepted",
         "mode": "async",
-        "message": f"{ocr_type} OCR 已加入后台队列，系统会按串行顺序执行。",
+        "message": f"{ocr_type} OCR 已加入后台队列，系统会按全局锁与显存门槛串行执行。",
         "project_identifier": identifier_id,
         "project": (payload.get("project") or {}),
         "queued_count": len(pending_documents),

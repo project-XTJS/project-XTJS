@@ -47,15 +47,23 @@ class Settings(BaseSettings):
     OCR_STORAGE_ROOT: Path = Field(default_factory=_default_ocr_storage_root)
     PADDLE_PDX_CACHE_HOME: Path | None = None
     OCR_RUNTIME_TEMP_DIR: Path | None = None
+    # 多实例共享的 OCR 队列锁文件路径。
+    OCR_GPU_QUEUE_LOCK_FILE: Path | None = None
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: bool = True
 
     PADDLE_OCR_DEVICE: str = "gpu:0"
     PADDLE_OCR_DEVICE_POOL: str = "auto"
-    PADDLE_OCR_MAX_INFLIGHT_PER_DEVICE: int = 2
+    # 单卡同一时刻只允许 1 个 OCR 推理任务进入模型层。
+    PADDLE_OCR_MAX_INFLIGHT_PER_DEVICE: int = 1
     PADDLE_OCR_MULTI_GPU_LOG_SCHEDULING: bool = False
     PADDLE_OCR_FALLBACK_TO_CPU: bool = True
     PADDLE_OCR_USE_DOC_ORIENTATION: bool = True
     PADDLE_OCR_USE_DOC_UNWARPING: bool = True
+    # 小于这个剩余显存阈值时，OCR 任务继续排队等待。
+    OCR_GPU_MIN_FREE_MEMORY_MB: int = 256
+    # 队列等待时每隔多久轮询一次锁和显存。
+    OCR_GPU_QUEUE_POLL_SECONDS: float = 3.0
+    OCR_GPU_QUEUE_MAX_WAIT_SECONDS: float = 1800.0
 
     PADDLE_VL_PIPELINE_VERSION: str = "v1.5"
     PADDLE_VL_USE_LAYOUT_DETECTION: bool = True
@@ -96,3 +104,6 @@ if not settings.PADDLE_PDX_CACHE_HOME:
     settings.PADDLE_PDX_CACHE_HOME = settings.OCR_STORAGE_ROOT / "paddlex-cache"
 if not settings.OCR_RUNTIME_TEMP_DIR:
     settings.OCR_RUNTIME_TEMP_DIR = settings.OCR_STORAGE_ROOT / "runtime-tmp"
+if not settings.OCR_GPU_QUEUE_LOCK_FILE:
+    # 默认把锁文件放到 OCR 运行目录，便于多个本地实例共享。
+    settings.OCR_GPU_QUEUE_LOCK_FILE = settings.OCR_STORAGE_ROOT / "ocr-gpu-queue.lock"
