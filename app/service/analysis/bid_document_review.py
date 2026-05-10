@@ -10,15 +10,31 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import re
 from collections import defaultdict
 from html.parser import HTMLParser
+from threading import Lock
 from typing import Any
 
+from app.config.settings import settings
 from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
+
+try:
+    import language_tool_python
+except ImportError:  # pragma: no cover - optional dependency fallback
+    language_tool_python = None
+
+
+logger = logging.getLogger(__name__)
+_LANGUAGE_TOOL_INSTANCE: Any | None = None
+_LANGUAGE_TOOL_INIT_ATTEMPTED = False
+_LANGUAGE_TOOL_INIT_ERROR: str | None = None
+_LANGUAGE_TOOL_INIT_LOCK = Lock()
+_LANGUAGE_TOOL_CHECK_LOCK = Lock()
 
 
 class _TableHTMLParser(HTMLParser):
@@ -188,6 +204,60 @@ class BidDocumentReviewService:
     }
     SKIP_REASON_MISSING_CONTENT = "missing_or_unusable_ocr_content"
 
+    @classmethod
+    def _get_language_tool_instance(cls) -> tuple[Any | None, str | None]:
+        """延迟初始化 LanguageTool，失败时回退到词典模式。"""
+        global _LANGUAGE_TOOL_INSTANCE, _LANGUAGE_TOOL_INIT_ATTEMPTED, _LANGUAGE_TOOL_INIT_ERROR
+
+        if not settings.TYPO_LANGUAGETOOL_ENABLED:
+            return None, "disabled_by_setting"
+        if language_tool_python is None:
+            return None, "package_not_installed"
+        if _LANGUAGE_TOOL_INSTANCE is not None:
+            return _LANGUAGE_TOOL_INSTANCE, None
+        if _LANGUAGE_TOOL_INIT_ATTEMPTED:
+            return None, _LANGUAGE_TOOL_INIT_ERROR or "initialization_failed"
+
+        with _LANGUAGE_TOOL_INIT_LOCK:
+            if _LANGUAGE_TOOL_INSTANCE is not None:
+                return _LANGUAGE_TOOL_INSTANCE, None
+            if _LANGUAGE_TOOL_INIT_ATTEMPTED:
+                return None, _LANGUAGE_TOOL_INIT_ERROR or "initialization_failed"
+            try:
+                _LANGUAGE_TOOL_INSTANCE = language_tool_python.LanguageTool(
+                    settings.TYPO_LANGUAGETOOL_LANGUAGE
+                )
+                _LANGUAGE_TOOL_INIT_ERROR = None
+            except Exception as exc:  # pragma: no cover - environment dependent
+                _LANGUAGE_TOOL_INIT_ERROR = f"{type(exc).__name__}: {exc}"
+                logger.warning("LanguageTool init failed, fallback to dictionary mode: %s", exc)
+            finally:
+                _LANGUAGE_TOOL_INIT_ATTEMPTED = True
+
+        return _LANGUAGE_TOOL_INSTANCE, _LANGUAGE_TOOL_INIT_ERROR
+
+    @staticmethod
+    def _typo_engine_name(language_tool_enabled: bool) -> str:
+        return "languagetool_hybrid" if language_tool_enabled else "rule_based"
+
+    def _build_typo_check_notes(
+        self,
+        *,
+        language_tool_enabled: bool,
+        language_tool_error: str | None,
+    ) -> list[str]:
+        notes: list[str] = []
+        if language_tool_enabled:
+            notes.append(
+                f"已默认启用 LanguageTool（{settings.TYPO_LANGUAGETOOL_LANGUAGE}），并结合内置错别字词典补充识别。"
+            )
+        else:
+            reason = language_tool_error or "unknown_reason"
+            notes.append(
+                f"LanguageTool 当前不可用（{reason}），本次回退为内置错别字词典识别。"
+            )
+        return notes
+
     # 主要服务入口：对项目文档进行审查
     def check_project_documents(
         self,
@@ -245,11 +315,17 @@ class BidDocumentReviewService:
         total_suspicious_typo_document_count = 0
         total_personnel_count = 0
         total_reused_name_count = 0
+        language_tool, language_tool_error = self._get_language_tool_instance()
+        language_tool_enabled = language_tool is not None
 
         for role in requested_types:
             prepared_documents = prepared_groups[role]
             skipped_documents = skipped_groups[role]
-            typo_check = self._run_typo_check(prepared_documents)
+            typo_check = self._run_typo_check(
+                prepared_documents,
+                language_tool=language_tool,
+                language_tool_error=language_tool_error,
+            )
             personnel_reuse_check = self._run_personnel_reuse_check(prepared_documents)
             group_summary = {
                 "document_count": len(prepared_documents),
@@ -294,8 +370,11 @@ class BidDocumentReviewService:
             "project": project or {"identifier_id": project_identifier},
             "config": {
                 "document_types": list(requested_types),
-                "typo_detection_engine": "rule_based",
+                "typo_detection_engine": self._typo_engine_name(language_tool_enabled),
+                "typo_languagetool_enabled": language_tool_enabled,
+                "typo_languagetool_language": settings.TYPO_LANGUAGETOOL_LANGUAGE,
                 "typo_stopword_dictionary_enabled": True,
+                "typo_known_typo_dictionary_enabled": settings.TYPO_KNOWN_DICTIONARY_ENABLED,
                 "personnel_reuse_scope": "per_document_type",
             },
             "groups": groups,
@@ -360,13 +439,23 @@ class BidDocumentReviewService:
         }, None
 
     # 错别字检查：基于内置词典扫描文档内容
-    def _run_typo_check(self, documents: list[dict[str, Any]]) -> dict[str, Any]:
+    def _run_typo_check(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        language_tool: Any | None = None,
+        language_tool_error: str | None = None,
+    ) -> dict[str, Any]:
         issue_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         document_issue_items: list[dict[str, Any]] = []
         total_issue_count = 0
+        language_tool_enabled = language_tool is not None
 
         for document in documents:
-            document_issues = self._extract_document_typo_issues(document)
+            document_issues = self._extract_document_typo_issues(
+                document,
+                language_tool=language_tool,
+            )
             total_issue_count += len(document_issues)
             if document_issues:
                 document_issue_items.append(
@@ -426,12 +515,13 @@ class BidDocumentReviewService:
             "issue_count": total_issue_count,
             "shared_issue_count": len(shared_issues),
             "suspicious_document_count": len(document_issue_items),
-            "engine": "rule_based",
+            "engine": self._typo_engine_name(language_tool_enabled),
             "documents": document_issue_items,
             "shared_issues": shared_issues,
-            "notes": [
-                "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。",
-            ],
+            "notes": self._build_typo_check_notes(
+                language_tool_enabled=language_tool_enabled,
+                language_tool_error=language_tool_error,
+            ),
         }
 
     # 人员复用分析：聚合同名人员信息
@@ -512,18 +602,102 @@ class BidDocumentReviewService:
             ],
         }
 
+    def _check_language_tool_sentence(self, language_tool: Any, text: str) -> list[Any]:
+        """串行调用共享的 LanguageTool 实例，避免并发冲突。"""
+        try:
+            with _LANGUAGE_TOOL_CHECK_LOCK:
+                return list(language_tool.check(text))
+        except Exception as exc:  # pragma: no cover - runtime/environment dependent
+            logger.warning("LanguageTool sentence check failed: %s", exc)
+            return []
+
+    def _build_language_tool_issue(
+        self,
+        *,
+        match: Any,
+        sentence: dict[str, Any],
+        document: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """将 LanguageTool 的 Match 转成项目内统一的错别字条目。"""
+        issue_type = str(getattr(match, "rule_issue_type", "") or "").strip().lower()
+        if issue_type not in {"misspelling", "typographical"}:
+            return None
+
+        text = str(sentence.get("text") or "")
+        matched_text = str(getattr(match, "matched_text", "") or "").strip()
+        if not matched_text:
+            offset = int(getattr(match, "offset", 0) or 0)
+            error_length = int(getattr(match, "error_length", 0) or 0)
+            matched_text = text[offset: offset + error_length].strip()
+        if not matched_text:
+            return None
+
+        replacements = list(getattr(match, "replacements", []) or [])
+        suggestion = str(replacements[0]).strip() if replacements else ""
+        if not suggestion or self._compact(suggestion) == self._compact(matched_text):
+            return None
+
+        rule_id = str(getattr(match, "rule_id", "") or "").strip() or "languagetool"
+        return {
+            "issue_type": "languagetool",
+            "issue_key": rule_id,
+            "matched_text": matched_text,
+            "suggestion": suggestion,
+            "page": sentence.get("page"),
+            "bbox": sentence.get("bbox"),
+            "text": text,
+            "message": str(getattr(match, "message", "") or "").strip(),
+            "document_identifier_id": document["identifier_id"],
+            "relation_id": document.get("relation_id"),
+            "file_name": document.get("file_name"),
+        }
+
+    def _find_language_tool_matches(
+        self,
+        sentence: dict[str, Any],
+        document: dict[str, Any],
+        language_tool: Any,
+    ) -> list[dict[str, Any]]:
+        """在句子中提取 LanguageTool 返回的拼写/笔误问题。"""
+        text = str(sentence.get("text") or "").strip()
+        if not text:
+            return []
+
+        issues: list[dict[str, Any]] = []
+        for match in self._check_language_tool_sentence(language_tool, text):
+            issue = self._build_language_tool_issue(
+                match=match,
+                sentence=sentence,
+                document=document,
+            )
+            if issue:
+                issues.append(issue)
+        return issues
+
     # 错别字问题提取：对单个文档逐句扫描已知错误词
-    def _extract_document_typo_issues(self, document: dict[str, Any]) -> list[dict[str, Any]]:
+    def _extract_document_typo_issues(
+        self,
+        document: dict[str, Any],
+        *,
+        language_tool: Any | None = None,
+    ) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
         seen_keys: set[tuple[Any, ...]] = set()
 
         for sentence in self._iter_typo_sentences(document):
-            for issue in self._find_known_typo_matches(sentence, document):
+            sentence_issues: list[dict[str, Any]] = []
+            if language_tool is not None:
+                sentence_issues.extend(
+                    self._find_language_tool_matches(sentence, document, language_tool)
+                )
+            if settings.TYPO_KNOWN_DICTIONARY_ENABLED:
+                sentence_issues.extend(self._find_known_typo_matches(sentence, document))
+
+            for issue in sentence_issues:
                 key = (
-                    issue.get("issue_type"),
-                    issue.get("issue_key"),
                     issue.get("page"),
                     issue.get("matched_text"),
+                    issue.get("suggestion"),
                 )
                 if key in seen_keys:
                     continue
