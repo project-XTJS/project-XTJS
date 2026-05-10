@@ -7,6 +7,7 @@ OCR 服务核心模块。
 """
 
 import html
+import copy
 import os
 from pathlib import Path
 import re
@@ -147,6 +148,136 @@ class OCRService:
         _patched_tensor_int._xtjs_len1_tensor_patch = True
         tensor_type.__int__ = _patched_tensor_int
 
+    def _patch_paddlex_paddleocr_vl_processor(self) -> None:
+        """Hotfix PaddleX doc-vlm processor to avoid int(Tensor) in static graph."""
+        import sys
+
+        # 相关模块在 PaddleOCRVL 实例化后才会进入 sys.modules，这里做运行时补丁。
+        common_module = sys.modules.get(
+            "paddlex.inference.models.doc_vlm.processors.common"
+        )
+        processor_module = sys.modules.get(
+            "paddlex.inference.models.doc_vlm.processors.paddleocr_vl._paddleocr_vl"
+        )
+        if common_module is None or processor_module is None:
+            return
+
+        BatchFeature = common_module.BatchFeature
+        PaddleOCRVLProcessor = processor_module.PaddleOCRVLProcessor
+        fetch_image = processor_module.fetch_image
+
+        current_preprocess = getattr(PaddleOCRVLProcessor, "preprocess", None)
+        if current_preprocess is None or getattr(
+            current_preprocess, "_xtjs_numpy_grid_patch", False
+        ):
+            return
+
+        def _patched_preprocess(
+            processor_self,
+            input_dicts,
+            min_pixels=None,
+            max_pixels=None,
+        ):
+            images = [fetch_image(input_dict["image"]) for input_dict in input_dicts]
+
+            text = []
+            for input_dict in input_dicts:
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": "placeholder"},
+                            {"type": "text", "text": input_dict["query"]},
+                        ],
+                    }
+                ]
+                prompt = processor_self.tokenizer.apply_chat_template(
+                    messages, tokenize=False
+                )
+                text.append(prompt)
+
+            output_kwargs = {
+                "tokenizer_init_kwargs": processor_self.tokenizer.init_kwargs,
+                "text_kwargs": copy.deepcopy(
+                    processor_self._DEFAULT_TEXT_KWARGS
+                ),
+                "video_kwargs": copy.deepcopy(
+                    processor_self._DEFAULT_VIDEO_KWARGS
+                ),
+            }
+
+            if min_pixels is not None or max_pixels is not None:
+                size = {
+                    "min_pixels": min_pixels
+                    or processor_self.image_processor.min_pixels,
+                    "max_pixels": max_pixels
+                    or processor_self.image_processor.max_pixels,
+                }
+            else:
+                size = None
+
+            image_inputs: dict[str, Any] = {}
+            image_grid_thw = None
+            if images is not None:
+                # 先保留为 numpy，避免静态图下对 Paddle 值执行 int(...)。
+                image_inputs = processor_self.image_processor(
+                    images=images,
+                    size=size,
+                    return_tensors="np",
+                )
+                image_grid_thw = image_inputs.get("image_grid_thw")
+
+            videos_inputs: dict[str, Any] = {}
+            video_grid_thw = None
+
+            if not isinstance(text, list):
+                text = [text]
+
+            merge_length = int(processor_self.image_processor.merge_size) ** 2
+            if image_grid_thw is not None:
+                index = 0
+                for i in range(len(text)):
+                    while processor_self.image_token in text[i]:
+                        placeholder_count = int(image_grid_thw[index].prod())
+                        placeholder_count = max(placeholder_count // merge_length, 0)
+                        text[i] = text[i].replace(
+                            processor_self.image_token,
+                            "<|placeholder|>" * placeholder_count,
+                            1,
+                        )
+                        index += 1
+                    text[i] = text[i].replace(
+                        "<|placeholder|>", processor_self.image_token
+                    )
+
+            if video_grid_thw is not None:
+                index = 0
+                for i in range(len(text)):
+                    while processor_self.video_token in text[i]:
+                        placeholder_count = int(video_grid_thw[index].prod())
+                        placeholder_count = max(placeholder_count // merge_length, 0)
+                        text[i] = text[i].replace(
+                            processor_self.video_token,
+                            "<|placeholder|>" * placeholder_count,
+                            1,
+                        )
+                        index += 1
+                    text[i] = text[i].replace(
+                        "<|placeholder|>", processor_self.video_token
+                    )
+
+            text_inputs = processor_self.tokenizer(
+                text, **output_kwargs["text_kwargs"]
+            )
+
+            return BatchFeature(
+                data={**text_inputs, **image_inputs, **videos_inputs},
+                tensor_type="pd",
+            )
+
+        _patched_preprocess._xtjs_numpy_grid_patch = True
+        PaddleOCRVLProcessor.preprocess = _patched_preprocess
+
     def _candidate_devices(self) -> list[str]:
         """根据配置生成尝试的设备列表，支持 CPU 回退。"""
         primary_device = self.preferred_device or settings.PADDLE_OCR_DEVICE
@@ -233,6 +364,8 @@ class OCRService:
                     flush=True,
                 )
                 self.pipeline, disabled_args = self._instantiate_pipeline(PaddleOCRVL, device)
+                # pipeline 就绪后再补丁，此时处理器模块已完成加载。
+                self._patch_paddlex_paddleocr_vl_processor()
                 self.available = True
                 self.active_device = device
                 if disabled_args:
@@ -1062,18 +1195,6 @@ class OCRService:
 
     # ── 签名识别与处理 ─────────────────────────────
 
-    def _is_signature_placeholder_text(self, text: Any) -> bool:
-        """判断文本是否为签名占位符（如“签字”、“手写签字”等）。"""
-        normalized = self._normalize_section_text(text)
-        if not normalized:
-            return False
-
-        compact = re.sub(r"\s+", "", normalized)
-        compact = re.sub(r"[：:_＿\-—.·•()\[\]（）【】]", "", compact)
-        if compact in self.SIGNATURE_PLACEHOLDER_TOKENS:
-            return True
-        return compact.endswith("签字") and len(compact) <= 6
-
     def _normalize_signature_candidate_text(self, text: Any) -> str:
         """清洗并判断是否为可能的签名文本（人名）。"""
         normalized = self._normalize_section_text(text)
@@ -1101,11 +1222,6 @@ class OCRService:
         if re.fullmatch(r"[\u4e00-\u9fffA-Za-z]{2,6}", cleaned):
             return cleaned
         return ""
-
-    def _is_signature_anchor_text(self, text: Any) -> bool:
-        """判断文本是否为签名锚点（如法定代表人、签字等）。"""
-        compact = re.sub(r"\s+", "", self._normalize_section_text(text))
-        return bool(compact and any(token in compact for token in self.SIGNATURE_ANCHOR_TOKENS))
 
     def _boxes_are_close(
         self,
@@ -1240,31 +1356,10 @@ class OCRService:
         best_anchor["text"] = merged_text
         signature_section["_merged"] = True
 
-    def _enrich_page_signature_sections(
-        self,
-        page_sections: list[dict[str, Any]],
-        page_blocks: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """丰富签名区段信息：解析文本并合并到锚点。"""
-        if not page_sections:
-            return page_sections
+    # ── 签名锚点高级处理 ─────────────
 
-        for section in page_sections:
-            if str(section.get("type") or "").strip().lower() != "signature":
-                continue
-
-            resolved_text = self._resolve_signature_section_text(section, page_blocks)
-            if resolved_text:
-                section["text"] = resolved_text
-            self._merge_signature_into_anchor(section, page_sections)
-
-        return page_sections
-
-    # ── 签名锚点高级处理（第二个重载版本） ─────────────
-
-    # _is_signature_placeholder_text（重复方法，保留原始第二个版本）
     def _is_signature_placeholder_text(self, text: Any) -> bool:
-        """判断文本是否为签名占位符（第二个实现，与配置占位符比较）。"""
+        """判断文本是否为签名占位符，并兼容配置中的自定义占位符。"""
         normalized = self._normalize_section_text(text)
         if not normalized:
             return False
@@ -1278,7 +1373,7 @@ class OCRService:
         return compact.endswith("签字") and len(compact) <= 6
 
     def _is_signature_anchor_text(self, text: Any) -> bool:
-        """判断文本是否为签名锚点（第二个重载，增加表格锚点检测）。"""
+        """判断文本是否为签名锚点。"""
         compact = re.sub(r"\s+", "", self._normalize_section_text(text))
         if not compact:
             return False
