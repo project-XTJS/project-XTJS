@@ -53,10 +53,10 @@ class PostgreSQLService:
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
     SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
-    # 项目解析状态：0 表示仍有文档未 OCR，1 表示项目内全部文档 OCR 完成。
+    # 项目解析状态：0 表示未全部完成 OCR，1 表示项目关联的招标文件、商务标、技术标均已完成 OCR。
     PARSING_STATUS_PENDING = 0
     PARSING_STATUS_COMPLETED = 1
-    # 兼容旧代码里曾用到的常量名，统一收敛到当前的两态状态值。
+    # 兼容旧代码里曾用到的常量名，实际仍只保留“未全部完成 / 全部完成”两种状态。
     PARSING_STATUS_UPLOADED = PARSING_STATUS_PENDING
     PARSING_STATUS_BUSINESS_OCR_COMPLETED = PARSING_STATUS_COMPLETED
     PARSING_STATUS_TECHNICAL_OCR_COMPLETED = PARSING_STATUS_COMPLETED
@@ -102,7 +102,7 @@ class PostgreSQLService:
 
     @classmethod
     def _normalize_parsing_status(cls, parsing_status: Optional[int]) -> int:
-        # 历史上数据库里可能出现过 2，这里统一把所有正数状态收敛为“已完成”。
+        # 兼容历史遗留值；当前统一只使用 0=未全部完成 OCR、1=全部完成 OCR。
         try:
             normalized = int(parsing_status or 0)
         except (TypeError, ValueError):
@@ -390,7 +390,7 @@ class PostgreSQLService:
         identifier_id: str,
         parsing_status: int,
     ) -> Optional[Dict[str, Any]]:
-        # 提供统一入口给手动 OCR 路由推进项目解析阶段。
+        # 提供统一入口给路由层同步项目“是否全部完成 OCR”的状态。
         normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         normalized_status = self._normalize_parsing_status(parsing_status)
         query = """
@@ -406,7 +406,7 @@ class PostgreSQLService:
                 return self._decorate_project_record(dict(updated)) if updated else None
 
     def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
-        """按项目下文档的 extracted 状态重新计算 parsing_status。"""
+        """按项目下文档的 extracted 状态重算 parsing_status：全完成为 1，否则为 0。"""
         normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         status_query = """
             WITH project_row AS (

@@ -594,7 +594,7 @@ async def ingest_and_recognize_project_documents(
     technical_summary = _summarize_batch_items(technical_results)
     binding_summary = _summarize_batch_items(binding_items)
 
-    # 只要形成了有效绑定，就把项目状态固定在“已入库待解析”。
+    # 只要形成了有效绑定，就先标记为“未全部完成 OCR”，待后续全部完成后再刷新为 1。
     if any(item.get("status") == "success" for item in binding_items):
         refreshed_project = await run_in_threadpool(
             db_service.update_project_parsing_status,
