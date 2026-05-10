@@ -11,9 +11,9 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -36,6 +36,33 @@ from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
 router = APIRouter()
+
+_RUN_ANALYSIS_OPENAPI_EXAMPLES = {
+    "text_analysis_mode": {
+        "summary": "文本分析模式",
+        "description": "传入 task_type + text 执行单次文本分析，不需要 project_identifier 或 services。",
+        "value": {
+            "task_type": "integrity_check",
+            "text": "请检查这份投标文件是否缺少必备附件。",
+        },
+    },
+    "project_analysis_mode": {
+        "summary": "项目分析模式",
+        "description": "传入 project_identifier + services 执行项目级分析，不需要 task_type 或 text。",
+        "value": {
+            "project_identifier": "服务器设备",
+            "services": [
+                "business_bid_format_review",
+                "business_bid_duplicate_check",
+                "technical_bid_duplicate_check",
+                "personnel_reuse_check",
+                "typo_check",
+            ],
+            "max_evidence_sections": 5,
+            "max_pairs_per_type": 0,
+        },
+    },
+}
 
 # 文本清洗辅助函数
 def _clean_inline_text(value: Any) -> str:
@@ -800,7 +827,7 @@ async def analyze_file(
 # 接口：统一分析（文本/项目服务）
 @router.post("/run", summary="统一分析接口（文本/项目服务）")
 async def run_text_analysis(
-    payload: TextAnalysisRequest,
+    payload: TextAnalysisRequest = Body(openapi_examples=_RUN_ANALYSIS_OPENAPI_EXAMPLES),
     analysis_service=Depends(get_text_analysis_service),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service=Depends(get_duplicate_check_service),

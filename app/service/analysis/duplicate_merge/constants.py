@@ -7,6 +7,9 @@ from app.core.document_types import (
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
 
+# 当前聚合策略版本；变更时可触发旧 merged 结果自动重建
+MERGE_STRATEGY = "duplicate_pair_cluster_merge_v2"
+
 # 按文档类型映射到聚类结果键名
 MERGED_RESULT_KEY_BY_DOC_TYPE = {
     DOCUMENT_TYPE_BUSINESS_BID: "business_bid_duplicate_clusters",

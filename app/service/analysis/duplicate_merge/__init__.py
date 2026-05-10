@@ -4,6 +4,7 @@ from typing import Any
 
 # 导出常量
 from .constants import (
+    MERGE_STRATEGY,
     MERGED_RESULT_KEY_BY_DOC_TYPE,
     RAW_RESULT_KEY_BY_DOC_TYPE,
     DOC_TYPE_BY_MERGED_RESULT_KEY,
@@ -47,6 +48,7 @@ def build_duplicate_merge_results(
 
 
 __all__ = [
+    "MERGE_STRATEGY",
     "MERGED_RESULT_KEY_BY_DOC_TYPE",
     "RAW_RESULT_KEY_BY_DOC_TYPE",
     "DOC_TYPE_BY_MERGED_RESULT_KEY",

@@ -2,6 +2,7 @@
 """
 聚类引擎 Mixin：并查集聚类与嵌套消除
 """
+import json
 from typing import Any
 
 
@@ -19,6 +20,259 @@ class ClusterEngineMixin:
     _occurrence_preview: Any
     _cluster_title: Any
     _cluster_id: Any
+
+    def _pair_item_signature(self, item: dict[str, Any]) -> str:
+        """生成底层查重 pair 的稳定签名，用于后续聚合收口。"""
+        if not isinstance(item, dict):
+            return self.helper._project_make_stable_token("duplicate-pair-item", str(item))
+        sides = []
+        for prefix in ("left", "right"):
+            sides.append(
+                "|".join(
+                    [
+                        str(item.get(f"{prefix}_relation_id") or "").strip(),
+                        str(item.get(f"{prefix}_document_identifier") or "").strip(),
+                        str(item.get(f"{prefix}_file_name") or "").strip(),
+                    ]
+                )
+            )
+        return self.helper._project_make_stable_token(
+            "duplicate-pair-item",
+            str(item.get("document_type") or "").strip(),
+            *sorted(sides),
+        )
+
+    def _occurrence_signature(self, occurrence: dict[str, Any]) -> str:
+        """生成单条聚类证据的稳定签名，用于去重。"""
+        docs = occurrence.get("docs") or {}
+        normalized_docs = {
+            str(file_name): {
+                "pages": list((doc or {}).get("pages") or []),
+                "preview": str((doc or {}).get("preview") or "").strip(),
+            }
+            for file_name, doc in docs.items()
+        }
+        return self.helper._project_make_stable_token(
+            "duplicate-occurrence",
+            str(occurrence.get("family") or "").strip(),
+            str(occurrence.get("mode") or "").strip(),
+            json.dumps(normalized_docs, ensure_ascii=False, sort_keys=True),
+            json.dumps(list(occurrence.get("tokens") or []), ensure_ascii=False),
+            str(occurrence.get("similarity") or ""),
+        )
+
+    def _cluster_group_signature(self, cluster: dict[str, Any]) -> str:
+        """按 mode + 底层 pair 集合生成聚类收口签名。"""
+        signatures = sorted(
+            {
+                str(signature).strip()
+                for signature in (cluster.get("item_signatures") or [])
+                if str(signature).strip()
+            }
+        )
+        if signatures:
+            return self.helper._project_make_stable_token(
+                "duplicate-cluster-group",
+                str(cluster.get("mode") or "exact"),
+                *signatures,
+            )
+        return self.helper._project_make_stable_token(
+            "duplicate-cluster-group-fallback",
+            str(cluster.get("mode") or "exact"),
+            *sorted(str(file_name) for file_name in (cluster.get("files") or []) if file_name),
+        )
+
+    def _merge_cluster_into(
+        self,
+        target: dict[str, Any],
+        source: dict[str, Any],
+    ) -> dict[str, Any]:
+        """合并两个已归组的 cluster。"""
+        for file_name in source.get("files") or []:
+            if file_name not in target["files"]:
+                target["files"].append(file_name)
+
+        for file_name, ranges in (source.get("doc_ranges_by_file") or {}).items():
+            target_ranges = target["doc_ranges_by_file"].setdefault(file_name, [])
+            for pair in ranges or []:
+                if pair not in target_ranges:
+                    target_ranges.append(pair)
+
+        for file_name, previews in (source.get("doc_previews_by_file") or {}).items():
+            target_previews = target["doc_previews_by_file"].setdefault(file_name, [])
+            for preview in previews or []:
+                if preview not in target_previews:
+                    target_previews.append(preview)
+
+        target["items"].extend(source.get("items") or [])
+        target["item_signatures"].extend(source.get("item_signatures") or [])
+        target["occurrences"].extend(source.get("occurrences") or [])
+        target["tokens"].extend(source.get("tokens") or [])
+        return target
+
+    def _finalize_cluster(self, cluster: dict[str, Any]) -> dict[str, Any]:
+        """对 cluster 做去重和派生字段重算，避免同一 pair 被拆成重复组。"""
+        files: list[str] = []
+        for file_name in cluster.get("files") or []:
+            normalized = str(file_name or "").strip()
+            if normalized and normalized not in files:
+                files.append(normalized)
+        cluster["files"] = files
+
+        doc_ranges_by_file: dict[str, list[tuple[int, int]]] = {}
+        for file_name, ranges in (cluster.get("doc_ranges_by_file") or {}).items():
+            normalized_ranges: list[tuple[int, int]] = []
+            for pair in ranges or []:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                try:
+                    normalized_pair = (int(pair[0]), int(pair[1]))
+                except (TypeError, ValueError):
+                    continue
+                if normalized_pair not in normalized_ranges:
+                    normalized_ranges.append(normalized_pair)
+            if normalized_ranges:
+                doc_ranges_by_file[str(file_name)] = sorted(normalized_ranges)
+        cluster["doc_ranges_by_file"] = doc_ranges_by_file
+
+        doc_previews_by_file: dict[str, list[str]] = {}
+        for file_name, previews in (cluster.get("doc_previews_by_file") or {}).items():
+            normalized_previews: list[str] = []
+            for preview in previews or []:
+                normalized = str(preview or "").strip()
+                if normalized and normalized not in normalized_previews:
+                    normalized_previews.append(normalized)
+            if normalized_previews:
+                doc_previews_by_file[str(file_name)] = normalized_previews
+        cluster["doc_previews_by_file"] = doc_previews_by_file
+
+        tokens: list[str] = []
+        for token in cluster.get("tokens") or []:
+            normalized = str(token or "").strip()
+            if normalized and normalized not in tokens:
+                tokens.append(normalized)
+        cluster["tokens"] = tokens
+
+        unique_items: list[dict[str, Any]] = []
+        item_signatures: list[str] = []
+        seen_item_signatures: set[str] = set()
+        for item in cluster.get("items") or []:
+            signature = self._pair_item_signature(item)
+            if signature in seen_item_signatures:
+                continue
+            seen_item_signatures.add(signature)
+            item_signatures.append(signature)
+            unique_items.append(item)
+        cluster["items"] = unique_items
+        cluster["item_signatures"] = item_signatures
+
+        unique_occurrences: list[dict[str, Any]] = []
+        seen_occurrence_signatures: set[str] = set()
+        for occurrence in cluster.get("occurrences") or []:
+            signature = self._occurrence_signature(occurrence)
+            if signature in seen_occurrence_signatures:
+                continue
+            seen_occurrence_signatures.add(signature)
+            unique_occurrences.append(occurrence)
+        cluster["occurrences"] = unique_occurrences
+
+        families = {
+            str(occurrence.get("family") or "").strip()
+            for occurrence in unique_occurrences
+            if str(occurrence.get("family") or "").strip()
+        }
+        if not families:
+            families = {str(cluster.get("family") or "block")}
+        cluster["family"] = next(iter(families)) if len(families) == 1 else "mixed"
+
+        mode = str(cluster.get("mode") or "exact")
+        metrics = {
+            "exact_section_count": 0,
+            "similar_section_count": 0,
+            "exact_block_count": 0,
+            "similar_block_count": 0,
+            "exact_table_count": 0,
+            "similar_table_count": 0,
+            "exact_image_count": 0,
+            "similar_image_count": 0,
+        }
+        relevant_prefix = "exact_" if mode == "exact" else "similar_"
+        for item in unique_items:
+            item_metrics = item.get("_project_raw_metrics") or item.get("metrics") or {}
+            for key in metrics:
+                if key.startswith(relevant_prefix):
+                    metrics[key] += int(item_metrics.get(key) or 0)
+        cluster["metrics"] = metrics
+
+        best_risk_level = "none"
+        best_risk_rank = -1
+        best_score_value = 0.0
+        best_score_display = str(cluster.get("score_display") or "0")
+        for item in unique_items:
+            risk_level = str(item.get("risk_level") or "none")
+            risk_rank = self.helper._project_duplicate_risk_rank(risk_level)
+            score_raw = item.get("match_score")
+            if score_raw is None:
+                score_raw = item.get("exact_match_score")
+            try:
+                score_value = float(score_raw or 0)
+            except (TypeError, ValueError):
+                score_value = 0.0
+            if (
+                risk_rank > best_risk_rank
+                or (risk_rank == best_risk_rank and score_value >= best_score_value)
+            ):
+                best_risk_rank = risk_rank
+                best_risk_level = risk_level
+                best_score_value = score_value
+                best_score_display = self.helper._project_duplicate_score(item)
+
+        if best_risk_rank >= 0:
+            cluster["risk_level"] = best_risk_level
+            cluster["score_value"] = best_score_value
+            cluster["score_display"] = best_score_display
+        else:
+            cluster["risk_level"] = str(cluster.get("risk_level") or "none")
+            cluster["score_value"] = float(cluster.get("score_value") or 0)
+            cluster["score_display"] = str(cluster.get("score_display") or "0")
+
+        cluster["similarity"] = max(
+            [
+                float(occurrence.get("similarity") or 0)
+                for occurrence in unique_occurrences
+                if occurrence.get("similarity") is not None
+            ]
+            or [0]
+        )
+        return cluster
+
+    def _consolidate_clusters(
+        self,
+        clusters: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """将同一底层 pair 集合的 cluster 合并成更稳定的展示组。"""
+        grouped: dict[str, dict[str, Any]] = {}
+        ordered_keys: list[str] = []
+        for cluster in clusters:
+            finalized = self._finalize_cluster(cluster)
+            key = self._cluster_group_signature(finalized)
+            target = grouped.get(key)
+            if target is None:
+                grouped[key] = finalized
+                ordered_keys.append(key)
+                continue
+            self._merge_cluster_into(target, finalized)
+
+        consolidated = [self._finalize_cluster(grouped[key]) for key in ordered_keys]
+        return sorted(
+            consolidated,
+            key=lambda cluster: (
+                -self._cluster_rank(cluster),
+                -self.helper._project_duplicate_risk_rank(str(cluster.get("risk_level") or "none")),
+                -float(cluster.get("score_value") or 0),
+                "/".join(cluster.get("files") or []),
+            ),
+        )
 
     def _ranges_cover(
         self,
@@ -100,6 +354,8 @@ class ClusterEngineMixin:
         occurrences: list[dict[str, Any]] = []
         for raw_item in items:
             item = self.helper._project_filter_duplicate_item_evidence(raw_item)
+            if isinstance(item, dict) and isinstance(raw_item, dict):
+                item["_project_raw_metrics"] = dict(raw_item.get("metrics") or {})
             left_file = str(item.get("left_file_name") or "").strip()
             right_file = str(item.get("right_file_name") or "").strip()
             if not left_file or not right_file:
@@ -143,6 +399,7 @@ class ClusterEngineMixin:
                                 "tokens": tokens,
                                 "docs": docs,
                                 "item": item,
+                                "item_signature": self._pair_item_signature(item),
                                 "evidence": occurrence,
                             }
                         )
@@ -242,6 +499,11 @@ class ClusterEngineMixin:
                 "family": family,
                 "mode": active_mode,
                 "items": [member.get("item") for member in active_members],
+                "item_signatures": [
+                    str(member.get("item_signature") or "").strip()
+                    for member in active_members
+                    if str(member.get("item_signature") or "").strip()
+                ],
                 "occurrences": active_members,
                 "doc_ranges_by_file": doc_ranges_by_file,
                 "doc_previews_by_file": doc_previews_by_file,
@@ -259,7 +521,7 @@ class ClusterEngineMixin:
                 ),
                 "tokens": cluster_tokens,
             }
-            clusters.append(cluster)
+            clusters.append(self._finalize_cluster(cluster))
 
         # 按优先级排序并消除被高优先级聚类完全覆盖的低优先级聚类
         sorted_clusters = sorted(
@@ -305,12 +567,14 @@ class ClusterEngineMixin:
                     if token not in strong["tokens"]:
                         strong["tokens"].append(token)
                 strong["items"].extend(weak.get("items") or [])
+                strong["item_signatures"].extend(weak.get("item_signatures") or [])
                 strong["occurrences"].extend(weak.get("occurrences") or [])
                 strong_files = set(strong.get("files") or [])
                 dropped_indexes.add(weak_index)
 
-        return [
-            cluster
+        surviving_clusters = [
+            self._finalize_cluster(cluster)
             for index, cluster in enumerate(sorted_clusters)
             if index not in dropped_indexes
         ]
+        return self._consolidate_clusters(surviving_clusters)

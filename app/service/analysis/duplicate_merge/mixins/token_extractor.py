@@ -94,10 +94,12 @@ class TokenExtractorMixin:
         mode = str(cluster.get("mode") or "similar")
         family = str(cluster.get("family") or "block")
         rank_map = {
+            ("exact", "mixed"): 8,
             ("exact", "table"): 7,
             ("exact", "section"): 6,
             ("exact", "image"): 5,
             ("exact", "block"): 4,
+            ("similar", "mixed"): 3,
             ("similar", "table"): 3,
             ("similar", "section"): 2,
             ("similar", "block"): 1,

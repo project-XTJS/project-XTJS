@@ -60,6 +60,7 @@ from app.schemas.postgresql import (
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
 from app.service.analysis.duplicate_merge import (
     DOC_TYPE_BY_MERGED_RESULT_KEY,
+    MERGE_STRATEGY,
     MERGED_RESULT_KEY_BY_DOC_TYPE,
     RAW_RESULT_KEY_BY_DOC_TYPE,
     build_duplicate_merge_results,
@@ -1156,6 +1157,14 @@ def _resolve_merged_result_source(
     return None, None
 
 
+def _merged_result_needs_rebuild(existing_result: Any) -> bool:
+    """派生聚合结果按策略版本重建，避免沿用旧的碎片化 cluster。"""
+    if not isinstance(existing_result, dict) or not existing_result:
+        return True
+    config = existing_result.get("config") or {}
+    return str(config.get("merge_strategy") or "").strip() != MERGE_STRATEGY
+
+
 # 按需加载或重建项目的合并查重结果
 def _load_or_build_project_merged_results(
     *,
@@ -1180,7 +1189,7 @@ def _load_or_build_project_merged_results(
     changed = False
     for merged_key in target_keys:
         existing = results.get(merged_key)
-        if isinstance(existing, dict) and existing:
+        if not _merged_result_needs_rebuild(existing):
             merged_payloads[merged_key] = existing
             continue
 

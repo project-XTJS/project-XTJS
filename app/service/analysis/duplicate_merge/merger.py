@@ -5,6 +5,7 @@
 from typing import Any, Optional
 
 from .constants import (
+    MERGE_STRATEGY,
     MERGED_RESULT_KEY_BY_DOC_TYPE,
     RAW_RESULT_KEY_BY_DOC_TYPE,
 )
@@ -94,7 +95,7 @@ class DuplicateResultMerger(
             "merged_result_key": MERGED_RESULT_KEY_BY_DOC_TYPE.get(doc_type),
             "document_type": doc_type,
             "config": {
-                "merge_strategy": "duplicate_pair_cluster_merge",
+                "merge_strategy": MERGE_STRATEGY,
                 "source_document_types": list((raw_result.get("config") or {}).get("document_types") or []),
                 "source_pair_count": int(group.get("pair_count") or 0),
                 "source_reported_pair_count": int(group.get("reported_pair_count") or 0),

@@ -2,6 +2,7 @@
 """
 商务标查重范围提取（分项报价+偏离表）
 """
+import re
 from typing import Any
 
 from app.service.analysis.itemized import ItemizedPricingChecker
@@ -228,7 +229,7 @@ def _is_deviation_scope_boundary(text: str) -> bool:
         return False
     if "偏离" in compact:
         return False
-    if __import__("re").match(r"^(附件|附表|附录)\s*[0-9一二三四五六七八九十]+", text):
+    if re.match(r"^(附件|附表|附录)\s*[0-9一二三四五六七八九十]+", text):
         return True
     return any(
         token in compact
@@ -274,8 +275,7 @@ def _strip_scope_serial_prefix(text: str) -> str:
     normalized = normalize_plain_text(text)
     if not normalized:
         return ""
-    import re as regex
-    stripped = regex.sub(
+    stripped = re.sub(
         r"^\s*(?:[(（]?\d{1,4}[)）]?[.、:：]?|[一二三四五六七八九十百千]+[、.．])\s+",
         "",
         normalized,
@@ -320,7 +320,7 @@ def _is_common_duplicate_scope_line(text: str) -> bool:
     if 4 <= len(compact) <= 32 and "项目" in compact:
         return True
 
-    if __import__("re").fullmatch(r"[（(]?\d+[）)]?[\u4e00-\u9fa5]{0,8}[;；。]?", compact):
+    if re.fullmatch(r"[（(]?\d+[）)]?[\u4e00-\u9fa5]{0,8}[;；。]?", compact):
         return True
     return False
 
@@ -332,9 +332,9 @@ def _is_deviation_response_line(text: str) -> bool:
         return False
     if any(token in compact for token in DEVIATION_RESPONSE_TOKENS):
         return True
-    if __import__("re").search(r"(?:^|[^A-Za-z])P\d+", compact, re.IGNORECASE):
+    if re.search(r"(?:^|[^A-Za-z])P\d+", compact, re.IGNORECASE):
         return True
-    if __import__("re").search(r"第\d+页", compact):
+    if re.search(r"第\d+页", compact):
         return True
     return False
 

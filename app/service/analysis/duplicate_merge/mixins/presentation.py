@@ -60,9 +60,11 @@ class PresentationMixin:
             ("exact", "block"): "重复句子",
             ("exact", "table"): "重复表格",
             ("exact", "image"): "重复图片",
+            ("exact", "mixed"): "重复证据组",
             ("similar", "section"): "相似段落",
             ("similar", "block"): "相似句子",
             ("similar", "table"): "相似表格",
+            ("similar", "mixed"): "相似证据组",
         }
         prefix = title_map.get((mode, family), "重复证据")
         previews_by_file = cluster.get("doc_previews_by_file") or {}
