@@ -69,6 +69,9 @@ class DuplicateCheckService:
     ) -> dict[str, Any]:
         """主入口：对项目中的文档分组进行两两比较，返回查重分析结果。"""
         requested_types = self._normalize_requested_types(document_types)
+        enabled_similarity_roles = {
+            role for role in requested_types if self._supports_similarity_matching(role)
+        }
         prepared_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
         skipped_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
         template_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
@@ -169,14 +172,18 @@ class DuplicateCheckService:
         return {
             "project": project or {"identifier_id": project_identifier},
             "config": {
-                "detection_mode": "exact_plus_similarity",
+                "detection_mode": self._resolve_detection_mode(
+                    requested_types=requested_types,
+                    enabled_similarity_roles=enabled_similarity_roles,
+                ),
                 "document_types": list(requested_types),
                 "max_evidence_sections": int(max_evidence_sections),
                 "max_pairs_per_type": int(max_pairs_per_type),
                 "template_exclusion_enabled": True,
                 "template_exclusion_source": "tender_document",
                 "block_matching_unit": "sentence",
-                "business_similarity_enabled": True,
+                "business_similarity_enabled": DOCUMENT_TYPE_BUSINESS_BID in enabled_similarity_roles,
+                "technical_similarity_enabled": DOCUMENT_TYPE_TECHNICAL_BID in enabled_similarity_roles,
             },
             "groups": groups,
             "summary": {
@@ -687,8 +694,21 @@ class DuplicateCheckService:
         }
 
     def _supports_similarity_matching(self, role: str) -> bool:
-        """当前文档角色是否支持相似度匹配。"""
-        return role in {DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID}
+        """当前仅商务标支持相似度匹配，技术标只保留精确查重。"""
+        return role == DOCUMENT_TYPE_BUSINESS_BID
+
+    def _resolve_detection_mode(
+        self,
+        *,
+        requested_types: tuple[str, ...],
+        enabled_similarity_roles: set[str],
+    ) -> str:
+        """根据当前请求的文档类型返回实际启用的查重模式。"""
+        if not enabled_similarity_roles:
+            return "exact_only"
+        if len(enabled_similarity_roles) == len(requested_types):
+            return "exact_plus_similarity"
+        return "mixed_exact_plus_similarity"
 
     # ── 通用辅助 ─────────────────────────────────
 
