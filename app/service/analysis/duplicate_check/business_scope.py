@@ -26,6 +26,7 @@ def extract_business_duplicate_segments(
     payload: dict[str, Any],
     itemized_checker: ItemizedPricingChecker,
     deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """从商务标中提取分项报价和偏离表相关段落作为查重范围。"""
     segments: list[dict[str, Any]] = []
@@ -40,7 +41,11 @@ def extract_business_duplicate_segments(
     # 偏离表部分
     deviation_payload = deviation_checker._coerce_payload(payload)
     deviation_sections = deviation_checker._extract_bid_deviation_sections(deviation_payload)
-    row_segments = _segments_from_deviation_rows(deviation_sections)
+    row_segments = _segments_from_deviation_rows(
+        deviation_sections,
+        deviation_checker=deviation_checker,
+        star_requirement_context=star_requirement_context,
+    )
     segments.extend(row_segments)
 
     # 补充未被行覆盖的偏离表章节
@@ -56,7 +61,11 @@ def extract_business_duplicate_segments(
         )
         if section_pages and section_pages in covered_page_keys:
             continue
-        segment = _segment_from_deviation_section(section)
+        segment = _segment_from_deviation_section(
+            section,
+            deviation_checker=deviation_checker,
+            star_requirement_context=star_requirement_context,
+        )
         if segment is not None:
             segments.append(segment)
 
@@ -67,6 +76,9 @@ def extract_business_duplicate_segments(
 
 def _segments_from_deviation_rows(
     deviation_sections: dict[str, Any],
+    *,
+    deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """从已解析的偏离行中构建查重段落。"""
     section_pages = {
@@ -89,9 +101,22 @@ def _segments_from_deviation_rows(
         requirement = normalize_plain_text(row.get("requirement_text") or "")
         response = normalize_plain_text(row.get("response_text") or "")
         deviation = normalize_plain_text(row.get("deviation_text") or "")
+        star_matched = _matches_star_requirement(
+            requirement,
+            deviation_checker=deviation_checker,
+            star_requirement_context=star_requirement_context,
+        )
         if not _is_deviation_duplicate_row(requirement, response, deviation):
             continue
-        joined = " | ".join(part for part in (requirement, response, deviation) if part).strip()
+        joined = " | ".join(
+            part
+            for part in (
+                "" if star_matched else requirement,
+                response,
+                deviation,
+            )
+            if part
+        ).strip()
         if len(compact_raw_text(joined)) < 6:
             continue
 
@@ -174,7 +199,12 @@ def _segment_from_itemized_section(section: dict[str, Any]) -> dict[str, Any] | 
     }
 
 
-def _segment_from_deviation_section(section: dict[str, Any]) -> dict[str, Any] | None:
+def _segment_from_deviation_section(
+    section: dict[str, Any],
+    *,
+    deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """将偏离表区段标准化为查重段落。"""
     raw_lines = section.get("lines")
     if not isinstance(raw_lines, list) or not raw_lines:
@@ -184,6 +214,15 @@ def _segment_from_deviation_section(section: dict[str, Any]) -> dict[str, Any] |
         preserve_common_lines=True,
     )
     lines = [line for line in lines if _is_deviation_response_line(line)]
+    lines = [
+        _strip_star_requirement_content(
+            line,
+            deviation_checker=deviation_checker,
+            star_requirement_context=star_requirement_context,
+        )
+        for line in lines
+    ]
+    lines = [line for line in lines if compact_raw_text(line)]
     if not lines:
         return None
 
@@ -207,6 +246,32 @@ def _segment_from_deviation_section(section: dict[str, Any]) -> dict[str, Any] |
         "preserve_common_lines": True,
         "lines": lines,
     }
+
+
+def _strip_star_requirement_content(
+    line: str,
+    *,
+    deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None,
+) -> str:
+    """对偏离表原始行做轻量删减：命中招标★要求时，尽量只保留响应/偏离侧文本。"""
+    text = normalize_plain_text(line)
+    if not text:
+        return ""
+    if not _matches_star_requirement(
+        text,
+        deviation_checker=deviation_checker,
+        star_requirement_context=star_requirement_context,
+    ):
+        return text
+
+    for token in ("投标文件的响应", "投标响应", "响应内容", "响应", "应答", "回复", "偏离说明", "偏离"):
+        index = text.find(token)
+        if index >= 0:
+            trimmed = normalize_plain_text(text[index:])
+            if compact_raw_text(trimmed):
+                return trimmed
+    return ""
 
 
 def _trim_deviation_section_lines(values: list[Any]) -> list[str]:
@@ -268,6 +333,55 @@ def _normalize_scope_lines(
         seen.add(key)
         normalized.append(text)
     return normalized
+
+
+def _matches_star_requirement(
+    requirement: str,
+    *,
+    deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None,
+) -> bool:
+    """判断偏离表要求列是否命中招标文件中提取出的★强制要求。"""
+    items = list((star_requirement_context or {}).get("items") or [])
+    if not items:
+        return False
+
+    normalized_requirement = _normalize_requirement_for_star_match(
+        requirement,
+        deviation_checker=deviation_checker,
+    )
+    if len(normalized_requirement) < 4:
+        return False
+
+    for item in items:
+        star_norm = str(item.get("normalized_requirement") or "").strip()
+        if not star_norm:
+            continue
+        if normalized_requirement == star_norm:
+            return True
+        if len(normalized_requirement) >= 8 and (
+            normalized_requirement in star_norm or star_norm in normalized_requirement
+        ):
+            return True
+
+        fragment_hits = 0
+        for fragment in item.get("fragments") or []:
+            fragment_key = str(fragment or "").strip()
+            if fragment_key and fragment_key in normalized_requirement:
+                fragment_hits += 1
+        if fragment_hits >= 2:
+            return True
+    return False
+
+
+def _normalize_requirement_for_star_match(
+    requirement: str,
+    *,
+    deviation_checker: DeviationChecker,
+) -> str:
+    """复用偏离检查器的要求清洗与归一化逻辑，保持★要求匹配口径一致。"""
+    cleaned = deviation_checker._clean_req(requirement)
+    return deviation_checker._norm(cleaned)
 
 
 def _strip_scope_serial_prefix(text: str) -> str:

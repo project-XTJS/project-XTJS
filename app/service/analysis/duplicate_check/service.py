@@ -213,6 +213,9 @@ class DuplicateCheckService:
                 payload,
                 itemized_checker=self._itemized_checker,
                 deviation_checker=self._deviation_checker,
+                star_requirement_context=(
+                    template_context.get("star_requirement_context") if template_context else None
+                ),
             )
             if not scoped_segments:
                 return None, BUSINESS_SCOPE_SKIP_REASON
@@ -558,8 +561,26 @@ class DuplicateCheckService:
                 if str(table.get("exact_hash") or "")
             },
             "placeholder_patterns": _build_template_placeholder_patterns(ordered_blocks),
+            "star_requirement_context": self._build_star_requirement_context(tender_payload),
         }
         return cache[cache_key]
+
+    def _build_star_requirement_context(self, tender_payload: dict[str, Any]) -> dict[str, Any]:
+        """抽取招标文件中带★的要求，供偏离表查重时剔除要求列使用。"""
+        requirements = self._deviation_checker._extract_star_requirements(tender_payload)
+        return {
+            "items": [
+                {
+                    "requirement_id": str(item.get("requirement_id") or "").strip(),
+                    "requirement": str(item.get("requirement") or "").strip(),
+                    "normalized_requirement": str(item.get("normalized_requirement") or "").strip(),
+                    "fragments": list(item.get("fragments") or []),
+                    "section_type": str(item.get("section_type") or "").strip(),
+                }
+                for item in requirements
+                if str(item.get("normalized_requirement") or "").strip()
+            ],
+        }
 
     # ── 文档比较核心 ─────────────────────────────
 

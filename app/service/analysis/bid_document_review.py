@@ -108,6 +108,30 @@ class BidDocumentReviewService:
     FIELD_NAME_PATTERN = re.compile(
         r"(?:姓名|缴费人名称|法定代表人|授权代表|授权委托人|委托代理人|被授权人)[^：:\n]{0,12}[：:]\s*([A-Za-z\u4e00-\u9fa5\[\]【】()（）]{2,30})"
     )
+    PERSONNEL_ROLE_HINTS = (
+        "法定代表人",
+        "授权代表",
+        "授权委托人",
+        "委托代理人",
+        "被授权人",
+    )
+    PERSONNEL_CONTEXT_HINTS = PERSONNEL_ROLE_HINTS + (
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人授权委托书",
+        "合法代理人",
+        "执行事务合伙人",
+    )
+    PERSONNEL_SOURCE_PRIORITY = {
+        "personnel_certificate": 100,
+        "personnel_authorizer": 95,
+        "personnel_authorized_agent": 95,
+        "personnel_key_value_table": 90,
+        "personnel_table": 80,
+        "personnel_reverse_role": 70,
+        "personnel_line": 65,
+        "personnel_inline_role": 60,
+    }
 
     # 人员相关章节标题关键词
     PERSONNEL_SECTION_HINTS = (
@@ -140,6 +164,9 @@ class BidDocumentReviewService:
         "全能运维工程师",
         "服务主管",
         "授权代表",
+        "授权委托人",
+        "委托代理人",
+        "被授权人",
         "法定代表人",
     )
 
@@ -808,21 +835,24 @@ class BidDocumentReviewService:
             if section_entries:
                 entries.extend(section_entries)
 
-        # 去重后按姓名、页码、角色排序
-        deduped: list[dict[str, Any]] = []
-        seen: set[tuple[Any, ...]] = set()
+        # 同一文档中同一姓名+角色仅保留质量最高的一条证据，避免多规则重复命中。
+        selected: dict[tuple[Any, ...], dict[str, Any]] = {}
         for entry in entries:
             key = (
                 entry.get("document_identifier_id"),
                 entry.get("name"),
                 entry.get("role"),
-                entry.get("page"),
-                tuple(entry.get("bbox") or []),
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(entry)
+            existing = selected.get(key)
+            if existing is None or self._personnel_entry_priority(entry) > self._personnel_entry_priority(existing):
+                selected[key] = entry
+            elif existing is not None and self._personnel_entry_priority(entry) == self._personnel_entry_priority(existing):
+                existing_page = int(existing.get("page") or 10**9)
+                entry_page = int(entry.get("page") or 10**9)
+                if entry_page < existing_page:
+                    selected[key] = entry
+
+        deduped = list(selected.values())
 
         deduped.sort(
             key=lambda item: (
@@ -868,7 +898,7 @@ class BidDocumentReviewService:
                         source_type="personnel_table",
                     )
                 )
-            return entries
+        entries.extend(self._extract_personnel_entries_from_key_value_table(record, table, rows))
         return entries
 
     def _extract_personnel_entries_from_section(
@@ -880,27 +910,155 @@ class BidDocumentReviewService:
         text = str(section.get("text") or "").strip()
         if not text:
             return []
+        evidence_text = self._normalize_personnel_evidence_text(text)
+        compact = self._compact(evidence_text)
+        if not any(token in compact for token in self.PERSONNEL_CONTEXT_HINTS):
+            return []
 
         entries: list[dict[str, Any]] = []
         for match in re.finditer(
             r"(?P<role>法定代表人|授权代表|授权委托人|委托代理人|被授权人)[^：:\n]{0,8}[：:]\s*(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})",
-            text,
+            evidence_text,
         ):
-            name = self._clean_person_name(match.group("name"))
-            if not name:
-                continue
-            entries.append(
-                self._build_personnel_entry(
-                    record=record,
-                    name=name,
-                    role=self._normalize_role(match.group("role")),
-                    page=section.get("page"),
-                    bbox=section.get("bbox"),
-                    evidence_text=text,
-                    source_type="personnel_line",
-                )
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role=match.group("role"),
+                evidence_text=evidence_text,
+                source_type="personnel_line",
+            )
+
+        for match in re.finditer(
+            r"(?P<role>法定代表人|授权代表|授权委托人|委托代理人|被授权人)\s*(?:为|是)?\s*(?P<name>[\u4e00-\u9fa5]{2,4})(?=$|[\s，,。；;、])",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role=match.group("role"),
+                evidence_text=evidence_text,
+                source_type="personnel_inline_role",
+            )
+
+        for match in re.finditer(
+            r"(?:^|[\s（(：:])(?P<name>[\u4e00-\u9fa5]{2,4})\s+(?P<role>法定代表人|授权代表|授权委托人|委托代理人|被授权人)(?=$|[\s，,。；;、])",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role=match.group("role"),
+                evidence_text=evidence_text,
+                source_type="personnel_reverse_role",
+            )
+
+        for match in re.finditer(
+            r"兹证明\s*[（(]?\s*(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})\s*[）)]?[^。\n]{0,120}?系本公司法定代表人",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role="法定代表人",
+                evidence_text=evidence_text,
+                source_type="personnel_certificate",
+            )
+
+        for match in re.finditer(
+            r"下面签字的\s*[（(]\s*(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})\s*[、,，][^）)]{0,30}[）)]\s*代表本公司授权",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role="法定代表人",
+                evidence_text=evidence_text,
+                source_type="personnel_authorizer",
+            )
+
+        for match in re.finditer(
+            r"授权下面签字的\s*[（(]\s*(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})\s*[、,，]",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role="授权委托人",
+                evidence_text=evidence_text,
+                source_type="personnel_authorized_agent",
             )
         return entries
+
+    def _extract_personnel_entries_from_key_value_table(
+        self,
+        record: dict[str, Any],
+        table: dict[str, Any],
+        rows: list[list[str]],
+    ) -> list[dict[str, Any]]:
+        """兼容营业执照/基本情况表这类“标签-值”表格中的人员字段。"""
+        entries: list[dict[str, Any]] = []
+        for row in rows:
+            if len(row) < 2:
+                continue
+            for index in range(len(row) - 1):
+                role = self._normalize_personnel_role_label(row[index])
+                if not role:
+                    continue
+                name = self._clean_person_name(row[index + 1])
+                if not name:
+                    continue
+                evidence_text = " | ".join(cell for cell in row if cell)
+                entries.append(
+                    self._build_personnel_entry(
+                        record=record,
+                        name=name,
+                        role=role,
+                        page=table.get("page"),
+                        bbox=table.get("bbox"),
+                        evidence_text=evidence_text,
+                        source_type="personnel_key_value_table",
+                    )
+                )
+        return entries
+
+    def _append_personnel_match_entry(
+        self,
+        *,
+        entries: list[dict[str, Any]],
+        record: dict[str, Any],
+        section: dict[str, Any],
+        name: Any,
+        role: Any,
+        evidence_text: str,
+        source_type: str,
+    ) -> None:
+        cleaned_name = self._clean_person_name(name)
+        normalized_role = self._normalize_role(role)
+        if not cleaned_name or not normalized_role:
+            return
+        entries.append(
+            self._build_personnel_entry(
+                record=record,
+                name=cleaned_name,
+                role=normalized_role,
+                page=section.get("page"),
+                bbox=section.get("bbox"),
+                evidence_text=evidence_text,
+                source_type=source_type,
+            )
+        )
 
     def _build_personnel_entry(
         self,
@@ -1036,6 +1194,19 @@ class BidDocumentReviewService:
             return compact
         return text[:24]
 
+    def _normalize_personnel_role_label(self, value: Any) -> str:
+        compact = self._compact(value)
+        if not compact:
+            return ""
+        for role in self.PERSONNEL_ROLE_HINTS:
+            if role in compact:
+                return self._normalize_role(role)
+        return ""
+
+    def _personnel_entry_priority(self, entry: dict[str, Any]) -> int:
+        source_type = str(entry.get("source_type") or "").strip()
+        return int(self.PERSONNEL_SOURCE_PRIORITY.get(source_type, 0))
+
     def _clean_person_name(self, value: Any) -> str | None:
         """清洗人名，过滤掉占位符及明显非人名的字符串。"""
         text = self._normalize_text(value)
@@ -1068,6 +1239,16 @@ class BidDocumentReviewService:
             "地址",
             "服务",
             "社会保险",
+            "证明书",
+            "委托书",
+            "授权书",
+            "签字",
+            "盖章",
+            "签章",
+            "性别",
+            "身份证",
+            "资格",
+            "证件号码",
         )
         if any(token in text for token in blocked):
             return None
@@ -1194,6 +1375,17 @@ class BidDocumentReviewService:
         text = re.sub(r"[ \t\f\v]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+    def _normalize_personnel_evidence_text(self, value: Any) -> str:
+        """清理 OCR 中的公式/下划线标记，便于抽取授权书和证明书中的姓名。"""
+        text = self._normalize_text(value)
+        text = re.sub(r"\\underline\s*\{\s*\\text\s*\{", "", text)
+        text = re.sub(r"\\text\s*\{", "", text)
+        text = re.sub(r"\\underline\s*\{", "", text)
+        text = text.replace("$", " ")
+        text = text.replace("{", "").replace("}", "")
+        text = text.replace("\\", "")
+        return self._normalize_text(text)
 
     def _compact(self, value: Any) -> str:
         """去除所有空白字符，用于关键词匹配。"""
