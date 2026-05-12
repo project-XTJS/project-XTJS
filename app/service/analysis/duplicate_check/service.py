@@ -208,13 +208,19 @@ class DuplicateCheckService:
         """对单条文档记录提取内容，排除模板，返回可用于比较的结构化对象。"""
         payload = self._coerce_payload(record.get("content"))
         if role == DOCUMENT_TYPE_BUSINESS_BID:
-            # 商务标特殊处理
+            # 商务标先按招标模板清洗可比内容，再进入统一查重。
             scoped_segments = extract_business_duplicate_segments(
                 payload,
                 itemized_checker=self._itemized_checker,
                 deviation_checker=self._deviation_checker,
                 star_requirement_context=(
                     template_context.get("star_requirement_context") if template_context else None
+                ),
+                deviation_template_context=(
+                    template_context.get("deviation_template_context") if template_context else None
+                ),
+                itemized_template_context=(
+                    template_context.get("itemized_template_context") if template_context else None
                 ),
             )
             if not scoped_segments:
@@ -544,7 +550,19 @@ class DuplicateCheckService:
 
         tender_payload = self._coerce_payload(record.get("tender_content"))
         ordered_blocks, table_entries, _ = _extract_document_content_blocks(tender_payload, role=role)
-        if not ordered_blocks:
+        # 这三类模板上下文分别服务于星标要求、偏离表、分项报价表清洗。
+        star_requirement_context = self._build_star_requirement_context(tender_payload)
+        deviation_template_context = self._build_deviation_template_context(tender_payload)
+        itemized_template_context = self._build_itemized_template_context(tender_payload)
+        # 招标文件即使正文较弱，只要还能提到模板，就继续保留模板上下文。
+        if (
+            not ordered_blocks
+            and not table_entries
+            and not (star_requirement_context.get("items") or [])
+            and not (deviation_template_context.get("requirement_items") or [])
+            and not (deviation_template_context.get("line_items") or [])
+            and not (itemized_template_context.get("line_items") or [])
+        ):
             cache[cache_key] = None
             return None
 
@@ -561,7 +579,9 @@ class DuplicateCheckService:
                 if str(table.get("exact_hash") or "")
             },
             "placeholder_patterns": _build_template_placeholder_patterns(ordered_blocks),
-            "star_requirement_context": self._build_star_requirement_context(tender_payload),
+            "star_requirement_context": star_requirement_context,
+            "deviation_template_context": deviation_template_context,
+            "itemized_template_context": itemized_template_context,
         }
         return cache[cache_key]
 
@@ -583,6 +603,90 @@ class DuplicateCheckService:
         }
 
     # ── 文档比较核心 ─────────────────────────────
+
+    def _build_deviation_template_context(self, tender_payload: dict[str, Any]) -> dict[str, Any]:
+        """从招标文件提取偏离表模板，用于剔除投标文件偏离表模板内容。"""
+        sections = self._deviation_checker._extract_bid_deviation_sections(tender_payload)
+        requirement_items: list[dict[str, Any]] = []
+        line_items: list[dict[str, Any]] = []
+        seen_requirement_norms: set[str] = set()
+        seen_line_keys: set[str] = set()
+
+        def _append_requirement(text: str) -> None:
+            cleaned = normalize_plain_text(text)
+            if not cleaned:
+                return
+            requirement = self._deviation_checker._clean_req(cleaned)
+            normalized_requirement = self._deviation_checker._norm(requirement)
+            if len(normalized_requirement) < 4 or normalized_requirement in seen_requirement_norms:
+                return
+            seen_requirement_norms.add(normalized_requirement)
+            requirement_items.append(
+                {
+                    "text": requirement,
+                    "normalized_requirement": normalized_requirement,
+                    "fragments": self._deviation_checker._fragments(requirement),
+                }
+            )
+
+        def _append_line(text: str) -> None:
+            cleaned = normalize_plain_text(text)
+            compact = compact_raw_text(cleaned)
+            if len(compact) < 4 or compact in seen_line_keys:
+                return
+            seen_line_keys.add(compact)
+            line_items.append(
+                {
+                    "text": cleaned,
+                    "compact": compact,
+                    "normalized": self._deviation_checker._norm(cleaned),
+                    "fragments": self._deviation_checker._fragments(cleaned),
+                }
+            )
+
+        for row in sections.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            # 同时保留“要求项”和“整行模板”，便于后续分别匹配。
+            _append_requirement(str(row.get("requirement_text") or ""))
+            _append_line(str(row.get("joined_text") or row.get("requirement_text") or ""))
+
+        for section in (sections.get("business") or []) + (sections.get("technical") or []):
+            if not isinstance(section, dict):
+                continue
+            for raw_line in section.get("lines") or []:
+                _append_line(str(raw_line or ""))
+
+        return {
+            "requirement_items": requirement_items,
+            "line_items": line_items,
+            "line_keys": seen_line_keys,
+        }
+
+    def _build_itemized_template_context(self, tender_payload: dict[str, Any]) -> dict[str, Any]:
+        """从招标文件提取分项报价表模板，用于剔除投标文件分项报价表模板内容。"""
+        document = self._itemized_checker._prepare_document(tender_payload)
+        line_items: list[dict[str, Any]] = []
+        seen_line_keys: set[str] = set()
+
+        for section in document.get("item_sections") or []:
+            for raw_line in section.get("lines") or []:
+                cleaned = normalize_plain_text(raw_line)
+                compact = compact_raw_text(cleaned)
+                if len(compact) < 4 or compact in seen_line_keys:
+                    continue
+                seen_line_keys.add(compact)
+                line_items.append(
+                    {
+                        "text": cleaned,
+                        "compact": compact,
+                    }
+                )
+
+        return {
+            "line_items": line_items,
+            "line_keys": seen_line_keys,
+        }
 
     def _compare_documents(
         self,

@@ -60,6 +60,24 @@ class OCRService:
     )
     # 签名候选区块排除字符集
     SIGNATURE_CANDIDATE_BLOCKED_CHARS = set("签章盖日期公司项目设备授权代表投标")
+    # 这些字段多出现在身份证明或基础信息，不应被误判成签字位。
+    SIGNATURE_ATTRIBUTE_BLOCKED_TOKENS = (
+        "性别",
+        "年龄",
+        "身份证",
+        "号码",
+        "公司注册号码",
+        "注册号码",
+        "单位类型",
+        "经营范围",
+        "住址",
+        "地址",
+        "电话",
+        "邮编",
+        "职务",
+        "签发日期",
+        "签发机关",
+    )
 
     DEFAULT_SIGNATURE_PLACEHOLDER_TEXT = "已签字"
 
@@ -1372,29 +1390,42 @@ class OCRService:
             return True
         return compact.endswith("签字") and len(compact) <= 6
 
-    def _is_signature_anchor_text(self, text: Any) -> bool:
-        """判断文本是否为签名锚点。"""
+    def _is_signature_attribute_text(self, text: Any) -> bool:
+        """身份证明等属性行不应参与签字锚点匹配。"""
         compact = re.sub(r"\s+", "", self._normalize_section_text(text))
         if not compact:
             return False
+        return any(token in compact for token in self.SIGNATURE_ATTRIBUTE_BLOCKED_TOKENS)
+
+    def _is_strong_signature_anchor_text(self, text: Any) -> bool:
+        """只把明确的人员签署栏位当成强锚点。"""
+        compact = re.sub(r"\s+", "", self._normalize_section_text(text))
+        if not compact or self._is_signature_attribute_text(compact):
+            return False
+
+        strong_patterns = (
+            r"(?:法定代表人(?:或(?:其)?(?:委托代理人|授权代理人|授权代表|授权委托人))?|委托代理人|授权代理人|授权代表|授权委托人|被授权人)(?:[（(]?(?:签字或盖章|签章或盖章|签名或盖章|签字|签章|签名|手签)[)）]?)?(?:[:：]|$)",
+            r"持证人签名(?:[:：]|$)",
+        )
+        return any(re.search(pattern, compact) for pattern in strong_patterns)
+
+    def _is_signature_anchor_text(self, text: Any) -> bool:
+        """判断文本是否为签名锚点。"""
+        compact = re.sub(r"\s+", "", self._normalize_section_text(text))
+        if not compact or self._is_signature_attribute_text(compact):
+            return False
+        if self._is_strong_signature_anchor_text(compact):
+            return True
         return bool(
             re.search(
-                r"(签字或盖章|签章或盖章|签名或盖章|签字|签章|签名|手签)[\)）】】]*([：:]|$)",
+                r"(签字或盖章|签章或盖章|签名或盖章)[\)）】】]*([：:]|$)",
                 compact,
             )
         )
 
     def _is_table_signature_anchor_text(self, text: Any) -> bool:
         """检测表格中的签名锚点关键词。"""
-        compact = re.sub(r"\s+", "", self._normalize_section_text(text))
-        if not compact:
-            return False
-        return bool(
-            re.search(
-                r"(法定代表人(?:或其)?(?:委托代理人|授权代理人|授权代表)?|委托代理人|授权代理人|授权代表)[^：:\n]{0,20}[：:]",
-                compact,
-            )
-        )
+        return self._is_strong_signature_anchor_text(text)
 
     def _find_signature_anchor_match(
         self,
@@ -1407,10 +1438,10 @@ class OCRService:
 
         patterns = (
             re.compile(
-                r"(?P<prefix>(?:签字或盖章|签章或盖章|签名或盖章|签字|签章|签名|手签)[\)）】】]*[：:])\s*(?P<value>[^)）\]】>\n]{0,24})"
+                r"(?P<prefix>(?:(?:法定代表人(?:或(?:其)?(?:委托代理人|授权代理人|授权代表|授权委托人))?|委托代理人|授权代理人|授权代表|授权委托人|被授权人)(?:[（(]?(?:签字或盖章|签章或盖章|签名或盖章|签字|签章|签名|手签)[)）]?)?|持证人签名)[：:])\s*(?P<value>[^)）\]】>\n]{0,24})"
             ),
             re.compile(
-                r"(?P<prefix>(?:法定代表人(?:或其)?(?:委托代理人|授权代理人|授权代表)?|委托代理人|授权代理人|授权代表)[^：:\n]{0,20}[：:])\s*(?P<value>[^)）\]】>\n]{0,24})"
+                r"(?P<prefix>(?:签字或盖章|签章或盖章|签名或盖章)[\)）】】]*[：:])\s*(?P<value>[^)）\]】>\n]{0,24})"
             ),
         )
 
@@ -1534,6 +1565,12 @@ class OCRService:
                     max(108, int(max(anchor_width * 0.20, seal_width * 2.1))),
                     max(72, int(max(anchor_height, seal_height) * 1.45)),
                 ]
+                # 印章过大时改用更保守的锚点估算，避免把整块空白一起框进去。
+                if (
+                    estimated_bbox[2] > max(int(anchor_width * 1.2), 220)
+                    or estimated_bbox[3] > max(int(anchor_height * 3), 120)
+                ):
+                    return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
                 return self._clip_xywh_to_page(estimated_bbox, page_image_size)
 
         return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
@@ -1628,9 +1665,12 @@ class OCRService:
         """检测锚点附近是否有签名或印章证据。"""
         anchor_value = self._extract_signature_anchor_value(anchor_section.get("text") or "")
         compact_value = re.sub(r"\s+", "", anchor_value)
-        if compact_value and not self._is_signature_placeholder_text(compact_value):
-            cleaned = re.sub(r"[_＿\-\u2014~.·•\s]", "", compact_value)
-            if cleaned:
+        strong_anchor = self._is_strong_signature_anchor_text(anchor_section.get("text") or "")
+        if compact_value:
+            if self._is_signature_placeholder_text(compact_value):
+                if strong_anchor:
+                    return True
+            elif self._normalize_signature_candidate_text(compact_value):
                 return True
 
         anchor_bbox = self._signature_anchor_reference_bbox(
@@ -1652,7 +1692,7 @@ class OCRService:
             if section_type == "signature" and anchor_bbox is not None and section_bbox is not None:
                 if self._boxes_are_close(anchor_bbox, section_bbox, max_dx=420, max_dy=180):
                     return True
-            if section_type == "seal" and estimated_bbox is not None and section_bbox is not None:
+            if strong_anchor and section_type == "seal" and estimated_bbox is not None and section_bbox is not None:
                 if self._boxes_are_close(estimated_bbox, section_bbox, max_dx=180, max_dy=180):
                     return True
 
@@ -1665,11 +1705,35 @@ class OCRService:
             if block_type == "signature" and anchor_bbox is not None and block_bbox is not None:
                 if self._boxes_are_close(anchor_bbox, block_bbox, max_dx=420, max_dy=180):
                     return True
-            if block_type == "seal" and estimated_bbox is not None and block_bbox is not None:
+            if strong_anchor and block_type == "seal" and estimated_bbox is not None and block_bbox is not None:
                 if self._boxes_are_close(estimated_bbox, block_bbox, max_dx=180, max_dy=180):
                     return True
 
         return False
+
+    def _dedupe_signature_sections(
+        self,
+        sections: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """同页同框的签字区只保留一份，避免重复计数。"""
+        result: list[dict[str, Any]] = []
+        seen_signature_keys: set[Any] = set()
+        for section in sections:
+            section_type = str(section.get("type") or "").strip().lower()
+            if section_type != "signature":
+                result.append(section)
+                continue
+
+            section_key = (
+                int(section.get("page", 0) or 0),
+                self._bbox_signature_key(section.get("bbox")),
+                bool(section.get("_synthetic")),
+            )
+            if section_key in seen_signature_keys:
+                continue
+            seen_signature_keys.add(section_key)
+            result.append(section)
+        return result
 
     def _match_signatures_to_anchors(
         self,
@@ -1858,7 +1922,7 @@ class OCRService:
                 int(item.get("_order", 0) or 0),
             ),
         )
-        return sections
+        return self._dedupe_signature_sections(sections)
 
     # ── 页眉页脚清理 ─────────────────────────────
 
@@ -2004,15 +2068,18 @@ class OCRService:
     ) -> dict[str, Any]:
         """提取页面中的所有签名。"""
         signature_info = {"count": 0, "texts": [], "locations": []}
-        seen_bbox_keys: set[tuple[int, int, int, int] | None] = set()
+        seen_signature_keys: set[Any] = set()
 
         for section in page_sections:
             if str(section.get("type") or "").strip().lower() != "signature":
                 continue
-            signature_info["count"] += 1
             bbox_key = self._bbox_signature_key(section.get("bbox"))
-            seen_bbox_keys.add(bbox_key)
             text = self._normalize_section_text(section.get("text") or "")
+            signature_key = (bbox_key, text or None)
+            if signature_key in seen_signature_keys:
+                continue
+            seen_signature_keys.add(signature_key)
+            signature_info["count"] += 1
             bbox = self._bbox_to_xywh(section.get("bbox"))
             if text:
                 signature_info["texts"].append(text)
@@ -2024,11 +2091,12 @@ class OCRService:
                 continue
 
             bbox_key = self._bbox_signature_key(block.get("bbox"))
-            if bbox_key in seen_bbox_keys:
-                continue
-
-            signature_info["count"] += 1
             text = self._normalize_section_text(block.get("text") or "")
+            signature_key = (bbox_key, text or None)
+            if signature_key in seen_signature_keys:
+                continue
+            seen_signature_keys.add(signature_key)
+            signature_info["count"] += 1
             bbox = self._bbox_to_xywh(block.get("bbox"))
             if text:
                 signature_info["texts"].append(text)

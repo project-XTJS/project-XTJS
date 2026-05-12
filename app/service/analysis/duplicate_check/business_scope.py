@@ -21,30 +21,52 @@ from .constants import (
     COMMON_DUPLICATE_TEMPLATE_PATTERNS,
 )
 
+GENERIC_DEVIATION_RESPONSE_TOKENS = (
+    "与招标文件条款相同",
+    "与采购文件条款相同",
+    "与招标文件一致",
+    "与采购文件一致",
+    "无偏离",
+    "未偏离",
+    "没有偏离",
+    "完全响应",
+    "完全满足",
+    "响应",
+    "满足",
+    "符合",
+    "详见",
+)
+
 
 def extract_business_duplicate_segments(
     payload: dict[str, Any],
     itemized_checker: ItemizedPricingChecker,
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None = None,
+    deviation_template_context: dict[str, Any] | None = None,
+    itemized_template_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """从商务标中提取分项报价和偏离表相关段落作为查重范围。"""
     segments: list[dict[str, Any]] = []
 
-    # 分项报价部分
+    # 分项报价先按招标模板剔除表头/固定行，再保留剩余可比内容。
     itemized_document = itemized_checker._prepare_document(payload)
     for section in itemized_document.get("item_sections") or []:
-        segment = _segment_from_itemized_section(section)
+        segment = _segment_from_itemized_section(
+            section,
+            itemized_template_context=itemized_template_context,
+        )
         if segment is not None:
             segments.append(segment)
 
-    # 偏离表部分
+    # 偏离表先按招标模板剔除要求列/模板行，再保留响应内容。
     deviation_payload = deviation_checker._coerce_payload(payload)
     deviation_sections = deviation_checker._extract_bid_deviation_sections(deviation_payload)
     row_segments = _segments_from_deviation_rows(
         deviation_sections,
         deviation_checker=deviation_checker,
         star_requirement_context=star_requirement_context,
+        deviation_template_context=deviation_template_context,
     )
     segments.extend(row_segments)
 
@@ -65,6 +87,7 @@ def extract_business_duplicate_segments(
             section,
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
+            deviation_template_context=deviation_template_context,
         )
         if segment is not None:
             segments.append(segment)
@@ -79,6 +102,7 @@ def _segments_from_deviation_rows(
     *,
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
+    deviation_template_context: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """从已解析的偏离行中构建查重段落。"""
     section_pages = {
@@ -106,17 +130,30 @@ def _segments_from_deviation_rows(
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
         )
+        template_matched = _matches_tender_template_requirement(
+            requirement,
+            deviation_checker=deviation_checker,
+            deviation_template_context=deviation_template_context,
+        )
         if not _is_deviation_duplicate_row(requirement, response, deviation):
             continue
         joined = " | ".join(
             part
             for part in (
-                "" if star_matched else requirement,
+                "" if (star_matched or template_matched) else requirement,
                 response,
                 deviation,
             )
             if part
         ).strip()
+        joined = _strip_tender_template_line_content(
+            joined,
+            deviation_checker=deviation_checker,
+            deviation_template_context=deviation_template_context,
+        )
+        # 模板被剔掉后如果只剩“无偏离/满足”这类空洞响应，就不再参与查重。
+        if (star_matched or template_matched) and _is_generic_deviation_response_only_text(joined):
+            continue
         if len(compact_raw_text(joined)) < 6:
             continue
 
@@ -179,9 +216,25 @@ def _is_deviation_duplicate_row(
     return False
 
 
-def _segment_from_itemized_section(section: dict[str, Any]) -> dict[str, Any] | None:
+def _segment_from_itemized_section(
+    section: dict[str, Any],
+    *,
+    itemized_template_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """将分项报价区段标准化为查重段落。"""
     lines = _normalize_scope_lines(section.get("lines") or [])
+    # 逐行剔除与招标分项报价模板重合的固定内容。
+    lines = [
+        line
+        for line in (
+            _strip_itemized_template_line_content(
+                line,
+                itemized_template_context=itemized_template_context,
+            )
+            for line in lines
+        )
+        if compact_raw_text(line)
+    ]
     if not lines:
         return None
 
@@ -204,6 +257,7 @@ def _segment_from_deviation_section(
     *,
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
+    deviation_template_context: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """将偏离表区段标准化为查重段落。"""
     raw_lines = section.get("lines")
@@ -214,15 +268,25 @@ def _segment_from_deviation_section(
         preserve_common_lines=True,
     )
     lines = [line for line in lines if _is_deviation_response_line(line)]
-    lines = [
-        _strip_star_requirement_content(
+    cleaned_lines: list[str] = []
+    for line in lines:
+        # 先剔★要求，再剔招标偏离表模板，最后只保留真正可比的响应文本。
+        line = _strip_star_requirement_content(
             line,
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
         )
-        for line in lines
-    ]
-    lines = [line for line in lines if compact_raw_text(line)]
+        line = _strip_tender_template_line_content(
+            line,
+            deviation_checker=deviation_checker,
+            deviation_template_context=deviation_template_context,
+        )
+        if not compact_raw_text(line):
+            continue
+        if _is_generic_deviation_response_only_text(line):
+            continue
+        cleaned_lines.append(line)
+    lines = cleaned_lines
     if not lines:
         return None
 
@@ -246,6 +310,25 @@ def _segment_from_deviation_section(
         "preserve_common_lines": True,
         "lines": lines,
     }
+
+
+def _strip_itemized_template_line_content(
+    line: str,
+    *,
+    itemized_template_context: dict[str, Any] | None,
+) -> str:
+    """根据招标文件分项报价表模板剔除投标文件里的模板行。"""
+    text = normalize_plain_text(line)
+    if not text:
+        return ""
+    if itemized_template_context is None:
+        return text
+    if _matches_itemized_template_line(
+        text,
+        itemized_template_context=itemized_template_context,
+    ):
+        return ""
+    return text
 
 
 def _strip_star_requirement_content(
@@ -272,6 +355,53 @@ def _strip_star_requirement_content(
             if compact_raw_text(trimmed):
                 return trimmed
     return ""
+
+
+def _strip_tender_template_line_content(
+    line: str,
+    *,
+    deviation_checker: DeviationChecker,
+    deviation_template_context: dict[str, Any] | None,
+) -> str:
+    """根据招标文件偏离表模板剔除投标文件行里的模板内容。"""
+    text = normalize_plain_text(line)
+    if not text:
+        return ""
+    if _matches_tender_template_line(
+        text,
+        deviation_checker=deviation_checker,
+        deviation_template_context=deviation_template_context,
+    ):
+        return ""
+
+    parts = [
+        normalize_plain_text(part)
+        for part in re.split(r"\s*[|｜]\s*", text)
+        if normalize_plain_text(part)
+    ]
+    if len(parts) < 2:
+        return text
+
+    # 管道分隔的偏离表行按列清洗，只保留非模板列。
+    kept_parts = [
+        part
+        for part in parts
+        if not _matches_tender_template_line(
+            part,
+            deviation_checker=deviation_checker,
+            deviation_template_context=deviation_template_context,
+        )
+        and not _matches_tender_template_requirement(
+            part,
+            deviation_checker=deviation_checker,
+            deviation_template_context=deviation_template_context,
+        )
+    ]
+    if not kept_parts:
+        return ""
+    if len(kept_parts) == len(parts):
+        return text
+    return " | ".join(kept_parts)
 
 
 def _trim_deviation_section_lines(values: list[Any]) -> list[str]:
@@ -372,6 +502,124 @@ def _matches_star_requirement(
         if fragment_hits >= 2:
             return True
     return False
+
+
+def _matches_tender_template_requirement(
+    requirement: str,
+    *,
+    deviation_checker: DeviationChecker,
+    deviation_template_context: dict[str, Any] | None,
+) -> bool:
+    """判断偏离表要求列是否命中招标文件里的模板要求项。"""
+    items = list((deviation_template_context or {}).get("requirement_items") or [])
+    if not items:
+        return False
+
+    normalized_requirement = _normalize_requirement_for_star_match(
+        requirement,
+        deviation_checker=deviation_checker,
+    )
+    if len(normalized_requirement) < 4:
+        return False
+
+    for item in items:
+        template_norm = str(item.get("normalized_requirement") or "").strip()
+        if not template_norm:
+            continue
+        if normalized_requirement == template_norm:
+            return True
+        if len(normalized_requirement) >= 8 and (
+            normalized_requirement in template_norm or template_norm in normalized_requirement
+        ):
+            return True
+
+        fragment_hits = 0
+        for fragment in item.get("fragments") or []:
+            fragment_key = str(fragment or "").strip()
+            if fragment_key and fragment_key in normalized_requirement:
+                fragment_hits += 1
+        if fragment_hits >= 2:
+            return True
+    return False
+
+
+def _matches_tender_template_line(
+    text: str,
+    *,
+    deviation_checker: DeviationChecker,
+    deviation_template_context: dict[str, Any] | None,
+) -> bool:
+    """判断整行文本是否属于招标文件偏离表模板。"""
+    if deviation_template_context is None:
+        return False
+
+    normalized_text = normalize_plain_text(text)
+    compact_text = compact_raw_text(normalized_text)
+    if not compact_text:
+        return False
+    if compact_text in set(deviation_template_context.get("line_keys") or []):
+        return True
+
+    normalized_line = deviation_checker._norm(normalized_text)
+    for item in deviation_template_context.get("line_items") or []:
+        template_compact = str(item.get("compact") or "").strip()
+        template_norm = str(item.get("normalized") or "").strip()
+        if not template_compact or not template_norm:
+            continue
+        if compact_text == template_compact or normalized_line == template_norm:
+            return True
+        if len(normalized_line) >= 8 and (
+            normalized_line in template_norm or template_norm in normalized_line
+        ):
+            return True
+    return False
+
+
+def _matches_itemized_template_line(
+    text: str,
+    *,
+    itemized_template_context: dict[str, Any] | None,
+) -> bool:
+    """判断分项报价表行是否命中招标文件里的模板行。"""
+    if itemized_template_context is None:
+        return False
+    normalized_text = normalize_plain_text(text)
+    compact_text = compact_raw_text(normalized_text)
+    if not compact_text:
+        return False
+    if compact_text in set(itemized_template_context.get("line_keys") or []):
+        return True
+    for item in itemized_template_context.get("line_items") or []:
+        template_compact = str(item.get("compact") or "").strip()
+        if not template_compact:
+            continue
+        if compact_text == template_compact:
+            return True
+        if len(compact_text) >= 8 and (
+            compact_text in template_compact or template_compact in compact_text
+        ):
+            return True
+    return False
+
+
+def _is_generic_deviation_response_only_text(text: str) -> bool:
+    """识别仅由通用响应话术组成的空洞偏离表文本。"""
+    compact = compact_raw_text(text)
+    if not compact:
+        return True
+
+    normalized = compact
+    has_generic_token = False
+    for token in GENERIC_DEVIATION_RESPONSE_TOKENS:
+        compact_token = compact_raw_text(token)
+        if compact_token and compact_token in normalized:
+            normalized = normalized.replace(compact_token, "")
+            has_generic_token = True
+
+    normalized = re.sub(r"(?:^|[^a-z])p\d+(?:[-~]p?\d+)?", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"第\d+页", "", normalized)
+    normalized = re.sub(r"[|｜/:：;；,，.。\-_\s]+", "", normalized)
+    return has_generic_token and not normalized
 
 
 def _normalize_requirement_for_star_match(
