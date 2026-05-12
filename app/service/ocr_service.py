@@ -236,14 +236,23 @@ class OCRService:
 
             image_inputs: dict[str, Any] = {}
             image_grid_thw = None
+            image_grid_thw_for_placeholder = None
             if images is not None:
-                # 先保留为 numpy，避免静态图下对 Paddle 值执行 int(...)。
+                # 模型实际输入仍保持 Paddle tensor，避免后续生成阶段混入静/动态图类型。
                 image_inputs = processor_self.image_processor(
                     images=images,
                     size=size,
-                    return_tensors="np",
+                    return_tensors="pd",
                 )
                 image_grid_thw = image_inputs.get("image_grid_thw")
+                # 仅额外取一份 numpy 网格尺寸来计算占位符数量，绕开 int(Tensor)。
+                if image_grid_thw is not None:
+                    placeholder_inputs = processor_self.image_processor(
+                        images=images,
+                        size=size,
+                        return_tensors="np",
+                    )
+                    image_grid_thw_for_placeholder = placeholder_inputs.get("image_grid_thw")
 
             videos_inputs: dict[str, Any] = {}
             video_grid_thw = None
@@ -256,7 +265,12 @@ class OCRService:
                 index = 0
                 for i in range(len(text)):
                     while processor_self.image_token in text[i]:
-                        placeholder_count = int(image_grid_thw[index].prod())
+                        grid_source = (
+                            image_grid_thw_for_placeholder
+                            if image_grid_thw_for_placeholder is not None
+                            else image_grid_thw
+                        )
+                        placeholder_count = int(grid_source[index].prod())
                         placeholder_count = max(placeholder_count // merge_length, 0)
                         text[i] = text[i].replace(
                             processor_self.image_token,
