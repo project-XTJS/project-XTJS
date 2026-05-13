@@ -47,73 +47,6 @@ class VerificationChecker:
         r'及身份证',
         r'如为分支机构投标则须总公司唯一授权函',
     )
-    ATTACHMENT_TITLE_FRAGMENT_PATTERNS = (
-        "法定代表人",
-        "单位负责人",
-        "授权委托书",
-        "证明书",
-        "声明函",
-        "承诺书",
-        "保证书",
-        "一览表",
-        "报价表",
-        "偏离表",
-        "情况表",
-        "配置表",
-        "清单",
-        "凭证",
-        "执照",
-        "财务状况",
-        "社会保障资金",
-        "税收",
-        "保证金",
-        "投标人基本情况",
-        "类似项目业绩",
-        "营业执照",
-        "劳动合同",
-        "社保",
-    )
-    ATTACHMENT_TITLE_TOKEN_PATTERNS = (
-        "法定代表人授权委托书",
-        "法定代表人资格证明书",
-        "法定代表人证明书",
-        "法定代表人身份证明",
-        "单位负责人证明书",
-        "单位负责人身份证明",
-        "类似项目业绩清单",
-        "投标人基本情况介绍",
-        "供应商承诺声明函",
-        "不参与围标串标承诺书",
-        "保证金缴纳凭证",
-        "财务状况及税收社会保障资金缴纳情况声明函",
-        "财务状况声明函",
-        "社会保障资金缴纳情况声明函",
-        "制造商声明函",
-        "制造商授权书",
-        "原厂授权函",
-        "营业执照",
-        "法人登记证书",
-        "分项报价表",
-        "商务条款偏离表",
-        "技术条款偏离表",
-        "开标一览表",
-        "投标保证书",
-        "拟派项目负责人情况表",
-        "项目人员配置表",
-        "授权委托书",
-        "证明书",
-        "声明函",
-        "承诺书",
-        "保证书",
-        "一览表",
-        "报价表",
-        "偏离表",
-        "情况表",
-        "配置表",
-        "清单",
-        "凭证",
-        "执照",
-    )
     COMMON_ATTACHMENT_TITLES = (
         "投标保证书",
         "开标一览表",
@@ -132,6 +65,31 @@ class VerificationChecker:
         "制造商授权书",
         "投标人认为需加以说明的其他内容",
     )
+    RESPONSE_FORMAT_ZONE_MARKERS = (
+        "响应文件格式附件",
+        "部分格式附件",
+    )
+    RESPONSE_FORMAT_CHAPTER_MARKERS = (
+        "响应文件格式",
+    )
+    RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS = (
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "法定代表人授权委托书",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+        "授权委托书",
+        "声明函",
+        "承诺书",
+        "保证书",
+    )
+    RESPONSE_FORMAT_COMPOSITE_TITLE_MARKERS = (
+        "组成及部分格式",
+        "文件组成及部分格式",
+        "资格证明文件组成",
+    )
+    CHAPTER_HEADING_RE = re.compile(r"^\s*第[一二三四五六七八九十百零\d]+章")
     COMPANY_RE = re.compile(r"([A-Za-z0-9\u4e00-\u9fa5]{4,60}(?:有限责任公司|股份有限公司|集团有限公司|有限公司|公司))")
 
     def __init__(self, ocr_service: Any):
@@ -512,49 +470,6 @@ class VerificationChecker:
         title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
         return title.strip("：:；;，,。")
 
-    def _attachment_title_tokens(self, text: str) -> list[str]:
-        title_key = self._attachment_title_key(text)
-        if not title_key:
-            return []
-        tokens = []
-        for token in self.ATTACHMENT_TITLE_TOKEN_PATTERNS:
-            compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", token)
-            if compact and compact in title_key and compact not in tokens:
-                tokens.append(compact)
-        for token in self.ATTACHMENT_TITLE_FRAGMENT_PATTERNS:
-            compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", token)
-            if compact and compact in title_key and compact not in tokens:
-                tokens.append(compact)
-        return tokens or [title_key]
-
-    def _leading_title_key(self, text: str) -> str:
-        return self._attachment_title_key(text)
-
-    def _attachment_title_score(self, left: str, right: str) -> float:
-        left_key = self._attachment_title_key(left)
-        right_key = self._attachment_title_key(right)
-        if not left_key or not right_key:
-            return 0.0
-        if left_key == right_key:
-            return 1.0
-        score = SequenceMatcher(None, left_key, right_key).ratio()
-        if len(left_key) >= 4 and (left_key in right_key or right_key in left_key):
-            score = max(score, 0.92)
-
-        left_tokens = self._attachment_title_tokens(left)
-        if left_tokens:
-            matched = sum(
-                1
-                for token in left_tokens
-                if token in right_key or (len(token) >= 4 and right_key in token)
-            )
-            coverage = matched / len(left_tokens)
-            if coverage >= 1:
-                score = max(score, 0.9 if len(left_tokens) >= 2 else 0.82)
-            elif coverage >= 0.6:
-                score = max(score, 0.76)
-        return min(score, 1.0)
-
     def _attachment_title_hints(self, attachments: list[dict] | None = None) -> list[dict]:
         result, seen = [], set()
         for item in attachments or []:
@@ -572,16 +487,18 @@ class VerificationChecker:
             result.append({"attachment_number": None, "title": title, "title_key": title_key})
         return result
 
-    def _best_expected_attachment(self, text: str, expected_attachments: list[dict] | None = None) -> dict | None:
+    def _expected_attachment(self, text: str, expected_attachments: list[dict] | None = None) -> dict | None:
+        # 这里只做精确匹配：优先按附件编号，其次按归一化标题，不再按相似度猜测附件。
+        attachment_number = self._attachment_number(text)
         title_key = self._attachment_title_key(text)
-        if len(title_key) < 5:
-            return None
-        best = None
         for item in expected_attachments or []:
-            score = self._attachment_title_score(item.get("title") or item.get("title_key") or "", text)
-            if best is None or score > best["score"]:
-                best = {"score": score, "item": item}
-        return best["item"] if best and best["score"] >= 0.74 else None
+            expected_number = item.get("attachment_number")
+            expected_title_key = str(item.get("title_key") or "").strip()
+            if attachment_number and expected_number == attachment_number:
+                return item
+            if not attachment_number and title_key and expected_title_key == title_key:
+                return item
+        return None
 
     def _is_attachment_heading(self, section: dict, expected_attachments: list[dict] | None = None) -> bool:
         if section.get("type") not in {"heading", "text"}:
@@ -589,7 +506,7 @@ class VerificationChecker:
         text = str(section.get("text") or "").strip()
         if not text or self._catalog_like(text):
             return False
-        matched_expected = self._best_expected_attachment(text, expected_attachments)
+        matched_expected = self._expected_attachment(text, expected_attachments)
         attachment_number = self._attachment_number(text)
         compact = self._compact(text)
         if attachment_number is not None:
@@ -601,16 +518,109 @@ class VerificationChecker:
             return matched_expected is not None if expected_attachments else True
         if expected_attachments is None:
             return False
-        if matched_expected is not None and section.get("type") == "text":
-            leading_title_key = self._leading_title_key(text)
-            expected_title_key = str(matched_expected.get("title_key") or "").strip()
-            if expected_title_key and not (
-                leading_title_key.startswith("附件") or leading_title_key.startswith(expected_title_key)
-            ):
-                return False
         if len(compact) > (120 if section.get("type") == "heading" else 36):
             return False
         return matched_expected is not None
+
+    def _response_format_sections(self, tender_payload: dict | None) -> list[dict]:
+        payload = self._as_document(tender_payload) or {}
+        container = self._container(payload)
+        sections, _ = TemplateExtractor.preprocess_sections(
+            container.get("layout_sections", []),
+            container.get("logical_tables", []),
+            is_template=True,
+        )
+        if not sections:
+            return []
+
+        start_index = None
+        for idx, section in enumerate(sections):
+            compact = self._compact(section.get("text") or "")
+            if any(marker in compact for marker in self.RESPONSE_FORMAT_ZONE_MARKERS):
+                start_index = idx
+                break
+        if start_index is None:
+            for idx, section in enumerate(sections):
+                compact = self._compact(section.get("text") or "")
+                if any(marker in compact for marker in self.RESPONSE_FORMAT_CHAPTER_MARKERS):
+                    start_index = idx
+                    break
+        if start_index is None:
+            return []
+
+        end_index = len(sections)
+        for idx in range(start_index + 1, len(sections)):
+            section = sections[idx]
+            if str(section.get("type") or "").strip().lower() != "heading":
+                continue
+            text = str(section.get("text") or "").strip()
+            compact = self._compact(text)
+            if self.CHAPTER_HEADING_RE.match(text) and not any(
+                marker in compact for marker in self.RESPONSE_FORMAT_CHAPTER_MARKERS
+            ):
+                end_index = idx
+                break
+        return sections[start_index:end_index]
+
+    def _is_embedded_response_format_heading(self, section: dict) -> bool:
+        if str(section.get("type") or "").strip().lower() != "heading":
+            return False
+        text = str(section.get("text") or "").strip()
+        compact = self._compact(text)
+        if not compact or self._catalog_like(text):
+            return False
+        if "附件" in compact or len(compact) > 40:
+            return False
+        if "格式" not in compact:
+            return False
+        return any(marker in compact for marker in self.RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS)
+
+    def _is_response_format_attachment_heading(self, section: dict) -> bool:
+        if self._is_attachment_heading(section):
+            return True
+        return self._is_embedded_response_format_heading(section)
+
+    def _extract_response_format_attachments(self, tender_payload: dict | None) -> list[dict]:
+        sections = self._response_format_sections(tender_payload)
+        if not sections:
+            return []
+
+        starts = [
+            idx
+            for idx, section in enumerate(sections)
+            if self._is_response_format_attachment_heading(section)
+        ]
+        attachments: list[dict] = []
+        for pos, start in enumerate(starts):
+            end = starts[pos + 1] if pos + 1 < len(starts) else len(sections)
+            chunk = sections[start:end]
+            if not chunk:
+                continue
+            title = str(chunk[0].get("text") or "").strip()
+            content = [
+                str(section.get("text") or "").strip()
+                for section in chunk
+                if str(section.get("text") or "").strip()
+            ]
+            attachments.append(
+                {
+                    "attachment_number": self._attachment_number(title),
+                    "title": self._attachment_title(title),
+                    "content": content,
+                    "pages": list(
+                        dict.fromkeys(
+                            section.get("page")
+                            for section in chunk
+                            if section.get("page") is not None
+                        )
+                    ),
+                }
+            )
+        return attachments
+
+    def _is_composite_response_attachment(self, title: str) -> bool:
+        compact = self._compact(title)
+        return any(marker in compact for marker in self.RESPONSE_FORMAT_COMPOSITE_TITLE_MARKERS)
 
     def _attachment_sections(self, payload: dict | None, seal_locations: list[dict] | None = None, signature_locations: list[dict] | None = None, expected_attachments: list[dict] | None = None) -> list[dict]:
         sections = self._sections(payload)
@@ -622,7 +632,7 @@ class VerificationChecker:
             end = starts[pos + 1] if pos + 1 < len(starts) else len(sections)
             chunk = sections[start:end]
             title = chunk[0]["text"]
-            matched_expected = self._best_expected_attachment(title, expected_attachments)
+            matched_expected = self._expected_attachment(title, expected_attachments)
             attachment_number = self._attachment_number(title)
             normalized_title = self._attachment_title(title)
             if matched_expected is not None and attachment_number is None:
@@ -645,7 +655,7 @@ class VerificationChecker:
         result, seen = [], set()
         bid_by_no = bid_by_no or {}
         bid_sections = bid_sections or []
-        for item in TemplateExtractor.extract_consistency_templates(tender_payload or {}):
+        for item in self._extract_response_format_attachments(tender_payload):
             title = self._attachment_title(item.get("title"))
             text = "\n".join(item.get("content") or [])
             template_req = self._requirements(title, text)
@@ -654,6 +664,9 @@ class VerificationChecker:
             if key in seen:
                 continue
             seen.add(key)
+            # “组成及部分格式”这类总说明页不直接作为待检附件。
+            if self._is_composite_response_attachment(title):
+                continue
             probe_attachment = {
                 "attachment_number": attachment_number,
                 "title": title,
@@ -663,12 +676,13 @@ class VerificationChecker:
             bid_section = self._match_attachment(probe_attachment, bid_by_no, bid_sections)
             if bid_section is None and any(marker in title for marker in self.EXCLUDE_ATTACHMENTS):
                 continue
-            merged_req = self._merge_requirements(
-                template_req,
-                self._requirements(title, bid_section.get("text") or "") if bid_section else None,
-            )
-            if merged_req.get("is_optional") and not any(
-                merged_req.get(flag) for flag in ("requires_signature", "requires_seal", "requires_date")
+            # 只保留招标模板中明确要求签字、盖章、日期的附件。
+            if not any(
+                template_req.get(flag) for flag in ("requires_signature", "requires_seal", "requires_date")
+            ):
+                continue
+            if template_req.get("is_optional") and not any(
+                template_req.get(flag) for flag in ("requires_signature", "requires_seal", "requires_date")
             ):
                 continue
             result.append(
@@ -676,94 +690,10 @@ class VerificationChecker:
                     "attachment_number": attachment_number,
                     "title": title,
                     "text": text,
-                    "requirements": merged_req,
+                    "requirements": template_req,
                 }
             )
-        return self._apply_alternative_attachment_rules(result, bid_by_no, bid_sections)
-
-    def _apply_alternative_attachment_rules(
-        self,
-        attachments: list[dict],
-        bid_by_no: dict[str, dict] | None = None,
-        bid_sections: list[dict] | None = None,
-    ) -> list[dict]:
-        if not attachments:
-            return attachments
-
-        bid_by_no = bid_by_no or {}
-        bid_sections = bid_sections or []
-
-        certificate_idx = None
-        authorization_idx = None
-        for idx, item in enumerate(attachments):
-            title_key = self._attachment_title_key(item.get("title") or "")
-            if not title_key:
-                continue
-            if certificate_idx is None and "法定代表人证明书" in title_key:
-                certificate_idx = idx
-            if authorization_idx is None and "授权委托书" in title_key:
-                authorization_idx = idx
-
-        if certificate_idx is None or authorization_idx is None:
-            return attachments
-
-        certificate_attachment = attachments[certificate_idx]
-        authorization_attachment = attachments[authorization_idx]
-        certificate_found = self._match_attachment(certificate_attachment, bid_by_no, bid_sections) is not None
-        authorization_found = self._match_attachment(authorization_attachment, bid_by_no, bid_sections) is not None
-
-        if certificate_found and authorization_found:
-            return attachments
-
-        if certificate_found != authorization_found:
-            drop_idx = authorization_idx if certificate_found else certificate_idx
-            return [item for idx, item in enumerate(attachments) if idx != drop_idx]
-
-        merged = {
-            "attachment_number": None,
-            "title": "法定代表人资格证明书/授权委托书",
-            "text": "\n".join(
-                part
-                for part in (
-                    str(certificate_attachment.get("text") or "").strip(),
-                    str(authorization_attachment.get("text") or "").strip(),
-                )
-                if part
-            ),
-            "requirements": self._merge_requirements(
-                certificate_attachment.get("requirements"),
-                authorization_attachment.get("requirements"),
-            ),
-        }
-
-        result: list[dict] = []
-        for idx, item in enumerate(attachments):
-            if idx == certificate_idx:
-                result.append(merged)
-                continue
-            if idx == authorization_idx:
-                continue
-            result.append(item)
         return result
-
-    def _merge_requirements(self, primary: dict | None, secondary: dict | None) -> dict:
-        base = dict(primary or {})
-        other = dict(secondary or {})
-
-        signature_examples = list(dict.fromkeys((base.get("signature_field_examples") or []) + (other.get("signature_field_examples") or [])))
-        seal_examples = list(dict.fromkeys((base.get("seal_field_examples") or []) + (other.get("seal_field_examples") or [])))
-        date_examples = list(dict.fromkeys((base.get("date_field_examples") or []) + (other.get("date_field_examples") or [])))
-
-        return {
-            "requires_signature": bool(base.get("requires_signature")),
-            "signature_field_count": int(base.get("signature_field_count") or 0),
-            "signature_field_examples": signature_examples[:3],
-            "requires_seal": bool(base.get("requires_seal")),
-            "seal_field_examples": seal_examples[:3],
-            "requires_date": bool(base.get("requires_date")),
-            "date_field_examples": date_examples[:3],
-            "is_optional": bool(base.get("is_optional")),
-        }
 
     def _requirements(self, title: str, text: str) -> dict:
         lines = self._lines(text)
@@ -808,19 +738,19 @@ class VerificationChecker:
         return len(compact) <= 40 or "underline" in compact.lower() or bool(self._date_candidates(text))
 
     def _match_attachment(self, attachment: dict, bid_by_no: dict[str, dict], all_sections: list[dict]) -> dict | None:
-        if attachment.get("attachment_number") in bid_by_no:
-            return bid_by_no[attachment["attachment_number"]]
+        # 投标文件侧同样只做精确匹配，未命中时直接返回，不再做模糊兜底。
         attachment_number = attachment.get("attachment_number")
-        title = self._attachment_title(attachment["title"])
-        best = None
+        if attachment_number in bid_by_no:
+            return bid_by_no[attachment_number]
+        if attachment_number:
+            return None
+        title_key = self._attachment_title_key(attachment.get("title") or "")
+        if not title_key:
+            return None
         for section in all_sections:
-            section_number = section.get("attachment_number")
-            if attachment_number is not None and section_number not in (None, attachment_number):
-                continue
-            score = self._attachment_title_score(title, section.get("title") or "")
-            if best is None or score > best["score"]:
-                best = {"score": score, "section": section}
-        return best["section"] if best and best["score"] >= 0.68 else None
+            if self._attachment_title_key(section.get("title") or "") == title_key:
+                return section
+        return None
 
     def _evaluate_attachment(self, attachment: dict, bid_section: dict | None, deadline: dict | None, bidder_name: str | None) -> dict:
         seal_check = self._seal_check(attachment, bid_section, bidder_name)

@@ -106,22 +106,36 @@ class ResultNormalizerMixin:
         for segment in segments:
             title = str(segment.get("name") or "未命名模板段")
             missing = segment.get("missing_anchors") or []
-            evidence = {"missing_anchors": missing}
+            unfilled_fields = segment.get("unfilled_fields") or []
+            evidence = {
+                "missing_anchors": missing,
+                "unfilled_fields": unfilled_fields,
+                "fillable_field_count": segment.get("fillable_field_count"),
+            }
             if segment.get("is_passed"):
                 passed.append(
                     self._issue(
                         status="pass",
                         title=title,
-                        message="模板关键锚点齐全。",
+                        message="模板固定正文保留且填写项已补全。",
                         evidence=evidence,
                     )
                 )
             else:
+                parts = []
+                if missing:
+                    parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
+                if unfilled_fields:
+                    labels = [
+                        str(item.get("label") or item.get("template_line") or "填写项")
+                        for item in unfilled_fields
+                    ]
+                    parts.append(f"未填写字段：{self._join_text(labels)}")
                 failed.append(
                     self._issue(
                         status="fail",
                         title=title,
-                        message=f"缺少模板锚点：{self._join_text(missing)}",
+                        message="；".join(parts) or "模板正文或填写项存在缺失。",
                         evidence=evidence,
                     )
                 )
@@ -164,6 +178,8 @@ class ResultNormalizerMixin:
                 "skipped_segment_count": len(skipped_segments),
                 "passed_segment_count": len(passed),
                 "failed_segment_count": len(failed),
+                "fillable_field_count": sum(int(segment.get("fillable_field_count") or 0) for segment in segments),
+                "unfilled_field_count": sum(len(segment.get("unfilled_fields") or []) for segment in segments),
             },
             "issues": {"passed": passed, "failed": failed, "unclear": []},
         }

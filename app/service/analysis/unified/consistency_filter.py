@@ -158,38 +158,14 @@ class ConsistencyFilterMixin:
     def _integrity_missing_tokens(self, item_name: str, detail: dict[str, Any]) -> set[str]:
         """从完整性缺失项中提取用于匹配的 token 集合。"""
         tokens: set[str] = set()
-        status_text = str(detail.get("status") or "")
-        normalized_item = self._normalize_match_text(item_name)
-        normalized_status = self._normalize_match_text(status_text)
 
+        # 这里只保留当前完整性结果中的附件编号和标题，不再兼容历史合并附件状态。
         for attachment_ref in self._extract_attachment_refs(item_name):
             tokens.add(self._normalize_match_text(attachment_ref))
 
         simplified_title = self._simplify_integrity_item_title(item_name)
         if simplified_title:
             tokens.add(self._normalize_match_text(simplified_title))
-
-        if (
-            "法定代表人" in normalized_item
-            and "证明书" in normalized_item
-            and "授权委托书" in normalized_item
-        ):
-            missing_certificate = "缺失证明书" in normalized_status or (
-                "缺失" in normalized_status
-                and "证明书" in normalized_status
-                and "授权" in normalized_status
-            )
-            missing_authorization = "缺失授权委托书" in normalized_status or (
-                "缺失" in normalized_status
-                and "授权" in normalized_status
-                and "证明书" in normalized_status
-            )
-            if missing_certificate:
-                tokens.add(self._normalize_match_text("附件 7-1"))
-                tokens.add(self._normalize_match_text("法定代表人资格证明书"))
-            if missing_authorization:
-                tokens.add(self._normalize_match_text("附件 7-2"))
-                tokens.add(self._normalize_match_text("法定代表人授权委托书"))
 
         return {token for token in tokens if token}
 

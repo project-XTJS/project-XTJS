@@ -31,13 +31,6 @@ class IntegrityChecker:
         ],
     }
 
-    # 可选章节的关键词
-    OPTIONAL_ITEM_KEYWORDS = (
-        "参选人认为需加以说明的其他内容",
-        "投标人认为需加以说明的其他内容",
-        "应答人认为需加以说明的其他内容",
-    )
-
     # 标题前缀模式（用于去除编号）
     PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
@@ -124,38 +117,8 @@ class IntegrityChecker:
     # 判断是否为可选条目
     def _is_optional_item(self, item: str) -> bool:
         normalized = str(item or "").strip()
-        return "如有" in normalized or any(keyword in normalized for keyword in self.OPTIONAL_ITEM_KEYWORDS)
-
-    # 父项放宽：若所有子项齐全，则父项也视为通过
-    def _apply_parent_relaxation(self, ordered_items: list[str], details: dict[str, dict]) -> None:
-        current_main = None
-        child_items: list[str] = []
-
-        def finalize_current() -> None:
-            if not current_main or not child_items:
-                return
-            main_detail = details.get(current_main) or {}
-            child_all_passed = all((details.get(child) or {}).get("is_passed") for child in child_items)
-            details[current_main] = {
-                **main_detail,
-                "status": "子附件齐全" if child_all_passed else "子附件不齐全",
-                "preview": "；".join(child_items),
-                "is_passed": child_all_passed,
-                "scored": False,
-                "covered_by_child_items": True,
-                "child_items": child_items[:],
-            }
-
-        for item in ordered_items:
-            if self._is_sub_item(item):
-                if current_main is not None:
-                    child_items.append(item)
-                continue
-            finalize_current()
-            current_main = item
-            child_items = []
-
-        finalize_current()
+        # 完整性阶段只有标题本身带“如有”才允许缺失。
+        return "如有" in normalized
 
     # 从 section 中提取位置信息
     def _location_from_section(self, section: dict | None) -> dict[str, Any] | None:
@@ -193,11 +156,6 @@ class IntegrityChecker:
                     return sec
         return None
 
-    # 查找指定关键词的标题文本（仅返回文本）
-    def _find_heading(self, sections: list, headers: set, keyword: str) -> str:
-        section = self._find_heading_section(sections, headers, keyword)
-        return str(section.get("text") or "") if isinstance(section, dict) else None
-
     # 主校验入口
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:
         """
@@ -213,53 +171,7 @@ class IntegrityChecker:
             is_sub = self._is_sub_item(item)
             cat = "资格证明子项" if is_sub else "商务标主项"
 
-            # 特殊处理：法定代表人证明书和授权委托书互为替代
-            if "法定代表人" in item and "证明书" in item:
-                zm_section = self._find_heading_section(sections, headers, "法定代表人证明书")
-                sq_section = self._find_heading_section(sections, headers, "授权委托书")
-                zm_match = str(zm_section.get("text") or "") if isinstance(zm_section, dict) else None
-                sq_match = str(sq_section.get("text") or "") if isinstance(sq_section, dict) else None
-
-                if not zm_match or not sq_match:
-                    for sec in sections:
-                        text = sec['text']
-                        if TemplateExtractor._is_noise(text, headers, sec.get('type')):
-                            continue
-                        clean_text = text.replace(' ', '')
-                        if not zm_match and ("法定代表人" in clean_text or "法人" in clean_text) and "证明" in clean_text:
-                            zm_section = sec
-                            zm_match = text
-                        if not sq_match and ("法定代表人" in clean_text or "法人" in clean_text or "委托" in clean_text) and "授权" in clean_text:
-                            sq_section = sec
-                            sq_match = text
-
-                if zm_match and sq_match:
-                    status, preview, is_passed = "已找到证明书及授权委托书", f"{zm_match} | {sq_match}", True
-                elif zm_match:
-                    status, preview, is_passed = "已找到法定代表人证明书", zm_match, True
-                elif sq_match:
-                    status, preview, is_passed = "已找到法定代表人授权委托书", sq_match, True
-                else:
-                    status, preview, is_passed = "缺失法定代表人证明书/授权委托书", "-", False
-
-                all_details[item] = {
-                    "status": status,
-                    "preview": preview,
-                    "is_passed": is_passed,
-                    "category": cat,
-                    "scored": True,
-                    "locations": [
-                        location
-                        for location in (
-                            self._location_from_section(zm_section),
-                            self._location_from_section(sq_section),
-                        )
-                        if location is not None
-                    ],
-                }
-                continue
-
-            # 普通条目匹配
+            # 每个附件单独判断，不再允许证明书/授权委托书互替，也不再做父子项放宽。
             norm_item = self._normalize_target(item)
             match_section = self._find_heading_section(sections, headers, norm_item)
             match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
@@ -277,9 +189,6 @@ class IntegrityChecker:
                 "scored": True,
                 "locations": [self._location_from_section(match_section)] if match_section else [],
             }
-
-        # 父子项逻辑：全子项通过则父项视为通过
-        self._apply_parent_relaxation(reqs, all_details)
 
         scored_details = [v for v in all_details.values() if v.get("scored", True)]
         passed = len([v for v in scored_details if v['is_passed']])

@@ -142,10 +142,9 @@ class ExtractionTablesMixin:
         for template in TemplateExtractor.extract_consistency_templates(tender_payload or {}):
             title = str(template.get("title") or "").strip() or "unnamed_template"
             content_text = "\n".join(template.get("content") or [])
-            body = self.consistency_checker._trim_non_body_lines(
-                self.consistency_checker._strip_title_line(content_text, title)
-            )
-            anchors = self.consistency_checker._get_anchors(body)
+            analysis = self.consistency_checker._analyze_template_segment(title, content_text)
+            anchors = analysis.get("anchors") or []
+            fill_specs = analysis.get("fill_specs") or []
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -157,11 +156,19 @@ class ExtractionTablesMixin:
                     value={
                         "anchor_count": len(anchors),
                         "anchor_sample": anchors[:8],
+                        "fillable_field_count": len(fill_specs),
+                        "fillable_field_sample": [
+                            str(item.get("display_label") or item.get("template_line") or "").strip()
+                            for item in fill_specs[:5]
+                        ],
                     },
                     status="extracted",
                     expected_document_role="business",
                     evidence={
-                        "content_preview": self._trim_text(body or content_text, max_length=200),
+                        "content_preview": self._trim_text(
+                            analysis.get("anchor_source") or analysis.get("body") or content_text,
+                            max_length=200,
+                        ),
                     },
                 )
             )
@@ -381,7 +388,10 @@ class ExtractionTablesMixin:
                     check_code="consistency_check",
                     field_group="template_segment",
                     field_name=str(segment.get("name") or "template_segment"),
-                    value={"missing_anchors": list(segment.get("missing_anchors") or [])},
+                    value={
+                        "missing_anchors": list(segment.get("missing_anchors") or []),
+                        "unfilled_fields": list(segment.get("unfilled_fields") or []),
+                    },
                     status="pass" if segment.get("is_passed") else "fail",
                 )
             )
@@ -394,7 +404,10 @@ class ExtractionTablesMixin:
                     check_code="consistency_check",
                     field_group="template_segment",
                     field_name=str(segment.get("name") or "template_segment"),
-                    value={"missing_anchors": list(segment.get("missing_anchors") or [])},
+                    value={
+                        "missing_anchors": list(segment.get("missing_anchors") or []),
+                        "unfilled_fields": list(segment.get("unfilled_fields") or []),
+                    },
                     status="skipped",
                     evidence={"skip_reason": segment.get("skip_reason")},
                 )

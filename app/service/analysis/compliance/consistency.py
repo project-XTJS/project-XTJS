@@ -1,295 +1,16 @@
-# -*- coding: utf-8 -*-
 """
-文档一致性检查模块。
+??????????
 
-包含段落处理器（DocumentProcessor）和一致性校验器（ConsistencyChecker），
-用于将投标文件按模板切分段落，并比对招标模型与投标文件之间的内容一致性。
+??????????????????????????????????
+???????????
 """
 
 import re
-from difflib import SequenceMatcher
 from typing import List, Dict
 
 from .template_extractor import TemplateExtractor 
 from ..verification import VerificationChecker
 
-
-class DocumentProcessor:
-    """段落处理器：将投标文件段落按模板标题进行匹配与切分。"""
-
-    # 可识别的标题关键词（用于匹配模板）
-    TITLE_TOKEN_PATTERNS = (
-        "法定代表人授权委托书",
-        "法定代表人资格证明书",
-        "法定代表人证明书",
-        "法定代表人身份证明",
-        "单位负责人证明书",
-        "单位负责人身份证明",
-        "类似项目业绩清单",
-        "投标人基本情况介绍",
-        "供应商承诺声明函",
-        "不参与围标串标承诺书",
-        "保证金缴纳凭证",
-        "财务状况及税收社会保障资金缴纳情况声明函",
-        "财务状况声明函",
-        "社会保障资金缴纳情况声明函",
-        "制造商声明函",
-        "制造商授权书",
-        "原厂授权函",
-        "营业执照",
-        "法人登记证书",
-        "分项报价表",
-        "商务条款偏离表",
-        "技术条款偏离表",
-        "开标一览表",
-        "投标保证书",
-        "拟派项目负责人情况表",
-        "项目人员配置表",
-        "授权委托书",
-        "证明书",
-        "声明函",
-        "承诺书",
-        "保证书",
-        "一览表",
-        "报价表",
-        "偏离表",
-        "情况表",
-        "配置表",
-        "清单",
-        "凭证",
-        "执照",
-    )
-
-    # 标题前缀模式（如“附件1”、“第一章”、“1.”等）
-    TITLE_PREFIX_PATTERNS = (
-        r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
-        r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
-        r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
-        r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
-        r'^\s*\d+[)）]\s*',
-    )
-
-    # 标题中需要移除的噪声内容
-    TITLE_NOISE_PATTERNS = (
-        r'附件|附表|附录|格式',
-        r'按要求加盖公章',
-        r'加盖公章',
-        r'后附证明材料',
-        r'直接投标的应提供',
-        r'委托授权人投标的应提供',
-        r'委托授权投标的应提供',
-        r'及被授权人身份证',
-        r'及身份证',
-        r'如为分支机构投标则须总公司唯一授权函',
-    )
-
-    # 标题关键词片段（用于 token 提取）
-    TITLE_FRAGMENT_PATTERNS = (
-        "法定代表人",
-        "单位负责人",
-        "授权委托书",
-        "证明书",
-        "声明函",
-        "承诺书",
-        "保证书",
-        "一览表",
-        "报价表",
-        "偏离表",
-        "情况表",
-        "配置表",
-        "清单",
-        "凭证",
-        "执照",
-        "财务状况",
-        "社会保障资金",
-        "税收",
-        "保证金",
-        "投标人基本情况",
-        "类似项目业绩",
-        "营业执照",
-        "劳动合同",
-        "社保",
-    )
-
-    @classmethod
-    def _strip_title_prefix(cls, text: str) -> str:
-        """反复移除标题前缀，直到结果不再变化。"""
-        value = str(text or "").strip()
-        previous = None
-        while value and value != previous:
-            previous = value
-            for pattern in cls.TITLE_PREFIX_PATTERNS:
-                value = re.sub(pattern, '', value).strip()
-        return value
-
-    @classmethod
-    def _normalize_title_key(cls, text: str) -> str:
-        """将标题归一化为关键词（去噪、去括号、标准化）。"""
-        value = cls._strip_title_prefix(text)
-        value = re.sub(r'\(.*?\)|（.*?）', ' ', value)
-        value = re.split(r'[；;。]', value, maxsplit=1)[0]
-        # 同义词标准化
-        for pattern, repl in (
-            (r'法定代表人资格证明书', '法定代表人证明书'),
-            (r'法定代表人身份证明', '法定代表人证明书'),
-            (r'单位负责人身份证明', '单位负责人证明书'),
-            (r'授权委托书及被授权人身份证', '授权委托书'),
-        ):
-            value = re.sub(pattern, repl, value)
-        for pattern in cls.TITLE_NOISE_PATTERNS:
-            value = re.sub(pattern, '', value)
-        return re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', value)
-
-    @classmethod
-    def _title_tokens(cls, text: str) -> List[str]:
-        """提取标题中的关键词 token 列表。"""
-        title_key = cls._normalize_title_key(text)
-        if not title_key:
-            return []
-        tokens = []
-        for token in cls.TITLE_TOKEN_PATTERNS:
-            compact = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', token)
-            if compact and compact in title_key and compact not in tokens:
-                tokens.append(compact)
-        for token in cls.TITLE_FRAGMENT_PATTERNS:
-            compact = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', token)
-            if compact and compact in title_key and compact not in tokens:
-                tokens.append(compact)
-        return tokens or [title_key]
-
-    @classmethod
-    def _title_match_score(cls, left: str, right: str) -> float:
-        """计算两个标题的相似度评分（0~1）。"""
-        left_key = cls._normalize_title_key(left)
-        right_key = cls._normalize_title_key(right)
-        if not left_key or not right_key:
-            return 0.0
-        if left_key == right_key:
-            return 1.0
-
-        score = SequenceMatcher(None, left_key, right_key).ratio()
-        if len(left_key) >= 4 and (left_key in right_key or right_key in left_key):
-            score = max(score, 0.92)
-
-        left_tokens = cls._title_tokens(left)
-        if left_tokens:
-            matched = sum(
-                1
-                for token in left_tokens
-                if token in right_key or (len(token) >= 4 and right_key in token)
-            )
-            coverage = matched / len(left_tokens)
-            if coverage >= 1:
-                score = max(score, 0.9 if len(left_tokens) >= 2 else 0.82)
-            elif coverage >= 0.6:
-                score = max(score, 0.76)
-        return min(score, 1.0)
-
-    @classmethod
-    def _compile_template_patterns(cls, templates: List[Dict]) -> None:
-        """为每个模板预编译正则表达式，加速后续标题匹配。"""
-        for temp in templates:
-            core = cls._normalize_title_key(temp['title'])
-            temp['title_key'] = core
-            temp['title_tokens'] = cls._title_tokens(temp['title'])
-            if core:
-                prefix = r'[\s\-_]*'.join(list(core[:min(6, len(core))]))
-                temp['pattern'] = re.compile(r'^.{0,30}?' + prefix)
-            else:
-                temp['pattern'] = None
-            temp['buffer'] = []
-            temp['extracted_text'] = ""
-
-    @classmethod
-    def _find_matching_template_idx(cls, clean_text: str, templates: List[Dict], current_idx: int) -> int:
-        """在模板列表中查找与当前文本最匹配的模板索引，支持乱序查找。"""
-        # 优先向后找，再向前找（兼容乱序）
-        search_order = list(range(current_idx + 1, len(templates)))
-        search_order.extend(range(0, current_idx + 1))
-
-        best = None
-        for j in search_order:
-            score = cls._title_match_score(templates[j].get('title') or "", clean_text)
-            pattern = templates[j].get('pattern')
-            if pattern is not None and pattern.search(clean_text):
-                score = max(score, 0.88)
-            if best is None or score > best['score']:
-                best = {"score": score, "index": j}
-        return best['index'] if best and best['score'] >= 0.76 else -1
-
-    @classmethod
-    def segment_document(cls, raw_json: dict, templates: list, is_test_file: bool = False) -> List[Dict]:
-        """将文档段落按模板切分，返回每个模板对应的 {title, text} 列表。"""
-        data_node = raw_json.get('data', raw_json)
-        logical_tables = data_node.get('logical_tables', [])
-        sections, headers = TemplateExtractor.preprocess_sections(
-            data_node.get('layout_sections', []), 
-            logical_tables
-        )
-        
-        cls._compile_template_patterns(templates)
-        current_idx = -1  # 当前已匹配的模板索引，-1 表示未匹配
-
-        for sec in sections:
-            text = sec['text']
-            # 跳过噪声段落
-            if not text or TemplateExtractor._is_noise(text, headers, sec.get('type')) or (sec.get('type') == 'text' and text.strip().isdigit()): 
-                continue
-                
-            clean_text = re.sub(r'\s+', '', text)
-            short_text_candidate = (
-                sec['type'] == 'text'
-                and len(clean_text) <= 60
-                and any(
-                    marker in clean_text
-                    for marker in ("一览表", "报价表", "偏离表", "情况表", "配置表", "保证书", "证明书", "委托书", "声明函", "承诺书", "清单", "凭证", "执照", "介绍", "授权")
-                )
-            )
-
-            if sec['type'] == 'heading' or short_text_candidate:
-                is_potential_title = True if sec['type'] == 'heading' and is_test_file else (
-                    short_text_candidate or bool(TemplateExtractor.RE_HEADING_START.search(text))
-                )
-
-                if is_potential_title:
-                    matched_idx = cls._find_matching_template_idx(clean_text, templates, current_idx)
-                
-                    if matched_idx != -1:
-                        # 防止相同模板因为重复标题而无限累积
-                        if len(templates[matched_idx]['buffer']) > 3: 
-                            if current_idx != -1: 
-                                templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
-                            current_idx = -1
-                            continue
-                        
-                        # 切换模板状态：保存上一个模板的内容，开始新模板
-                        if current_idx != -1: 
-                            templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
-                        
-                        current_idx = matched_idx
-                        templates[current_idx]['buffer'] = [text]
-                        continue
-                    
-                    elif current_idx != -1 and re.match(r'^[一二三四五六七八九十百]+[、．]', text.strip()):
-                        templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
-                        current_idx = -1
-                        continue
-                
-                # 遇到大章节断点，终止当前模板的收集
-                is_chapter_break = re.search(r'^第[一二三四五六七八九十百]+[章节部分]', text) or "技术文件" in text
-                if current_idx != -1 and is_chapter_break:
-                    templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
-                    current_idx = -1
-
-            # 将当前正文追加到已匹配模板的缓冲区
-            if current_idx != -1: 
-                templates[current_idx]['buffer'].append(text)
-
-        # 收尾最后一个模板
-        if current_idx != -1: 
-            templates[current_idx]['extracted_text'] = "\n".join(templates[current_idx]['buffer'])
-            
-        return [{"title": t['title'], "text": t['extracted_text']} for t in templates]
 
 
 class ConsistencyChecker:
@@ -318,6 +39,12 @@ class ConsistencyChecker:
     )
     # 注释/说明引导行
     NOTE_LEAD_RE = re.compile(r"^\s*(?:注|说明)\s*[:：]?\s*$")
+    PLACEHOLDER_SPAN_RE = re.compile(
+        r"_{2,}(?:[（(][^()（）\n]{0,40}[）)])?_{2,}"
+        r"|_{2,}"
+        r"|(?:…|\.|·){3,}"
+        r"|[（(]\s*[)）]"
+    )
 
     def __init__(self):
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
@@ -526,6 +253,265 @@ class ConsistencyChecker:
             )
         return locations
 
+    def _plain_text(self, text: str) -> str:
+        value = str(text or "").replace("\u3000", " ").replace("\xa0", " ")
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        value = re.sub(r"[ \t\f\v]+", " ", value)
+        return value.strip()
+
+    def _compact_text(self, text: str) -> str:
+        return re.sub(r"\s+", "", self._plain_text(text))
+
+    def _body_lines(self, text: str) -> List[str]:
+        return [self._plain_text(line) for line in str(text or "").splitlines() if self._plain_text(line)]
+
+    def _strip_placeholder_hints(self, line: str) -> str:
+        stripped = self._plain_text(line)
+        stripped = self.PLACEHOLDER_SPAN_RE.sub("", stripped)
+        stripped = re.sub(r"[（(]\s*[)）]", "", stripped)
+        stripped = re.sub(r"\s+", " ", stripped)
+        return stripped.strip()
+
+    def _looks_like_table_line(self, line: str) -> bool:
+        return "|" in str(line or "") and str(line or "").count("|") >= 2
+
+    def _is_effectively_filled_value(self, value: str, hint: str = "") -> bool:
+        raw = self._plain_text(value)
+        if not raw:
+            return False
+        normalized = raw
+        for token in ("\\underline", "\\text", "underline", "text"):
+            normalized = normalized.replace(token, "")
+        normalized = re.sub(r"_{2,}|(?:…|\.|·){3,}", "", normalized)
+        normalized = re.sub(r"[（()）\[\]{}<>$\\]", "", normalized)
+        compact = self._normalize(normalized)
+        if not compact:
+            return False
+        hint_key = self._normalize(hint)
+        if hint_key and compact == hint_key:
+            return False
+        if compact in {"年月日", "年月", "月日", "日期", "签字", "盖章", "签字盖章"}:
+            return False
+        return True
+
+    def _is_fillable_line(self, line: str) -> bool:
+        text = self._plain_text(line)
+        if not text or self._looks_like_table_line(text):
+            return False
+        compact = self._compact_text(text)
+        if not compact or self.NOTE_LEAD_RE.match(text):
+            return False
+        if self.PLACEHOLDER_SPAN_RE.search(compact):
+            return True
+        if re.search(r"[：:]\s*$", text):
+            return True
+        if "：" in text or ":" in text:
+            _, value = re.split(r"[:：]", text, maxsplit=1)
+            return not self._is_effectively_filled_value(value)
+        return False
+
+    def _build_fill_spec(self, line: str) -> dict | None:
+        text = self._plain_text(line)
+        if not self._is_fillable_line(text):
+            return None
+
+        compact = self._compact_text(text)
+        placeholder_matches = list(self.PLACEHOLDER_SPAN_RE.finditer(compact))
+        anchor_text = self._strip_placeholder_hints(text) or text
+        anchor_key = self._normalize(anchor_text)
+        if any(
+            marker in anchor_key
+            for marker in (
+                "总报价", "不含税总价", "含税总价", "人民币",
+                "盖章", "签字", "签章", "比选响应单位", "参选人名称", "供应商名称",
+                "法定代表人签字", "授权代表签字",
+            )
+        ):
+            return None
+
+        if placeholder_matches:
+            # 长段落中的占位符更适合只做“固定正文”比对，不宜按逐空位强校验。
+            if len(compact) > 80 or len(placeholder_matches) > 2:
+                return None
+            pattern_parts: list[str] = []
+            placeholders: list[dict] = []
+            cursor = 0
+            for index, match in enumerate(placeholder_matches):
+                pattern_parts.append(re.escape(compact[cursor:match.start()]))
+                group_name = f"fill_{index}"
+                pattern_parts.append(f"(?P<{group_name}>.*?)")
+                raw_placeholder = match.group(0)
+                hint = re.sub(r"_{2,}|[.…·（）()]", "", raw_placeholder)
+                placeholders.append(
+                    {
+                        "name": group_name,
+                        "hint": self._plain_text(hint),
+                    }
+                )
+                cursor = match.end()
+            pattern_parts.append(re.escape(compact[cursor:]))
+            return {
+                "kind": "placeholder",
+                "template_line": text,
+                "display_label": anchor_text,
+                "anchor_text": anchor_text,
+                "anchor_key": anchor_key,
+                "pattern": re.compile("^" + "".join(pattern_parts) + "$"),
+                "placeholders": placeholders,
+            }
+
+        bracket_hints = re.findall(r"[（(]([^()（）]{1,40})[）)]", text)
+        if bracket_hints and re.search(r"[：:]\s*$", text):
+            pattern_source = re.escape(compact)
+            placeholders: list[dict] = []
+            for index, hint in enumerate(bracket_hints):
+                token = re.escape(self._compact_text(f"（{hint}）"))
+                if token not in pattern_source:
+                    token = re.escape(self._compact_text(f"({hint})"))
+                group_name = f"fill_{index}"
+                pattern_source = pattern_source.replace(token, f"(?P<{group_name}>.*?)", 1)
+                placeholders.append({"name": group_name, "hint": hint})
+            return {
+                "kind": "placeholder",
+                "template_line": text,
+                "display_label": re.sub(r"[（(][^()（）]{1,40}[）)]", "", anchor_text).strip() or anchor_text,
+                "anchor_text": re.sub(r"[（(][^()（）]{1,40}[）)]", "", anchor_text).strip() or anchor_text,
+                "anchor_key": self._normalize(re.sub(r"[（(][^()（）]{1,40}[）)]", "", anchor_text)),
+                "pattern": re.compile("^" + pattern_source + "$"),
+                "placeholders": placeholders,
+            }
+
+        label, _ = re.split(r"[:：]", text, maxsplit=1)
+        label = re.sub(r"[（(][^()（）]{0,40}[）)]", "", label)
+        label = self._plain_text(label)
+        normalized_label = self._normalize(label)
+        if re.match(r"^(?:[（(]?[一二三四五六七八九十\d]+[)）]?)", label) and len(normalized_label) <= 8:
+            return None
+        if normalized_label in {"基本情况", "基本经济指标", "其他情况"}:
+            return None
+        return {
+            "kind": "suffix",
+            "template_line": text,
+            "display_label": label or text,
+            "anchor_text": anchor_text,
+            "anchor_key": anchor_key,
+            "label_key": self._normalize(label or text),
+        }
+
+    def _analyze_template_segment(self, title: str, text: str) -> dict:
+        body = self._trim_instruction_note_block(
+            self._trim_non_body_lines(self._strip_title_line(text, title))
+        )
+        fill_specs: list[dict] = []
+        anchor_lines: list[str] = []
+        for line in self._body_lines(body):
+            fill_spec = self._build_fill_spec(line)
+            if fill_spec is not None:
+                fill_specs.append(fill_spec)
+                anchor_lines.append(fill_spec.get("anchor_text") or line)
+            else:
+                anchor_lines.append(line)
+        anchor_source = "\n".join(anchor_lines)
+        return {
+            "body": body,
+            "anchor_source": anchor_source,
+            "anchors": self._get_anchors(anchor_source),
+            "fill_specs": fill_specs,
+        }
+
+    def _evaluate_placeholder_fill_spec(self, fill_spec: dict, bid_lines: List[str]) -> dict | None:
+        best_match: dict | None = None
+        for line in bid_lines:
+            compact_line = self._compact_text(line)
+            if not compact_line:
+                continue
+            match = fill_spec["pattern"].fullmatch(compact_line)
+            if match is not None:
+                missing_labels = []
+                for index, placeholder in enumerate(fill_spec.get("placeholders") or [], start=1):
+                    value = match.group(placeholder["name"])
+                    if self._is_effectively_filled_value(value, placeholder.get("hint") or ""):
+                        continue
+                    missing_labels.append(placeholder.get("hint") or f"填写项{index}")
+                candidate = {
+                    "line": line,
+                    "missing_labels": missing_labels,
+                    "matched": True,
+                }
+                if best_match is None or len(missing_labels) < len(best_match.get("missing_labels") or []):
+                    best_match = candidate
+                if not missing_labels:
+                    break
+                continue
+
+            anchor_key = str(fill_spec.get("anchor_key") or "").strip()
+            if anchor_key and anchor_key in self._normalize(line) and best_match is None:
+                best_match = {
+                    "line": line,
+                    "missing_labels": [],
+                    "matched": False,
+                }
+
+        if best_match is None:
+            return {
+                "label": fill_spec.get("display_label") or fill_spec.get("template_line") or "填写项",
+                "reason": "field_line_not_found",
+                "template_line": fill_spec.get("template_line"),
+            }
+        if best_match["matched"] and not best_match["missing_labels"]:
+            return None
+        return {
+            "label": fill_spec.get("display_label") or fill_spec.get("template_line") or "填写项",
+            "reason": "field_value_missing" if best_match["matched"] else "field_line_not_stably_matched",
+            "template_line": fill_spec.get("template_line"),
+            "bid_line": best_match.get("line"),
+            "missing_labels": best_match.get("missing_labels") or [],
+        }
+
+    def _evaluate_suffix_fill_spec(self, fill_spec: dict, bid_lines: List[str]) -> dict | None:
+        label_key = str(fill_spec.get("label_key") or "").strip()
+        for index, line in enumerate(bid_lines):
+            normalized_line = self._normalize(line)
+            if label_key and label_key not in normalized_line:
+                continue
+
+            value = ""
+            if "：" in line or ":" in line:
+                _, value = re.split(r"[:：]", line, maxsplit=1)
+            if self._is_effectively_filled_value(value):
+                return None
+
+            next_line = bid_lines[index + 1] if index + 1 < len(bid_lines) else ""
+            if next_line and not self._is_fillable_line(next_line) and self._is_effectively_filled_value(next_line):
+                return None
+
+            return {
+                "label": fill_spec.get("display_label") or fill_spec.get("template_line") or "填写项",
+                "reason": "field_value_missing",
+                "template_line": fill_spec.get("template_line"),
+                "bid_line": line,
+            }
+
+        return {
+            "label": fill_spec.get("display_label") or fill_spec.get("template_line") or "填写项",
+            "reason": "field_line_not_found",
+            "template_line": fill_spec.get("template_line"),
+        }
+
+    def _evaluate_fill_specs(self, fill_specs: List[dict], bid_body: str) -> List[Dict]:
+        if not fill_specs:
+            return []
+        bid_lines = self._body_lines(bid_body)
+        unfilled_fields: List[Dict] = []
+        for fill_spec in fill_specs:
+            if fill_spec.get("kind") == "placeholder":
+                result = self._evaluate_placeholder_fill_spec(fill_spec, bid_lines)
+            else:
+                result = self._evaluate_suffix_fill_spec(fill_spec, bid_lines)
+            if result is not None:
+                unfilled_fields.append(result)
+        return unfilled_fields
+
     def _get_anchors(self, text: str) -> List[str]:
         """从文本中提取用于比对的锚点词（长度>=2的中英文词）。"""
         text = re.sub(r'\(.*?\)|（.*?）', ' ', text)
@@ -546,92 +532,70 @@ class ConsistencyChecker:
         返回每个模板的通过状态及缺失锚点列表。
         """
         temps = TemplateExtractor.extract_consistency_templates(model_json)
-        model_segments = [{"title": t['title'], "text": "\n".join(t['content'])} for t in temps]
-        test_segments = DocumentProcessor.segment_document(test_json, temps, is_test_file=True)
+        model_segments = [
+            {
+                "title": t["title"],
+                "text": "\n".join(t.get("content") or []),
+                "is_optional": bool(t.get("is_optional")),
+            }
+            for t in temps
+        ]
         bid_by_no, bid_sections = self._build_attachment_lookup(test_json, model_segments)
 
         results = []
-        for i, m_seg in enumerate(model_segments):
-            m_txt = m_seg['text']
-            title = m_seg['title']
-            fallback_txt = test_segments[i]['text']
+        for m_seg in model_segments:
+            m_txt = m_seg["text"]
+            title = m_seg["title"]
+            is_optional = bool(m_seg.get("is_optional"))
 
             attachment_probe = {
                 "attachment_number": self._verification_checker._attachment_number(title),
                 "title": self._verification_checker._attachment_title(title),
             }
             matched_section = self._verification_checker._match_attachment(attachment_probe, bid_by_no, bid_sections)
-            if matched_section is not None:
-                t_txt = matched_section.get("text") or ""
-            else:
-                t_txt = fallback_txt
-                # 如果附件号存在但完全没匹配到内容，则直接标记为缺失
-                if attachment_probe["attachment_number"] is not None and not str(t_txt or "").strip():
-                    results.append(
-                        {
-                            "name": title,
-                            "is_passed": False,
-                            "missing_anchors": [],
-                            "pages": [],
-                            "locations": [],
-                            "skip_reason": {
+            if matched_section is None:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": bool(is_optional),
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "pages": [],
+                        "locations": [],
+                        "skip_reason": (
+                            {"type": "optional_attachment_not_provided"}
+                            if is_optional
+                            else {
                                 "type": "attachment_not_found",
                                 "attachment_number": attachment_probe["attachment_number"],
-                            },
-                        }
-                    )
-                    continue
+                            }
+                        ),
+                    }
+                )
+                continue
+            t_txt = matched_section.get("text") or ""
 
             matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
             matched_locations = self._serialize_section_locations(matched_section)
-
-            m_body = self._trim_instruction_note_block(
-                self._trim_non_body_lines(self._strip_title_line(m_txt, title))
-            )
+            template_analysis = self._analyze_template_segment(title, m_txt)
             t_body = self._trim_instruction_note_block(
                 self._trim_non_body_lines(self._strip_title_line(t_txt, title))
             )
 
-            # 特殊附件：只要存在内容即通过
-            if "制造商声明函" in title or "制造商授权书" in title or "原厂授权函" in title:
-                passed = bool(t_body.strip())
-                results.append({
-                    "name": title,
-                    "is_passed": passed,
-                    "missing_anchors": [] if passed else ["[未检测到内容]"],
-                    "pages": matched_pages,
-                    "locations": matched_locations,
-                })
-                continue
-
-            # 法定代表人相关模板：仅检查核心关键词
-            if "法定代表人" in title and ("证明书" in title or "授权委托书" in title):
-                relaxed_anchors = ["法定代表人"]
-                if "证明书" in title:
-                    relaxed_anchors.append("证明书")
-                if "授权委托书" in title:
-                    relaxed_anchors.append("授权委托书")
-
-                norm_t = self._normalize(t_txt)
-                missing = [a for a in relaxed_anchors if a not in norm_t]
-                results.append({
-                    "name": title,
-                    "is_passed": bool(t_txt.strip()) and len(missing) == 0,
-                    "missing_anchors": missing if t_txt.strip() else ["[未检测到内容]"],
-                    "pages": matched_pages,
-                    "locations": matched_locations,
-                })
-                continue
-
             norm_t = self._normalize(t_body)
-            anchors = self._get_anchors(m_body)
+            anchors = template_analysis["anchors"]
             missing = [a for a in anchors if a not in norm_t]
+            unfilled_fields = self._evaluate_fill_specs(template_analysis["fill_specs"], t_body)
 
-            results.append({
-                "name": title,
-                "is_passed": len(missing) == 0,
-                "missing_anchors": missing,
-                "pages": matched_pages,
-                "locations": matched_locations,
-            })
+            results.append(
+                {
+                    "name": title,
+                    "is_passed": len(missing) == 0 and not unfilled_fields,
+                    "missing_anchors": missing,
+                    "unfilled_fields": unfilled_fields,
+                    "fillable_field_count": len(template_analysis["fill_specs"]),
+                    "pages": matched_pages,
+                    "locations": matched_locations,
+                }
+            )
         return results

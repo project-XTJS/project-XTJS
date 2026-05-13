@@ -147,6 +147,29 @@ class TemplateExtractor:
         r'(?<![\dA-Z一二三四五六七八九十百零])'
         r'(?=(?:\d+[．\.、)]|[A-Z][．\.、)]|[一二三四五六七八九十百零]+[、．\.]|[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]))'
     )
+    RESPONSE_FORMAT_ZONE_MARKERS = ("响应文件格式附件", "部分格式附件")
+    RESPONSE_FORMAT_CHAPTER_MARKERS = ("响应文件格式",)
+    RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS = (
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "法定代表人授权委托书",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+        "授权委托书",
+        "声明函",
+        "承诺书",
+        "保证书",
+    )
+    RESPONSE_FORMAT_COMPOSITE_TITLE_MARKERS = (
+        "组成及部分格式",
+        "文件组成及部分格式",
+        "资格证明文件组成",
+    )
+    CHAPTER_HEADING_RE = re.compile(r'^\s*第[一二三四五六七八九十百零\d]+章')
+    ATTACHMENT_NUMBER_RE = re.compile(
+        r'^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)'
+    )
 
     @classmethod
     def _format_logical_table(cls, tb: dict, is_template: bool = False) -> str:
@@ -319,20 +342,134 @@ class TemplateExtractor:
         )
 
     @classmethod
-    def _is_consistency_template_heading(cls, text: str) -> bool:
-        """判断文本是否为一致性模板的章节标题。"""
-        raw = str(text or "").strip()
-        if not raw:
+    def _compact(cls, text: str) -> str:
+        return re.sub(r'\s+', '', str(text or ''))
+
+    @classmethod
+    def _attachment_number(cls, text: str) -> str | None:
+        match = cls.ATTACHMENT_NUMBER_RE.search(str(text or ""))
+        return re.sub(r"\s+", "", match.group("number")) if match else None
+
+    @classmethod
+    def _attachment_title(cls, text: str) -> str:
+        value = str(text or "").strip()
+        value = re.sub(r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*', '', value)
+        value = re.sub(r'^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[）).、．]?|[一二三四五六七八九十百零]+[、.)）．])\s*', '', value)
+        idx = value.find("附件")
+        value = value[idx:] if idx >= 0 else value
+        return re.sub(r'\s+', ' ', value).strip('：:；;，,。')
+
+    @classmethod
+    def _is_embedded_response_format_heading(cls, section: dict) -> bool:
+        if str(section.get('type') or '').strip().lower() != 'heading':
             return False
-        if SectionClassifier.RE_ATTACHMENT_TITLE.search(raw):
-            return True
-        if re.match(r'^第[一二三四五六七八九十百零\d]+[章节部分篇项]', raw):
-            compact = re.sub(r'\s+', '', raw)
-            return len(compact) <= 48 and any(
-                keyword in compact
-                for keyword in SectionClassifier.ATTACHMENT_TITLE_KEYWORDS
+        text = str(section.get('text') or '').strip()
+        compact = cls._compact(text)
+        if not compact or SectionClassifier.is_toc_noise(text):
+            return False
+        if "附件" in compact or len(compact) > 40:
+            return False
+        if "格式" not in compact:
+            return False
+        return any(marker in compact for marker in cls.RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS)
+
+    @classmethod
+    def _is_response_format_attachment_heading(cls, section: dict) -> bool:
+        text = str(section.get('text') or '').strip()
+        compact = cls._compact(text)
+        attachment_number = cls._attachment_number(text)
+        if attachment_number is not None:
+            attachment_index = compact.find("附件")
+            if attachment_index >= 0 and attachment_index <= 12:
+                return True
+        return (
+            SectionClassifier.is_attachment_heading_text(text)
+            or cls._is_embedded_response_format_heading(section)
+        )
+
+    @classmethod
+    def _response_format_sections(cls, model_raw_json: dict) -> list[dict]:
+        data_node = model_raw_json.get('data', model_raw_json)
+        sections, _ = cls.preprocess_sections(
+            data_node.get('layout_sections', []),
+            data_node.get('logical_tables', []),
+            is_template=True,
+        )
+        if not sections:
+            return []
+
+        start_index = None
+        for idx, section in enumerate(sections):
+            compact = cls._compact(section.get('text') or '')
+            if any(marker in compact for marker in cls.RESPONSE_FORMAT_ZONE_MARKERS):
+                start_index = idx
+                break
+        if start_index is None:
+            for idx, section in enumerate(sections):
+                compact = cls._compact(section.get('text') or '')
+                if any(marker in compact for marker in cls.RESPONSE_FORMAT_CHAPTER_MARKERS):
+                    start_index = idx
+                    break
+        if start_index is None:
+            return []
+
+        end_index = len(sections)
+        for idx in range(start_index + 1, len(sections)):
+            section = sections[idx]
+            if str(section.get('type') or '').strip().lower() != 'heading':
+                continue
+            text = str(section.get('text') or '').strip()
+            compact = cls._compact(text)
+            if cls.CHAPTER_HEADING_RE.match(text) and not any(
+                marker in compact for marker in cls.RESPONSE_FORMAT_CHAPTER_MARKERS
+            ):
+                end_index = idx
+                break
+        return sections[start_index:end_index]
+
+    @classmethod
+    def extract_response_format_attachments(cls, model_raw_json: dict) -> list[dict]:
+        """从“响应文件格式/响应文件格式附件”区域提取附件标题与内容。"""
+        sections = cls._response_format_sections(model_raw_json)
+        if not sections:
+            return []
+
+        starts = [
+            idx
+            for idx, section in enumerate(sections)
+            if cls._is_response_format_attachment_heading(section)
+        ]
+        attachments: list[dict] = []
+        current_top_level_number: str | None = None
+        for pos, start in enumerate(starts):
+            end = starts[pos + 1] if pos + 1 < len(starts) else len(sections)
+            chunk = sections[start:end]
+            if not chunk:
+                continue
+            title = str(chunk[0].get('text') or '').strip()
+            attachment_number = cls._attachment_number(title)
+            if attachment_number is not None:
+                current_top_level_number = attachment_number
+            elif current_top_level_number is not None:
+                attachment_number = current_top_level_number
+            normalized_title = cls._attachment_title(title)
+            compact_title = cls._compact(normalized_title)
+            attachments.append(
+                {
+                    "attachment_number": attachment_number,
+                    "title": normalized_title,
+                    "content": [
+                        str(section.get('text') or '').strip()
+                        for section in chunk
+                        if str(section.get('text') or '').strip()
+                    ],
+                    "is_composite": any(
+                        marker in compact_title
+                        for marker in cls.RESPONSE_FORMAT_COMPOSITE_TITLE_MARKERS
+                    ),
+                }
             )
-        return False
+        return attachments
 
     @classmethod
     def extract_requirements(cls, model_raw_json: dict) -> tuple:
@@ -391,53 +528,70 @@ class TemplateExtractor:
                     if attach_numbers:
                         attachment_mapping[seq] = attach_numbers
 
+        response_attachments = cls.extract_response_format_attachments(model_raw_json)
+        for attachment in response_attachments:
+            title = str(attachment.get("title") or "").strip()
+            if not title or attachment.get("is_composite"):
+                continue
+            if title not in ordered_list:
+                ordered_list.append(title)
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            if attachment_number:
+                attachment_mapping[title] = [attachment_number]
+
         return ordered_list, attachment_mapping
 
     @classmethod
     def extract_consistency_templates(cls, model_raw_json: dict) -> list:
-        """提取一致性比对所需的模板基准（含表格表头），返回模板列表。
+        """提取一致性比对所需的模板基准，来源与完整性检查保持一致。"""
+        requirements, attachment_mapping = cls.extract_requirements(model_raw_json)
+        response_attachments = cls.extract_response_format_attachments(model_raw_json)
+        if not response_attachments:
+            return []
 
-        Args:
-            model_raw_json: 招标文件 OCR JSON。
+        attachments_by_title: dict[str, dict] = {}
+        attachments_by_number: dict[str, dict] = {}
+        for attachment in response_attachments:
+            title = str(attachment.get("title") or "").strip()
+            if not title or attachment.get("is_composite"):
+                continue
+            compact_title = cls._compact(title)
+            if compact_title and compact_title not in attachments_by_title:
+                attachments_by_title[compact_title] = attachment
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            if attachment_number and attachment_number not in attachments_by_number:
+                attachments_by_number[attachment_number] = attachment
 
-        Returns:
-            模板字典列表，每个包含 "title" 和 "content"（文本行列表）。
-        """
-        data_node = model_raw_json.get('data', model_raw_json)
-
-        # 传入 logical_tables 以启用表格结构化，is_template=True 表示仅提取表头
-        sections, headers = cls.preprocess_sections(
-            data_node.get('layout_sections', []),
-            data_node.get('logical_tables', []),
-            is_template=True,
-        )
-
-        templates, current, in_zone = [], None, False
-        for sec in sections:
-            text = sec['text']
-            if not text or cls._is_noise(text, headers, sec.get('type')):
+        templates: list[dict] = []
+        seen_titles: set[str] = set()
+        for item in requirements:
+            item_title = str(item or "").strip()
+            if not item_title:
                 continue
 
-            if sec['type'] == 'heading' and not in_zone:
-                if "部分格式附件" in text:
-                    in_zone = True
-                    continue
-
-            if in_zone:
-                if sec['type'] == 'heading':
-                    # 遇到大章节或特定关键词则停止收集
-                    if re.match(r'^第[一二三四五六七八九十百]+章', text) or "营业执照" in text:
+            attachment = attachments_by_title.get(cls._compact(item_title))
+            if attachment is None:
+                for ref in attachment_mapping.get(item_title) or []:
+                    attachment = attachments_by_number.get(str(ref).strip())
+                    if attachment is not None:
                         break
-                    if cls._is_consistency_template_heading(text):
-                        if current:
-                            templates.append(current)
-                        current = {"title": cls._clean_label(text), "content": [text]}
-                        continue
-                if current:
-                    current["content"].append(text)
+            if attachment is None:
+                continue
 
-        if current:
-            templates.append(current)
+            normalized_title = str(attachment.get("title") or item_title).strip()
+            compact_title = cls._compact(normalized_title)
+            if not compact_title or compact_title in seen_titles:
+                continue
+            seen_titles.add(compact_title)
+
+            templates.append(
+                {
+                    "title": normalized_title,
+                    "content": list(attachment.get("content") or []),
+                    "is_optional": "如有" in normalized_title,
+                }
+            )
+
         return templates
 
     @staticmethod
