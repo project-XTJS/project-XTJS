@@ -44,6 +44,28 @@ from app.service.postgresql_service import PostgreSQLService
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _OCR_TASK_LOCK: Optional[asyncio.Lock] = None
+_PROJECT_OCR_QUEUE_LOCK: Optional[asyncio.Lock] = None
+# 记录每个项目当前队列尾任务，保证同一项目的新请求接在旧请求后面。
+_PROJECT_OCR_QUEUE_TAILS: dict[str, asyncio.Task] = {}
+
+_OCR_STAGE_TENDER = "tender"
+_OCR_STAGE_BUSINESS = "business"
+_OCR_STAGE_TECHNICAL = "technical"
+_OCR_STAGE_SEQUENCE = (
+    _OCR_STAGE_TENDER,
+    _OCR_STAGE_BUSINESS,
+    _OCR_STAGE_TECHNICAL,
+)
+_OCR_STAGE_LABELS = {
+    _OCR_STAGE_TENDER: "招标文件",
+    _OCR_STAGE_BUSINESS: "商务标",
+    _OCR_STAGE_TECHNICAL: "技术标",
+}
+_OCR_STAGE_REQUIRED_STATUS = {
+    _OCR_STAGE_TENDER: PostgreSQLService.PARSING_STATUS_TENDER_OCR_COMPLETED,
+    _OCR_STAGE_BUSINESS: PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+    _OCR_STAGE_TECHNICAL: PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+}
 
 # 从配置读取批处理数量限制，兼容新旧字段名
 PROJECT_BATCH_MIN_BID_GROUPS = max(
@@ -71,6 +93,14 @@ def _get_ocr_task_lock() -> asyncio.Lock:
     if _OCR_TASK_LOCK is None:
         _OCR_TASK_LOCK = asyncio.Lock()
     return _OCR_TASK_LOCK
+
+
+def _get_project_ocr_queue_lock() -> asyncio.Lock:
+    """项目级队列锁，用于串起同一项目的阶段任务。"""
+    global _PROJECT_OCR_QUEUE_LOCK
+    if _PROJECT_OCR_QUEUE_LOCK is None:
+        _PROJECT_OCR_QUEUE_LOCK = asyncio.Lock()
+    return _PROJECT_OCR_QUEUE_LOCK
 
 
 def _collect_tender_documents(payload: dict) -> list[dict]:
@@ -134,6 +164,64 @@ def _collect_technical_documents(payload: dict) -> list[dict]:
     return documents
 
 
+def _collect_documents_by_stage(payload: dict, stage: str) -> list[dict]:
+    """按阶段收集当前项目要做 OCR 的文档。"""
+    if stage == _OCR_STAGE_TENDER:
+        return _collect_tender_documents(payload)
+    if stage == _OCR_STAGE_BUSINESS:
+        return _collect_business_documents(payload)
+    if stage == _OCR_STAGE_TECHNICAL:
+        return _collect_technical_documents(payload)
+    raise ValueError(f"unsupported ocr stage: {stage}")
+
+
+def _pending_documents(documents: list[dict]) -> list[dict]:
+    # 只把尚未 extracted 的文档继续送去 OCR。
+    return [item for item in documents if not item.get("extracted")]
+
+
+def _planned_ocr_stages(payload: dict, current_status: int, target_stage: str) -> list[dict]:
+    """根据当前状态计算本次请求需要排队的阶段。"""
+    planned: list[dict] = []
+    target_status = _OCR_STAGE_REQUIRED_STATUS[target_stage]
+    for stage in _OCR_STAGE_SEQUENCE:
+        stage_status = _OCR_STAGE_REQUIRED_STATUS[stage]
+        if stage_status <= current_status or stage_status > target_status:
+            continue
+        documents = _collect_documents_by_stage(payload, stage)
+        if not documents:
+            # 自动补前置阶段只补“已上传且已绑定”的文档，不会凭空补缺文件。
+            raise HTTPException(
+                status_code=409,
+                detail=f"当前项目未绑定{_OCR_STAGE_LABELS[stage]}，无法继续执行 OCR。",
+            )
+        pending = _pending_documents(documents)
+        if pending:
+            planned.append(
+                {
+                    "stage": stage,
+                    "label": _OCR_STAGE_LABELS[stage],
+                    "documents": documents,
+                    "pending_documents": pending,
+                }
+            )
+    return planned
+
+
+def _next_stage_to_run(current_status: int, target_stage: str) -> str | None:
+    # 总是返回“目标阶段之前第一个尚未完成的阶段”。
+    target_status = _OCR_STAGE_REQUIRED_STATUS[target_stage]
+    for stage in _OCR_STAGE_SEQUENCE:
+        stage_status = _OCR_STAGE_REQUIRED_STATUS[stage]
+        if stage_status > current_status and stage_status <= target_status:
+            return stage
+    return None
+
+
+def _format_stage_labels(stages: list[dict]) -> str:
+    return " -> ".join(item["label"] for item in stages)
+
+
 async def _run_project_ocr_task(
     *,
     identifier_id: str,
@@ -180,11 +268,150 @@ async def _run_project_ocr_task(
         )
 
 
+async def _run_project_ocr_pipeline(
+    *,
+    previous_task: asyncio.Task | None,
+    identifier_id: str,
+    target_stage: str,
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+    analysis_service,
+) -> None:
+    """同一项目的 OCR 请求按阶段顺序串起来执行。"""
+    if previous_task is not None:
+        try:
+            # 同项目存在前序任务时，先等前序任务完成再继续。
+            await previous_task
+        except Exception:
+            logger.exception("previous project ocr task failed identifier=%s", identifier_id)
+
+    while True:
+        refreshed_project = await run_in_threadpool(
+            db_service.refresh_project_parsing_status,
+            identifier_id,
+        )
+        if not refreshed_project:
+            logger.warning("project ocr pipeline aborted because project disappeared identifier=%s", identifier_id)
+            return
+
+        current_status = int(refreshed_project.get("parsing_status") or 0)
+        target_status = _OCR_STAGE_REQUIRED_STATUS[target_stage]
+        if current_status >= target_status:
+            logger.info(
+                "project ocr pipeline completed identifier=%s target_stage=%s parsing_status=%s",
+                identifier_id,
+                target_stage,
+                current_status,
+            )
+            return
+
+        payload = await run_in_threadpool(
+            db_service.get_project_documents_for_duplicate_check,
+            identifier_id,
+        )
+        if not payload:
+            logger.warning("project ocr pipeline missing payload identifier=%s", identifier_id)
+            return
+
+        stage = _next_stage_to_run(current_status, target_stage)
+        if stage is None:
+            return
+        documents = _collect_documents_by_stage(payload, stage)
+        if not documents:
+            logger.warning(
+                "project ocr pipeline missing stage documents identifier=%s stage=%s",
+                identifier_id,
+                stage,
+            )
+            return
+
+        pending_documents = _pending_documents(documents)
+        if not pending_documents:
+            # 文档虽然都已抽取，但项目状态还没推进时，说明数据不一致，先停下来等人工处理。
+            refreshed_project = await run_in_threadpool(
+                db_service.refresh_project_parsing_status,
+                identifier_id,
+            )
+            if not PostgreSQLService.parsing_status_reached(
+                (refreshed_project or {}).get("parsing_status"),
+                _OCR_STAGE_REQUIRED_STATUS[stage],
+            ):
+                logger.warning(
+                    "project ocr pipeline paused identifier=%s stage=%s reason=status_not_advanced",
+                    identifier_id,
+                    stage,
+                )
+                return
+            continue
+
+        await _run_project_ocr_task(
+            identifier_id=identifier_id,
+            documents=pending_documents,
+            ocr_type=_OCR_STAGE_LABELS[stage],
+            db_service=db_service,
+            oss_service=oss_service,
+            analysis_service=analysis_service,
+        )
+
+        refreshed_project = await run_in_threadpool(
+            db_service.refresh_project_parsing_status,
+            identifier_id,
+        )
+        if not PostgreSQLService.parsing_status_reached(
+            (refreshed_project or {}).get("parsing_status"),
+            _OCR_STAGE_REQUIRED_STATUS[stage],
+        ):
+            logger.warning(
+                "project ocr pipeline paused identifier=%s stage=%s parsing_status=%s",
+                identifier_id,
+                stage,
+                (refreshed_project or {}).get("parsing_status"),
+            )
+            return
+
+
+async def _enqueue_project_ocr_pipeline(
+    *,
+    identifier_id: str,
+    target_stage: str,
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+    analysis_service,
+) -> None:
+    """给项目追加一个 OCR 请求，后来的请求会接在前一个请求后面。"""
+    async with _get_project_ocr_queue_lock():
+        previous_task = _PROJECT_OCR_QUEUE_TAILS.get(identifier_id)
+        # 新任务直接挂到当前队尾，形成项目内串行链。
+        task = asyncio.create_task(
+            _run_project_ocr_pipeline(
+                previous_task=previous_task,
+                identifier_id=identifier_id,
+                target_stage=target_stage,
+                db_service=db_service,
+                oss_service=oss_service,
+                analysis_service=analysis_service,
+            )
+        )
+        _PROJECT_OCR_QUEUE_TAILS[identifier_id] = task
+
+    def _cleanup_queue_tail(finished_task: asyncio.Task) -> None:
+        async def _cleanup() -> None:
+            async with _get_project_ocr_queue_lock():
+                current_task = _PROJECT_OCR_QUEUE_TAILS.get(identifier_id)
+                # 只有自己还是队尾时才清掉，避免误删后来追加的新任务。
+                if current_task is finished_task:
+                    _PROJECT_OCR_QUEUE_TAILS.pop(identifier_id, None)
+
+        asyncio.create_task(_cleanup())
+
+    task.add_done_callback(_cleanup_queue_tail)
+
+
 async def _build_async_ocr_response(
     *,
     identifier_id: str,
     payload: dict,
-    documents: list[dict],
+    target_stage: str,
     ocr_type: str,
     endpoint_name: str,
     db_service: PostgreSQLService,
@@ -192,11 +419,15 @@ async def _build_async_ocr_response(
     analysis_service,
 ) -> dict:
     """统一处理单类文档 OCR 的排队响应。"""
-    if not documents:
-        raise HTTPException(status_code=409, detail=f"当前项目未绑定{ocr_type}，无法执行 OCR。")
-
-    pending_documents = [item for item in documents if not item.get("extracted")]
-    if not pending_documents:
+    refreshed_project = await run_in_threadpool(
+        db_service.refresh_project_parsing_status,
+        identifier_id,
+    )
+    project = refreshed_project or (payload.get("project") or {})
+    current_status = int(project.get("parsing_status") or 0)
+    # 这里会把缺失但已绑定的前置阶段一并规划进队列。
+    planned_stages = _planned_ocr_stages(payload, current_status, target_stage)
+    if not planned_stages:
         refreshed_project = await run_in_threadpool(
             db_service.refresh_project_parsing_status,
             identifier_id,
@@ -204,35 +435,37 @@ async def _build_async_ocr_response(
         return {
             "status": "success",
             "mode": "async",
-            "message": f"{ocr_type}已全部完成 OCR，无需重复触发。",
+            "message": f"{ocr_type}所需阶段已全部完成 OCR，无需重复触发。",
             "project_identifier": identifier_id,
             "project": refreshed_project or (payload.get("project") or {}),
             "queued_count": 0,
-            "skipped_count": len(documents),
+            "skipped_count": 0,
             "ocr_type": ocr_type,
             "endpoint": endpoint_name,
+            "queued_stages": [],
         }
 
-    asyncio.create_task(
-        _run_project_ocr_task(
-            identifier_id=identifier_id,
-            documents=pending_documents,
-            ocr_type=ocr_type,
-            db_service=db_service,
-            oss_service=oss_service,
-            analysis_service=analysis_service,
-        )
+    await _enqueue_project_ocr_pipeline(
+        identifier_id=identifier_id,
+        target_stage=target_stage,
+        db_service=db_service,
+        oss_service=oss_service,
+        analysis_service=analysis_service,
     )
     return {
         "status": "accepted",
         "mode": "async",
-        "message": f"{ocr_type} OCR 已加入后台队列，系统会按串行顺序执行。",
+        "message": (
+            f"{ocr_type} OCR 已加入项目队列，系统会按阶段顺序执行："
+            f"{_format_stage_labels(planned_stages)}。"
+        ),
         "project_identifier": identifier_id,
-        "project": (payload.get("project") or {}),
-        "queued_count": len(pending_documents),
-        "skipped_count": len(documents) - len(pending_documents),
+        "project": project,
+        "queued_count": sum(len(item["pending_documents"]) for item in planned_stages),
+        "skipped_count": 0,
         "ocr_type": ocr_type,
         "endpoint": endpoint_name,
+        "queued_stages": [item["stage"] for item in planned_stages],
     }
 
 
@@ -714,7 +947,7 @@ async def run_project_tender_ocr(
     return await _build_async_ocr_response(
         identifier_id=identifier_id,
         payload=payload,
-        documents=_collect_tender_documents(payload),
+        target_stage=_OCR_STAGE_TENDER,
         ocr_type="招标文件",
         endpoint_name=f"/api/postgresql/projects/{identifier_id}/run-tender-ocr",
         db_service=db_service,
@@ -739,7 +972,7 @@ async def run_project_business_ocr(
     return await _build_async_ocr_response(
         identifier_id=identifier_id,
         payload=payload,
-        documents=_collect_business_documents(payload),
+        target_stage=_OCR_STAGE_BUSINESS,
         ocr_type="商务标",
         endpoint_name=f"/api/postgresql/projects/{identifier_id}/run-business-ocr",
         db_service=db_service,
@@ -764,7 +997,7 @@ async def continue_project_technical_ocr(
     return await _build_async_ocr_response(
         identifier_id=identifier_id,
         payload=payload,
-        documents=_collect_technical_documents(payload),
+        target_stage=_OCR_STAGE_TECHNICAL,
         ocr_type="技术标",
         endpoint_name=f"/api/postgresql/projects/{identifier_id}/continue-technical-ocr",
         db_service=db_service,

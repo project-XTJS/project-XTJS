@@ -88,6 +88,59 @@ def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]
     return [scope.value]
 
 
+def _refresh_project_or_404(db_service: PostgreSQLService, identifier_id: str) -> dict[str, Any]:
+    """先重算项目 OCR 状态，再返回最新项目记录。"""
+    project = db_service.refresh_project_parsing_status(identifier_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return project
+
+
+def _ensure_project_analysis_status(
+    project: dict[str, Any],
+    *,
+    required_status: int,
+    analysis_name: str,
+) -> dict[str, Any]:
+    """分析前先校验项目 OCR 阶段是否达标。"""
+    current_status = int(project.get("parsing_status") or 0)
+    if PostgreSQLService.parsing_status_reached(current_status, required_status):
+        return project
+    current_text = PostgreSQLService.get_parsing_status_text(current_status)
+    required_text = PostgreSQLService.get_parsing_status_text(required_status)
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{analysis_name} 需要项目 OCR 状态至少达到 {required_status}（{required_text}），"
+            f"当前为 {current_status}（{current_text}）。"
+        ),
+    )
+
+
+def _required_parsing_status_for_duplicate_scope(scope: DuplicateCheckScope) -> int:
+    # 综合查重只要带技术标范围，就必须等到技术标 OCR 完成。
+    if scope == DuplicateCheckScope.BUSINESS_BID:
+        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
+    return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
+
+
+def _resolve_project_typo_document_types(project: dict[str, Any]) -> Optional[list[str]]:
+    """状态 2 只跑商务标错别字，状态 3 跑全部错别字。"""
+    current_status = int(project.get("parsing_status") or 0)
+    _ensure_project_analysis_status(
+        project,
+        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+        analysis_name="错别字检查",
+    )
+    if PostgreSQLService.parsing_status_reached(
+        current_status,
+        PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+    ):
+        # None 代表不限制文档类型，直接按“全部文档”跑。
+        return None
+    return [DOCUMENT_TYPE_BUSINESS_BID]
+
+
 # 统一分页参数解析（兼容 page/limit 两种方式）
 def _resolve_pagination(
     *,
@@ -924,10 +977,12 @@ def _run_project_typo_check(
     identifier_id: str,
     db_service: PostgreSQLService,
     bid_document_review_service: BidDocumentReviewService,
+    document_types: Optional[list[str]] = None,
 ) -> dict:
+    # document_types=None 表示全量错别字；传列表则只检查指定类型。
     review_result = _run_project_bid_document_review(
         identifier_id=identifier_id,
-        document_types=None,
+        document_types=document_types,
         result_key="bid_document_review",
         db_service=db_service,
         bid_document_review_service=bid_document_review_service,
@@ -1684,6 +1739,12 @@ async def project_duplicate_check(
 ):
     """执行项目的商务标/技术标内容查重，结果持久化。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_analysis_status(
+            project,
+            required_status=_required_parsing_status_for_duplicate_scope(document_scope),
+            analysis_name="查重分析",
+        )
         return await run_in_threadpool(
             _run_project_duplicate_check,
             identifier_id=identifier_id,
@@ -1710,11 +1771,19 @@ async def project_business_bid_format_review(
     """对项目中的商务标进行格式合规性检查。"""
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            analysis_name="商务标形式审查",
+        )
         return await run_in_threadpool(
             review_service.persist_project_business_review,
             project_identifier=identifier_id,
             result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         if "project not found" in str(exc).lower():
             raise HTTPException(status_code=404, detail="项目不存在") from exc
@@ -1733,6 +1802,12 @@ async def project_business_bid_duplicate_check(
 ):
     """仅对商务标进行内容查重。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            analysis_name="商务标查重",
+        )
         return await run_in_threadpool(
             _run_project_duplicate_check,
             identifier_id=identifier_id,
@@ -1825,6 +1900,12 @@ async def project_technical_bid_duplicate_check(
 ):
     """仅对技术标进行内容查重。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+            analysis_name="技术标查重",
+        )
         return await run_in_threadpool(
             _run_project_duplicate_check,
             identifier_id=identifier_id,
@@ -1915,6 +1996,12 @@ async def project_personnel_reuse_check(
 ):
     """检查商务标中是否存在同一人员出现在多家投标单位的情况。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            analysis_name="一人多用检查",
+        )
         return await run_in_threadpool(
             _run_project_personnel_reuse_check,
             identifier_id=identifier_id,
@@ -1997,11 +2084,14 @@ async def project_typo_check(
 ):
     """对项目中的文档进行错别字扫描。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        typo_document_types = _resolve_project_typo_document_types(project)
         return await run_in_threadpool(
             _run_project_typo_check,
             identifier_id=identifier_id,
             db_service=db_service,
             bid_document_review_service=bid_document_review_service,
+            document_types=typo_document_types,
         )
     except HTTPException:
         raise

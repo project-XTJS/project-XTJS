@@ -53,16 +53,25 @@ class PostgreSQLService:
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
     SUPPORTED_DOCUMENT_TYPES = set(SUPPORTED_DOCUMENT_TYPES)
-    # 项目解析状态：0 表示未全部完成 OCR，1 表示项目关联的招标文件、商务标、技术标均已完成 OCR。
+    # 0=未开始 OCR，1=招标文件 OCR 完成，2=商务标 OCR 完成，3=技术标 OCR 完成。
     PARSING_STATUS_PENDING = 0
-    PARSING_STATUS_COMPLETED = 1
-    # 兼容旧代码里曾用到的常量名，实际仍只保留“未全部完成 / 全部完成”两种状态。
+    PARSING_STATUS_TENDER_OCR_COMPLETED = 1
+    PARSING_STATUS_BUSINESS_OCR_COMPLETED = 2
+    PARSING_STATUS_TECHNICAL_OCR_COMPLETED = 3
+    # 保留 uploaded 常量名，兼容旧调用方。
     PARSING_STATUS_UPLOADED = PARSING_STATUS_PENDING
-    PARSING_STATUS_BUSINESS_OCR_COMPLETED = PARSING_STATUS_COMPLETED
-    PARSING_STATUS_TECHNICAL_OCR_COMPLETED = PARSING_STATUS_COMPLETED
     PARSING_STATUS_LABELS = {
         PARSING_STATUS_PENDING: "pending",
-        PARSING_STATUS_COMPLETED: "completed",
+        PARSING_STATUS_TENDER_OCR_COMPLETED: "tender_ocr_completed",
+        PARSING_STATUS_BUSINESS_OCR_COMPLETED: "business_ocr_completed",
+        PARSING_STATUS_TECHNICAL_OCR_COMPLETED: "technical_ocr_completed",
+    }
+    # 给接口和报错复用的人类可读状态文案。
+    PARSING_STATUS_TEXTS = {
+        PARSING_STATUS_PENDING: "未开始OCR",
+        PARSING_STATUS_TENDER_OCR_COMPLETED: "招标文件OCR完成",
+        PARSING_STATUS_BUSINESS_OCR_COMPLETED: "商务标OCR完成",
+        PARSING_STATUS_TECHNICAL_OCR_COMPLETED: "技术标OCR完成",
     }
 
     # 连接管理
@@ -102,13 +111,30 @@ class PostgreSQLService:
 
     @classmethod
     def _normalize_parsing_status(cls, parsing_status: Optional[int]) -> int:
-        # 兼容历史遗留值；当前统一只使用 0=未全部完成 OCR、1=全部完成 OCR。
+        # 兼容异常值，并将状态收敛到 0~3。
         try:
             normalized = int(parsing_status or 0)
         except (TypeError, ValueError):
             normalized = cls.PARSING_STATUS_PENDING
-        normalized = cls.PARSING_STATUS_COMPLETED if normalized > 0 else cls.PARSING_STATUS_PENDING
+        if normalized < cls.PARSING_STATUS_PENDING:
+            return cls.PARSING_STATUS_PENDING
+        if normalized > cls.PARSING_STATUS_TECHNICAL_OCR_COMPLETED:
+            return cls.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
         return normalized
+
+    @classmethod
+    def parsing_status_reached(cls, parsing_status: Optional[int], required_status: int) -> bool:
+        """判断当前项目 OCR 状态是否达到某个分析前置阶段。"""
+        return cls._normalize_parsing_status(parsing_status) >= cls._normalize_parsing_status(required_status)
+
+    @classmethod
+    def get_parsing_status_text(cls, parsing_status: Optional[int]) -> str:
+        # 未知状态一律回落到“未开始”，避免对外暴露脏值。
+        normalized = cls._normalize_parsing_status(parsing_status)
+        return cls.PARSING_STATUS_TEXTS.get(
+            normalized,
+            cls.PARSING_STATUS_TEXTS[cls.PARSING_STATUS_PENDING],
+        )
 
     @classmethod
     def _decorate_project_record(cls, project: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -119,6 +145,7 @@ class PostgreSQLService:
         normalized = cls._normalize_parsing_status(decorated.get("parsing_status"))
         decorated["parsing_status"] = normalized
         decorated["parsing_status_label"] = cls.PARSING_STATUS_LABELS[normalized]
+        decorated["parsing_status_text"] = cls.get_parsing_status_text(normalized)
         return decorated
 
     @staticmethod
@@ -390,7 +417,7 @@ class PostgreSQLService:
         identifier_id: str,
         parsing_status: int,
     ) -> Optional[Dict[str, Any]]:
-        # 提供统一入口给路由层同步项目“是否全部完成 OCR”的状态。
+        # 路由层统一通过这里同步项目 OCR 阶段状态。
         normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         normalized_status = self._normalize_parsing_status(parsing_status)
         query = """
@@ -406,7 +433,7 @@ class PostgreSQLService:
                 return self._decorate_project_record(dict(updated)) if updated else None
 
     def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
-        """按项目下文档的 extracted 状态重算 parsing_status：全完成为 1，否则为 0。"""
+        """按项目下文档 extracted 状态重算 0/1/2/3 的 OCR 阶段。"""
         normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         status_query = """
             WITH project_row AS (
@@ -414,14 +441,21 @@ class PostgreSQLService:
                 FROM xtjs_projects
                 WHERE identifier_id = %s AND deleted = FALSE
             ),
-            document_flags AS (
+            document_stats AS (
                 SELECT
-                    COALESCE(td.extracted, FALSE) AS tender_extracted,
-                    COALESCE(bbd.extracted, FALSE) AS business_extracted,
-                    CASE
-                        WHEN pd.technical_bid_document_id IS NULL THEN TRUE
-                        ELSE COALESCE(tbd.extracted, FALSE)
-                    END AS technical_extracted
+                    -- 这里按“文档类型整体是否全部 extracted”来推进项目阶段。
+                    COUNT(DISTINCT td.id) AS tender_count,
+                    COUNT(DISTINCT CASE WHEN COALESCE(td.extracted, FALSE) = TRUE THEN td.id END) AS tender_extracted_count,
+                    COUNT(DISTINCT bbd.id) AS business_count,
+                    COUNT(DISTINCT CASE WHEN COALESCE(bbd.extracted, FALSE) = TRUE THEN bbd.id END) AS business_extracted_count,
+                    COUNT(DISTINCT CASE WHEN pd.technical_bid_document_id IS NOT NULL THEN tbd.id END) AS technical_count,
+                    COUNT(
+                        DISTINCT CASE
+                            WHEN pd.technical_bid_document_id IS NOT NULL
+                             AND COALESCE(tbd.extracted, FALSE) = TRUE
+                            THEN tbd.id
+                        END
+                    ) AS technical_extracted_count
                 FROM project_row pr
                 JOIN xtjs_project_documents pd
                   ON pd.project_id = pr.id
@@ -436,17 +470,21 @@ class PostgreSQLService:
                  AND tbd.deleted = FALSE
             )
             SELECT CASE
-                WHEN EXISTS (SELECT 1 FROM document_flags)
-                 AND NOT EXISTS (
-                     SELECT 1
-                     FROM document_flags
-                     WHERE tender_extracted = FALSE
-                        OR business_extracted = FALSE
-                        OR technical_extracted = FALSE
-                 )
+                -- 招标文件没完成前，整个项目仍视为未开始 OCR。
+                WHEN tender_count = 0
+                  OR tender_extracted_count < tender_count
+                THEN 0
+                -- 招标完成后，只要商务标没全部完成，就停留在状态 1。
+                WHEN business_count = 0
+                  OR business_extracted_count < business_count
                 THEN 1
-                ELSE 0
+                -- 商务标完成后，若没有技术标或技术标未全部完成，则停留在状态 2。
+                WHEN technical_count = 0
+                  OR technical_extracted_count < technical_count
+                THEN 2
+                ELSE 3
             END AS parsing_status
+            FROM document_stats
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:

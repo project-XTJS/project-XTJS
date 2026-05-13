@@ -331,6 +331,15 @@ async def persist_uploaded_json_project_documents(
             }
         )
 
+    # JSON 上传本身就代表对应文档已完成 OCR，这里同步刷新项目阶段状态。
+    refreshed_project = await run_in_threadpool(
+        db_service.refresh_project_parsing_status,
+        resolved_project_identifier,
+    )
+    if refreshed_project:
+        # 直接回最新项目状态，避免前端继续看到旧的 parsing_status。
+        project = refreshed_project
+
     # 组装返回结果，含绑定摘要
     return {
         "project": project,

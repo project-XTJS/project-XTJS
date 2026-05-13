@@ -24,6 +24,9 @@ from app.router.dependencies import (
     get_text_analysis_service,
 )
 from app.router.postgresql import (
+    _ensure_project_analysis_status,
+    _refresh_project_or_404,
+    _resolve_project_typo_document_types,
     _run_project_duplicate_check,
     _run_project_personnel_reuse_check,
     _run_project_typo_check,
@@ -515,10 +518,19 @@ async def _run_selected_project_services(
     items: list[dict] = []
     results: dict[str, Any] = {}
     business_review_response: dict[str, Any] | None = None
+    # 整个项目分析批次只取一次最新项目状态，后续各服务共用这份门槛判断。
+    project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+    typo_document_types: list[str] | None = None
 
     async def _ensure_business_review_response() -> dict[str, Any]:
         nonlocal business_review_response
         if business_review_response is None:
+            # 商务标形式审查只允许在商务标 OCR 完成后触发。
+            _ensure_project_analysis_status(
+                project,
+                required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                analysis_name="商务标形式审查",
+            )
             business_review_response = await run_in_threadpool(
                 review_service.persist_project_business_review,
                 project_identifier=identifier_id,
@@ -532,6 +544,11 @@ async def _run_selected_project_services(
             if service_name == "business_bid_format_review":
                 result = await _ensure_business_review_response()
             elif service_name == "business_bid_duplicate_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                    analysis_name="商务标查重",
+                )
                 result = await run_in_threadpool(
                     _run_project_duplicate_check,
                     identifier_id=identifier_id,
@@ -543,6 +560,11 @@ async def _run_selected_project_services(
                     duplicate_check_service=duplicate_check_service,
                 )
             elif service_name == "technical_bid_duplicate_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                    analysis_name="技术标查重",
+                )
                 result = await run_in_threadpool(
                     _run_project_duplicate_check,
                     identifier_id=identifier_id,
@@ -554,6 +576,11 @@ async def _run_selected_project_services(
                     duplicate_check_service=duplicate_check_service,
                 )
             elif service_name == "personnel_reuse_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                    analysis_name="一人多用检查",
+                )
                 result = await run_in_threadpool(
                     _run_project_personnel_reuse_check,
                     identifier_id=identifier_id,
@@ -561,11 +588,14 @@ async def _run_selected_project_services(
                     bid_document_review_service=bid_document_review_service,
                 )
             elif service_name == "typo_check":
+                # 错别字范围依赖当前 OCR 阶段，按需延迟计算即可。
+                typo_document_types = _resolve_project_typo_document_types(project)
                 result = await run_in_threadpool(
                     _run_project_typo_check,
                     identifier_id=identifier_id,
                     db_service=db_service,
                     bid_document_review_service=bid_document_review_service,
+                    document_types=typo_document_types,
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"不支持的分析服务：{service_name}")
