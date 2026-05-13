@@ -383,7 +383,7 @@ class OrchestratorMixin:
         business_payload: dict[str, Any],
         business_meta: dict[str, Any],
     ) -> dict[str, Any]:
-        """对仅提供商务标的投标人执行审查（不包含技术标，偏离检查会略过）。"""
+        """对提供商务标的投标人执行审查，偏离检查仅基于当前商务标内容。"""
         integrity_check = self._execute_check(
             check_code="integrity_check",
             check_name="商务标完整性审查",
@@ -419,6 +419,13 @@ class OrchestratorMixin:
                     tender_text=tender_payload,
                 ),
                 normalizer=self._normalize_itemized,
+            ),
+            # 商务标形式审查只检查当前商务标文件中出现的商务/技术偏离表内容，不读取技术标文件。
+            "deviation_check": self._execute_check(
+                check_code="deviation_check",
+                check_name="偏离条款审查",
+                runner=lambda: self.deviation_checker.check_technical_deviation(tender_payload, business_payload),
+                normalizer=self._normalize_deviation,
             ),
             "verification_check": self._execute_check(
                 check_code="verification_check",
