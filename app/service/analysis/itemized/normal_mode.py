@@ -75,6 +75,13 @@ class NormalModeMixin:
                 self._collect_section_totals(total_sections or candidate_sections)
             )
 
+        # 分项报价表只有 1 条分项且没有单独合计行时，将该行总价视作合计价。
+        inferred_total = self._build_single_item_total_candidate(
+            extracted_items, extracted_totals
+        )
+        if inferred_total is not None:
+            extracted_totals.append(inferred_total)
+
         extracted_items = self._dedupe_entries(extracted_items)
         extracted_totals = self._dedupe_entries(extracted_totals)
         row_issues = self._dedupe_row_issues(row_issues)
@@ -453,7 +460,8 @@ class NormalModeMixin:
     ) -> dict:
         """计算分项汇总与声明总价的关系。"""
         calculated_total = self._sum_entry_amounts(items)
-        if len(items) < 2 or not totals:
+        # 单条分项只要能拿到明确的合计/总价候选，也允许继续做总价一致性校验。
+        if not items or not totals:
             return self._build_sum_check_result(
                 status="unknown" if items else "not_detected",
                 calculated_total=calculated_total if items else None,
@@ -485,6 +493,42 @@ class NormalModeMixin:
             difference=difference,
             matched_total_label=best_total["label"],
         )
+
+    def _build_single_item_total_candidate(
+        self,
+        items: list[dict],
+        totals: list[dict],
+    ) -> dict | None:
+        """单条分项缺少合计行时，将该行总价补成隐式合计候选。"""
+        if totals or len(items) != 1:
+            return None
+
+        item = items[0]
+        amount = item.get("amount")
+        if amount is None:
+            return None
+
+        item_label = str(item.get("label") or "").strip()
+        label = "单条分项行总价（视作合计）"
+        if item_label:
+            label = f"{item_label} 行总价（视作合计）"
+
+        inferred_total = {
+            "label": label,
+            "amount": amount,
+            "source": "single_item_total_inferred",
+            "is_subtotal": False,
+        }
+        for key in (
+            "serial",
+            "line_index",
+            "section_id",
+            "section_anchor",
+            "section_pages",
+        ):
+            if item.get(key) is not None:
+                inferred_total[key] = item.get(key)
+        return inferred_total
 
     # 状态判定与结果描述
     def _resolve_normal_status(
