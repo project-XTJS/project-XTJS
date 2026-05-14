@@ -88,10 +88,49 @@ class OCRService:
         self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
         self._predictor_lock = threading.Lock()
+        # PaddleOCR-VL 的模型参数对线程上下文较敏感：
+        # 模型若在 A 线程初始化、在 B 线程推理，容易触发
+        # “embedding(): argument must be Value, but got EagerParamBase”。
+        # 因此这里为每个 OCRService 固定一个专属线程，保证初始化和推理始终发生在同一线程。
+        self._engine_thread_id: int | None = None
+        self._engine_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=(
+                "ocr-engine-"
+                + (self.preferred_device or "cpu").replace(":", "-").replace("/", "-")
+            ),
+        )
 
         self._prepare_runtime_dirs()
         self._prepare_runtime_env()
-        self._init_engine()
+        self._run_on_engine_thread(self._init_engine)
+
+    def _bind_engine_thread(self) -> None:
+        """记录 OCR 引擎专属线程 ID。"""
+        current_ident = threading.get_ident()
+        if self._engine_thread_id is None:
+            self._engine_thread_id = current_ident
+
+    def _is_engine_thread(self) -> bool:
+        """判断当前调用是否已经位于 OCR 引擎专属线程。"""
+        return self._engine_thread_id is not None and threading.get_ident() == self._engine_thread_id
+
+    def _run_on_engine_thread(self, func, /, *args, **kwargs):
+        """
+        将 OCR 引擎相关调用固定在专属线程执行。
+
+        这样即使外层接口通过 run_in_threadpool 落到不同 worker 线程，
+        Paddle 动态图模型也不会跨线程复用。
+        """
+        if self._is_engine_thread():
+            return func(*args, **kwargs)
+
+        def _runner():
+            self._bind_engine_thread()
+            return func(*args, **kwargs)
+
+        future = self._engine_executor.submit(_runner)
+        return future.result()
 
     # ── 运行环境与引擎初始化 ─────────────────────────────
 
@@ -2228,6 +2267,9 @@ class OCRService:
 
     def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
         """执行完整的 OCR 提取流程：推理、后处理、表格构建，返回统一字典。"""
+        if not self._is_engine_thread():
+            return self._run_on_engine_thread(self.extract_all, file_path, file_type)
+
         total_pages = self._estimate_total_pages(file_path, file_type)
         print(
             "OCRService: OCR inference started "

@@ -63,7 +63,11 @@ class ResultNormalizerMixin:
             else len(passed) + len(failed)
         )
         review_status = "pass" if not failed else "fail"
-        summary = f"完整性得分 {score}，共校验 {total} 项，缺失 {len(failed)} 项。"
+        # 摘要使用“已命中/总数”的口径，避免直接使用“缺失 X 项”的表述。
+        summary = f"共校验 {total} 项，已命中 {len(passed)}/{total} 项"
+        if score is not None:
+            summary += f"，完整性得分 {score}"
+        summary += "。"
         if ignored_count:
             summary += f" 另有 {ignored_count} 个父级标题由子项覆盖，不单独计分。"
         return {
@@ -169,12 +173,13 @@ class ResultNormalizerMixin:
 
         if has_results:
             total_segments = original_segment_count or (len(segments) + len(skipped_segments))
+            # 一致性摘要统一改成“已通过/已校验”的数量表达。
             summary = (
                 f"共比对 {total_segments} 个模板段，实际校验 {len(segments)} 个，"
-                f"因正文不足{20}字跳过 {short_body_skipped} 个，"
-                f"因附件未稳定定位跳过 {attachment_not_found_skipped} 个，"
-                f"因完整性缺失跳过 {integrity_skipped} 个，通过 {len(passed)} 个，"
-                f"存在缺漏 {len(failed)} 个。"
+                f"已通过 {len(passed)}/{len(segments)} 个；"
+                f"正文不足20字跳过 {short_body_skipped} 个，"
+                f"附件未稳定定位跳过 {attachment_not_found_skipped} 个，"
+                f"因完整性结果跳过 {integrity_skipped} 个。"
             )
         else:
             summary = "未提取到可比较的模板段。"
@@ -374,6 +379,16 @@ class ResultNormalizerMixin:
                 )
             )
 
+        total_requirements = raw.get("core_requirements_count")
+        if not isinstance(total_requirements, int):
+            total_requirements = len(missing_items) + len(negative_items) + len(unclear_items)
+        covered_count = max(0, int(total_requirements or 0) - len(missing_items))
+        review_summary = (
+            f"共核验 {int(total_requirements or 0)} 条带★要求，"
+            f"已明确响应 {covered_count}/{int(total_requirements or 0)} 条，"
+            f"负偏离 {len(negative_items)} 条，不明确 {len(unclear_items)} 条。"
+        )
+
         return {
             "validation": {
                 "status": "correct",
@@ -381,7 +396,7 @@ class ResultNormalizerMixin:
             },
             "review": {
                 "status": compliance_status,
-                "summary": str(raw.get("summary") or "未返回偏离条款结论。"),
+                "summary": review_summary,
             },
             "metrics": {
                 "core_requirements_count": raw.get("core_requirements_count"),
@@ -456,9 +471,30 @@ class ResultNormalizerMixin:
                     self._issue(status="fail", title=attachment, message="附件落款日期晚于招标截止时间。", evidence={"attachment": attachment, "source": "date_check"})
                 )
 
+        required_attachment_count = int(raw.get("required_attachment_count") or 0)
+        position_pass_count = max(
+            0,
+            required_attachment_count - len(missing_attachments) - len(missing_signature) - len(missing_seal),
+        )
+        date_pass_count = max(
+            0,
+            required_attachment_count - len(missing_date) - len(late_date),
+        )
+        review_summary = (
+            f"共核验 {required_attachment_count} 个必检附件，"
+            f"签章要素已覆盖 {position_pass_count}/{required_attachment_count} 个，"
+            f"日期校验通过 {date_pass_count}/{required_attachment_count} 个。"
+        )
+        if seal_company_check:
+            review_summary += (
+                " 公章单位匹配已确认。"
+                if seal_company_check.get("status") == "pass"
+                else " 公章单位匹配需进一步确认。"
+            )
+
         return {
             "validation": {"status": "correct", "reason": "模块返回了附件级签字、盖章、日期和公章匹配结果。"},
-            "review": {"status": compliance_status, "summary": str(raw.get("summary") or "未返回签字盖章日期结论。")},
+            "review": {"status": compliance_status, "summary": review_summary},
             "metrics": {
                 "required_attachment_count": raw.get("required_attachment_count"),
                 "missing_attachment_count": len(missing_attachments),
