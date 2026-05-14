@@ -102,6 +102,19 @@ class ResultNormalizerMixin:
             original_segment_count = len(segments)
         passed = []
         failed = []
+        short_body_skipped = 0
+        attachment_not_found_skipped = 0
+        integrity_skipped = 0
+
+        for skipped in skipped_segments:
+            skip_reason = skipped.get("skip_reason") or {}
+            skip_type = str(skip_reason.get("type") or "")
+            if skip_type == "body_too_short":
+                short_body_skipped += 1
+            elif skip_type in {"attachment_not_found", "optional_attachment_not_provided"}:
+                attachment_not_found_skipped += 1
+            else:
+                integrity_skipped += 1
 
         for segment in segments:
             title = str(segment.get("name") or "未命名模板段")
@@ -110,14 +123,15 @@ class ResultNormalizerMixin:
             evidence = {
                 "missing_anchors": missing,
                 "unfilled_fields": unfilled_fields,
-                "fillable_field_count": segment.get("fillable_field_count"),
+                "template_body_length": segment.get("template_body_length"),
+                "bid_body_length": segment.get("bid_body_length"),
             }
             if segment.get("is_passed"):
                 passed.append(
                     self._issue(
                         status="pass",
                         title=title,
-                        message="模板固定正文保留且填写项已补全。",
+                        message="模板正文固定内容未发现改动。",
                         evidence=evidence,
                     )
                 )
@@ -125,17 +139,11 @@ class ResultNormalizerMixin:
                 parts = []
                 if missing:
                     parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
-                if unfilled_fields:
-                    labels = [
-                        str(item.get("label") or item.get("template_line") or "填写项")
-                        for item in unfilled_fields
-                    ]
-                    parts.append(f"未填写字段：{self._join_text(labels)}")
                 failed.append(
                     self._issue(
                         status="fail",
                         title=title,
-                        message="；".join(parts) or "模板正文或填写项存在缺失。",
+                        message="；".join(parts) or "模板正文固定内容疑似被修改。",
                         evidence=evidence,
                     )
                 )
@@ -143,11 +151,11 @@ class ResultNormalizerMixin:
         has_results = bool(segments or skipped_segments)
         if skipped_segments:
             validation_status = "correct"
-            validation_reason = "模块返回了逐模板段的一致性结果，并已根据完整性缺失跳过对应附件。"
+            validation_reason = "模块返回了逐模板段的一致性结果，并已跳过正文过短或完整性缺失的附件。"
         else:
             validation_status = "correct" if segments else "unclear"
             validation_reason = (
-                "模块返回了逐模板段的缺漏锚点结果。"
+                "模块返回了逐模板段的正文固定内容比对结果。"
                 if segments
                 else "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
             )
@@ -163,7 +171,9 @@ class ResultNormalizerMixin:
             total_segments = original_segment_count or (len(segments) + len(skipped_segments))
             summary = (
                 f"共比对 {total_segments} 个模板段，实际校验 {len(segments)} 个，"
-                f"因完整性缺失跳过 {len(skipped_segments)} 个，通过 {len(passed)} 个，"
+                f"因正文不足{20}字跳过 {short_body_skipped} 个，"
+                f"因附件未稳定定位跳过 {attachment_not_found_skipped} 个，"
+                f"因完整性缺失跳过 {integrity_skipped} 个，通过 {len(passed)} 个，"
                 f"存在缺漏 {len(failed)} 个。"
             )
         else:
@@ -176,10 +186,13 @@ class ResultNormalizerMixin:
                 "template_segment_count": original_segment_count or len(segments),
                 "evaluated_segment_count": len(segments),
                 "skipped_segment_count": len(skipped_segments),
+                "short_body_skipped_count": short_body_skipped,
+                "attachment_not_found_skipped_count": attachment_not_found_skipped,
+                "integrity_skipped_count": integrity_skipped,
                 "passed_segment_count": len(passed),
                 "failed_segment_count": len(failed),
-                "fillable_field_count": sum(int(segment.get("fillable_field_count") or 0) for segment in segments),
-                "unfilled_field_count": sum(len(segment.get("unfilled_fields") or []) for segment in segments),
+                "fillable_field_count": 0,
+                "unfilled_field_count": 0,
             },
             "issues": {"passed": passed, "failed": failed, "unclear": []},
         }

@@ -156,6 +156,74 @@ class IntegrityChecker:
                     return sec
         return None
 
+    # 第二遍只回查 text 区段，并跳过目录页，避免把目录项当成正文附件
+    def _collect_toc_pages(self, sections: list) -> set[int]:
+        toc_pages: set[int] = set()
+        toc_line_counts: dict[int, int] = {}
+
+        for sec in sections:
+            if not isinstance(sec, dict):
+                continue
+            text = str(sec.get("text") or "").strip()
+            page = sec.get("page")
+            if not text or not isinstance(page, int):
+                continue
+
+            compact = re.sub(r"\s+", "", text)
+            if compact == "目录" or (compact.startswith("目录") and len(compact) <= 8):
+                toc_pages.add(page)
+
+            if TemplateExtractor._is_noise(text, set(), sec.get("type")):
+                toc_line_counts[page] = toc_line_counts.get(page, 0) + 1
+
+        for page, count in toc_line_counts.items():
+            if count >= 3:
+                toc_pages.add(page)
+
+        return toc_pages
+
+    # text 回查只接受标题样式的短文本，不把正文句子误当成附件标题
+    def _looks_like_text_title(self, text: str, keyword: str) -> bool:
+        compact = re.sub(r"\s+", "", str(text or ""))
+        if not compact or len(compact) > 80:
+            return False
+        if any(mark in compact for mark in ("根据", "提交", "详见", "说明如下", "应提供", "应附", "后附", "附后")):
+            return False
+        if any(mark in text for mark in ("。", "；", ";")):
+            return False
+
+        normalized_text = self._normalize_title_text(text)
+        normalized_keyword = self._normalize_title_text(keyword)
+        if not normalized_keyword or normalized_keyword not in normalized_text:
+            return False
+
+        return len(normalized_text) <= max(len(normalized_keyword) + 12, len(normalized_keyword) * 2)
+
+    # heading 没找到时，再按附件名回查 text，确认是否只是 OCR 把标题切成了正文
+    def _find_text_section(self, sections: list, headers: set, keyword: str, toc_pages: set[int]) -> dict | None:
+        for sec in sections:
+            if sec.get("type") != "text":
+                continue
+            if sec.get("page") in toc_pages:
+                continue
+
+            text = str(sec.get("text") or "")
+            if not text:
+                continue
+            if TemplateExtractor._is_noise(text, headers, sec.get("type")):
+                continue
+            if not self._looks_like_text_title(text, keyword):
+                continue
+            return sec
+        return None
+
+    # 完整性检查先认 heading，只有缺失项才做 text 二次确认
+    def _find_required_section(self, sections: list, headers: set, keyword: str, toc_pages: set[int]) -> dict | None:
+        match_section = self._find_heading_section(sections, headers, keyword)
+        if match_section:
+            return match_section
+        return self._find_text_section(sections, headers, keyword, toc_pages)
+
     # 主校验入口
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:
         """
@@ -165,6 +233,7 @@ class IntegrityChecker:
         reqs, attachment_mapping = TemplateExtractor.extract_requirements(model_json)
         data_node = test_json.get('data', test_json)
         sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
+        toc_pages = self._collect_toc_pages(sections)
 
         all_details = {}
         for item in reqs:
@@ -173,7 +242,7 @@ class IntegrityChecker:
 
             # 每个附件单独判断，不再允许证明书/授权委托书互替，也不再做父子项放宽。
             norm_item = self._normalize_target(item)
-            match_section = self._find_heading_section(sections, headers, norm_item)
+            match_section = self._find_required_section(sections, headers, norm_item, toc_pages)
             match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
             is_optional = self._is_optional_item(item)
 

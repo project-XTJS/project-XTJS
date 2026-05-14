@@ -31,6 +31,8 @@ class VerificationChecker:
     ATTACHMENT_TITLE_PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
         r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        # 兼容 2.2 / 7.2 / 8.1.2 这类多级编号标题
+        r'^\s*\d+(?:[．\.、]\d+)+(?:[．\.、])?\s*',
         r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
         r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
         r'^\s*\d+[)）]\s*',
@@ -111,7 +113,12 @@ class VerificationChecker:
         template_required = self._required_attachments(tender)
         expected_attachments = self._attachment_title_hints(template_required)
         bid_sections = self._attachment_sections(bid, seal_bundle["locations"], signature_bundle["locations"], expected_attachments)
-        bid_by_no = {x["attachment_number"]: x for x in bid_sections if x.get("attachment_number")}
+        bid_by_no: dict[str, list[dict]] = {}
+        for item in bid_sections:
+            attachment_number = item.get("attachment_number")
+            if not attachment_number:
+                continue
+            bid_by_no.setdefault(attachment_number, []).append(item)
         required = self._required_attachments(tender, bid_by_no, bid_sections)
 
         results, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], []
@@ -395,6 +402,17 @@ class VerificationChecker:
                     items.append({"date": parsed, "text": match.group(0), "start": match.start()})
         return items
 
+    def _is_pure_date_line(self, text: str) -> bool:
+        """识别只包含日期本身的独立落款行。"""
+        plain = str(text or "").strip()
+        if not plain:
+            return False
+        normalized = re.sub(r"[\s　]+", "", plain)
+        for pattern in self.DATE_PATTERNS:
+            if re.fullmatch(pattern, normalized):
+                return True
+        return False
+
     def _deadline_from_doc(self, payload: dict | None) -> dict | None:
         candidates = []
         sections = self._sections(payload)
@@ -439,10 +457,9 @@ class VerificationChecker:
 
     def _attachment_title(self, text: str) -> str:
         text = str(text or "").strip()
-        text = re.sub(r"^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*", "", text)
-        text = re.sub(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[）).、．]?|[一二三四五六七八九十百零]+[、.)）．])\s*", "", text)
         idx = text.find("附件")
-        text = text[idx:] if idx >= 0 else text
+        # 没有“附件X”时，也要把多级编号前缀去干净，避免 7.2/8.1.2 残留数字影响匹配。
+        text = text[idx:] if idx >= 0 else self._strip_attachment_title_prefix(text)
         return re.sub(r"\s+", " ", text).strip("：:；;，,。")
 
     def _strip_attachment_title_prefix(self, text: str) -> str:
@@ -488,16 +505,25 @@ class VerificationChecker:
         return result
 
     def _expected_attachment(self, text: str, expected_attachments: list[dict] | None = None) -> dict | None:
-        # 这里只做精确匹配：优先按附件编号，其次按归一化标题，不再按相似度猜测附件。
+        # 先按标题精确命中，避免后文合同/说明里的“附件1/附件2”把正式附件串号。
         attachment_number = self._attachment_number(text)
         title_key = self._attachment_title_key(text)
+        matched_by_title = None
+        matched_by_number = None
         for item in expected_attachments or []:
             expected_number = item.get("attachment_number")
             expected_title_key = str(item.get("title_key") or "").strip()
+            if title_key and expected_title_key == title_key:
+                if attachment_number and expected_number == attachment_number:
+                    return item
+                matched_by_title = matched_by_title or item
             if attachment_number and expected_number == attachment_number:
-                return item
-            if not attachment_number and title_key and expected_title_key == title_key:
-                return item
+                matched_by_number = matched_by_number or item
+        if matched_by_title is not None:
+            return matched_by_title
+        # 只有标题 key 缺失时，才退回纯附件编号匹配。
+        if attachment_number and not title_key:
+            return matched_by_number
         return None
 
     def _is_attachment_heading(self, section: dict, expected_attachments: list[dict] | None = None) -> bool:
@@ -580,6 +606,40 @@ class VerificationChecker:
             return True
         return self._is_embedded_response_format_heading(section)
 
+    def _attachment_heading_identity(
+        self,
+        text: str,
+        expected_attachments: list[dict] | None = None,
+    ) -> str:
+        """将附件标题归一为稳定标识，用于合并同一附件的多层标题。"""
+        matched_expected = self._expected_attachment(text, expected_attachments)
+        if matched_expected is not None:
+            identity = (
+                matched_expected.get("attachment_number")
+                or matched_expected.get("title_key")
+                or self._attachment_title_key(matched_expected.get("title") or "")
+            )
+            if identity:
+                return str(identity)
+        attachment_number = self._attachment_number(text)
+        if attachment_number:
+            return str(attachment_number)
+        return self._attachment_title_key(text)
+
+    def _can_merge_attachment_heading_gap(self, gap_sections: list[dict]) -> bool:
+        """同一附件连续出现“章节标题 + 表单标题”时，视为同一附件起点。"""
+        for section in gap_sections:
+            text = str(section.get("text") or "").strip()
+            section_type = str(section.get("type") or "").strip().lower()
+            if not text:
+                continue
+            if section_type in {"heading", "seal", "signature"}:
+                continue
+            if self._catalog_like(text):
+                continue
+            return False
+        return True
+
     def _extract_response_format_attachments(self, tender_payload: dict | None) -> list[dict]:
         sections = self._response_format_sections(tender_payload)
         if not sections:
@@ -624,7 +684,22 @@ class VerificationChecker:
 
     def _attachment_sections(self, payload: dict | None, seal_locations: list[dict] | None = None, signature_locations: list[dict] | None = None, expected_attachments: list[dict] | None = None) -> list[dict]:
         sections = self._sections(payload)
-        starts = [i for i, x in enumerate(sections) if self._is_attachment_heading(x, expected_attachments)]
+        raw_starts = [i for i, x in enumerate(sections) if self._is_attachment_heading(x, expected_attachments)]
+        starts: list[int] = []
+        for start in raw_starts:
+            if not starts:
+                starts.append(start)
+                continue
+            prev_start = starts[-1]
+            prev_text = str(sections[prev_start].get("text") or "").strip()
+            curr_text = str(sections[start].get("text") or "").strip()
+            prev_identity = self._attachment_heading_identity(prev_text, expected_attachments)
+            curr_identity = self._attachment_heading_identity(curr_text, expected_attachments)
+            gap_sections = sections[prev_start + 1:start]
+            # 同一附件的连续多层标题不应切成两个附件，否则正文会被截断成只剩标题。
+            if prev_identity and prev_identity == curr_identity and self._can_merge_attachment_heading_gap(gap_sections):
+                continue
+            starts.append(start)
         result = []
         seal_locations = seal_locations or []
         signature_locations = signature_locations or []
@@ -649,7 +724,7 @@ class VerificationChecker:
     def _required_attachments(
         self,
         tender_payload: dict | None,
-        bid_by_no: dict[str, dict] | None = None,
+        bid_by_no: dict[str, list[dict]] | None = None,
         bid_sections: list[dict] | None = None,
     ) -> list[dict]:
         result, seen = [], set()
@@ -737,14 +812,24 @@ class VerificationChecker:
             return False
         return len(compact) <= 40 or "underline" in compact.lower() or bool(self._date_candidates(text))
 
-    def _match_attachment(self, attachment: dict, bid_by_no: dict[str, dict], all_sections: list[dict]) -> dict | None:
-        # 投标文件侧同样只做精确匹配，未命中时直接返回，不再做模糊兜底。
+    def _match_attachment(self, attachment: dict, bid_by_no: dict[str, list[dict]], all_sections: list[dict]) -> dict | None:
+        # 先按标题精确匹配，再在同号候选里兜底，避免后文同号附件串到前面的正式表单。
         attachment_number = attachment.get("attachment_number")
+        title_key = self._attachment_title_key(attachment.get("title") or "")
         if attachment_number in bid_by_no:
-            return bid_by_no[attachment_number]
+            candidates = bid_by_no.get(attachment_number) or []
+            if title_key:
+                exact = [
+                    section
+                    for section in candidates
+                    if self._attachment_title_key(section.get("title") or "") == title_key
+                ]
+                if exact:
+                    return exact[0]
+            if len(candidates) == 1:
+                return candidates[0]
         if attachment_number:
             return None
-        title_key = self._attachment_title_key(attachment.get("title") or "")
         if not title_key:
             return None
         for section in all_sections:
@@ -1185,9 +1270,40 @@ class VerificationChecker:
         if fallback_items:
             return max(fallback_items, key=lambda x: x["date"])
 
-        contextual_items = []
-        recent_sections = list(sections or [])[-8:]
+        pure_date_items = []
+        section_list = list(sections or [])
         context_anchors = self.DATE_FIELD_ANCHORS + self.SIGNATURE_MARKERS + self.SEAL_MARKERS + self.COMPANY_ANCHORS
+        for idx, section in enumerate(section_list):
+            section_text = str(section.get("text") or "").strip()
+            compact = self._compact(section_text)
+            if not compact or str(section.get("type") or "").strip().lower() == "seal":
+                continue
+            if not self._is_pure_date_line(section_text):
+                continue
+            current_page = section.get("page") if isinstance(section.get("page"), int) else None
+            nearby_context = False
+            for neighbor in section_list[max(0, idx - 4): min(len(section_list), idx + 5)]:
+                if neighbor is section:
+                    continue
+                neighbor_text = str(neighbor.get("text") or "").strip()
+                neighbor_compact = self._compact(neighbor_text)
+                if not neighbor_compact:
+                    continue
+                neighbor_page = neighbor.get("page") if isinstance(neighbor.get("page"), int) else None
+                if current_page is not None and neighbor_page is not None and neighbor_page != current_page:
+                    continue
+                if any(anchor in neighbor_compact for anchor in context_anchors):
+                    nearby_context = True
+                    break
+            if not nearby_context:
+                continue
+            for candidate in self._date_candidates(section_text):
+                pure_date_items.append({**candidate, "page": current_page})
+        if pure_date_items:
+            return max(pure_date_items, key=lambda x: x["date"])
+
+        contextual_items = []
+        recent_sections = section_list[-8:]
         for idx, section in enumerate(recent_sections):
             section_text = str(section.get("text") or "").strip()
             compact = self._compact(section_text)

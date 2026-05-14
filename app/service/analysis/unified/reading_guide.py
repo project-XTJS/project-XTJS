@@ -159,7 +159,7 @@ class ReadingGuideMixin:
             }
         if check_code == "consistency_check":
             return {
-                "focus_scope": "对照招标文件响应文件格式中的模板正文与填写项，检查商务标对应附件是否保留固定内容并完成必要填写。",
+                "focus_scope": "对照招标文件响应文件格式中的模板正文固定内容，只检查正文是否被改动；标题、页眉页脚、落款和填写项不纳入一致性判断。",
                 "source_documents": [
                     self._document_source_brief(tender_meta, purpose="template_source"),
                     self._document_source_brief(business_meta, purpose="recognized_attachment_content"),

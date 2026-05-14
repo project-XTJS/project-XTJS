@@ -144,7 +144,6 @@ class ExtractionTablesMixin:
             content_text = "\n".join(template.get("content") or [])
             analysis = self.consistency_checker._analyze_template_segment(title, content_text)
             anchors = analysis.get("anchors") or []
-            fill_specs = analysis.get("fill_specs") or []
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -154,19 +153,16 @@ class ExtractionTablesMixin:
                     field_group="template_attachment",
                     field_name=title,
                     value={
+                        "fixed_body_length": int(analysis.get("fixed_body_length") or 0),
                         "anchor_count": len(anchors),
                         "anchor_sample": anchors[:8],
-                        "fillable_field_count": len(fill_specs),
-                        "fillable_field_sample": [
-                            str(item.get("display_label") or item.get("template_line") or "").strip()
-                            for item in fill_specs[:5]
-                        ],
+                        "min_body_length": int(getattr(self.consistency_checker, "MIN_BODY_LENGTH", 50)),
                     },
                     status="extracted",
                     expected_document_role="business",
                     evidence={
                         "content_preview": self._trim_text(
-                            analysis.get("anchor_source") or analysis.get("body") or content_text,
+                            analysis.get("fixed_body") or analysis.get("body") or content_text,
                             max_length=200,
                         ),
                     },

@@ -16,6 +16,9 @@ from ..verification import VerificationChecker
 class ConsistencyChecker:
     """一致性校验器：比对招标模型段落与投标文件段落的内容差异。"""
 
+    # 正文过短的附件不参与一致性判断，避免只靠标题/零散字段误报
+    MIN_BODY_LENGTH = 20
+
     # 正式标题行模式（如“附件1”、“第一章”）
     FORMAL_TITLE_LINE_RE = re.compile(
         r"^\s*(?:" r"(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*"
@@ -44,6 +47,55 @@ class ConsistencyChecker:
         r"|_{2,}"
         r"|(?:…|\.|·){3,}"
         r"|[（(]\s*[)）]"
+    )
+    # 已填写的动态内容常出现在下划线、括号或 LaTeX underline 中，一致性比较时应剥离
+    FILLED_UNDERLINE_RE = re.compile(r"\$?\s*\\underline\{\s*(?:\\text\{)?[^{}\n]{0,200}(?:\})?\s*\}\s*\$?")
+    FILLED_BLANK_SPAN_RE = re.compile(r"_{2,}\s*[^_\n]{0,120}?\s*_{2,}")
+    SHORT_PAREN_RE = re.compile(r"[（(][^()（）\n]{0,80}[）)]")
+    FOOTER_PAGE_RE = re.compile(r"^\s*(?:第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?|\d+\s*/\s*\d+|\d+)\s*$")
+    FIELD_LABEL_PREFIXES = ("地址", "邮政编码", "电话号码", "传真号码", "电子邮件", "电子邮箱", "电话", "传真")
+    AMOUNT_LINE_MARKERS = ("总报价为", "不含税总价", "含税总价", "人民币")
+    # 表格型附件只校验表头和固定说明，不把数据行数值带入一致性比较。
+    TABLE_HEADER_GROUPS = (
+        (
+            ("报价项", ("报价项",)),
+            ("产品", ("产品/设备名称", "产品名称", "产品",)),
+            ("设备名称", ("产品/设备名称", "设备名称",)),
+            ("不含税总价", ("不含税总价",)),
+            ("增值税税率", ("增值税税率",)),
+            ("含税总价", ("含税总价",)),
+            ("交货进度", ("交货进度",)),
+            ("备注", ("备注",)),
+        ),
+        (
+            ("设备名称", ("设备名称",)),
+            ("数量", ("数量",)),
+            ("单位", ("单位",)),
+            ("增值税税率", ("增值税税率",)),
+            ("含税单价", ("含税单价",)),
+            ("含税总价", ("含税总价",)),
+            ("备注", ("备注",)),
+        ),
+        (
+            ("采购文件商务条款", ("采购文件商务条款", "采购文件的商务条款", "采购文件商务",)),
+            ("响应文件的商务条款", ("响应文件的商务条款", "响应文件商务条款", "响应文件的商务",)),
+            ("偏离", ("偏离",)),
+            ("说明", ("说明",)),
+        ),
+        (
+            ("序号", ("序号",)),
+            ("年份", ("年份",)),
+            ("项目名称", ("项目名称",)),
+            ("合同金额", ("合同金额",)),
+            ("委托内容", ("委托内容",)),
+            ("委托单位", ("委托单位",)),
+            ("所附证明材料在本响应文件的所在页码", ("所附证明材料在本响应文件的所在页码", "所附证明材料在本投标文件的所在页码", "所附证明材料在本比选文件的所在页码", "所在页码")),
+        ),
+    )
+    INSTRUCTIONAL_LINE_MARKERS = (
+        "我方同意根据采购人进一步要求出示有关资料予以证实",
+        "如为联合体",
+        "此附件联合体各方均应提供",
     )
 
     def __init__(self):
@@ -95,8 +147,21 @@ class ConsistencyChecker:
         """检查归一化后的行是否是落款等非正文行。"""
         return any(marker in normalized_line for marker in self.NON_BODY_LINE_MARKERS)
 
+    def _is_header_footer_line(self, text: str, normalized_line: str) -> bool:
+        """过滤页眉页脚和纯页码。"""
+        plain = self._plain_text(text)
+        if not plain:
+            return True
+        if self.FOOTER_PAGE_RE.match(plain):
+            return True
+        if normalized_line.isdigit() and len(normalized_line) <= 4:
+            return True
+        if "招标编号" in plain and len(normalized_line) <= 32:
+            return True
+        return False
+
     def _trim_non_body_lines(self, text: str) -> str:
-        """移除正文中的通讯地址块和落款行。"""
+        """移除正文中的标题、页眉页脚、通讯地址块和落款行。"""
         if not text:
             return ""
 
@@ -112,6 +177,11 @@ class ConsistencyChecker:
             if not normalized_line:
                 continue
 
+            if self._is_formal_title_line(stripped):
+                continue
+            if self._is_header_footer_line(stripped, normalized_line):
+                continue
+
             if any(marker in normalized_line for marker in self.NON_BODY_BLOCK_MARKERS):
                 in_non_body_block = True
                 continue
@@ -125,6 +195,82 @@ class ConsistencyChecker:
             kept.append(stripped)
 
         return "\n".join(kept)
+
+    def _table_header_projection(self, text: str) -> str:
+        """从混合了表头和数据行的 OCR 文本里，只抽取稳定的表头字段。"""
+        normalized_text = self._normalize(text)
+        best_fields: list[str] = []
+        for group in self.TABLE_HEADER_GROUPS:
+            present_fields: list[str] = []
+            for canonical, variants in group:
+                normalized_variants = [self._normalize(item) for item in variants]
+                if any(variant and variant in normalized_text for variant in normalized_variants):
+                    present_fields.append(canonical)
+            if len(present_fields) >= 3 and len(present_fields) > len(best_fields):
+                best_fields = present_fields
+        return " ".join(best_fields)
+
+    def _fixed_body_line(self, line: str) -> str:
+        """提取一行中的固定正文，只保留不随填写内容变化的部分。"""
+        text = self._plain_text(line)
+        if not text:
+            return ""
+        table_header_projection = self._table_header_projection(text)
+        if table_header_projection:
+            return table_header_projection
+        normalized_text = self._normalize(text)
+        compact_text = self._compact_text(text)
+        has_dynamic_marker = bool(
+            self.FILLED_UNDERLINE_RE.search(text)
+            or self.FILLED_BLANK_SPAN_RE.search(text)
+            or self.PLACEHOLDER_SPAN_RE.search(compact_text)
+        )
+        # 招标模板里的说明性提示不是正文，避免与投标文件填写内容混在一起误判。
+        if any(marker in normalized_text for marker in self.INSTRUCTIONAL_LINE_MARKERS):
+            return ""
+        # 报价金额句属于填写项，模板和投标文件的书写方式差异较大，不纳入固定正文一致性比较。
+        if any(marker in normalized_text for marker in self.AMOUNT_LINE_MARKERS):
+            if "总报价为" in normalized_text and (has_dynamic_marker or re.search(r"[¥￥]|\d[\d,，.]*", text)):
+                return ""
+        fixed_line = self.FILLED_UNDERLINE_RE.sub(" ", text)
+        fixed_line = self.FILLED_BLANK_SPAN_RE.sub(" ", fixed_line)
+        fixed_line = self.SHORT_PAREN_RE.sub(" ", fixed_line)
+        normalized_fixed_candidate = self._normalize(self._strip_placeholder_hints(fixed_line))
+        # 长填写骨架句先剥离填写值，再根据剩余固定正文判断；只有固定信息几乎为空时才跳过。
+        if has_dynamic_marker and len(normalized_text) > 30 and len(normalized_fixed_candidate) < 10:
+            return ""
+        fill_spec = self._build_fill_spec(text)
+        if fill_spec is not None:
+            # 填写行不应整行删除，而是保留固定标签部分参与一致性比较。
+            preserved_label = self._plain_text(
+                fill_spec.get("display_label")
+                or fill_spec.get("anchor_text")
+                or fill_spec.get("template_line")
+                or ""
+            )
+            if "：" in preserved_label or ":" in preserved_label:
+                preserved_label = re.split(r"[:：]", preserved_label, maxsplit=1)[0]
+            preserved_label = self._strip_placeholder_hints(preserved_label)
+            preserved_label = re.sub(r"\s+", " ", preserved_label).strip("：:；;，,。 ")
+            return preserved_label if len(self._normalize(preserved_label)) >= 2 else ""
+        # 已填写的地址、邮箱等行只保留字段名，不把具体值带入一致性比较
+        if "：" in fixed_line or ":" in fixed_line:
+            label, _ = re.split(r"[:：]", fixed_line, maxsplit=1)
+            plain_label = self._plain_text(label)
+            if plain_label and any(marker in plain_label for marker in self.FIELD_LABEL_PREFIXES):
+                fixed_line = plain_label
+        fixed_line = self._strip_placeholder_hints(fixed_line)
+        fixed_line = re.sub(r"\s+", " ", fixed_line).strip("：:；;，,。 ")
+        return fixed_line if self._normalize(fixed_line) else ""
+
+    def _build_fixed_body(self, text: str) -> str:
+        """从正文中提取固定内容，填写项和落款等内容不参与一致性判断。"""
+        fixed_lines: list[str] = []
+        for line in self._body_lines(text):
+            fixed_line = self._fixed_body_line(line)
+            if fixed_line:
+                fixed_lines.append(fixed_line)
+        return "\n".join(fixed_lines)
 
     def _trim_instruction_note_block(self, text: str) -> str:
         """移除正文中的注释/说明块（以“注：”或“说明：”开头的内容）。"""
@@ -162,10 +308,10 @@ class ConsistencyChecker:
 
         return "\n".join(kept)
 
-    def _build_attachment_lookup(self, test_json: dict, templates: List[Dict]) -> tuple[dict[str, dict], list[dict]]:
+    def _build_attachment_lookup(self, test_json: dict, templates: List[Dict]) -> tuple[dict[str, list[dict]], list[dict]]:
         """
         从投标文件 JSON 中提取所有附件（如附件1、附件2等），
-        返回按附件号索引的字典和合并后的附件列表。
+        返回按附件号索引的候选列表和原始附件列表。
         """
         expected_attachments = []
         seen = set()
@@ -173,7 +319,8 @@ class ConsistencyChecker:
             title = str(temp.get("title") or "").strip()
             attachment_number = self._verification_checker._attachment_number(title)
             normalized_title = self._verification_checker._attachment_title(title)
-            key = attachment_number or normalized_title
+            title_key = self._verification_checker._attachment_title_key(normalized_title)
+            key = title_key or attachment_number or normalized_title
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -181,51 +328,19 @@ class ConsistencyChecker:
                 {
                     "attachment_number": attachment_number,
                     "title": normalized_title,
-                    "title_key": self._verification_checker._attachment_title_key(normalized_title),
+                    "title_key": title_key,
                 }
             )
 
         sections = self._verification_checker._attachment_sections(
             test_json, [], [], expected_attachments,
         )
-        merged_sections: list[dict] = []
-        by_number: dict[str, dict] = {}
+        by_number: dict[str, list[dict]] = {}
         for item in sections:
             attachment_number = item.get("attachment_number")
-            if not attachment_number:
-                merged_sections.append(item)
-                continue
-            existing = by_number.get(attachment_number)
-            if existing is None:
-                copied = {
-                    **item,
-                    "pages": list(item.get("pages") or []),
-                    "seal_texts": list(item.get("seal_texts") or []),
-                    "signature_texts": list(item.get("signature_texts") or []),
-                    "sections": list(item.get("sections") or []),
-                    "seal_locations": list(item.get("seal_locations") or []),
-                    "signature_locations": list(item.get("signature_locations") or []),
-                }
-                by_number[attachment_number] = copied
-                merged_sections.append(copied)
-                continue
-
-            # 合并相同附件号下的内容
-            existing["pages"] = list(dict.fromkeys((existing.get("pages") or []) + (item.get("pages") or [])))
-            existing["seal_texts"] = list(dict.fromkeys((existing.get("seal_texts") or []) + (item.get("seal_texts") or [])))
-            existing["signature_texts"] = list(dict.fromkeys((existing.get("signature_texts") or []) + (item.get("signature_texts") or [])))
-            existing["sections"] = list(existing.get("sections") or []) + list(item.get("sections") or [])
-            existing["seal_locations"] = self._verification_checker._dedupe_locations(
-                list(existing.get("seal_locations") or []) + list(item.get("seal_locations") or [])
-            )
-            existing["signature_locations"] = self._verification_checker._dedupe_locations(
-                list(existing.get("signature_locations") or []) + list(item.get("signature_locations") or [])
-            )
-            part = str(item.get("text") or "").strip()
-            if part:
-                prefix = str(existing.get("text") or "").strip()
-                existing["text"] = f"{prefix}\n{part}".strip() if prefix else part
-        return by_number, merged_sections
+            if attachment_number:
+                by_number.setdefault(attachment_number, []).append(item)
+        return by_number, sections
 
     def _serialize_section_locations(self, section: dict | None) -> List[Dict]:
         """将附件区段中的页面/位置信息序列化为列表。"""
@@ -309,6 +424,116 @@ class ConsistencyChecker:
             _, value = re.split(r"[:：]", text, maxsplit=1)
             return not self._is_effectively_filled_value(value)
         return False
+
+    def _meaningful_fixed_parts(self, parts: List[str]) -> List[str]:
+        """过滤掉过短或纯序号片段，只保留可用于槽位匹配的固定骨架。"""
+        result: List[str] = []
+        for part in parts:
+            normalized = self._normalize(part)
+            if not normalized or normalized.isdigit():
+                continue
+            if len(normalized) < 2 and normalized not in {"年", "月", "日"}:
+                continue
+            result.append(normalized)
+        return result
+
+    def _build_dynamic_slot_spec(self, line: str) -> dict | None:
+        """根据招标模板中的下划线/空格槽位，生成动态句匹配规则。"""
+        text = self._plain_text(line)
+        if not text or self._looks_like_table_line(text):
+            return None
+
+        compact = self._compact_text(text)
+        placeholder_matches = list(self.PLACEHOLDER_SPAN_RE.finditer(compact))
+        if not placeholder_matches:
+            return None
+
+        pattern_parts: list[str] = []
+        fixed_parts_raw: list[str] = []
+        cursor = 0
+        for match in placeholder_matches:
+            fixed_fragment = compact[cursor:match.start()]
+            if fixed_fragment:
+                pattern_parts.append(re.escape(fixed_fragment))
+                fixed_parts_raw.append(fixed_fragment)
+            pattern_parts.append(r".*?")
+            cursor = match.end()
+        tail = compact[cursor:]
+        if tail:
+            pattern_parts.append(re.escape(tail))
+            fixed_parts_raw.append(tail)
+
+        fixed_parts = self._meaningful_fixed_parts(fixed_parts_raw)
+        fallback_text = self._fixed_body_line(text)
+        fallback_anchors = self._get_anchors(fallback_text)
+        if not fixed_parts and not fallback_anchors:
+            return None
+
+        return {
+            "template_line": text,
+            "pattern": re.compile("".join(pattern_parts)),
+            "fixed_parts": fixed_parts,
+            "fallback_anchors": fallback_anchors,
+        }
+
+    def _candidate_line_windows(self, bid_lines: List[str], max_window: int = 3) -> List[str]:
+        """生成单行和相邻多行窗口，兼容 OCR 将一条模板句拆成多行的情况。"""
+        windows: list[str] = []
+        seen: set[str] = set()
+        for size in range(1, max_window + 1):
+            for start in range(0, len(bid_lines) - size + 1):
+                candidate = "".join(bid_lines[start:start + size]).strip()
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                windows.append(candidate)
+        return windows
+
+    def _ordered_parts_present(self, fixed_parts: List[str], candidate_text: str) -> bool:
+        """检查固定骨架是否按顺序出现在候选文本中。"""
+        normalized_candidate = self._normalize(candidate_text)
+        cursor = 0
+        for part in fixed_parts:
+            if not part:
+                continue
+            position = normalized_candidate.find(part, cursor)
+            if position < 0:
+                return False
+            cursor = position + len(part)
+        return True
+
+    def _dynamic_slot_spec_matches(self, slot_spec: dict, bid_lines: List[str]) -> bool:
+        """按模板槽位匹配投标句子，允许填写值替换下划线位置。"""
+        fixed_parts = slot_spec.get("fixed_parts") or []
+        fallback_anchors = self._meaningful_fixed_parts(slot_spec.get("fallback_anchors") or [])
+        pattern = slot_spec.get("pattern")
+        for candidate in self._candidate_line_windows(bid_lines):
+            compact_candidate = self._compact_text(candidate)
+            if not compact_candidate:
+                continue
+            if pattern is not None and pattern.search(compact_candidate):
+                return True
+            if fixed_parts and self._ordered_parts_present(fixed_parts, candidate):
+                return True
+            # 模板句就算下划线被投标文件删掉，只要固定骨架仍按顺序保留，也视为命中。
+            if fallback_anchors and self._ordered_parts_present(fallback_anchors, candidate):
+                return True
+        return False
+
+    def _evaluate_dynamic_slot_specs(self, slot_specs: List[dict], bid_body: str, fixed_bid_body: str) -> List[str]:
+        """先用模板槽位规则匹配，未命中时再回退到严格锚点比对。"""
+        if not slot_specs:
+            return []
+        bid_lines = self._body_lines(bid_body)
+        strict_bid_norm = self._normalize(fixed_bid_body)
+        missing: List[str] = []
+        for slot_spec in slot_specs:
+            if self._dynamic_slot_spec_matches(slot_spec, bid_lines):
+                continue
+            fallback_anchors = slot_spec.get("fallback_anchors") or []
+            slot_missing = [anchor for anchor in fallback_anchors if anchor not in strict_bid_norm]
+            missing.extend(slot_missing)
+        return missing
 
     def _build_fill_spec(self, line: str) -> dict | None:
         text = self._plain_text(line)
@@ -402,21 +627,26 @@ class ConsistencyChecker:
         body = self._trim_instruction_note_block(
             self._trim_non_body_lines(self._strip_title_line(text, title))
         )
-        fill_specs: list[dict] = []
-        anchor_lines: list[str] = []
+        fixed_lines: List[str] = []
+        dynamic_slot_specs: List[dict] = []
         for line in self._body_lines(body):
-            fill_spec = self._build_fill_spec(line)
-            if fill_spec is not None:
-                fill_specs.append(fill_spec)
-                anchor_lines.append(fill_spec.get("anchor_text") or line)
-            else:
-                anchor_lines.append(line)
-        anchor_source = "\n".join(anchor_lines)
+            slot_spec = self._build_dynamic_slot_spec(line)
+            if slot_spec is not None:
+                dynamic_slot_specs.append(slot_spec)
+                continue
+            fixed_line = self._fixed_body_line(line)
+            if fixed_line:
+                fixed_lines.append(fixed_line)
+        fixed_body = "\n".join(fixed_lines)
+        fixed_body_length = len(self._normalize(fixed_body))
         return {
             "body": body,
-            "anchor_source": anchor_source,
-            "anchors": self._get_anchors(anchor_source),
-            "fill_specs": fill_specs,
+            "fixed_body": fixed_body,
+            "fixed_body_length": fixed_body_length,
+            "anchor_source": fixed_body,
+            "anchors": self._get_anchors(fixed_body),
+            "dynamic_slot_specs": dynamic_slot_specs,
+            "fill_specs": [],
         }
 
     def _evaluate_placeholder_fill_spec(self, fill_spec: dict, bid_lines: List[str]) -> dict | None:
@@ -578,22 +808,60 @@ class ConsistencyChecker:
             matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
             matched_locations = self._serialize_section_locations(matched_section)
             template_analysis = self._analyze_template_segment(title, m_txt)
+            dynamic_slot_specs = template_analysis.get("dynamic_slot_specs") or []
+            if int(template_analysis.get("fixed_body_length") or 0) <= self.MIN_BODY_LENGTH and not dynamic_slot_specs:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": True,
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "fillable_field_count": 0,
+                        "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
+                        "pages": matched_pages,
+                        "locations": matched_locations,
+                        "skip_reason": {
+                            "type": "body_too_short",
+                            "body_length": int(template_analysis.get("fixed_body_length") or 0),
+                            "min_body_length": self.MIN_BODY_LENGTH,
+                        },
+                    }
+                )
+                continue
+
             t_body = self._trim_instruction_note_block(
                 self._trim_non_body_lines(self._strip_title_line(t_txt, title))
             )
+            fixed_bid_body = self._build_fixed_body(t_body)
 
-            norm_t = self._normalize(t_body)
+            norm_t = self._normalize(fixed_bid_body)
             anchors = template_analysis["anchors"]
             missing = [a for a in anchors if a not in norm_t]
-            unfilled_fields = self._evaluate_fill_specs(template_analysis["fill_specs"], t_body)
+            dynamic_missing = self._evaluate_dynamic_slot_specs(
+                dynamic_slot_specs,
+                t_body,
+                fixed_bid_body,
+            )
+            if dynamic_missing:
+                combined_missing: List[str] = []
+                seen_missing: set[str] = set()
+                for anchor in missing + dynamic_missing:
+                    normalized_anchor = self._normalize(anchor)
+                    if not normalized_anchor or normalized_anchor in seen_missing:
+                        continue
+                    seen_missing.add(normalized_anchor)
+                    combined_missing.append(anchor)
+                missing = combined_missing
 
             results.append(
                 {
                     "name": title,
-                    "is_passed": len(missing) == 0 and not unfilled_fields,
+                    "is_passed": len(missing) == 0,
                     "missing_anchors": missing,
-                    "unfilled_fields": unfilled_fields,
-                    "fillable_field_count": len(template_analysis["fill_specs"]),
+                    "unfilled_fields": [],
+                    "fillable_field_count": 0,
+                    "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
+                    "bid_body_length": len(self._normalize(fixed_bid_body)),
                     "pages": matched_pages,
                     "locations": matched_locations,
                 }
