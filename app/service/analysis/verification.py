@@ -730,7 +730,11 @@ class VerificationChecker:
         result, seen = [], set()
         bid_by_no = bid_by_no or {}
         bid_sections = bid_sections or []
-        for item in self._extract_response_format_attachments(tender_payload):
+        response_attachments, _ = TemplateExtractor.filter_business_response_attachments(
+            tender_payload or {},
+            self._extract_response_format_attachments(tender_payload),
+        )
+        for item in response_attachments:
             title = self._attachment_title(item.get("title"))
             text = "\n".join(item.get("content") or [])
             template_req = self._requirements(title, text)

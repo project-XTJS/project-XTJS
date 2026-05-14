@@ -56,7 +56,8 @@ class NormalModeMixin:
             row_issues.extend(section_analysis["row_issues"])
             unresolved_rows.extend(section_analysis["unresolved_rows"])
 
-        if not extracted_items and total_sections:
+        # 已识别到结构化分项表时，总价页只补总价候选，不再回退生成分项项。
+        if not extracted_items and total_sections and not structured_analysis["used_tables"]:
             fallback_analysis = self._collect_section_analysis(total_sections)
             extracted_items.extend(fallback_analysis["items"])
             extracted_totals.extend(fallback_analysis["totals"])

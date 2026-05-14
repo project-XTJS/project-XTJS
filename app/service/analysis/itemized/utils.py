@@ -39,6 +39,11 @@ class UtilsMixin:
         if not normalized:
             return None
 
+        # 兼容“2面 / 3处 / 9台”这类前导数字数量写法。
+        leading_match = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)", normalized)
+        if leading_match:
+            return self._to_decimal(leading_match.group(1))
+
         unit_pattern = "|".join(
             sorted(
                 (re.escape(unit) for unit in self.UNIT_KEYWORDS if unit),

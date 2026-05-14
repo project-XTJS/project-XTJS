@@ -74,6 +74,9 @@ class DirectPriceMixin:
         s = re.sub(r"\s+", "", s)
         s = s.replace("人民币", "")
         s = s.replace("圆", "元")
+        # 纯单位（如“万元”）不是有效金额，避免被误折算成 10000 元。
+        if not any(ch in self.CAPITAL_NUM or ch in self.SMALL_UNITS for ch in s):
+            return None
         jiao = 0.0
         fen = 0.0
         jiao_match = re.search(r"([零〇壹贰叁肆伍陆柒捌玖])角", s)

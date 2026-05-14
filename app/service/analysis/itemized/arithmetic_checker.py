@@ -14,6 +14,17 @@ from typing import Any
 
 
 class ArithmeticCheckerMixin:
+    def _is_total_only_section(self, section_context: dict | None) -> bool:
+        """判断当前区段是否属于总价页，避免把开标一览表误当成分项表。"""
+        if not isinstance(section_context, dict):
+            return False
+        anchor = re.sub(r"\s+", "", str(section_context.get("anchor") or ""))
+        if not anchor:
+            return False
+        return any(
+            re.sub(r"\s+", "", str(keyword or "")) in anchor
+            for keyword in self.TOTAL_SECTION_ANCHORS
+        )
     # 逐项算术校验
     def _extract_row_arithmetic(self, line: str) -> dict | None:
         """从一行文本中提取数量、单价、行总价，用于逐项算术校验。"""
@@ -201,7 +212,11 @@ class ArithmeticCheckerMixin:
 
     # 显式金额声明行提取
     def _extract_explicit_amount_entries(
-        self, lines: list[str], *, section_context: dict | None = None
+        self,
+        lines: list[str],
+        *,
+        section_context: dict | None = None,
+        force_total: bool = False,
     ) -> list[dict]:
         """提取“小写金额/报价金额”这类显式金额声明行。"""
         entries = []
@@ -217,7 +232,13 @@ class ArithmeticCheckerMixin:
             if len(amounts) != 1:
                 continue
 
-            if self._looks_like_total_line(line) and (
+            if force_total:
+                label = (
+                    self._clean_label(line)
+                    or str((section_context or {}).get("anchor") or "").strip()
+                    or "总价"
+                )
+            elif self._looks_like_total_line(line) and (
                 "合计" in line or "总计" in line
             ):
                 label = "合计"
@@ -231,7 +252,8 @@ class ArithmeticCheckerMixin:
                     "label": label,
                     "amount": amounts[0],
                     "source": "explicit_amount",
-                    "is_total": self._looks_like_total_line(label)
+                    "is_total": force_total
+                    or self._looks_like_total_line(label)
                     or self._looks_like_total_line(line),
                     **self._build_entry_context(
                         section_context,
@@ -285,8 +307,11 @@ class ArithmeticCheckerMixin:
         从一个候选区段中抽取分项、总价、算术疑点和未完整识别的行。
         返回: (items, totals, row_issues, unresolved_rows)
         """
+        total_only_section = self._is_total_only_section(section_context)
         explicit_entries = self._extract_explicit_amount_entries(
-            lines, section_context=section_context
+            lines,
+            section_context=section_context,
+            force_total=total_only_section,
         )
         table_items = []
         table_totals = []
@@ -320,6 +345,8 @@ class ArithmeticCheckerMixin:
                 break
 
         for block in row_blocks:
+            if total_only_section:
+                continue
             block_text = " ".join(block["lines"])
             amounts = self._extract_row_amounts(block_text)
             if not amounts:

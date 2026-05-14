@@ -144,7 +144,7 @@ class TemplateExtractor:
     RE_TAGS = re.compile(r'\\[a-zA-Z]+|[{}$]')
     # 要求条款的切分正则（按编号拆分）
     REQUIREMENT_SPLIT_RE = re.compile(
-        r'(?<![\dA-Z一二三四五六七八九十百零])'
+        r'(?<![\dA-Z一二三四五六七八九十百零\-－])'
         r'(?=(?:\d+[．\.、)]|[A-Z][．\.、)]|[一二三四五六七八九十百零]+[、．\.]|[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]))'
     )
     RESPONSE_FORMAT_ZONE_MARKERS = ("响应文件格式附件", "部分格式附件")
@@ -483,61 +483,56 @@ class TemplateExtractor:
             - ordered_list: 格式为 "序号. 内容" 的字符串列表。
             - attachment_mapping: 序号 → 附件编号列表。
         """
-        data_node = model_raw_json.get('data', model_raw_json)
-        sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
+        business_scope = cls.extract_business_attachment_scope(model_raw_json)
+        response_attachments, _ = cls.filter_business_response_attachments(model_raw_json)
 
-        ordered_list = []
-        attachment_mapping = {}
-        stage = 0
+        attachments_by_number: dict[str, dict] = {}
+        for attachment in response_attachments:
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            if attachment_number and attachment_number not in attachments_by_number:
+                attachments_by_number[attachment_number] = attachment
 
-        for sec in sections:
-            text = sec['text']
-            if not text or cls._is_noise(text, headers, sec.get('type')):
+        ordered_list: list[str] = []
+        attachment_mapping: dict[str, list[str]] = {}
+        dedupe_seen: set[str] = set()
+
+        def push_requirement(title: str, numbers: list[str] | None = None) -> None:
+            normalized_title = str(title or "").strip()
+            if not normalized_title:
+                return
+            dedupe_key = cls._requirement_core_title(normalized_title) or cls._compact(normalized_title)
+            if not dedupe_key or dedupe_key in dedupe_seen:
+                return
+            dedupe_seen.add(dedupe_key)
+            ordered_list.append(normalized_title)
+            if numbers:
+                clean_numbers = [str(num).strip() for num in numbers if str(num).strip()]
+                if clean_numbers:
+                    attachment_mapping[normalized_title] = clean_numbers
+
+        # 有附件引用的组成条目优先落到附件模板标题；没有附件引用的材料项直接保留。
+        for entry in business_scope.get("item_entries") or []:
+            numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
+            if numbers:
+                matched_any = False
+                for number in numbers:
+                    attachment = attachments_by_number.get(number)
+                    if attachment is None:
+                        continue
+                    push_requirement(str(attachment.get("title") or "").strip(), [number])
+                    matched_any = True
+                if not matched_any:
+                    push_requirement(str(entry.get("content") or "").strip(), numbers)
                 continue
+            push_requirement(str(entry.get("content") or "").strip())
 
-            if sec['type'] == 'heading':
-                if stage == 0 and '文件' in text and '组成' in text:
-                    stage = 1
-                    continue
-                if stage == 1 and "商务" in text:
-                    stage = 2
-                    continue
-                if stage == 2 and "技术" in text:
-                    break
-
-            if stage == 2:
-                # 将条款文本按编号拆分，依次处理
-                for part in cls._split_requirement_parts(text):
-                    seq, content = cls._parse_requirement_item(part)
-                    if not seq or not content:
-                        continue
-                    if not cls._looks_like_requirement_leaf(content):
-                        continue
-                    ordered_list.append(f"{seq}. {cls._clean_label(content)}")
-
-                    # 提取“格式参见本章附件X”中的附件编号
-                    attach_refs = re.findall(r'格式参见本章附件\s*([\d\-—，,、\s]+)', content)
-                    attach_numbers = []
-                    if attach_refs:
-                        raw = attach_refs[0]
-                        nums = re.split(r'[，,、\s]+', raw)
-                        for num in nums:
-                            num = num.strip().strip('—－-')
-                            if num:
-                                attach_numbers.append(num)
-                    if attach_numbers:
-                        attachment_mapping[seq] = attach_numbers
-
-        response_attachments = cls.extract_response_format_attachments(model_raw_json)
+        # 无组成时回退全量附件；有组成时补齐仍未被条目覆盖的模板附件。
         for attachment in response_attachments:
             title = str(attachment.get("title") or "").strip()
             if not title or attachment.get("is_composite"):
                 continue
-            if title not in ordered_list:
-                ordered_list.append(title)
             attachment_number = str(attachment.get("attachment_number") or "").strip()
-            if attachment_number:
-                attachment_mapping[title] = [attachment_number]
+            push_requirement(title, [attachment_number] if attachment_number else None)
 
         return ordered_list, attachment_mapping
 
@@ -602,3 +597,150 @@ class TemplateExtractor:
             '',
             text
         ).strip()
+
+    @classmethod
+    def _attachment_core_title(cls, text: str) -> str:
+        """提取附件标题主体，便于与“投标文件的组成”中的商务标条目比对。"""
+        value = cls._attachment_title(text)
+        value = re.sub(
+            r'^\s*(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*[、.)）．]?\s*',
+            '',
+            value,
+        )
+        value = re.sub(r'[(（].*?格式.*?[)）]', '', value)
+        value = re.sub(r'格式', '', value)
+        return re.sub(r'\s+', ' ', value).strip('：:；;，,。 ')
+
+    @classmethod
+    def _requirement_core_title(cls, text: str) -> str:
+        """提取要求条目的标题主体，用于和附件标题做统一去重。"""
+        value = cls._clean_label(text or "")
+        value = re.sub(r'^\s*(?:[A-Z]|\d+|[一二三四五六七八九十百零]+)\s*[．\.、)]\s*', '', value)
+        value = re.sub(r'^[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*', '', value)
+        value = re.sub(r'格式参见本章附件\s*[\d\-—，,、\s]+', '', value)
+        value = value.replace('（须加盖公章）', '').replace('(须加盖公章)', '').replace('须加盖公章', '')
+        value = value.replace('后附证明材料', '')
+        value = value.replace('可另外再附公司简介（如有）', '').replace('可另外再附公司简介', '')
+        value = value.replace('（如有）', '').replace('(如有)', '')
+        value = value.replace('完成的', '').replace('近三年以来', '').replace('近三年内', '').replace('近三年', '')
+        value = value.replace('情况介绍', '情况').replace('情况表', '情况').replace('介绍', '')
+        return re.sub(r'\s+', '', value).strip('：:；;，,。 ')
+
+    @classmethod
+    def _extract_attachment_refs(cls, text: str) -> list[str]:
+        """提取“格式参见本章附件X”中的附件编号列表。"""
+        refs = re.findall(r'格式参见本章附件\s*([\d\-—，,、\s]+)', str(text or ""))
+        numbers: list[str] = []
+        for raw in refs:
+            for num in re.split(r'[，,、\s]+', raw):
+                cleaned = num.strip().strip('—－-')
+                if cleaned:
+                    numbers.append(cleaned)
+        return numbers
+
+    @classmethod
+    def extract_business_attachment_scope(cls, model_raw_json: dict) -> dict:
+        """提取“投标文件的组成”中明确归入商务标的条目和附件范围。"""
+        data_node = model_raw_json.get('data', model_raw_json)
+        sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
+
+        ordered_items: list[str] = []
+        item_entries: list[dict] = []
+        attachment_mapping: dict[str, list[str]] = {}
+        required_numbers: set[str] = set()
+        required_titles: set[str] = set()
+        stage = 0
+        found_composition = False
+        entered_business = False
+
+        for sec in sections:
+            text = sec['text']
+            if not text or cls._is_noise(text, headers, sec.get('type')):
+                continue
+
+            compact = cls._compact(text)
+            if sec['type'] == 'heading':
+                if stage == 0 and '文件' in text and '组成' in text:
+                    stage = 1
+                    found_composition = True
+                    continue
+                if stage == 1 and '商务' in compact and '技术' not in compact:
+                    stage = 2
+                    entered_business = True
+                    continue
+                if stage == 2 and '技术' in compact:
+                    break
+
+            if stage != 2:
+                continue
+
+            for part in cls._split_requirement_parts(text):
+                seq, content = cls._parse_requirement_item(part)
+                if not seq or not content:
+                    continue
+                if not cls._looks_like_requirement_leaf(content):
+                    continue
+
+                cleaned = cls._clean_label(content)
+                ordered_items.append(f"{seq}. {cleaned}")
+                required_titles.add(cls._compact(cleaned))
+
+                attach_numbers = cls._extract_attachment_refs(content)
+                item_entries.append(
+                    {
+                        "seq": seq,
+                        "content": cleaned,
+                        "attachment_numbers": attach_numbers,
+                        "title_core": cls._requirement_core_title(cleaned),
+                    }
+                )
+                if attach_numbers:
+                    attachment_mapping[seq] = attach_numbers
+                    required_numbers.update(attach_numbers)
+
+        return {
+            "has_business_composition": found_composition and entered_business,
+            "ordered_items": ordered_items,
+            "item_entries": item_entries,
+            "attachment_mapping": attachment_mapping,
+            "required_numbers": required_numbers,
+            "required_titles": required_titles,
+        }
+
+    @classmethod
+    def filter_business_response_attachments(
+        cls,
+        model_raw_json: dict,
+        attachments: list[dict] | None = None,
+    ) -> tuple[list[dict], bool]:
+        """按“投标文件的组成”过滤商务标应包含的附件；无组成时回退全量附件。"""
+        source_attachments = list(attachments or cls.extract_response_format_attachments(model_raw_json))
+        scope = cls.extract_business_attachment_scope(model_raw_json)
+        if not scope.get("has_business_composition"):
+            return source_attachments, False
+
+        required_numbers = {str(x).strip() for x in scope.get("required_numbers") or set() if str(x).strip()}
+        required_titles = {str(x).strip() for x in scope.get("required_titles") or set() if str(x).strip()}
+
+        filtered: list[dict] = []
+        for attachment in source_attachments:
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            title = str(attachment.get("title") or "").strip()
+            compact_title = cls._compact(title)
+            compact_core_title = cls._compact(cls._attachment_core_title(title))
+
+            if attachment_number and attachment_number in required_numbers:
+                filtered.append(attachment)
+                continue
+            if compact_title and compact_title in required_titles:
+                filtered.append(attachment)
+                continue
+            if compact_core_title and any(
+                compact_core_title == token
+                or compact_core_title in token
+                or token in compact_core_title
+                for token in required_titles
+            ):
+                filtered.append(attachment)
+
+        return filtered, True

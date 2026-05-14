@@ -29,6 +29,48 @@ class TenderLimitMixin:
     def _format_amount_yuan(self, value: float) -> str:
         return f"{value:.2f}元"
 
+    def _build_amount_compare_tokens(self, raw_amount: str, amount_yuan: float) -> List[str]:
+        """将金额文本统一折算后生成可比较 token，兼容 OCR 中的空格差异。"""
+        tokens = {self._normalize(raw_amount)}
+        if amount_yuan <= 0:
+            return [token for token in tokens if token]
+
+        rounded = round(float(amount_yuan), 2)
+        if abs(rounded - round(rounded)) < 0.01:
+            int_amount = int(round(rounded))
+            tokens.add(self._normalize(f"{int_amount}元"))
+            if int_amount % 10000 == 0:
+                wan_value = int_amount / 10000
+                if abs(wan_value - round(wan_value)) < 0.01:
+                    wan_int = int(round(wan_value))
+                    tokens.add(self._normalize(f"{wan_int}万"))
+                    tokens.add(self._normalize(f"{wan_int}万元"))
+            if int_amount % 100000000 == 0:
+                yi_value = int_amount / 100000000
+                if abs(yi_value - round(yi_value)) < 0.01:
+                    yi_int = int(round(yi_value))
+                    tokens.add(self._normalize(f"{yi_int}亿"))
+                    tokens.add(self._normalize(f"{yi_int}亿元"))
+        else:
+            tokens.add(self._normalize(f"{rounded:.2f}元"))
+
+        return [token for token in tokens if token]
+
+    def _keyword_near_amount(self, context: str, raw_amount: str, amount_yuan: float) -> bool:
+        """先把金额文本规范化后再比邻近关系，避免“500 万元”与“500万元”失配。"""
+        normalized_context = self._normalize(context)
+        if not normalized_context:
+            return False
+        keyword_pattern = (
+            r"(最高限价|最高投标限价|最高响应限价|最高报价限价|招标控制价|控制价|"
+            r"采购预算|预算金额|项目预算|最高总价|限价)"
+        )
+        for token in self._build_amount_compare_tokens(raw_amount, amount_yuan):
+            pattern = keyword_pattern + r".{0,20}?" + re.escape(token)
+            if re.search(pattern, normalized_context):
+                return True
+        return False
+
     def _extract_money_candidates_from_text(self, text: str) -> List[Dict]:
         if not text or not str(text).strip():
             return []
@@ -119,11 +161,8 @@ class TenderLimitMixin:
         if "本项目" in normalized or "项目名称" in normalized or "采购项目" in normalized:
             score += 10
 
-        near_patterns = [
-            r"(最高限价|最高投标限价|最高响应限价|最高报价限价|招标控制价|控制价|采购预算|预算金额|项目预算|最高总价|限价)[^\n]{0,20}"
-            + re.escape(raw_amount)
-        ]
-        if any(re.search(p, context) for p in near_patterns):
+        # 金额先折算成数字再生成规范化 token，兼容 OCR 把“500万元”切成“500 万元”。
+        if self._keyword_near_amount(context, raw_amount, amount_yuan):
             score += 40
 
         if any(

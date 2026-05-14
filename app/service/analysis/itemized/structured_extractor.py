@@ -555,6 +555,14 @@ class StructuredExtractorMixin:
         if has_pricing_signal and not brand:
             brand = carry.get("brand")
 
+        # 说明性零价行即使数量写成文本，也不应阻断分项汇总校验。
+        if (
+            quantity is None
+            and unit_price == Decimal("0")
+            and line_total == Decimal("0")
+        ):
+            quantity = Decimal("0")
+
         if serial:
             carry["serial"] = serial
         if model:
