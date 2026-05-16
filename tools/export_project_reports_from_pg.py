@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 from types import MethodType
+from psycopg2.extras import RealDictCursor
 
 # 确保项目根目录在搜索路径中
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ from app.core.document_types import (
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
 from app.service.analysis.bid_document_review import BidDocumentReviewService
-from app.service.analysis.compliance.consistency import ConsistencyChecker, DocumentProcessor
+from app.service.analysis.compliance.consistency import ConsistencyChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.duplicate_check import DuplicateCheckService
 from app.service.analysis.duplicate_merge import DuplicateResultMerger
@@ -42,7 +43,9 @@ from app.service.postgresql_service import PostgreSQLService
 
 # 环境变量与配置
 PROJECT_IDENTIFIER = os.getenv("XTJS_PROJECT_IDENTIFIER", "").strip()
-OUTPUT_DIR = Path(os.getenv("XTJS_PROJECT_REPORT_DIR", f"./test_reports/{PROJECT_IDENTIFIER or 'project_from_pg'}"))
+PROJECT_ID = os.getenv("XTJS_PROJECT_ID", "").strip()
+_output_fallback_name = PROJECT_IDENTIFIER or PROJECT_ID or "project_from_pg"
+OUTPUT_DIR = Path(os.getenv("XTJS_PROJECT_REPORT_DIR", f"./test_reports/{_output_fallback_name}"))
 API_BASE_URL = os.getenv("XTJS_REPORT_API_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 USE_STORED_PROJECT_RESULTS = os.getenv("XTJS_REPORT_USE_STORED_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
 RECOMPUTE_MISSING_PROJECT_RESULTS = os.getenv("XTJS_REPORT_RECOMPUTE_MISSING_RESULTS", "1").strip().lower() not in {"0", "false", "no"}
@@ -1045,6 +1048,114 @@ def build_business_infos(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return infos
 
 
+def load_project_payload_by_id(
+    *,
+    db_service: PostgreSQLService,
+    project_id: int,
+) -> dict[str, Any] | None:
+    """按项目主键直接查询项目文档，作为 identifier 查询失败时的兜底。"""
+    project_query = """
+        SELECT *
+        FROM xtjs_projects
+        WHERE id = %s
+          AND deleted = FALSE
+        LIMIT 1
+    """
+    document_query = """
+        SELECT
+            pd.id AS relation_id,
+            'business_bid' AS relation_role,
+            bbd.id AS document_id,
+            bbd.identifier_id,
+            bbd.document_type,
+            bbd.file_name,
+            bbd.file_url,
+            bbd.extracted,
+            bbd.content,
+            td.identifier_id AS tender_identifier_id,
+            td.document_type AS tender_document_type,
+            td.file_name AS tender_file_name,
+            td.file_url AS tender_file_url,
+            td.extracted AS tender_extracted,
+            td.content AS tender_content,
+            pd.create_time
+        FROM xtjs_project_documents pd
+        JOIN xtjs_documents td
+          ON pd.tender_document_id = td.id
+         AND td.deleted = FALSE
+        JOIN xtjs_documents bbd
+          ON pd.business_bid_document_id = bbd.id
+         AND bbd.deleted = FALSE
+        WHERE pd.project_id = %s
+
+        UNION ALL
+
+        SELECT
+            pd.id AS relation_id,
+            'technical_bid' AS relation_role,
+            tbd.id AS document_id,
+            tbd.identifier_id,
+            tbd.document_type,
+            tbd.file_name,
+            tbd.file_url,
+            tbd.extracted,
+            tbd.content,
+            td.identifier_id AS tender_identifier_id,
+            td.document_type AS tender_document_type,
+            td.file_name AS tender_file_name,
+            td.file_url AS tender_file_url,
+            td.extracted AS tender_extracted,
+            td.content AS tender_content,
+            pd.create_time
+        FROM xtjs_project_documents pd
+        JOIN xtjs_documents td
+          ON pd.tender_document_id = td.id
+         AND td.deleted = FALSE
+        JOIN xtjs_documents tbd
+          ON pd.technical_bid_document_id = tbd.id
+         AND tbd.deleted = FALSE
+        WHERE pd.project_id = %s
+
+        ORDER BY create_time DESC, relation_id DESC, document_id DESC
+    """
+    with db_service._get_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(project_query, (project_id,))
+            project = cursor.fetchone()
+            if not project:
+                return None
+            cursor.execute(document_query, (project_id, project_id))
+            documents = [dict(item) for item in cursor.fetchall()]
+    return {"project": dict(project), "documents": documents}
+
+
+def resolve_project_payload(
+    *,
+    db_service: PostgreSQLService,
+    project_identifier: str,
+    project_id: str,
+) -> dict[str, Any]:
+    """优先按 identifier 取项目文档，失败时允许按项目主键兜底。"""
+    if project_identifier:
+        payload = db_service.get_project_documents_for_duplicate_check(project_identifier)
+        if payload:
+            return payload
+    normalized_project_id = (project_id or "").strip()
+    if normalized_project_id:
+        try:
+            project_id_value = int(normalized_project_id)
+        except ValueError as exc:
+            raise SystemExit(f"XTJS_PROJECT_ID 不是有效整数: {normalized_project_id}") from exc
+        payload = load_project_payload_by_id(
+            db_service=db_service,
+            project_id=project_id_value,
+        )
+        if payload:
+            return payload
+    identifier_hint = project_identifier or f"id={project_id}" if project_id else "<empty>"
+    raise SystemExit(f"项目不存在或无可用文档: {identifier_hint}")
+
+
 # 项目结果加载与重新计算
 def load_stored_project_results(
     *,
@@ -1202,7 +1313,9 @@ def generate_business_report(
 
     templates = TemplateExtractor.extract_consistency_templates(tender_payload)
     model_segments = [{"title": item["title"], "text": "\n".join(item["content"])} for item in templates]
-    bidder_segments = DocumentProcessor.segment_document(bidder_payload, templates, is_test_file=True)
+    # 旧导出脚本依赖的 DocumentProcessor 已移除；项目总览导出不需要它，
+    # 这里保留模板段，投标侧分段留空即可，避免导出链路因过期依赖中断。
+    bidder_segments = []
 
     bidder_slug = build_record_slug(bidder_record, "business_bid")
     output_html_path = output_dir / f"report_{bidder_slug}.html"
@@ -1329,6 +1442,88 @@ def main() -> None:
             issue_pages=issue_pages,
         )
 
+def main_v2() -> None:
+    """优先按项目标识导出，失败时允许按项目主键兜底。"""
+    if not PROJECT_IDENTIFIER and not PROJECT_ID:
+        raise SystemExit("请先设置 XTJS_PROJECT_IDENTIFIER 或 XTJS_PROJECT_ID")
+
+    db_service = PostgreSQLService()
+    payload = resolve_project_payload(
+        db_service=db_service,
+        project_identifier=PROJECT_IDENTIFIER,
+        project_id=PROJECT_ID,
+    )
+    records = list(payload.get("documents") or [])
+    if not records:
+        raise SystemExit("项目下没有可用文档")
+
+    resolved_project_identifier = str(
+        (payload.get("project") or {}).get("identifier_id")
+        or PROJECT_IDENTIFIER
+        or PROJECT_ID
+    ).strip()
+    business_records = [
+        record for record in records
+        if record.get("document_type") == DOCUMENT_TYPE_BUSINESS_BID
+    ]
+    technical_records = [
+        record for record in records
+        if record.get("document_type") == DOCUMENT_TYPE_TECHNICAL_BID
+    ]
+    if not business_records:
+        raise SystemExit(f"项目下没有商务标文档: {resolved_project_identifier}")
+
+    tender_record = {
+        "identifier_id": business_records[0].get("tender_identifier_id"),
+        "file_name": business_records[0].get("tender_file_name"),
+        "file_url": business_records[0].get("tender_file_url"),
+        "content": business_records[0].get("tender_content") or {},
+        "document_type": "tender",
+    }
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    visualizer = ReportVisualizer()
+    patch_visualizer_duplicate_display(visualizer)
+    business_infos = build_business_infos(business_records)
+    project_results = resolve_project_results(
+        db_service=db_service,
+        project_identifier=resolved_project_identifier,
+        document_records=records,
+    )
+    source_lookup = build_source_lookup(
+        records=[tender_record, *business_records, *technical_records],
+        api_base_url=API_BASE_URL,
+    )
+    issue_pages = visualizer.write_project_issue_pages(
+        output_dir=OUTPUT_DIR,
+        project_identifier=resolved_project_identifier,
+        project_results=project_results,
+        source_lookup=source_lookup,
+    )
+    summary_html = visualizer.build_project_summary_html(
+        project_identifier=resolved_project_identifier,
+        business_infos=business_infos,
+        project_results=project_results,
+        source_lookup=source_lookup,
+        issue_pages=issue_pages,
+        display_options=PROJECT_REVIEW_DISPLAY_OPTIONS,
+    )
+    summary_path = OUTPUT_DIR / "project_review_summary.html"
+    summary_path.write_text(summary_html, encoding="utf-8")
+    print(f"已生成 {summary_path}")
+
+    for bidder_record in business_records:
+        generate_business_report(
+            visualizer=visualizer,
+            bidder_record=bidder_record,
+            tender_record=tender_record,
+            output_dir=OUTPUT_DIR,
+            business_infos=business_infos,
+            project_results=project_results,
+            source_lookup=source_lookup,
+            issue_pages=issue_pages,
+        )
+
 
 if __name__ == "__main__":
-    main()
+    main_v2()
