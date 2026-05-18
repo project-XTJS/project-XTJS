@@ -204,7 +204,10 @@ class StructuredExtractorMixin:
         serial_index = self._infer_structured_serial_column(data_rows, column_count)
         excluded_indexes = {index for index in (serial_index,) if index is not None}
         line_total_index = self._infer_structured_amount_column(
-            data_rows, column_count, excluded_indexes=excluded_indexes
+            data_rows,
+            column_count,
+            excluded_indexes=excluded_indexes,
+            headers=headers,
         )
         if line_total_index is None:
             return None
@@ -271,10 +274,20 @@ class StructuredExtractorMixin:
         column_count: int,
         *,
         excluded_indexes: set[int],
+        headers: list[str] | None = None,
     ) -> int | None:
         """推断总价列位置。"""
         best_index = None
         best_score = -1
+        total_aliases = {
+            self._normalize_label_key(alias)
+            for alias in self.STRUCTURED_COLUMN_ALIASES.get("line_total", ())
+        }
+        text_aliases = {
+            self._normalize_label_key(alias)
+            for field in ("brand", "model", "description")
+            for alias in self.STRUCTURED_COLUMN_ALIASES.get(field, ())
+        }
         for index in range(column_count):
             if index in excluded_indexes:
                 continue
@@ -292,7 +305,19 @@ class StructuredExtractorMixin:
                     text_hits += 1
             if amount_hits < 2 or amount_hits <= text_hits:
                 continue
+            header = headers[index] if headers and index < len(headers) else ""
+            normalized_header = self._normalize_label_key(header)
             score = amount_hits * 10 - text_hits + index
+            if normalized_header and any(
+                alias in normalized_header or normalized_header in alias
+                for alias in total_aliases
+            ):
+                score += 12
+            if normalized_header and any(
+                alias in normalized_header or normalized_header in alias
+                for alias in text_aliases
+            ):
+                score -= 12
             if best_index is None or score > best_score:
                 best_index = index
                 best_score = score
@@ -557,6 +582,28 @@ class StructuredExtractorMixin:
             if line_total is None:
                 line_total = zero_amount
 
+        if quantity is None or unit_price is None or line_total is None:
+            repaired = self._repair_shifted_structured_row_relation(
+                cells,
+                serial=serial,
+                model=model,
+                description=description,
+                brand=brand,
+                quantity_cell=quantity_cell,
+                quantity=quantity,
+                unit_price=unit_price,
+                line_total=line_total,
+                carry=carry,
+            )
+            if repaired is not None:
+                serial = repaired["serial"]
+                model = repaired["model"]
+                description = repaired["description"]
+                brand = repaired["brand"]
+                quantity = repaired["quantity"]
+                unit_price = repaired["unit_price"]
+                line_total = repaired["line_total"]
+
         has_pricing_signal = quantity is not None or unit_price is not None or line_total is not None
         if has_pricing_signal and not serial:
             serial = carry.get("serial")
@@ -673,9 +720,12 @@ class StructuredExtractorMixin:
             title=title,
         )
         amount_cell = self._structured_cell_value(cells, column_map.get("line_total"))
-        amount_candidates = self._extract_row_amounts(amount_cell) if amount_cell else []
-        if amount_candidates:
-            amount = amount_candidates[-1]
+        amount = self._resolve_structured_amount_only_amount(
+            cells,
+            preferred_index=column_map.get("line_total"),
+            serial_index=column_map.get("serial"),
+        )
+        if amount is not None:
             return {
                 "label": label,
                 "amount": amount,
@@ -749,6 +799,216 @@ class StructuredExtractorMixin:
         if "包含" in normalized_text and (amount_placeholder or unit_price_placeholder):
             return Decimal("0")
         return None
+
+    def _resolve_structured_amount_only_amount(
+        self,
+        cells: list[str],
+        *,
+        preferred_index: int | None,
+        serial_index: int | None,
+    ) -> Decimal | None:
+        """鍦ㄤ粎鍚噾棰濇ā寮忎笅锛屼紭鍏堜娇鐢ㄦ帹鏂噾棰濆垪锛屽け璐ユ椂鍥為€€鍒拌鍐呭彸渚ч噾棰濄€?"""
+        preferred_cell = self._structured_cell_value(cells, preferred_index)
+        preferred_amounts = self._extract_row_amounts(preferred_cell) if preferred_cell else []
+        if preferred_amounts:
+            return preferred_amounts[-1]
+
+        fallback_candidates: list[tuple[int, Decimal]] = []
+        for index, cell in enumerate(cells):
+            if index == serial_index:
+                continue
+            cell_text = str(cell).strip()
+            if not cell_text or self._is_placeholder_amount_text(cell_text):
+                continue
+            amounts = self._extract_row_amounts(cell_text)
+            if not amounts:
+                continue
+            fallback_candidates.append((index, amounts[-1]))
+
+        if not fallback_candidates:
+            return None
+        fallback_candidates.sort(key=lambda item: item[0], reverse=True)
+        return fallback_candidates[0][1]
+
+    def _repair_shifted_structured_row_relation(
+        self,
+        cells: list[str],
+        *,
+        serial: str | None,
+        model: str | None,
+        description: str | None,
+        brand: str | None,
+        quantity_cell: str | None,
+        quantity: Decimal | None,
+        unit_price: Decimal | None,
+        line_total: Decimal | None,
+        carry: dict,
+    ) -> dict | None:
+        """淇宸﹀彸閿欎綅鐨勫垎椤规姤浠疯锛屽悜鍙虫悳绱㈤噾棰濆苟鍥炲～鏂囨湰鍒椼€?"""
+        money_cells = self._collect_structured_money_cells(cells)
+        if not money_cells:
+            return None
+
+        quantity_value = (
+            quantity
+            if (
+                self._extract_structured_repair_quantity_value(quantity_cell) is not None
+                and self._is_reasonable_repair_quantity(quantity)
+            )
+            else None
+        )
+        quantity_index = None
+        if quantity_value is None:
+            quantity_index, quantity_value = self._find_structured_repair_quantity(
+                cells, before_index=money_cells[0][0]
+            )
+        if quantity_value is None:
+            return None
+
+        if len(money_cells) >= 2:
+            repaired_unit_price = money_cells[0][1]
+            repaired_line_total = money_cells[-1][1]
+        elif quantity_value == Decimal("1"):
+            repaired_unit_price = money_cells[0][1]
+            repaired_line_total = money_cells[0][1]
+        else:
+            return None
+
+        leading_texts = self._collect_structured_leading_texts(
+            cells,
+            before_index=quantity_index if quantity_index is not None else money_cells[0][0],
+        )
+        trusted_model = self._structured_repair_trusted_text(model)
+        trusted_description = self._structured_repair_trusted_text(description)
+        trusted_brand = self._structured_repair_trusted_text(brand)
+
+        serial_is_reliable = self._looks_like_structured_serial_value(serial)
+        repaired_serial = serial if serial_is_reliable else carry.get("serial")
+        repaired_model = (
+            trusted_model
+            if serial_is_reliable and trusted_model
+            else carry.get("model") or trusted_model
+        )
+        repaired_description = trusted_description
+        repaired_brand = trusted_brand
+
+        if leading_texts:
+            primary_text = leading_texts[0]
+            if repaired_model:
+                if not repaired_description and primary_text != repaired_model:
+                    repaired_description = primary_text
+            else:
+                repaired_model = primary_text
+            if not repaired_brand and len(leading_texts) >= 2:
+                brand_candidate = leading_texts[-1]
+                if brand_candidate not in {repaired_model, repaired_description}:
+                    repaired_brand = brand_candidate
+            if not repaired_description:
+                for text in leading_texts:
+                    if text not in {repaired_model, repaired_brand}:
+                        repaired_description = text
+                        break
+
+        if not repaired_model:
+            repaired_model = carry.get("model")
+        if not repaired_brand:
+            repaired_brand = carry.get("brand")
+
+        return {
+            "serial": repaired_serial,
+            "model": repaired_model,
+            "description": repaired_description,
+            "brand": repaired_brand,
+            "quantity": quantity_value,
+            "unit_price": repaired_unit_price,
+            "line_total": repaired_line_total,
+        }
+
+    def _collect_structured_money_cells(
+        self, cells: list[str]
+    ) -> list[tuple[int, Decimal]]:
+        """鏀堕泦缁撴瀯鍖栬涓殑閲戦鍊欓€夈€?"""
+        matches: list[tuple[int, Decimal]] = []
+        for index, cell in enumerate(cells):
+            cell_text = str(cell).strip()
+            if not cell_text or self._is_placeholder_amount_text(cell_text):
+                continue
+            amounts = self._extract_row_amounts(cell_text)
+            if not amounts:
+                continue
+            matches.append((index, amounts[-1]))
+        return matches
+
+    def _find_structured_repair_quantity(
+        self, cells: list[str], *, before_index: int
+    ) -> tuple[int | None, Decimal | None]:
+        """浠庨噾棰濆墠鐨勫崟鍏冩牸涓弽鍚戞壘鍒版渶鍍忔暟閲忕殑鍊笺€?"""
+        search_limit = min(len(cells), max(before_index, 0))
+        for index in range(search_limit - 1, -1, -1):
+            quantity = self._extract_structured_repair_quantity_value(cells[index])
+            if quantity is not None:
+                return index, quantity
+        return None, None
+
+    def _extract_structured_repair_quantity_value(
+        self, value: str | None
+    ) -> Decimal | None:
+        """鍙妸鈥滅函鏁板瓧/鏁板瓧+鍗曚綅鈥濈殑鍗曞厓鏍艰涓烘暟閲忥紝閬垮厤璇妸 5P 绛夋枃鏈綋鎴愭暟閲忋€?"""
+        normalized = str(value or "").replace(",", "").strip()
+        if not normalized:
+            return None
+        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", normalized):
+            return self._to_decimal(normalized)
+
+        unit_pattern = "|".join(
+            sorted(
+                (re.escape(unit) for unit in self.UNIT_KEYWORDS if unit),
+                key=len,
+                reverse=True,
+            )
+        )
+        if not unit_pattern:
+            return None
+        if not re.fullmatch(
+            rf"[+-]?\d+(?:\.\d+)?\s*(?:{unit_pattern})(?:\s*(?:/|每)\s*(?:{unit_pattern}))?",
+            normalized,
+            re.IGNORECASE,
+        ):
+            return None
+        return self._to_quantity_decimal(normalized)
+
+    def _is_reasonable_repair_quantity(self, value: Decimal | None) -> bool:
+        """鍒ゆ柇鏁伴噺鍊兼槸鍚﹁惤鍦ㄥ悎鐞嗚寖鍥村唴锛岄伩鍏嶆妸閲戦褰撴垚鏁伴噺銆?"""
+        if value is None:
+            return False
+        return Decimal("0") <= value <= Decimal("10000")
+
+    def _collect_structured_leading_texts(
+        self, cells: list[str], *, before_index: int
+    ) -> list[str]:
+        """鏀堕泦鏁伴噺鍓嶇殑鍙俊鏂囨湰鍒椼€?"""
+        texts = []
+        for cell in cells[: max(before_index, 0)]:
+            text = self._structured_repair_trusted_text(cell)
+            if text and text not in texts:
+                texts.append(text)
+        return texts
+
+    def _structured_repair_trusted_text(self, value: str | None) -> str | None:
+        """杩囨护鎺夐噾棰濄€佹暟閲忓拰鍗犱綅绗﹀悗锛屼繚鐣欏彲鐢ㄤ簬鍥炲～鐨勬枃鏈€?"""
+        text = str(value or "").strip()
+        if not text or self._is_placeholder_amount_text(text):
+            return None
+        if self._extract_row_amounts(text):
+            return None
+        if self._extract_structured_repair_quantity_value(text) is not None:
+            return None
+        return text
+
+    def _looks_like_structured_serial_value(self, value: str | None) -> bool:
+        """鍒ゆ柇鏄惁涓虹函搴忓彿鍗曞厓鏍笺€?"""
+        text = str(value or "").strip()
+        return bool(text) and bool(re.fullmatch(r"\d+(?:\.\d+)*", text))
 
     def _build_structured_amount_only_label(
         self,
@@ -879,10 +1139,17 @@ class StructuredExtractorMixin:
                     )
                 continue
 
-            for relation in group:
+            cover_total_indexes = (
+                {0} if self._group_has_cover_total_row(group) else set()
+            )
+            for relation_index, relation in enumerate(group):
                 difference = relation["difference"]
                 normalized_relation = dict(relation)
-                normalized_relation["relation_type"] = "row_total"
+                normalized_relation["relation_type"] = (
+                    "group_cover_total_row"
+                    if relation_index in cover_total_indexes
+                    else "row_total"
+                )
                 relation_rows.append(normalized_relation)
                 items.append(
                     {
@@ -904,7 +1171,10 @@ class StructuredExtractorMixin:
                         ),
                     }
                 )
-                if abs(difference) > self.MONEY_TOLERANCE:
+                if (
+                    relation_index not in cover_total_indexes
+                    and abs(difference) > self.MONEY_TOLERANCE
+                ):
                     row_issues.append(
                         {
                             "kind": "row_total_mismatch",
@@ -933,6 +1203,22 @@ class StructuredExtractorMixin:
             "relation_rows": relation_rows,
             "group_checks": group_checks,
         }
+
+    def _group_has_cover_total_row(self, group: list[dict]) -> bool:
+        """识别“首行声明组总价，后续行为拆分子项”的场景，避免把封面总价行误判成算术错误。"""
+        if len(group) <= 1:
+            return False
+        first_relation = group[0]
+        first_declared_total = first_relation.get("line_total")
+        first_expected_total = first_relation.get("expected_total")
+        if first_declared_total is None or first_expected_total is None:
+            return False
+        if first_declared_total <= first_expected_total + self.MONEY_TOLERANCE:
+            return False
+        expected_group_total = sum(
+            (item.get("expected_total") or Decimal("0")) for item in group
+        )
+        return abs(first_declared_total - expected_group_total) <= self.MONEY_TOLERANCE
 
     def _detect_repeated_group_total(self, group: list[dict]) -> Decimal | None:
         """检测同一组内每行都重复展示同一个组总价的模式。"""

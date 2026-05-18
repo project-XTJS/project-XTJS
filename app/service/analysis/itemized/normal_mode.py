@@ -472,10 +472,18 @@ class NormalModeMixin:
         matched_total = best_subtotal
         matched_difference = subtotal_difference
         overall_status = subtotal_status
+        prefer_subtotal_basis = (
+            subtotal_status == "pass"
+            and best_preferential_total is not None
+            and best_opening_total is not None
+            and abs(best_opening_total["amount"] - best_preferential_total["amount"])
+            <= self.MONEY_TOLERANCE
+        )
         if best_opening_total is not None:
-            matched_total = best_opening_total
-            matched_difference = opening_total_difference
-            if opening_total_status == "fail":
+            if not prefer_subtotal_basis:
+                matched_total = best_opening_total
+                matched_difference = opening_total_difference
+            if not prefer_subtotal_basis and opening_total_status == "fail":
                 overall_status = "fail"
 
         return self._build_sum_check_result(
@@ -654,7 +662,10 @@ class NormalModeMixin:
     ) -> dict:
         """评估当前分项报价抽取是否足够稳定，可用于硬性失败判断。"""
         benign_unresolved_rows = [
-            row for row in unresolved_rows if self._is_benign_unresolved_row(row)
+            row
+            for row in unresolved_rows
+            if self._is_benign_unresolved_row(row)
+            or self._is_parent_summary_unresolved_row(row, structured_analysis)
         ]
         blocking_unresolved_rows = [
             row for row in unresolved_rows if row not in benign_unresolved_rows
@@ -786,6 +797,33 @@ class NormalModeMixin:
             if re.search(r"[\u4e00-\u9fffA-Za-z]", text):
                 return True
         return False
+
+    def _is_parent_summary_unresolved_row(
+        self, row: dict, structured_analysis: dict
+    ) -> bool:
+        """识别已被子项完整展开的父项汇总行，避免其作为阻断性未解析项。"""
+        serial = str(row.get("serial") or "").strip()
+        if not serial or "." in serial:
+            return False
+        if any(
+            self._extract_money_candidates(str(value or ""))
+            for value in (
+                row.get("amount_cell"),
+                row.get("unit_price_cell"),
+                row.get("line_total_cell"),
+            )
+        ):
+            return False
+
+        relation_rows = structured_analysis.get("relation_rows") or []
+        section_id = row.get("section_id")
+        child_rows = [
+            entry
+            for entry in relation_rows
+            if str(entry.get("serial") or "").startswith(f"{serial}.")
+            and (not section_id or entry.get("section_id") == section_id)
+        ]
+        return len(child_rows) >= 2
 
     def _resolve_normal_status(
         self,
