@@ -47,6 +47,8 @@ class ItemizedPricingChecker(
         "line_total": ("合计", "总价", "金额", "小计", "总额", "分项总价", "单项总价"),
     }
     MONEY_TOLERANCE = Decimal("0.10")
+    PRIMARY_ITEM_SECTION_NEARBY_PAGE_GAP = 2
+    LOW_CONFIDENCE_UNRESOLVED_THRESHOLD = 3
 
     # 主入口方法（保留在原类中，因为它不属于某个特定 Mixin）
     def check_itemized_logic(self, text: object, tender_text: object | None = None) -> dict:

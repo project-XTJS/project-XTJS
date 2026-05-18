@@ -40,6 +40,8 @@ class ConsistencyChecker:
         "日期",
         "已签字",
     )
+    NON_BODY_PREFIX_MARKERS = tuple(marker for marker in NON_BODY_LINE_MARKERS if marker not in {"日期", "已签字"})
+    SHORT_NON_BODY_LABELS = ("日期", "已签字")
     # 注释/说明引导行
     NOTE_LEAD_RE = re.compile(r"^\s*(?:注|说明)\s*[:：]?\s*$")
     PLACEHOLDER_SPAN_RE = re.compile(
@@ -50,11 +52,25 @@ class ConsistencyChecker:
     )
     # 已填写的动态内容常出现在下划线、括号或 LaTeX underline 中，一致性比较时应剥离
     FILLED_UNDERLINE_RE = re.compile(r"\$?\s*\\underline\{\s*(?:\\text\{)?[^{}\n]{0,200}(?:\})?\s*\}\s*\$?")
+    FILLED_UNDERLINE_CAPTURE_RE = re.compile(
+        r"\$?\s*\\underline\{\s*(?:\\text\{)?(?P<content>[^{}\n]{0,200})(?:\})?\s*\}\s*\$?"
+    )
     FILLED_BLANK_SPAN_RE = re.compile(r"_{2,}\s*[^_\n]{0,120}?\s*_{2,}")
     SHORT_PAREN_RE = re.compile(r"[（(][^()（）\n]{0,80}[）)]")
     FOOTER_PAGE_RE = re.compile(r"^\s*(?:第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?|\d+\s*/\s*\d+|\d+)\s*$")
     FIELD_LABEL_PREFIXES = ("地址", "邮政编码", "电话号码", "传真号码", "电子邮件", "电子邮箱", "电话", "传真")
     AMOUNT_LINE_MARKERS = ("总报价为", "不含税总价", "含税总价", "人民币")
+    UNDERLINE_PRESERVE_MARKERS = (
+        "副本",
+        "电子文件",
+        "u盘",
+        "授权代表",
+        "宣布如下",
+        "投标文件所在页",
+        "偏离说明",
+        "劳动合同",
+        "退休人员",
+    )
     # 表格型附件只校验表头和固定说明，不把数据行数值带入一致性比较。
     TABLE_HEADER_GROUPS = (
         (
@@ -143,9 +159,18 @@ class ConsistencyChecker:
             lines = lines[1:]
         return "\n".join(lines).strip()
 
-    def _is_non_body_line(self, normalized_line: str) -> bool:
+    def _is_non_body_line(self, text: str, normalized_line: str) -> bool:
         """检查归一化后的行是否是落款等非正文行。"""
-        return any(marker in normalized_line for marker in self.NON_BODY_LINE_MARKERS)
+        plain = self._plain_text(text)
+        compact_plain = re.sub(r"\s+", "", plain)
+        if not compact_plain:
+            return False
+        if any(compact_plain.startswith(marker) for marker in self.NON_BODY_PREFIX_MARKERS):
+            return True
+        for marker in self.SHORT_NON_BODY_LABELS:
+            if compact_plain.startswith(marker) and len(compact_plain) <= 24:
+                return True
+        return compact_plain in self.NON_BODY_LINE_MARKERS or normalized_line in self.NON_BODY_LINE_MARKERS
 
     def _is_header_footer_line(self, text: str, normalized_line: str) -> bool:
         """过滤页眉页脚和纯页码。"""
@@ -189,7 +214,7 @@ class ConsistencyChecker:
             if in_non_body_block:
                 continue
 
-            if self._is_non_body_line(normalized_line):
+            if self._is_non_body_line(stripped, normalized_line):
                 continue
 
             kept.append(stripped)
@@ -209,6 +234,31 @@ class ConsistencyChecker:
             if len(present_fields) >= 3 and len(present_fields) > len(best_fields):
                 best_fields = present_fields
         return " ".join(best_fields)
+
+    def _should_preserve_underlined_text(self, content: str) -> bool:
+        """仅在下划线内容明显属于固定句子骨架时保留，避免把纯填写值带入一致性比较。"""
+        plain = self._plain_text(content)
+        normalized = self._normalize(plain)
+        if len(normalized) < 6:
+            return False
+        if any(marker in normalized for marker in self.UNDERLINE_PRESERVE_MARKERS):
+            return True
+        if re.search(r"[，。；：、】【、]", plain) and len(normalized) >= 10:
+            if re.fullmatch(r"[0-9零一二三四五六七八九十百千万年月日份元圆整]+", normalized):
+                return False
+            return True
+        return False
+
+    def _strip_or_preserve_filled_underlines(self, text: str) -> str:
+        """保留被 OCR 包进 underline 的固定句，继续剥离纯填写值。"""
+
+        def repl(match: re.Match[str]) -> str:
+            content = match.group("content") or ""
+            if self._should_preserve_underlined_text(content):
+                return content
+            return " "
+
+        return self.FILLED_UNDERLINE_CAPTURE_RE.sub(repl, text)
 
     def _fixed_body_line(self, line: str) -> str:
         """提取一行中的固定正文，只保留不随填写内容变化的部分。"""
@@ -232,7 +282,7 @@ class ConsistencyChecker:
         if any(marker in normalized_text for marker in self.AMOUNT_LINE_MARKERS):
             if "总报价为" in normalized_text and (has_dynamic_marker or re.search(r"[¥￥]|\d[\d,，.]*", text)):
                 return ""
-        fixed_line = self.FILLED_UNDERLINE_RE.sub(" ", text)
+        fixed_line = self._strip_or_preserve_filled_underlines(text)
         fixed_line = self.FILLED_BLANK_SPAN_RE.sub(" ", fixed_line)
         fixed_line = self.SHORT_PAREN_RE.sub(" ", fixed_line)
         normalized_fixed_candidate = self._normalize(self._strip_placeholder_hints(fixed_line))
@@ -297,7 +347,7 @@ class ConsistencyChecker:
             if in_note_block:
                 if (
                     self._is_formal_title_line(stripped)
-                    or self._is_non_body_line(normalized_line)
+                    or self._is_non_body_line(stripped, normalized_line)
                     or any(marker in normalized_line for marker in note_end_markers)
                 ):
                     in_note_block = False

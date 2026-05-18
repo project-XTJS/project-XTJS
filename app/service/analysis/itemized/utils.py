@@ -15,6 +15,8 @@ from typing import Any
 class UtilsMixin:
     """通用工具 Mixin，作为 ItemizedPricingChecker 的基类之一。"""
 
+    ZERO_AMOUNT_KEYWORDS: tuple
+
     # Decimal 转换与格式化
     def _to_decimal(self, value: str | Decimal | None) -> Decimal | None:
         """安全地将字符串或 Decimal 转为 Decimal。"""
@@ -91,6 +93,49 @@ class UtilsMixin:
         label = label.replace("报价：", "").replace("报价:", "")
         label = re.sub(r"\s+", " ", label).strip("：: /")
         return label.strip()
+
+    def _contains_zero_amount_hint(self, *values: object) -> bool:
+        """判断文本中是否包含“免费/包含”等零金额或包干提示。"""
+        combined = "".join(
+            re.sub(r"\s+", "", str(value or ""))
+            for value in values
+            if str(value or "").strip()
+        )
+        return bool(combined) and any(
+            keyword in combined for keyword in self.ZERO_AMOUNT_KEYWORDS
+        )
+
+    def _is_placeholder_amount_text(self, value: object) -> bool:
+        """判断单元格是否只是金额占位符，而非真实金额。"""
+        normalized = re.sub(r"\s+", "", str(value or ""))
+        if not normalized:
+            return True
+        return normalized in {
+            "/",
+            "\\",
+            "-",
+            "--",
+            "—",
+            "／",
+            "N/A",
+            "n/a",
+            "NA",
+            "na",
+            "免费",
+            "包含",
+            "赠送",
+            "无偿",
+            "不收费",
+            "0",
+            "0.0",
+            "0.00",
+            "¥0",
+            "￥0",
+            "¥0.0",
+            "￥0.0",
+            "¥0.00",
+            "￥0.00",
+        }
 
     # 去重工具
     def _dedupe_entries(self, entries: list[dict]) -> list[dict]:

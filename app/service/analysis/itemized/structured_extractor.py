@@ -537,15 +537,25 @@ class StructuredExtractorMixin:
         model = self._structured_cell_value(cells, column_map.get("model"))
         description = self._structured_cell_value(cells, column_map.get("description"))
         brand = self._structured_cell_value(cells, column_map.get("brand"))
-        quantity = self._to_quantity_decimal(
-            self._structured_cell_value(cells, column_map.get("quantity"))
+        quantity_cell = self._structured_cell_value(cells, column_map.get("quantity"))
+        unit_price_cell = self._structured_cell_value(cells, column_map.get("unit_price"))
+        line_total_cell = self._structured_cell_value(cells, column_map.get("line_total"))
+        quantity = self._to_quantity_decimal(quantity_cell)
+        unit_price = self._to_decimal(unit_price_cell)
+        line_total = self._to_decimal(line_total_cell)
+        zero_amount = self._extract_structured_zero_amount(
+            row_text=row_text,
+            amount_cell=line_total_cell,
+            unit_price_cell=unit_price_cell,
+            quantity_cell=quantity_cell,
         )
-        unit_price = self._to_decimal(
-            self._structured_cell_value(cells, column_map.get("unit_price"))
-        )
-        line_total = self._to_decimal(
-            self._structured_cell_value(cells, column_map.get("line_total"))
-        )
+        if zero_amount is not None:
+            if quantity is None:
+                quantity = Decimal("0")
+            if unit_price is None:
+                unit_price = Decimal("0")
+            if line_total is None:
+                line_total = zero_amount
 
         has_pricing_signal = quantity is not None or unit_price is not None or line_total is not None
         if has_pricing_signal and not serial:
@@ -583,15 +593,9 @@ class StructuredExtractorMixin:
                     "serial": serial,
                     "label": label,
                     "text": row_text[:200],
-                    "quantity_cell": self._structured_cell_value(
-                        cells, column_map.get("quantity")
-                    ),
-                    "unit_price_cell": self._structured_cell_value(
-                        cells, column_map.get("unit_price")
-                    ),
-                    "line_total_cell": self._structured_cell_value(
-                        cells, column_map.get("line_total")
-                    ),
+                    "quantity_cell": quantity_cell,
+                    "unit_price_cell": unit_price_cell,
+                    "line_total_cell": line_total_cell,
                     "reason": "pricing_fields_incomplete",
                     "reason_text": "该行存在报价字段痕迹，但数量、单价、总价至少有一项未能完整识别。",
                     **self._build_entry_context(
@@ -682,6 +686,21 @@ class StructuredExtractorMixin:
                     section_context, serial=serial, line_index=row_index
                 ),
             }
+        zero_amount = self._extract_structured_zero_amount(
+            row_text=row_text,
+            amount_cell=amount_cell,
+        )
+        if zero_amount is not None:
+            return {
+                "label": label,
+                "amount": zero_amount,
+                "source": "structured_amount_only_row",
+                "declared_line_total": zero_amount,
+                "relation_type": "amount_only_row",
+                **self._build_entry_context(
+                    section_context, serial=serial, line_index=row_index
+                ),
+            }
         if label and serial and amount_cell:
             return {
                 "_unresolved": True,
@@ -695,6 +714,40 @@ class StructuredExtractorMixin:
                     section_context, serial=serial, line_index=row_index
                 ),
             }
+        return None
+
+    def _extract_structured_zero_amount(
+        self,
+        *,
+        row_text: str,
+        amount_cell: str | None = None,
+        unit_price_cell: str | None = None,
+        quantity_cell: str | None = None,
+    ) -> Decimal | None:
+        """识别结构化表中的免费/包含/包干项，按零金额处理。"""
+        combined_text = " ".join(
+            str(value).strip()
+            for value in (row_text, amount_cell, unit_price_cell, quantity_cell)
+            if str(value or "").strip()
+        )
+        if not self._contains_zero_amount_hint(combined_text):
+            return None
+        if any(
+            self._extract_money_candidates(str(value))
+            for value in (amount_cell, unit_price_cell)
+            if str(value or "").strip()
+        ):
+            return None
+
+        normalized_text = re.sub(r"\s+", "", combined_text)
+        amount_placeholder = self._is_placeholder_amount_text(amount_cell)
+        unit_price_placeholder = self._is_placeholder_amount_text(unit_price_cell)
+
+        strong_zero_keywords = ("免费", "赠送", "无偿", "不收费")
+        if any(keyword in normalized_text for keyword in strong_zero_keywords):
+            return Decimal("0")
+        if "包含" in normalized_text and (amount_placeholder or unit_price_placeholder):
+            return Decimal("0")
         return None
 
     def _build_structured_amount_only_label(

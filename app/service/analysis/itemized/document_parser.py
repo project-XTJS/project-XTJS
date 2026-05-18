@@ -72,6 +72,7 @@ class DocumentParserMixin:
     UNIT_KEYWORDS: tuple
     ZERO_AMOUNT_KEYWORDS: tuple
     MONEY_TOLERANCE: Any
+    PRIMARY_ITEM_SECTION_NEARBY_PAGE_GAP: int
 
     def _prepare_document(self, payload: object) -> dict:
         """统一整理输入，抽取文本、分项段落、总价段落和候选检查区间。"""
@@ -91,13 +92,21 @@ class DocumentParserMixin:
         structured_total_sections = self._find_layout_table_sections(
             parsed_payload, self.TOTAL_SECTION_ANCHORS
         )
+        structured_item_sections = self._isolate_primary_item_sections(
+            structured_item_sections,
+            total_sections=structured_total_sections,
+        )
 
         # 如果结构化识别失败，回退到纯文本锚点搜索
-        item_sections = structured_item_sections or self._prioritize_item_sections(
+        fallback_item_sections = self._prioritize_item_sections(
             self._find_sections(lines, self.ITEM_SECTION_ANCHORS)
         )
         total_sections = structured_total_sections or self._find_sections(
             lines, self.TOTAL_SECTION_ANCHORS
+        )
+        item_sections = structured_item_sections or self._isolate_primary_item_sections(
+            fallback_item_sections,
+            total_sections=total_sections,
         )
         
         # 合并去重候选区段
@@ -121,6 +130,66 @@ class DocumentParserMixin:
             "total_sections": total_sections,
             "candidate_sections": candidate_sections,
         }
+
+    def _isolate_primary_item_sections(
+        self,
+        sections: list[dict],
+        *,
+        total_sections: list[dict] | None = None,
+    ) -> list[dict]:
+        """同一文件多次出现分项报价表时，优先保留靠近开标总价的主报价表。"""
+        if len(sections or []) <= 1:
+            return sections
+
+        reference_pages = sorted(
+            {
+                page
+                for section in total_sections or []
+                for page in (section.get("pages") or [])
+                if isinstance(page, int)
+            }
+        )
+
+        def section_start_locator(section: dict) -> int:
+            pages = [page for page in (section.get("pages") or []) if isinstance(page, int)]
+            if pages:
+                return min(pages)
+            start = section.get("start")
+            return int(start) if isinstance(start, int) else 10**9
+
+        def section_score(section: dict) -> tuple:
+            start_locator = section_start_locator(section)
+            anchor = str(section.get("anchor") or "")
+            distance = (
+                min(abs(start_locator - page) for page in reference_pages)
+                if reference_pages
+                else start_locator
+            )
+            return (
+                1 if anchor in self.PRIMARY_ITEM_SECTION_ANCHORS else 0,
+                1 if section.get("logical_table_refs") else 0,
+                -distance,
+                -start_locator,
+                len(section.get("lines") or []),
+            )
+
+        best_section = max(sections, key=section_score)
+        best_anchor = str(best_section.get("anchor") or "")
+        best_start = section_start_locator(best_section)
+        nearby_gap = int(getattr(self, "PRIMARY_ITEM_SECTION_NEARBY_PAGE_GAP", 2) or 2)
+
+        isolated = []
+        for section in sections:
+            start_locator = section_start_locator(section)
+            if section is best_section:
+                isolated.append(section)
+                continue
+            if (
+                str(section.get("anchor") or "") == best_anchor
+                and abs(start_locator - best_start) <= nearby_gap
+            ):
+                isolated.append(section)
+        return isolated or [best_section]
 
     def _parse_payload(self, payload: object) -> dict | None:
         """将字符串或对象输入解析为 OCR JSON 字典。"""

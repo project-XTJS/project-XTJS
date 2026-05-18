@@ -31,6 +31,8 @@ class VerificationChecker:
     ATTACHMENT_TITLE_PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
         r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        # 兼容 8-2 / 8-5 / 8-1-2 这类子编号标题
+        r'^\s*\d+(?:\s*[-－]\s*\d+)+(?:[、.)）．]?\s*)',
         # 兼容 2.2 / 7.2 / 8.1.2 这类多级编号标题
         r'^\s*\d+(?:[．\.、]\d+)+(?:[．\.、])?\s*',
         r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
@@ -820,6 +822,13 @@ class VerificationChecker:
         # 先按标题精确匹配，再在同号候选里兜底，避免后文同号附件串到前面的正式表单。
         attachment_number = attachment.get("attachment_number")
         title_key = self._attachment_title_key(attachment.get("title") or "")
+        title_matches = []
+        if title_key:
+            title_matches = [
+                section
+                for section in all_sections
+                if self._attachment_title_key(section.get("title") or "") == title_key
+            ]
         if attachment_number in bid_by_no:
             candidates = bid_by_no.get(attachment_number) or []
             if title_key:
@@ -832,13 +841,14 @@ class VerificationChecker:
                     return exact[0]
             if len(candidates) == 1:
                 return candidates[0]
+        # 编号体系可能因投标人将资格证明文件拆成子编号（如 8-2/8-3/8-5）而与模板不同；
+        # 此时仅在标题 key 唯一精确命中时回退到标题匹配，避免将不同附件串错。
+        if title_key and len(title_matches) == 1:
+            return title_matches[0]
         if attachment_number:
             return None
-        if not title_key:
-            return None
-        for section in all_sections:
-            if self._attachment_title_key(section.get("title") or "") == title_key:
-                return section
+        if not attachment_number and title_matches:
+            return title_matches[0]
         return None
 
     def _evaluate_attachment(self, attachment: dict, bid_section: dict | None, deadline: dict | None, bidder_name: str | None) -> dict:

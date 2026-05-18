@@ -31,6 +31,94 @@ class IntegrityChecker:
         ],
     }
 
+    BODY_EVIDENCE_MAPPING = {
+        "法定代表人资格证明书": [
+            "法定代表人资格证明书",
+            "法定代表人证明书",
+            "法定代表人身份证明",
+            "单位负责人身份证明",
+        ],
+        "法定代表人授权委托书": [
+            "法定代表人授权委托书",
+            "授权委托书",
+            "委托代理人",
+            "被授权人",
+        ],
+        "缴纳社保": [
+            "被授权人社保缴纳证明",
+            "社保缴纳证明",
+            "社会保险个人权益记录",
+            "劳动合同",
+            "劳动合同书",
+        ],
+        "财务状况，依法缴纳税收和社会保障资金的声明函": [
+            "财务状况",
+            "税收",
+            "社会保障资金",
+            "声明函",
+        ],
+        "制造商声明函": ["制造商声明", "制造商授权", "原厂授权"],
+        "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
+        "资格证明文件": [
+            "营业执照",
+            "法定代表人资格证明书",
+            "法定代表人授权委托书",
+            "被授权人社保缴纳证明",
+            "劳动合同书",
+            "承诺声明函",
+            "不参与围标串标承诺书",
+            "财务状况",
+            "制造商声明函",
+            "制造商授权书",
+            "原厂授权",
+        ],
+    }
+
+    COMPOSITE_REQUIREMENT_MARKERS = {
+        "资格证明文件": {
+            "markers": [
+                "营业执照",
+                "法定代表人资格证明书",
+                "法定代表人授权委托书",
+                "被授权人社保缴纳证明",
+                "劳动合同书",
+                "承诺声明函",
+                "不参与围标串标承诺书",
+                "财务状况",
+                "制造商声明函",
+                "制造商授权书",
+                "原厂授权",
+            ],
+            "min_hits": 2,
+        }
+    }
+
+    BODY_MATCH_FRAGMENTS = (
+        "法定代表人",
+        "资格证明",
+        "身份证明",
+        "授权委托书",
+        "授权委托",
+        "委托代理人",
+        "被授权人",
+        "营业执照",
+        "社保缴纳",
+        "社会保险",
+        "劳动合同",
+        "财务状况",
+        "税收",
+        "社会保障资金",
+        "声明函",
+        "承诺书",
+        "制造商声明",
+        "制造商授权",
+        "原厂授权",
+        "投标保证书",
+        "偏离表",
+        "报价表",
+        "一览表",
+    )
+
     # 标题前缀模式（用于去除编号）
     PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
@@ -78,6 +166,43 @@ class IntegrityChecker:
                 titles.extend([key, *aliases])
                 break
         return list(dict.fromkeys(titles))
+
+    def _body_evidence_titles(self, keyword: str) -> list[str]:
+        keyword_norm = self._normalize_title_text(keyword)
+        titles = [keyword, self._normalize_target(keyword), *self._candidate_titles(keyword)]
+        for key, aliases in self.BODY_EVIDENCE_MAPPING.items():
+            key_norm = self._normalize_title_text(key)
+            if keyword_norm == key_norm or keyword_norm in key_norm or key_norm in keyword_norm:
+                titles.extend([key, *aliases])
+                break
+
+        cleaned_titles = []
+        for title in titles:
+            clean = re.sub(r"[（(][^()（）]{0,40}[）)]", "", self._strip_heading_prefix(title)).strip()
+            if clean and clean not in cleaned_titles:
+                cleaned_titles.append(clean)
+        return cleaned_titles
+
+    def _body_evidence_parts(self, candidate: str) -> list[str]:
+        normalized_candidate = self._normalize_title_text(candidate)
+        if not normalized_candidate:
+            return []
+
+        parts = []
+        split_parts = re.split(r"[、，,；;：:\s/]+", candidate)
+        for part in split_parts:
+            normalized_part = self._normalize_title_text(part)
+            if len(normalized_part) >= 2 and normalized_part not in parts:
+                parts.append(normalized_part)
+
+        for fragment in self.BODY_MATCH_FRAGMENTS:
+            normalized_fragment = self._normalize_title_text(fragment)
+            if normalized_fragment and normalized_fragment in normalized_candidate and normalized_fragment not in parts:
+                parts.append(normalized_fragment)
+
+        if normalized_candidate not in parts:
+            parts.append(normalized_candidate)
+        return parts
 
     # 将任意标题归一化为标准描述
     def _normalize_target(self, name: str) -> str:
@@ -182,6 +307,142 @@ class IntegrityChecker:
 
         return toc_pages
 
+    def _is_usable_body_section(
+        self, section: dict, headers: set, toc_pages: set[int]
+    ) -> bool:
+        if not isinstance(section, dict):
+            return False
+        if section.get("page") in toc_pages:
+            return False
+        if section.get("type") not in {"heading", "text", "table"}:
+            return False
+        text = str(section.get("text") or "")
+        if not text:
+            return False
+        if TemplateExtractor._is_noise(text, headers, section.get("type")):
+            return False
+        return True
+
+    def _content_match_score(
+        self, text: str, keyword: str
+    ) -> tuple[int, str | None, list[str]]:
+        normalized_text = self._normalize_title_text(text)
+        if not normalized_text:
+            return 0, None, []
+
+        best_score = 0
+        best_title = None
+        best_hits: list[str] = []
+        for candidate in self._body_evidence_titles(keyword):
+            normalized_candidate = self._normalize_title_text(candidate)
+            if not normalized_candidate:
+                continue
+            if len(normalized_candidate) >= 4 and normalized_candidate in normalized_text:
+                score = 100 + min(len(normalized_candidate), 20)
+                if score > best_score:
+                    best_score = score
+                    best_title = candidate
+                    best_hits = [candidate]
+                continue
+
+            parts = self._body_evidence_parts(candidate)
+            hits = []
+            for part in parts:
+                if part and part in normalized_text and part not in hits:
+                    hits.append(part)
+            longest_hit = max((len(part) for part in hits), default=0)
+            if len(hits) >= 2:
+                score = 60 + len(hits) * 10 + min(longest_hit, 20)
+            elif longest_hit >= 6:
+                score = 40 + min(longest_hit, 20)
+            else:
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_title = candidate
+                best_hits = hits
+
+        return best_score, best_title, best_hits
+
+    def _find_body_section(
+        self, sections: list, headers: set, keyword: str, toc_pages: set[int]
+    ) -> dict | None:
+        best_section = None
+        best_score = 0
+        best_match_title = None
+        best_hits: list[str] = []
+
+        for sec in sections:
+            if not self._is_usable_body_section(sec, headers, toc_pages):
+                continue
+            score, matched_title, hits = self._content_match_score(
+                str(sec.get("text") or ""), keyword
+            )
+            if score <= best_score:
+                continue
+            best_section = sec
+            best_score = score
+            best_match_title = matched_title
+            best_hits = hits
+
+        if best_section is None or best_score < 60:
+            return None
+
+        matched = dict(best_section)
+        matched["match_mode"] = "body"
+        if best_match_title:
+            matched["matched_keyword"] = best_match_title
+        if best_hits:
+            matched["matched_parts"] = best_hits
+        return matched
+
+    def _find_composite_body_section(
+        self, sections: list, headers: set, keyword: str, toc_pages: set[int]
+    ) -> dict | None:
+        keyword_norm = self._normalize_title_text(keyword)
+        matched_profile = None
+        for profile_key, profile in self.COMPOSITE_REQUIREMENT_MARKERS.items():
+            profile_key_norm = self._normalize_title_text(profile_key)
+            if (
+                keyword_norm == profile_key_norm
+                or keyword_norm in profile_key_norm
+                or profile_key_norm in keyword_norm
+            ):
+                matched_profile = profile
+                break
+        if matched_profile is None:
+            return None
+
+        marker_hits: dict[str, dict] = {}
+        for sec in sections:
+            if not self._is_usable_body_section(sec, headers, toc_pages):
+                continue
+            normalized_text = self._normalize_title_text(str(sec.get("text") or ""))
+            if not normalized_text:
+                continue
+            for marker in matched_profile.get("markers") or []:
+                normalized_marker = self._normalize_title_text(marker)
+                if normalized_marker and normalized_marker in normalized_text and marker not in marker_hits:
+                    marker_hits[marker] = sec
+
+        min_hits = int(matched_profile.get("min_hits") or 1)
+        if len(marker_hits) < min_hits:
+            return None
+
+        preview_hits = list(marker_hits.keys())[:4]
+        first_section = next(iter(marker_hits.values()))
+        synthetic = {
+            "type": "text",
+            "page": first_section.get("page"),
+            "text": f"正文聚合命中：{', '.join(preview_hits)}",
+            "match_mode": "composite_body",
+            "matched_parts": list(marker_hits.keys()),
+        }
+        if first_section.get("bbox") is not None:
+            synthetic["bbox"] = first_section.get("bbox")
+        return synthetic
+
     # text 回查只接受标题样式的短文本，不把正文句子误当成附件标题
     def _looks_like_text_title(self, text: str, keyword: str) -> bool:
         compact = re.sub(r"\s+", "", str(text or ""))
@@ -222,7 +483,13 @@ class IntegrityChecker:
         match_section = self._find_heading_section(sections, headers, keyword)
         if match_section:
             return match_section
-        return self._find_text_section(sections, headers, keyword, toc_pages)
+        match_section = self._find_text_section(sections, headers, keyword, toc_pages)
+        if match_section:
+            return match_section
+        match_section = self._find_composite_body_section(sections, headers, keyword, toc_pages)
+        if match_section:
+            return match_section
+        return self._find_body_section(sections, headers, keyword, toc_pages)
 
     # 主校验入口
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:

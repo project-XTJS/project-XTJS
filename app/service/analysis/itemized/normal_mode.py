@@ -23,6 +23,8 @@ class NormalModeMixin:
     PREFERENTIAL_TOTAL_LINE_WINDOW: int
     TOTAL_KEYWORDS: tuple
     OPENING_TOTAL_KEYWORDS: tuple
+    ZERO_AMOUNT_KEYWORDS: tuple
+    LOW_CONFIDENCE_UNRESOLVED_THRESHOLD: int
 
     # 普通模式主入口
     def _check_normal_mode(
@@ -87,6 +89,12 @@ class NormalModeMixin:
         extracted_totals = self._dedupe_entries(extracted_totals)
         row_issues = self._dedupe_row_issues(row_issues)
         unresolved_rows = self._dedupe_unresolved_rows(unresolved_rows)
+        extracted_totals, excluded_totals = self._filter_total_candidates_to_primary_scope(
+            extracted_totals,
+            item_sections=item_sections,
+            total_sections=total_sections,
+            preferential_mode=preferential_mode,
+        )
         duplicate_items = self._extract_duplicate_items(extracted_items)
         serial_gap_hints = (
             self._extract_serial_gap_hints(item_sections) if item_sections else []
@@ -98,16 +106,44 @@ class NormalModeMixin:
         sum_check = self._evaluate_sum_check(
             extracted_items, extracted_totals, preferential_mode=preferential_mode
         )
+        confidence = self._assess_itemized_confidence(
+            item_sections=item_sections,
+            total_sections=total_sections,
+            structured_analysis=structured_analysis,
+            total_candidates=extracted_totals,
+            excluded_totals=excluded_totals,
+            unresolved_rows=unresolved_rows,
+            row_issues=row_issues,
+        )
+        row_status = self._resolve_row_arithmetic_status(
+            table_detected=table_detected,
+            structured_analysis=structured_analysis,
+            row_issues=row_issues,
+            unresolved_rows=unresolved_rows,
+            confidence=confidence,
+        )
+        effective_sum_status = self._resolve_sum_consistency_status(
+            sum_check["status"],
+            confidence=confidence,
+        )
         status = self._resolve_normal_status(
             table_detected,
-            sum_check["status"],
-            row_issues,
+            effective_sum_status,
+            row_status,
             duplicate_items,
-            unresolved_rows,
+            confidence["blocking_unresolved_rows"],
         )
         passed = self._status_to_passed(status)
         serialized_total_candidates = self._serialize_entries(extracted_totals)
         serialized_unresolved_rows = self._serialize_entries(unresolved_rows)
+        serialized_excluded_totals = self._serialize_entries(excluded_totals)
+        sum_check = {
+            **sum_check,
+            "raw_status": sum_check["status"],
+            "status": effective_sum_status,
+            "confidence_level": confidence["level"],
+            "confidence_reasons": list(confidence["reasons"]),
+        }
         details = self._build_normal_details(
             structured_analysis=structured_analysis,
             extracted_items=extracted_items,
@@ -117,6 +153,8 @@ class NormalModeMixin:
             duplicate_items=duplicate_items,
             unresolved_rows=unresolved_rows,
             serial_gap_hints=serial_gap_hints,
+            confidence=confidence,
+            excluded_totals=excluded_totals,
         )
         manual_review = self._build_manual_review_payload(
             status=status,
@@ -124,6 +162,7 @@ class NormalModeMixin:
             total_candidates=serialized_total_candidates,
             unresolved_rows=serialized_unresolved_rows,
             row_issues=row_issues,
+            confidence=confidence,
         )
 
         return {
@@ -136,7 +175,8 @@ class NormalModeMixin:
             ),
             "checks": {
                 "row_arithmetic": {
-                    "status": (
+                    "status": row_status,
+                    "raw_status": (
                         "fail"
                         if row_issues
                         else (
@@ -162,6 +202,10 @@ class NormalModeMixin:
                     "issues": row_issues,
                     "unresolved_count": len(unresolved_rows),
                     "unresolved_rows": serialized_unresolved_rows,
+                    "blocking_unresolved_count": confidence["blocking_unresolved_count"],
+                    "benign_unresolved_count": confidence["benign_unresolved_count"],
+                    "confidence_level": confidence["level"],
+                    "confidence_reasons": list(confidence["reasons"]),
                     "skipped_count": int(
                         structured_analysis.get("amount_only_item_count") or 0
                     ),
@@ -171,15 +215,12 @@ class NormalModeMixin:
                     ),
                 },
                 "sum_consistency": {
-                    "status": (
-                        "unknown"
-                        if unresolved_rows and sum_check["status"] == "pass"
-                        else sum_check["status"]
-                    ),
+                    "status": sum_check["status"],
                     "calculated_total": sum_check["calculated_total"],
                     "declared_total": sum_check["declared_total"],
                     "difference": sum_check["difference"],
                     "matched_total_label": sum_check["matched_total_label"],
+                    "raw_status": sum_check.get("raw_status"),
                     "total_mode": sum_check.get("total_mode"),
                     "preferential_total": sum_check.get("preferential_total"),
                     "preferential_total_label": sum_check.get("preferential_total_label"),
@@ -193,6 +234,8 @@ class NormalModeMixin:
                         "opening_total_difference"
                     ),
                     "opening_total_status": sum_check.get("opening_total_status"),
+                    "confidence_level": confidence["level"],
+                    "confidence_reasons": list(confidence["reasons"]),
                 },
                 "duplicate_items": {
                     "status": (
@@ -230,7 +273,9 @@ class NormalModeMixin:
                 "extracted_item_count": len(extracted_items),
                 "extracted_items": self._serialize_entries(extracted_items),
                 "total_candidates": serialized_total_candidates,
+                "excluded_total_candidates": serialized_excluded_totals,
                 "unresolved_rows": serialized_unresolved_rows,
+                "confidence_assessment": confidence,
             },
             "manual_review": manual_review,
             "details": details,
@@ -532,20 +577,230 @@ class NormalModeMixin:
         return inferred_total
 
     # 状态判定与结果描述
+    def _filter_total_candidates_to_primary_scope(
+        self,
+        totals: list[dict],
+        *,
+        item_sections: list[dict],
+        total_sections: list[dict],
+        preferential_mode: bool,
+    ) -> tuple[list[dict], list[dict]]:
+        """只保留主报价表附近及开标总价口径的总价候选，隔离无关附件。"""
+        if not totals:
+            return [], []
+
+        primary_pages = {
+            page
+            for section in item_sections or []
+            for page in (section.get("pages") or [])
+            if isinstance(page, int)
+        }
+        total_pages = {
+            page
+            for section in total_sections or []
+            for page in (section.get("pages") or [])
+            if isinstance(page, int)
+        }
+
+        kept = []
+        excluded = []
+        for total in totals:
+            pages = {
+                page for page in (total.get("section_pages") or []) if isinstance(page, int)
+            }
+            keep = False
+            if self._looks_like_opening_total_label(total.get("label")):
+                keep = True
+            elif preferential_mode and total.get("is_preferential_total"):
+                keep = True
+            elif pages and self._pages_intersect_or_near(pages, primary_pages):
+                keep = True
+            elif pages and self._pages_intersect_or_near(pages, total_pages):
+                keep = True
+            elif not pages and not primary_pages:
+                keep = True
+
+            if keep:
+                kept.append(total)
+            else:
+                excluded.append(total)
+
+        return (kept or totals), excluded
+
+    def _pages_intersect_or_near(
+        self,
+        pages: set[int],
+        reference_pages: set[int],
+        *,
+        gap: int = 1,
+    ) -> bool:
+        """判断两组页码是否重叠或足够接近。"""
+        if not pages or not reference_pages:
+            return False
+        if pages & reference_pages:
+            return True
+        return min(abs(page - ref) for page in pages for ref in reference_pages) <= gap
+
+    def _assess_itemized_confidence(
+        self,
+        *,
+        item_sections: list[dict],
+        total_sections: list[dict],
+        structured_analysis: dict,
+        total_candidates: list[dict],
+        excluded_totals: list[dict],
+        unresolved_rows: list[dict],
+        row_issues: list[dict],
+    ) -> dict:
+        """评估当前分项报价抽取是否足够稳定，可用于硬性失败判断。"""
+        benign_unresolved_rows = [
+            row for row in unresolved_rows if self._is_benign_unresolved_row(row)
+        ]
+        blocking_unresolved_rows = [
+            row for row in unresolved_rows if row not in benign_unresolved_rows
+        ]
+        distinct_totals = {
+            self._format_decimal(item.get("amount"))
+            for item in total_candidates
+            if item.get("amount") is not None
+        }
+        excluded_distinct_totals = {
+            self._format_decimal(item.get("amount"))
+            for item in excluded_totals
+            if item.get("amount") is not None
+        }
+        column_shift_suspected = any(
+            self._looks_like_column_shift_unresolved_row(row)
+            for row in blocking_unresolved_rows
+        )
+
+        reasons = []
+        if excluded_distinct_totals:
+            reasons.append("检测到主报价表范围外的总价候选，已按主报价表隔离。")
+        if len(item_sections or []) > 1:
+            reasons.append("同一文件内存在多处分项报价表锚点。")
+        if len(structured_analysis.get("used_tables") or []) > 1:
+            reasons.append("当前主报价表涉及多张结构化表，需谨慎判定。")
+        threshold = int(getattr(self, "LOW_CONFIDENCE_UNRESOLVED_THRESHOLD", 3) or 3)
+        if len(blocking_unresolved_rows) >= threshold:
+            reasons.append("未解析分项行较多，当前结构化结果可信度不足。")
+        if column_shift_suspected:
+            reasons.append("疑似存在金额列错位或厂家列误绑金额列。")
+        if row_issues and blocking_unresolved_rows:
+            reasons.append("在存在较多未解析行时又出现算术异常，优先按低置信度处理。")
+        if len(distinct_totals) >= 2 and excluded_distinct_totals:
+            reasons.append("总价候选存在多个口径，已隔离无关候选。")
+
+        return {
+            "level": "low" if reasons else "high",
+            "reasons": reasons,
+            "benign_unresolved_count": len(benign_unresolved_rows),
+            "blocking_unresolved_count": len(blocking_unresolved_rows),
+            "blocking_unresolved_rows": blocking_unresolved_rows,
+            "column_shift_suspected": column_shift_suspected,
+            "distinct_total_count": len(distinct_totals),
+            "excluded_total_count": len(excluded_totals),
+            "total_section_count": len(total_sections or []),
+        }
+
+    def _resolve_row_arithmetic_status(
+        self,
+        *,
+        table_detected: bool,
+        structured_analysis: dict,
+        row_issues: list[dict],
+        unresolved_rows: list[dict],
+        confidence: dict,
+    ) -> str:
+        """结合低置信度规则，计算逐项算术校验状态。"""
+        if row_issues:
+            return "unknown" if confidence["level"] == "low" else "fail"
+        if confidence["blocking_unresolved_count"]:
+            return "unknown"
+        if (
+            structured_analysis.get("amount_only_item_count")
+            and not structured_analysis["group_checks"]
+            and not any(
+                entry.get("relation_type") == "row_total"
+                for entry in (structured_analysis.get("relation_rows") or [])
+            )
+        ):
+            return "not_applicable"
+        if not table_detected:
+            return "not_detected"
+        if unresolved_rows and not confidence["blocking_unresolved_count"]:
+            return "pass"
+        return "pass"
+
+    def _resolve_sum_consistency_status(
+        self,
+        raw_status: str,
+        *,
+        confidence: dict,
+    ) -> str:
+        """结合低置信度规则，计算汇总一致性状态。"""
+        if raw_status == "fail" and confidence["level"] == "low":
+            return "unknown"
+        if raw_status == "pass" and confidence["blocking_unresolved_count"]:
+            return "unknown"
+        return raw_status
+
+    def _is_benign_unresolved_row(self, row: dict) -> bool:
+        """识别免费/包含等不会影响总价的未解析分项行。"""
+        values = [
+            row.get("amount_cell"),
+            row.get("unit_price_cell"),
+            row.get("line_total_cell"),
+            row.get("quantity_cell"),
+            row.get("text"),
+            row.get("label"),
+        ]
+        if not self._contains_zero_amount_hint(*values):
+            return False
+        return any(
+            self._is_placeholder_amount_text(value)
+            for value in (
+                row.get("amount_cell"),
+                row.get("unit_price_cell"),
+                row.get("line_total_cell"),
+            )
+        )
+
+    def _looks_like_column_shift_unresolved_row(self, row: dict) -> bool:
+        """识别金额列被厂商名等文本误占位的低置信度场景。"""
+        for value in (
+            row.get("amount_cell"),
+            row.get("line_total_cell"),
+            row.get("unit_price_cell"),
+            row.get("quantity_cell"),
+        ):
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if self._is_placeholder_amount_text(text):
+                continue
+            if self._extract_money_candidates(text):
+                continue
+            if self._contains_zero_amount_hint(text):
+                continue
+            if re.search(r"[\u4e00-\u9fffA-Za-z]", text):
+                return True
+        return False
+
     def _resolve_normal_status(
         self,
         table_detected: bool,
         sum_status: str,
-        row_issues: list[dict],
+        row_status: str,
         duplicate_items: list[dict],
         unresolved_rows: list[dict],
     ) -> str:
         """综合汇总校验、算术疑点和 OCR 完整度，给出普通模式总状态。"""
         if not table_detected:
             return "not_detected"
-        if row_issues or sum_status == "fail" or duplicate_items:
+        if duplicate_items or row_status == "fail" or sum_status == "fail":
             return "fail"
-        if unresolved_rows:
+        if row_status == "unknown" or sum_status == "unknown" or unresolved_rows:
             return "unknown"
         if sum_status == "pass":
             return "pass"
@@ -572,6 +827,8 @@ class NormalModeMixin:
             return "未识别到可用于校验的分项报价表或报价一览表。"
         if status == "pass":
             return "分项报价检查通过。"
+        if status == "unknown":
+            return "已识别到报价内容，但当前结构化可信度不足，暂不宜直接判定分项报价存在硬性异常。"
         if row_issues and sum_status == "fail":
             return "发现逐项算术错误，且分项汇总与声明总价不一致。"
         if row_issues:
@@ -580,6 +837,18 @@ class NormalModeMixin:
             return "发现疑似重项。"
         if sum_status == "fail":
             return "分项汇总与声明总价不一致。"
+        if False:
+            details.append(
+                "当前分项报价结构化可信度较低，已将原本可能的硬性异常降级为待人工复核。"
+            )
+            for reason in confidence.get("reasons") or []:
+                details.append(f"低置信度原因：{reason}")
+        if False:
+            details.append(
+                "当前分项报价结构化可信度较低，已将原本可能的硬性异常降级为待人工复核。"
+            )
+            for reason in confidence.get("reasons") or []:
+                details.append(f"低置信度原因：{reason}")
         if unresolved_rows:
             return (
                 "已识别到报价内容，但存在未完整识别的分项行，"
@@ -598,6 +867,8 @@ class NormalModeMixin:
         duplicate_items: list[dict],
         unresolved_rows: list[dict],
         serial_gap_hints: list[str],
+        confidence: dict,
+        excluded_totals: list[dict],
     ) -> list[str]:
         """生成普通模式的详细发现列表。"""
         details = []
@@ -619,6 +890,11 @@ class NormalModeMixin:
             details.append(f"识别到 {len(extracted_items)} 个分项金额。")
         if extracted_totals:
             details.append(f"识别到 {len(extracted_totals)} 个合计/总价候选值。")
+
+        if excluded_totals:
+            details.append(
+                f"已按主报价表范围隔离 {len(excluded_totals)} 个非主报价表总价候选。"
+            )
 
         if sum_check["status"] == "pass":
             if sum_check.get("total_mode") == "preferential_total":
@@ -702,6 +978,7 @@ class NormalModeMixin:
         total_candidates: list[dict],
         unresolved_rows: list[dict],
         row_issues: list[dict],
+        confidence: dict,
     ) -> dict:
         """生成人工复核所需的提示信息。"""
         recognized_total = None
@@ -718,7 +995,10 @@ class NormalModeMixin:
 
         return {
             "required": bool(
-                status in {"fail", "unknown"} or unresolved_rows or row_issues
+                status in {"fail", "unknown"}
+                or unresolved_rows
+                or row_issues
+                or confidence.get("level") == "low"
             ),
             "recognized_total": recognized_total,
             "calculated_total": sum_check.get("calculated_total"),
@@ -730,6 +1010,8 @@ class NormalModeMixin:
             ),
             "row_issue_count": len(row_issues),
             "row_issues": self._serialize_entries(row_issues),
+            "confidence_level": confidence.get("level"),
+            "confidence_reasons": list(confidence.get("reasons") or []),
         }
 
     def _build_manual_review_unclear_contents(
