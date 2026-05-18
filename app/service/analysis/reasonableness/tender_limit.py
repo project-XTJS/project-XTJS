@@ -282,6 +282,15 @@ class TenderLimitMixin:
             return None
 
         normalized_opening_text = self._strip_price_markup(bid_opening_text)
+        has_opening_context = (
+            self._contains_bid_opening_title(bid_opening_text)
+            or self._has_bid_opening_context(bid_opening_text)
+        )
+        if not self._has_bid_total_amount_signal(
+            bid_opening_text,
+            assume_opening_context=self._contains_bid_opening_title(bid_opening_text),
+        ):
+            return None
 
         direct_total_patterns = [
             r"(参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
@@ -323,22 +332,23 @@ class TenderLimitMixin:
                 "context": bid_opening_text[:400],
             }
 
-        line_patterns = [
-            r"(合计)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-        ]
-        for search_text in search_texts:
-            for pattern in line_patterns:
-                for m in re.finditer(pattern, search_text):
-                    raw_amount = m.group(2).strip()
-                    amount = self._clean_small_price(raw_amount)
-                    if amount is None:
-                        continue
-                    return {
-                        "page": bid_page,
-                        "amount_yuan": round(amount, 2),
-                        "raw_amount": raw_amount,
-                        "context": normalized_opening_text[:400] or bid_opening_text[:400],
-                    }
+        if has_opening_context and not self._looks_like_itemized_total_page(bid_opening_text):
+            line_patterns = [
+                r"(合计)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            ]
+            for search_text in search_texts:
+                for pattern in line_patterns:
+                    for m in re.finditer(pattern, search_text):
+                        raw_amount = m.group(2).strip()
+                        amount = self._clean_small_price(raw_amount)
+                        if amount is None:
+                            continue
+                        return {
+                            "page": bid_page,
+                            "amount_yuan": round(amount, 2),
+                            "raw_amount": raw_amount,
+                            "context": normalized_opening_text[:400] or bid_opening_text[:400],
+                        }
 
         return None
 

@@ -83,25 +83,121 @@ class DocumentParserMixin:
             "logical_tables": logical_tables,
         }
 
+    def _has_bid_opening_context(self, text: str) -> bool:
+        """判断文本是否具备开标一览表常见上下文字段。"""
+        if not text or not str(text).strip():
+            return False
+        normalized = self._normalize(self._strip_price_markup(str(text)))
+        meta_hits = sum(
+            1
+            for tokens in (
+                ("项目名称", "采购项目", "标的名称"),
+                ("招标编号", "项目编号", "采购编号", "比选编号"),
+            )
+            if any(token in normalized for token in tokens)
+        )
+        detail_hits = sum(
+            1
+            for tokens in (
+                ("货币单位", "币种"),
+                ("交货期", "交付期", "工期", "服务期"),
+                ("交货地点", "交付地点", "服务地点", "实施地点"),
+                ("质保期", "保修期", "质保"),
+            )
+            if any(token in normalized for token in tokens)
+        )
+        return detail_hits >= 2 or (detail_hits >= 1 and meta_hits >= 1)
+
+    def _has_bid_total_amount_signal(
+        self, text: str, *, assume_opening_context: bool = False
+    ) -> bool:
+        """判断页面是否出现了开标一览表中的总价字段和对应金额。"""
+        if not text or not str(text).strip():
+            return False
+        search_text = self._strip_price_markup(str(text))
+        context_ok = assume_opening_context or self._has_bid_opening_context(search_text)
+        if not context_ok:
+            return False
+
+        patterns = [
+            r"(?:参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)"
+            r"[^\n]{0,20}?(?:小写[：:]?)?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
+            r"(?:参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)"
+            r"[^\n]{0,20}?(?:为人民币)?[^\n]{0,40}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
+            r"[^\n]{0,40}?小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
+            r"小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?"
+            r".{0,60}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+",
+            r"大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
+            r".{0,60}?小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
+        ]
+        return any(
+            re.search(pattern, search_text, re.IGNORECASE | re.DOTALL)
+            for pattern in patterns
+        )
+
+    def _looks_like_itemized_total_page(self, text: str) -> bool:
+        """识别分项报价合计/最终优惠价页面，避免误当成开标一览表。"""
+        if not text or not str(text).strip():
+            return False
+        stripped_text = self._strip_price_markup(str(text))
+        normalized_text = self._normalize(stripped_text)
+        if any(title in normalized_text for title in self.ITEMIZED_SECTION_TITLES):
+            return True
+        if "小计" in normalized_text and "最终优惠价" in normalized_text:
+            return True
+
+        row_like_hits = 0
+        for raw_line in stripped_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            compact = self._normalize(line)
+            if "小计" in compact or "最终优惠价" in compact:
+                row_like_hits += 1
+                continue
+            if not re.match(r"^\d+(?:\.\d+)*", compact):
+                continue
+            if not re.search(r"(?:￥|¥|\d[\d,，]*(?:\.\d+)?)", line):
+                continue
+            if any(unit in compact for unit in ("套", "台", "项", "个", "批", "次", "人", "年", "月")):
+                row_like_hits += 1
+        return row_like_hits >= 3
+
     # 开标一览表定位
     def _score_page_candidate(self, page_sections: List[Dict]) -> int:
         page_text = "\n".join(sec["text"] for sec in page_sections if sec["text"])
         normalized_page_text = self._normalize(page_text)
         if self._has_page_heading_title(page_sections, self.ITEMIZED_SECTION_TITLES):
             return -1000
+        has_heading_title = self._has_page_heading_title(page_sections, self.BID_OPENING_TITLES)
+        has_bid_total_amount = self._has_bid_total_amount_signal(
+            page_text, assume_opening_context=has_heading_title
+        )
+        has_float_rate_keywords = self._contains_float_rate_keywords(page_text)
+        itemized_total_like = self._looks_like_itemized_total_page(page_text)
         score = 0
-        if self._contains_bid_opening_title(page_text):
-            score += 8
+        if has_heading_title:
+            score += 18
+        elif self._contains_bid_opening_title(page_text):
+            score += 6
         if "目录" in normalized_page_text:
             score -= 20
         if any(self._is_catalog_line(sec["text"]) for sec in page_sections):
             score -= 8
-        direct_keys = ["小写", "大写", "参选总价", "投标总价", "报价总价"]
-        score += sum(3 for k in direct_keys if k in normalized_page_text)
-        float_keys = ["下浮率", "投标下浮率", "税率", "投标报价", "暂估金额", "业务名称"]
-        score += sum(3 for k in float_keys if k in normalized_page_text)
+        if has_bid_total_amount:
+            score += 12
+        if has_float_rate_keywords:
+            score += 8
         if any(sec.get("type") == "table" for sec in page_sections):
-            score += 6
+            score += 4 if (has_heading_title or has_bid_total_amount or has_float_rate_keywords) else 1
+        if itemized_total_like:
+            score -= 16
+        if "投标保证书" in normalized_page_text or "比选保证书" in normalized_page_text:
+            score -= 10
+        if any(token in normalized_page_text for token in ("合同金额", "合同总价", "采购合同", "设备采购合同")):
+            score -= 10
+        if "偏离表" in normalized_page_text:
+            score -= 8
         rule_keys = ["不低于", "不少于", "低于或等于", "否决", "大于", "小于", "须"]
         score += sum(2 for k in rule_keys if k in normalized_page_text)
         return score
@@ -131,6 +227,14 @@ class DocumentParserMixin:
             raw_text = parsed.get("raw_text", "")
             extracted = self._extract_bid_opening_section_from_text(raw_text)
             return None, extracted
+        best_page_sections = page_map.get(best_page, [])
+        best_has_heading_title = self._has_page_heading_title(
+            best_page_sections, self.BID_OPENING_TITLES
+        )
+        if self._has_bid_total_amount_signal(
+            best_text, assume_opening_context=best_has_heading_title
+        ):
+            return best_page, best_text.strip()
         ordered_sections = sections
         collected = []
         started = False
@@ -170,9 +274,14 @@ class DocumentParserMixin:
                 score -= 12
             if "目录" in normalized_window:
                 score -= 12
-            for key in ["小写", "大写", "下浮率", "税率", "报价", "投标报价", "暂估金额"]:
-                if key in normalized_window:
-                    score += 3
+            if self._has_bid_total_amount_signal(
+                window, assume_opening_context=self._contains_bid_opening_title(window)
+            ):
+                score += 12
+            if self._contains_float_rate_keywords(window):
+                score += 8
+            if self._looks_like_itemized_total_page(window):
+                score -= 16
             if score > best_score:
                 best_score = score
                 best_idx = idx

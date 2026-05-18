@@ -12,6 +12,7 @@ from .text_utils import (
     normalize_plain_text,
     compact_raw_text,
     hash_text,
+    similarity_ratio,
 )
 from .constants import (
     SPLIT_LINE_PATTERN,
@@ -34,6 +35,43 @@ GENERIC_DEVIATION_RESPONSE_TOKENS = (
     "响应",
     "满足",
     "符合",
+    "详见",
+)
+
+DEVIATION_STATUS_ONLY_TOKENS = (
+    "无偏离",
+    "未偏离",
+    "正偏离",
+    "负偏离",
+    "响应",
+    "认可",
+    "符合",
+    "满足",
+    "相同",
+    "一致",
+)
+
+GENERIC_DUPLICATE_COMPARE_TOKENS = (
+    "我方",
+    "我司",
+    "我单位",
+    "我公司",
+    "本公司",
+    "本单位",
+    "投标人",
+    "投标文件的响应",
+    "投标响应",
+    "响应内容",
+    "响应",
+    "应答",
+    "回复",
+    "认可",
+    "无偏离",
+    "未偏离",
+    "正偏离",
+    "负偏离",
+    "偏离说明",
+    "偏离",
     "详见",
 )
 
@@ -75,7 +113,7 @@ def extract_business_duplicate_segments(
         tuple(int(page) for page in (segment.get("pages") or []) if isinstance(page, int))
         for segment in row_segments
     }
-    for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or []):
+    for section in _iter_business_bid_deviation_sections(deviation_sections):
         section_pages = tuple(
             int(page)
             for page in ([section.get("page")] if isinstance(section.get("page"), int) else [])
@@ -125,6 +163,8 @@ def _segments_from_deviation_rows(
         requirement = normalize_plain_text(row.get("requirement_text") or "")
         response = normalize_plain_text(row.get("response_text") or "")
         deviation = normalize_plain_text(row.get("deviation_text") or "")
+        if _is_requirement_echo_duplicate_row(requirement, response, deviation):
+            continue
         star_matched = _matches_star_requirement(
             requirement,
             deviation_checker=deviation_checker,
@@ -213,6 +253,93 @@ def _is_deviation_duplicate_row(
     if any(token in compact_response for token in ("响应", "相同", "满足", "符合", "偏离", "详见")):
         return True
 
+    return False
+
+
+def _iter_business_bid_deviation_sections(deviation_sections: dict[str, Any]) -> list[dict[str, Any]]:
+    """商务标中的商务/技术偏离表都纳入查重候选，由后续规则过滤纯模板和纯回声内容。"""
+    sections: list[dict[str, Any]] = []
+    seen = set()
+    for group_name in ("business", "technical"):
+        for section in deviation_sections.get(group_name) or []:
+            if not isinstance(section, dict):
+                continue
+            key = (
+                group_name,
+                str(section.get("title") or "").strip(),
+                int(section.get("page") or 0) if isinstance(section.get("page"), int) else 0,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            sections.append(section)
+    return sections
+
+
+def _is_technical_deviation_title(title: str) -> bool:
+    """识别标题是否为技术偏离表。"""
+    compact_title = compact_raw_text(title)
+    if not compact_title:
+        return False
+    return "技术" in compact_title and "商务" not in compact_title
+
+
+def _normalize_duplicate_compare_text(text: str) -> str:
+    """对偏离行文本做轻量归一，便于判断是否只是原条款复述。"""
+    normalized = normalize_plain_text(text)
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"第\d+页", "", normalized)
+    for token in GENERIC_DUPLICATE_COMPARE_TOKENS:
+        normalized = normalized.replace(token, "")
+    normalized = re.sub(r"[|｜/:：;；,，.。\-_\s]+", "", normalized)
+    return normalized
+
+
+def _is_deviation_status_only(text: str) -> bool:
+    """识别仅由“无偏离/正偏离/认可”等状态词组成的文本。"""
+    compact = compact_raw_text(text)
+    if not compact:
+        return True
+    residue = compact
+    for token in DEVIATION_STATUS_ONLY_TOKENS:
+        compact_token = compact_raw_text(token)
+        if compact_token:
+            residue = residue.replace(compact_token, "")
+    residue = re.sub(r"[|｜/:：;；,，.。\-_\s]+", "", residue)
+    return not residue
+
+
+def _is_requirement_echo_duplicate_row(
+    requirement: str,
+    response: str,
+    deviation: str,
+) -> bool:
+    """识别仅复述原条款的偏离行，避免“无偏离/认可原条款”成为误报证据。"""
+    compact_requirement = compact_raw_text(requirement)
+    compact_response = compact_raw_text(response)
+    generic_deviation = _is_deviation_status_only(deviation) or _is_generic_deviation_response_only_text(deviation)
+
+    if compact_requirement and not compact_response and generic_deviation:
+        return True
+
+    normalized_requirement = _normalize_duplicate_compare_text(requirement)
+    normalized_response = _normalize_duplicate_compare_text(response)
+    if not normalized_requirement or not normalized_response:
+        return False
+
+    if normalized_requirement in normalized_response:
+        residue = normalized_response.replace(normalized_requirement, "")
+        if len(residue) <= 8 and generic_deviation:
+            return True
+
+    if (
+        len(normalized_requirement) >= 12
+        and similarity_ratio(normalized_requirement, normalized_response) >= 0.92
+        and generic_deviation
+    ):
+        return True
     return False
 
 

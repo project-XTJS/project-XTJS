@@ -1046,7 +1046,11 @@ class BidDocumentReviewService:
     ) -> None:
         cleaned_name = self._clean_person_name(name)
         normalized_role = self._normalize_role(role)
-        if not cleaned_name or not normalized_role:
+        if (
+            not cleaned_name
+            or not normalized_role
+            or self._person_name_conflicts_with_role(cleaned_name, normalized_role)
+        ):
             return
         entries.append(
             self._build_personnel_entry(
@@ -1252,6 +1256,8 @@ class BidDocumentReviewService:
         )
         if any(token in text for token in blocked):
             return None
+        if self._looks_like_role_text(text):
+            return None
 
         if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", text):
             return text
@@ -1262,6 +1268,27 @@ class BidDocumentReviewService:
         ) >= 2:
             return text
         return None
+
+    def _looks_like_role_text(self, value: Any) -> bool:
+        compact = self._compact(value)
+        if not compact:
+            return False
+        for role in self.PERSONNEL_ROLE_HINTS + self.ROLE_TEXT_HINTS:
+            role_compact = self._compact(role)
+            if not role_compact:
+                continue
+            if compact == role_compact or compact in role_compact or role_compact in compact:
+                return True
+        return False
+
+    def _person_name_conflicts_with_role(self, name: str, role: str) -> bool:
+        name_compact = self._compact(name)
+        role_compact = self._compact(role)
+        if not name_compact:
+            return True
+        if self._looks_like_role_text(name_compact):
+            return True
+        return bool(role_compact) and name_compact == role_compact
 
     def _page_count(self, sections: list[dict[str, Any]], tables: list[dict[str, Any]]) -> int:
         pages = {
