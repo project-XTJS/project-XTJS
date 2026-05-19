@@ -468,6 +468,12 @@ class DocumentParserMixin:
             ("序号" in compact and "单价" in compact and "合计" in compact)
             or ("序号" in compact and any(x in compact for x in ("名称", "内容", "类型")))
             or ("规格型号" in compact and "单位" in compact and "数量" in compact)
+            or (
+                any(x in compact for x in ("服务类型", "项目名称", "名称", "类型"))
+                and "数量" in compact
+                and "单价" in compact
+                and any(x in compact for x in ("总价", "合计", "金额"))
+            )
             or ("搴忓彿" in compact and "鍗曚环" in compact) # 乱码兼容
         )
 

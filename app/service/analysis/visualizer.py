@@ -1267,7 +1267,13 @@ class ReportVisualizer:
         extracted_items = evidence.get("extracted_items") or []
         total_candidates = evidence.get("total_candidates") or []
         
-        status_map = {'pass': ('tag-ok', '逻辑一致'), 'fail': ('tag-err', '存在疑点'), 'unknown': ('tag-warning', '待人工核实')}
+        status_map = {
+            'pass': ('tag-ok', '逻辑一致'),
+            'fail': ('tag-err', '存在疑点'),
+            'unknown': ('tag-warning', '待人工核实'),
+            'not_detected': ('tag-missing', '未检测到分项报价表'),
+            'missing': ('tag-missing', '未检测到分项报价表'),
+        }
         tag_cls, tag_text = status_map.get(status, ('tag-missing', '未知'))
         details_html = "".join([f"<li>{html.escape(d)}</li>" for d in details])
 

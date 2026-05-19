@@ -96,6 +96,7 @@ class HelpersMixin:
             "pass": "info",
             "fail": "error",
             "unclear": "warning",
+            "missing": "warning",
         }[status]
         issue = {
             "status": status,
@@ -179,11 +180,15 @@ class HelpersMixin:
                 return "fail"
             if counts.get("unclear", 0) > 0:
                 return "unclear"
+            if counts.get("missing", 0) > 0:
+                return "unclear"
             return "pass"
 
         if any(status == "fail" for status in statuses):
             return "fail"
         if any(status == "unclear" for status in statuses):
+            return "unclear"
+        if any(status == "missing" for status in statuses):
             return "unclear"
         return "pass"
 
@@ -199,7 +204,7 @@ class HelpersMixin:
     def _review_status_sort_key(self, status: Any) -> int:
         """用于将状态字符串映射为排序权重，fail 优先。"""
         text = str(status or "").strip().lower()
-        order = {"fail": 0, "unclear": 1, "pass": 2}
+        order = {"fail": 0, "unclear": 1, "missing": 2, "pass": 3}
         return order.get(text, 3)
 
     def _check_display_index(self, check_code: Any) -> int:
@@ -253,7 +258,7 @@ class HelpersMixin:
 
     def _summarize_bidder_checks(self, checks: dict[str, Any]) -> dict[str, Any]:
         """汇总单个投标人各审查项的状态计数。"""
-        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0}
+        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0}
         validation_status_counts = {"correct": 0, "failed": 0, "unclear": 0}
         execution_status_counts = {"ok": 0, "error": 0}
 
@@ -278,7 +283,7 @@ class HelpersMixin:
 
     def _summarize_review(self, bidders: list[dict[str, Any]]) -> dict[str, Any]:
         """汇总所有投标人的整体审查状态。"""
-        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0}
+        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0}
         validation_status_counts = {"correct": 0, "failed": 0, "unclear": 0}
         execution_status_counts = {"ok": 0, "error": 0}
 
@@ -310,12 +315,15 @@ class HelpersMixin:
                         "check_name": check["check_name"],
                         "execution_status_counts": {"ok": 0, "error": 0},
                         "validation_status_counts": {"correct": 0, "failed": 0, "unclear": 0},
-                        "review_status_counts": {"pass": 0, "fail": 0, "unclear": 0},
+                        "review_status_counts": {"pass": 0, "fail": 0, "unclear": 0, "missing": 0},
                     },
                 )
                 entry["execution_status_counts"][check["execution"]["status"]] += 1
                 entry["validation_status_counts"][check["validation"]["status"]] += 1
-                entry["review_status_counts"][check["review"]["status"]] += 1
+                review_status = check["review"]["status"]
+                entry["review_status_counts"][review_status] = (
+                    entry["review_status_counts"].get(review_status, 0) + 1
+                )
         return function_summary
 
     # 响应概览

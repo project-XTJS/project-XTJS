@@ -255,9 +255,34 @@ class ResultNormalizerMixin:
 
     def _normalize_itemized(self, raw: dict[str, Any]) -> dict[str, Any]:
         """标准化分项报价审查的原始结果。"""
-        top_status = self._map_generic_status(raw.get("status"))
         checks = raw.get("checks", {}) if isinstance(raw, dict) else {}
         manual_review = raw.get("manual_review", {}) if isinstance(raw, dict) else {}
+        raw_status = str(raw.get("status") or "").strip().lower() if isinstance(raw, dict) else ""
+        itemized_table_detected = bool(raw.get("itemized_table_detected")) if isinstance(raw, dict) else False
+        top_status = self._map_generic_status(raw_status)
+        missing_itemized_table = raw_status in {"not_detected", "missing"} and not itemized_table_detected
+
+        if missing_itemized_table:
+            return {
+                "validation": {
+                    "status": "correct",
+                    "reason": "模块已执行，但当前文件未检测到可用于一致性校验的分项报价表。",
+                },
+                "review": {
+                    "status": "missing",
+                    "summary": str(
+                        raw.get("summary")
+                        or "未识别到分项报价表，无法执行分项报价表一致性校验。"
+                    ),
+                },
+                "metrics": {
+                    "itemized_table_detected": False,
+                    "passed_subcheck_count": 0,
+                    "failed_subcheck_count": 0,
+                    "unclear_subcheck_count": 0,
+                },
+                "issues": {"passed": [], "failed": [], "unclear": []},
+            }
 
         passed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
@@ -286,7 +311,7 @@ class ResultNormalizerMixin:
             else:
                 unclear.append(issue)
 
-        if manual_review.get("required"):
+        if manual_review.get("required") and not missing_itemized_table:
             unclear.append(
                 self._issue(
                     status="unclear",
@@ -298,6 +323,8 @@ class ResultNormalizerMixin:
 
         validation_status = "correct"
         validation_reason = "模块返回了分项报价校验明细。"
+        review_status = top_status
+        review_summary = str(raw.get("summary") or "未返回分项报价结论。")
         if top_status == "unclear":
             validation_status = "unclear"
             validation_reason = "模块已执行，但当前样本存在未完整识别的分项行，结论需人工复核。"
@@ -305,8 +332,8 @@ class ResultNormalizerMixin:
         return {
             "validation": {"status": validation_status, "reason": validation_reason},
             "review": {
-                "status": top_status,
-                "summary": str(raw.get("summary") or "未返回分项报价结论。"),
+                "status": review_status,
+                "summary": review_summary,
             },
             "metrics": {
                 "itemized_table_detected": raw.get("itemized_table_detected"),

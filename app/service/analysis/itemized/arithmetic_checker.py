@@ -251,6 +251,8 @@ class ArithmeticCheckerMixin:
                     and "报价" not in current_line
                 ):
                     continue
+                if self._extract_row_arithmetic(next_line) is not None:
+                    continue
                 if self._should_skip_line(next_line) or self._is_table_header_line(
                     next_line
                 ):
@@ -281,6 +283,8 @@ class ArithmeticCheckerMixin:
 
         for idx, line in enumerate(lines):
             if idx in multiline_amount_indexes:
+                continue
+            if force_total and self._extract_row_arithmetic(line) is not None:
                 continue
             if (
                 "小写" not in line

@@ -46,6 +46,16 @@ class StructuredExtractorMixin:
             return empty_result
 
         allowed_table_refs = self._collect_itemized_logical_table_refs(item_sections)
+        blocked_total_table_refs = (
+            self._collect_total_section_logical_table_refs(total_sections)
+            if not allowed_table_refs
+            else set()
+        )
+        total_section_pages = (
+            self._collect_total_section_pages(total_sections)
+            if not allowed_table_refs
+            else set()
+        )
         fallback_pages = (
             self._collect_structured_fallback_pages(total_sections)
             if not allowed_table_refs
@@ -64,6 +74,12 @@ class StructuredExtractorMixin:
             table_ref = self._logical_table_ref(table, table_index)
             if allowed_table_refs and table_ref not in allowed_table_refs:
                 continue
+            if not allowed_table_refs and table_ref in blocked_total_table_refs:
+                continue
+            if not allowed_table_refs:
+                table_pages = set(self._get_logical_table_pages(table))
+                if table_pages and table_pages & total_section_pages:
+                    continue
             headers = self._get_logical_table_headers(table)
             if (
                 not allowed_table_refs
@@ -142,6 +158,17 @@ class StructuredExtractorMixin:
                     refs.add(str(ref))
         return refs
 
+    def _collect_total_section_logical_table_refs(
+        self, sections: list[dict] | None
+    ) -> set[str]:
+        """收集总价页直接挂载的逻辑表格，避免误当成分项报价表回退解析。"""
+        refs = set()
+        for section in sections or []:
+            for ref in section.get("logical_table_refs") or []:
+                if ref:
+                    refs.add(str(ref))
+        return refs
+
     def _collect_structured_fallback_pages(
         self, sections: list[dict] | None
     ) -> set[int]:
@@ -155,6 +182,12 @@ class StructuredExtractorMixin:
             if isinstance(page, int):
                 pages.add(page)
         return pages
+
+    def _collect_total_section_pages(
+        self, sections: list[dict] | None
+    ) -> set[int]:
+        """收集总价页所在页码，避免把同页总价表回退识别成分项表。"""
+        return self._collect_structured_fallback_pages(sections)
 
     def _should_consider_structured_table_fallback(
         self,

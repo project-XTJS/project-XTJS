@@ -97,7 +97,7 @@ class NormalModeMixin:
         )
 
         table_detected = bool(
-            item_sections or total_sections or extracted_items or extracted_totals
+            item_sections or structured_analysis["used_tables"] or extracted_items
         )
         sum_check = self._evaluate_sum_check(extracted_items, extracted_totals)
         confidence = self._assess_itemized_confidence(
@@ -165,7 +165,12 @@ class NormalModeMixin:
             "status": status,
             "passed": passed,
             "summary": self._build_normal_summary(
-                status, sum_check["status"], row_issues, duplicate_items, unresolved_rows
+                status,
+                sum_check["status"],
+                row_issues,
+                duplicate_items,
+                unresolved_rows,
+                has_total_sections=bool(total_sections),
             ),
             "checks": {
                 "row_arithmetic": {
@@ -694,10 +699,14 @@ class NormalModeMixin:
         row_issues: list[dict],
         duplicate_items: list[dict],
         unresolved_rows: list[dict],
+        *,
+        has_total_sections: bool = False,
     ) -> str:
         """生成普通报价模式下的摘要结论。"""
         if status == "not_detected":
-            return "未识别到可用于校验的分项报价表或报价一览表。"
+            if has_total_sections:
+                return "未识别到分项报价表，当前仅检测到报价一览表，无法执行分项报价表一致性校验。"
+            return "未识别到分项报价表，无法执行分项报价表一致性校验。"
         if status == "pass":
             return "分项报价检查通过。"
         if status == "unknown":

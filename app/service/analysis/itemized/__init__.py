@@ -63,7 +63,7 @@ class ItemizedPricingChecker(
     STRUCTURED_COLUMN_ALIASES = {
         "serial": ("序号", "编号"),
         "model": ("型号", "规格型号", "项目", "品名", "设备名称"),
-        "description": ("说明", "名称", "内容", "参数", "配置", "描述"),
+        "description": ("说明", "名称", "内容", "参数", "配置", "描述", "服务类型", "服务项目"),
         "brand": ("品牌", "厂家", "厂商", "制造商", "生产厂家", "产地"),
         "quantity": ("数量",),
         "unit_price": ("单价", "投标单价", "报价单价", "综合单价", "含税单价"),
