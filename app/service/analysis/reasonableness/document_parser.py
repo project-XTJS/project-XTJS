@@ -136,14 +136,14 @@ class DocumentParserMixin:
         )
 
     def _looks_like_itemized_total_page(self, text: str) -> bool:
-        """识别分项报价合计/最终优惠价页面，避免误当成开标一览表。"""
+        """识别分项报价合计页面，避免误当成开标一览表。"""
         if not text or not str(text).strip():
             return False
         stripped_text = self._strip_price_markup(str(text))
         normalized_text = self._normalize(stripped_text)
         if any(title in normalized_text for title in self.ITEMIZED_SECTION_TITLES):
             return True
-        if "小计" in normalized_text and "最终优惠价" in normalized_text:
+        if "小计" in normalized_text:
             return True
 
         row_like_hits = 0
@@ -152,7 +152,7 @@ class DocumentParserMixin:
             if not line:
                 continue
             compact = self._normalize(line)
-            if "小计" in compact or "最终优惠价" in compact:
+            if "小计" in compact:
                 row_like_hits += 1
                 continue
             if not re.match(r"^\d+(?:\.\d+)*", compact):

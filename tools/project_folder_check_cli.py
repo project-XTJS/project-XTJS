@@ -15,7 +15,7 @@ from typing import Any
 # 默认项目文件夹。留空时运行脚本会在终端中提示输入。
 DEFAULT_PROJECT_FOLDER = "项目优化/2026.5.18仪仗"
 # 默认检查项。支持编号字符串，例如 ["1", "3", "6"]。留空时运行脚本会在终端中提示输入。
-DEFAULT_CHECKS: list[str] = ["2"]
+DEFAULT_CHECKS: list[str] = ["4"]
 # 默认原 result JSON 路径。留空时自动在项目文件夹中识别。
 DEFAULT_RESULT_JSON = ""
 # 默认项目标识。留空时使用文件夹名。

@@ -63,11 +63,26 @@ class ArithmeticCheckerMixin:
     # 行标签提取
     def _extract_row_label(self, line: str, index: int) -> str:
         """从单行文本中清理出分项名称标签。"""
-        unit_pattern = "|".join(re.escape(unit) for unit in sorted(self.UNIT_KEYWORDS, key=len, reverse=True))
+        unit_pattern = "|".join(
+            re.escape(unit)
+            for unit in sorted(self.UNIT_KEYWORDS, key=len, reverse=True)
+        )
+        money_pattern = r"(?:￥|¥)?\s*\d[\d,]*(?:\.\d{1,2})?"
+        quantity_pattern = r"\d+(?:\.\d+)?"
         label = re.sub(r"^\s*\d+(?:\.\d+)*\s*[\.、．）]?\s*", "", line)
         label = re.sub(r"\s*\d+(?:\.\d+)*(?:[\.、．）])\s*$", "", label)
         label = re.sub(
-            rf"\s+(?:￥|¥)?\s*\d[\d,]*(?:\.\d{{1,2}})?\s+\d+(?:\.\d+)?(?:\s*(?:{unit_pattern}))?\s+(?:￥|¥)?\s*\d[\d,]*(?:\.\d{{1,2}})?\s*$",
+            rf"\s+{money_pattern}\s+{quantity_pattern}(?:\s*(?:{unit_pattern}))?\s+{money_pattern}\s*$",
+            "",
+            label,
+        )
+        label = re.sub(
+            rf"\s+{quantity_pattern}(?:\s*(?:{unit_pattern}))?\s+{money_pattern}\s+{money_pattern}\s*$",
+            "",
+            label,
+        )
+        label = re.sub(
+            rf"\s+{quantity_pattern}(?:\s*(?:{unit_pattern}))?\s+{money_pattern}\s*$",
             "",
             label,
         )
@@ -466,8 +481,6 @@ class ArithmeticCheckerMixin:
         difference: Decimal | None = None,
         matched_total_label: str | None = None,
         total_mode: str = "standard",
-        preferential_total: Decimal | None = None,
-        preferential_total_label: str | None = None,
         subtotal_total: Decimal | None = None,
         subtotal_label: str | None = None,
         subtotal_difference: Decimal | None = None,
@@ -485,8 +498,6 @@ class ArithmeticCheckerMixin:
             "difference": self._format_decimal(difference),
             "matched_total_label": matched_total_label,
             "total_mode": total_mode,
-            "preferential_total": self._format_decimal(preferential_total),
-            "preferential_total_label": preferential_total_label,
             "subtotal_total": self._format_decimal(subtotal_total),
             "subtotal_label": subtotal_label,
             "subtotal_difference": self._format_decimal(subtotal_difference),
