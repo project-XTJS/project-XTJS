@@ -1228,6 +1228,7 @@ class BidDocumentReviewService:
             "公司",
             "项目",
             "经理",
+            "响应",
             "负责人",
             "工程师",
             "主管",

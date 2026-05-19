@@ -287,7 +287,8 @@ class IntegrityChecker:
             if self._smart_match(text, keyword):
                 is_exempt = any(k in keyword for k in EXEMPT_KEYWORDS)
                 is_short_text_title = sec.get('type') == 'text' and len(compact) <= 60
-                if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title:
+                is_short_heading_title = sec.get('type') == 'heading' and len(compact) <= 36
+                if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title or is_short_heading_title:
                     return sec
         return None
 

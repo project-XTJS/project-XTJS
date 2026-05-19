@@ -26,11 +26,19 @@ class StarExtractMixin:
     _infer_section: Any
 
     def _extract_star_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
-        """从招标文件全文逐行扫描，抽取所有带 ★ 的强制性要求条目。"""
+        """仅在需求章节内扫描，抽取带 ★ 的强制性要求条目。"""
         lines = self._page_lines(tender_payload)
+        scopes = self._chapter_scopes_for_star(lines)
+        return self._collect_star_requirements_from_scopes(lines, scopes)
+
+    def _collect_star_requirements_from_scopes(
+        self,
+        lines: list[dict[str, Any]],
+        scopes: list[tuple[int, int, str]],
+    ) -> list[dict[str, Any]]:
+        """按章节范围收集星标条款，并做去重。"""
         out: list[dict[str, Any]] = []
         seen = set()
-        scopes = self._chapter_scopes_for_star(lines)
         for start_idx, end_idx, chapter_title in scopes:
             for entry in self._iter_star_requirement_entries(
                 lines,
@@ -95,7 +103,7 @@ class StarExtractMixin:
             idx for idx, item in enumerate(lines) if is_chapter_heading(str(item.get("text", "")))
         ]
         if not chapter_starts:
-            return [(0, len(lines) - 1, "full_document")]
+            return []
 
         scopes: list[tuple[int, int, str, int]] = []
         for position, start_idx in enumerate(chapter_starts):
@@ -111,7 +119,7 @@ class StarExtractMixin:
             scopes.append((start_idx, end_idx, title, score))
 
         if not scopes:
-            return [(0, len(lines) - 1, "full_document")]
+            return []
 
         best_score = max(score for _, _, _, score in scopes)
         selected = [

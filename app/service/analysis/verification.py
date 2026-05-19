@@ -550,7 +550,21 @@ class VerificationChecker:
             return False
         if len(compact) > (120 if section.get("type") == "heading" else 36):
             return False
-        return matched_expected is not None
+        if matched_expected is None:
+            return False
+        if section.get("type") == "heading":
+            return True
+        return self._looks_like_attachment_text_title(text)
+
+    def _looks_like_attachment_text_title(self, text: str) -> bool:
+        compact = self._compact(text)
+        if not compact or len(compact) > 36:
+            return False
+        if any(mark in compact for mark in ("根据", "提交", "详见", "说明", "应", "须", "如果", "为准", "报价相等", "修正总价")):
+            return False
+        if any(mark in text for mark in ("。", "；", ";", "：", ":")):
+            return False
+        return True
 
     def _response_format_sections(self, tender_payload: dict | None) -> list[dict]:
         payload = self._as_document(tender_payload) or {}

@@ -71,6 +71,67 @@ class TenderLimitMixin:
                 return True
         return False
 
+    def _amount_local_context(
+        self, text: str, start: int, end: int, *, window: int = 40
+    ) -> str:
+        if not text:
+            return ""
+        left = max(0, int(start) - window)
+        right = min(len(text), int(end) + window)
+        return str(text[left:right])
+
+    def _amount_local_line_context(self, text: str, start: int, end: int) -> str:
+        if not text:
+            return ""
+        left = str(text).rfind("\n", 0, int(start))
+        right = str(text).find("\n", int(end))
+        if left == -1:
+            left = 0
+        else:
+            left += 1
+        if right == -1:
+            right = len(text)
+        return str(text[left:right])
+
+    def _is_guarantee_amount_context(self, context: str) -> bool:
+        normalized = self._normalize(context)
+        if not normalized:
+            return False
+        guarantee_tokens = [
+            "投标保证金",
+            "保证金",
+            "保函",
+            "保证金提交截止时间",
+            "以保证金实际到账为准",
+            "开户银行",
+            "账号",
+            "账户",
+            "转账方式",
+        ]
+        return any(token in normalized for token in guarantee_tokens)
+
+    def _has_budget_amount_signal(self, context: str) -> bool:
+        normalized = self._normalize(context)
+        if not normalized:
+            return False
+        budget_tokens = ["总预算", "项目预算", "预算金额", "采购预算", "预算"]
+        return any(token in normalized for token in budget_tokens)
+
+    def _looks_like_same_budget_limit_context(self, context: str) -> bool:
+        normalized = self._normalize(context)
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"(最高限价|最高投标限价|最高响应限价|最高报价限价|招标控制价|控制价).{0,20}?同预算",
+                normalized,
+            )
+            or re.search(
+                r"同预算.{0,20}?(最高限价|最高投标限价|最高响应限价|最高报价限价|招标控制价|控制价)",
+                normalized,
+            )
+        )
+
     def _extract_money_candidates_from_text(self, text: str) -> List[Dict]:
         if not text or not str(text).strip():
             return []
@@ -213,6 +274,21 @@ class TenderLimitMixin:
             if any(k in normalized_page for k in all_keywords):
                 money_candidates = self._extract_money_candidates_from_text(page_text)
                 for cand in money_candidates:
+                    line_context = self._amount_local_line_context(
+                        page_text, cand["start"], cand["end"]
+                    )
+                    local_context = self._amount_local_context(
+                        page_text, cand["start"], cand["end"]
+                    )
+                    if self._is_guarantee_amount_context(line_context):
+                        continue
+                    if not (
+                        self._keyword_near_amount(
+                            line_context, cand["raw_amount"], cand["amount_yuan"]
+                        )
+                        or self._has_budget_amount_signal(line_context)
+                    ):
+                        continue
                     score = (
                         self._score_tender_limit_candidate(
                             page_text, cand["raw_amount"], cand["amount_yuan"]
@@ -223,9 +299,9 @@ class TenderLimitMixin:
                         "page": page,
                         "amount_yuan": cand["amount_yuan"],
                         "raw_amount": cand["raw_amount"],
-                        "keyword": self._pick_keyword_near_amount(page_text),
+                        "keyword": self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(page_text),
                         "score": score,
-                        "context": page_text[:400],
+                        "context": local_context or page_text[:400],
                     })
 
             for idx, line in enumerate(lines):
@@ -239,6 +315,14 @@ class TenderLimitMixin:
                 money_candidates = self._extract_money_candidates_from_text(context)
 
                 for cand in money_candidates:
+                    line_context = self._amount_local_line_context(
+                        context, cand["start"], cand["end"]
+                    )
+                    local_context = self._amount_local_context(
+                        context, cand["start"], cand["end"]
+                    )
+                    if self._is_guarantee_amount_context(line_context):
+                        continue
                     score = self._score_tender_limit_candidate(
                         context, cand["raw_amount"], cand["amount_yuan"]
                     )
@@ -246,9 +330,9 @@ class TenderLimitMixin:
                         "page": page,
                         "amount_yuan": cand["amount_yuan"],
                         "raw_amount": cand["raw_amount"],
-                        "keyword": self._pick_keyword_near_amount(context),
+                        "keyword": self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(context),
                         "score": score,
-                        "context": context,
+                        "context": local_context or context,
                     })
 
         dedup: Dict[Tuple[Optional[int], float, str], Dict] = {}
@@ -268,10 +352,41 @@ class TenderLimitMixin:
         candidates = self._collect_tender_limit_candidates(parsed)
         if not candidates:
             return None
+        page_text_map = self._merge_texts_by_page(parsed)
+        same_budget_mode = any(
+            self._looks_like_same_budget_limit_context(page_text)
+            for page_text in page_text_map.values()
+            if page_text
+        )
+        if same_budget_mode:
+            budget_candidates = [
+                cand
+                for cand in candidates
+                if self._has_budget_amount_signal(cand.get("context", ""))
+                and not self._is_guarantee_amount_context(cand.get("context", ""))
+            ]
+            if not budget_candidates:
+                return None
+            best_budget = budget_candidates[0]
+            if best_budget["score"] < 20:
+                return None
+            return {
+                **best_budget,
+                "keyword": best_budget.get("keyword") or "预算",
+            }
         best = candidates[0]
         if best["score"] < 40:
             return None
         return best
+
+    def _is_direct_quote_mode(self, bid_source: Any) -> bool:
+        parsed = self._parse_input(bid_source)
+        _, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
+        if not bid_opening_text or not bid_opening_text.strip():
+            return False
+        if self._extract_direct_price_pairs(bid_opening_text):
+            return True
+        return self._extract_bid_total_amount(bid_source) is not None
 
     # 投标总价提取
     def _extract_bid_total_amount(self, bid_source: Any) -> Optional[Dict]:
@@ -359,6 +474,14 @@ class TenderLimitMixin:
     ) -> Dict:
         tender_limit = self._extract_tender_max_limit(tender_source)
         if not tender_limit:
+            if self._is_direct_quote_mode(bid_source):
+                return {
+                    "result": "合格",
+                    "type": "最高限价校验",
+                    "summary": ["未在招标文件中识别到最高限价/预算/控制价相关金额，按项目未设置最高限价处理。"],
+                    "pages": [],
+                    "locations": [],
+                }
             return {
                 "result": "失败",
                 "type": "最高限价校验",
