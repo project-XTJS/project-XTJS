@@ -6,6 +6,7 @@ from datetime import date
 from difflib import SequenceMatcher
 from typing import Any
 
+from .attachment_synonyms import canonicalize_attachment_title
 from .compliance.template_extractor import TemplateExtractor
 
 
@@ -486,6 +487,7 @@ class VerificationChecker:
             title = re.sub(pattern, repl, title)
         for pattern in self.ATTACHMENT_TITLE_NOISE_PATTERNS:
             title = re.sub(pattern, "", title)
+        title = canonicalize_attachment_title(title)
         title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
         return title.strip("：:；;，,。")
 

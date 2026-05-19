@@ -9,6 +9,10 @@
 import re
 from typing import Any
 from .template_extractor import TemplateExtractor
+from ..attachment_synonyms import (
+    attachment_title_variants,
+    canonicalize_attachment_title,
+)
 
 
 class IntegrityChecker:
@@ -159,7 +163,7 @@ class IntegrityChecker:
     # 根据关键词扩展候选标题列表
     def _candidate_titles(self, keyword: str) -> list[str]:
         keyword_norm = self._normalize_title_text(keyword)
-        titles = [keyword]
+        titles = [keyword, *attachment_title_variants(keyword)]
         for key, aliases in self.SENSITIVE_MAPPING.items():
             key_norm = self._normalize_title_text(key)
             if keyword_norm == key_norm or keyword_norm in key_norm or key_norm in keyword_norm:
@@ -169,7 +173,12 @@ class IntegrityChecker:
 
     def _body_evidence_titles(self, keyword: str) -> list[str]:
         keyword_norm = self._normalize_title_text(keyword)
-        titles = [keyword, self._normalize_target(keyword), *self._candidate_titles(keyword)]
+        titles = [
+            keyword,
+            canonicalize_attachment_title(keyword),
+            self._normalize_target(keyword),
+            *self._candidate_titles(keyword),
+        ]
         for key, aliases in self.BODY_EVIDENCE_MAPPING.items():
             key_norm = self._normalize_title_text(key)
             if keyword_norm == key_norm or keyword_norm in key_norm or key_norm in keyword_norm:
@@ -207,6 +216,7 @@ class IntegrityChecker:
     # 将任意标题归一化为标准描述
     def _normalize_target(self, name: str) -> str:
         stripped_name = self._strip_heading_prefix(name)
+        stripped_name = canonicalize_attachment_title(stripped_name)
         normalized_name = self._normalize_title_text(stripped_name)
 
         # 优先通过字典映射到标准名称
