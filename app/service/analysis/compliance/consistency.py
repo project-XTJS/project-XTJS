@@ -886,12 +886,173 @@ class ConsistencyChecker:
 
             norm_t = self._normalize(fixed_bid_body)
             anchors = template_analysis["anchors"]
-            missing = [a for a in anchors if a not in norm_t]
+            title_key = self._verification_checker._attachment_title_key(title)
+            opening_title_key = self._verification_checker._attachment_title_key("开标一览表")
+            has_equivalent_final_quote = (
+                title_key == opening_title_key
+                and bool(re.search(r"[¥￥]|\d[\d,，.]*", t_body or fixed_bid_body or ""))
+                and any(
+                    marker in self._normalize(fixed_bid_body or t_body)
+                    for marker in ("最终报价总价元", "最终报价总价", "最终报价")
+                )
+            )
+            missing = [
+                a
+                for a in anchors
+                if a not in norm_t
+                and not (has_equivalent_final_quote and a in {"投标总价", "报价总价", "总报价", "小写"})
+            ]
             dynamic_missing = self._evaluate_dynamic_slot_specs(
                 dynamic_slot_specs,
                 t_body,
                 fixed_bid_body,
             )
+            if has_equivalent_final_quote and dynamic_missing:
+                equivalent_total_fields = {
+                    self._normalize(field)
+                    for field in ("投标总价", "报价总价", "总报价", "小写", "投标总价（小写）", "报价总价（小写）")
+                }
+                dynamic_missing = [
+                    field
+                    for field in dynamic_missing
+                    if self._normalize(field) not in equivalent_total_fields
+                ]
+            if dynamic_missing:
+                combined_missing: List[str] = []
+                seen_missing: set[str] = set()
+                for anchor in missing + dynamic_missing:
+                    normalized_anchor = self._normalize(anchor)
+                    if not normalized_anchor or normalized_anchor in seen_missing:
+                        continue
+                    seen_missing.add(normalized_anchor)
+                    combined_missing.append(anchor)
+                missing = combined_missing
+
+            results.append(
+                {
+                    "name": title,
+                    "is_passed": len(missing) == 0,
+                    "missing_anchors": missing,
+                    "unfilled_fields": [],
+                    "fillable_field_count": 0,
+                    "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
+                    "bid_body_length": len(self._normalize(fixed_bid_body)),
+                    "pages": matched_pages,
+                    "locations": matched_locations,
+                }
+            )
+        return results
+
+    def compare_raw_data(self, model_json: dict, test_json: dict) -> List[Dict]:
+        """
+        主比对方法：将招标文件模板与投标文件段落进行比对，
+        返回每个模板的通过状态及缺失锚点列表。
+        """
+        temps = TemplateExtractor.extract_consistency_templates(model_json)
+        model_segments = [
+            {
+                "title": t["title"],
+                "text": "\n".join(t.get("content") or []),
+                "is_optional": bool(t.get("is_optional")),
+            }
+            for t in temps
+        ]
+        bid_by_no, bid_sections = self._build_attachment_lookup(test_json, model_segments)
+
+        results = []
+        for m_seg in model_segments:
+            m_txt = m_seg["text"]
+            title = m_seg["title"]
+            is_optional = bool(m_seg.get("is_optional"))
+
+            attachment_probe = {
+                "attachment_number": self._verification_checker._attachment_number(title),
+                "title": self._verification_checker._attachment_title(title),
+            }
+            matched_section = self._verification_checker._match_attachment(attachment_probe, bid_by_no, bid_sections)
+            if matched_section is None:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": bool(is_optional),
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "pages": [],
+                        "locations": [],
+                        "skip_reason": (
+                            {"type": "optional_attachment_not_provided"}
+                            if is_optional
+                            else {
+                                "type": "attachment_not_found",
+                                "attachment_number": attachment_probe["attachment_number"],
+                            }
+                        ),
+                    }
+                )
+                continue
+            t_txt = matched_section.get("text") or ""
+
+            matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
+            matched_locations = self._serialize_section_locations(matched_section)
+            template_analysis = self._analyze_template_segment(title, m_txt)
+            dynamic_slot_specs = template_analysis.get("dynamic_slot_specs") or []
+            if int(template_analysis.get("fixed_body_length") or 0) <= self.MIN_BODY_LENGTH and not dynamic_slot_specs:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": True,
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "fillable_field_count": 0,
+                        "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
+                        "pages": matched_pages,
+                        "locations": matched_locations,
+                        "skip_reason": {
+                            "type": "body_too_short",
+                            "body_length": int(template_analysis.get("fixed_body_length") or 0),
+                            "min_body_length": self.MIN_BODY_LENGTH,
+                        },
+                    }
+                )
+                continue
+
+            t_body = self._trim_instruction_note_block(
+                self._trim_non_body_lines(self._strip_title_line(t_txt, title))
+            )
+            fixed_bid_body = self._build_fixed_body(t_body)
+
+            norm_t = self._normalize(fixed_bid_body)
+            anchors = template_analysis["anchors"]
+            normalized_title = self._normalize(title)
+            has_equivalent_final_quote = (
+                any(marker in normalized_title for marker in ("开标一览表", "报价一览表"))
+                and bool(re.search(r"[¥￥]|\d[\d,，.]*", t_body or fixed_bid_body or ""))
+                and any(
+                    marker in self._normalize(f"{fixed_bid_body}\n{t_body}")
+                    for marker in ("最终报价总价元", "最终报价总价", "最终报价")
+                )
+            )
+            missing = [
+                a
+                for a in anchors
+                if a not in norm_t
+                and not (has_equivalent_final_quote and a in {"投标总价", "报价总价", "总报价", "小写"})
+            ]
+            dynamic_missing = self._evaluate_dynamic_slot_specs(
+                dynamic_slot_specs,
+                t_body,
+                fixed_bid_body,
+            )
+            if has_equivalent_final_quote and dynamic_missing:
+                equivalent_total_fields = {
+                    self._normalize(field)
+                    for field in ("投标总价", "报价总价", "总报价", "小写", "投标总价（小写）", "报价总价（小写）")
+                }
+                dynamic_missing = [
+                    field
+                    for field in dynamic_missing
+                    if self._normalize(field) not in equivalent_total_fields
+                ]
             if dynamic_missing:
                 combined_missing: List[str] = []
                 seen_missing: set[str] = set()

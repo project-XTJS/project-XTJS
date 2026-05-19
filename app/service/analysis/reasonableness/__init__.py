@@ -89,6 +89,30 @@ class ReasonablenessChecker(
                 locations=fallback_locations,
             )
 
+        direct_total = self._extract_bid_total_amount(source)
+        if direct_total:
+            raw_amount = str(direct_total.get("raw_amount") or "").strip()
+            amount_yuan = direct_total.get("amount_yuan")
+            page = direct_total.get("page")
+            summary = [
+                f"已识别直接报价：{raw_amount or amount_yuan}，位置：第 {page} 页"
+                if isinstance(page, int)
+                else f"已识别直接报价：{raw_amount or amount_yuan}"
+            ]
+            locations = (
+                [{"page": page, "label": "投标总价", "document": "bidder"}]
+                if isinstance(page, int)
+                else fallback_locations
+            )
+            pages = [page] if isinstance(page, int) else fallback_pages
+            return self._build_result(
+                result_text="合格",
+                price_type="直接报价",
+                summary=summary,
+                pages=pages,
+                locations=locations,
+            )
+
         # 4. 尝试分流模式 B：下浮率报价（提取规则与行）
         rules = self._extract_float_rate_rules(bid_opening_text)
         rows = self._extract_float_rate_rows(parsed, bid_page, bid_opening_text, rules)
