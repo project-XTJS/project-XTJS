@@ -1,0 +1,2076 @@
+{
+  "typo_check": {
+    "config": {
+      "document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "typo_model_name": null,
+      "typo_engine_statuses": [],
+      "typo_model_threshold": null,
+      "typo_detection_engine": "rule_based",
+      "typo_model_load_error": null,
+      "typo_stopword_dictionary_enabled": true
+    },
+    "groups": {
+      "business_bid": {
+        "summary": {
+          "suspicious": true,
+          "document_count": 1,
+          "typo_issue_count": 1,
+          "skipped_document_count": 0,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 1
+        },
+        "documents": [
+          {
+            "file_name": "衡山商务扫描件.pdf",
+            "page_count": 25,
+            "relation_id": 18,
+            "table_count": 6,
+            "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+            "layout_section_count": 427,
+            "personnel_entry_count": 0
+          }
+        ],
+        "typo_check": {
+          "notes": [
+            "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。"
+          ],
+          "engine": "rule_based",
+          "documents": [
+            {
+              "items": [
+                {
+                  "bbox": [
+                    128,
+                    494,
+                    106,
+                    13
+                  ],
+                  "page": 20,
+                  "text": "甲方开户银行、帐号：",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "issue_key": "帐号",
+                  "issue_type": "known_typo",
+                  "suggestion": "账号",
+                  "relation_id": 18,
+                  "matched_text": "帐号",
+                  "document_identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6"
+                }
+              ],
+              "file_name": "衡山商务扫描件.pdf",
+              "issue_count": 1,
+              "relation_id": 18,
+              "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6"
+            }
+          ],
+          "issue_count": 1,
+          "shared_issues": [],
+          "document_count": 1,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 1
+        },
+        "skipped_documents": []
+      },
+      "technical_bid": {
+        "summary": {
+          "suspicious": false,
+          "document_count": 0,
+          "typo_issue_count": 0,
+          "skipped_document_count": 1,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 0
+        },
+        "documents": [],
+        "typo_check": {
+          "notes": [
+            "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。"
+          ],
+          "engine": "rule_based",
+          "documents": [],
+          "issue_count": 0,
+          "shared_issues": [],
+          "document_count": 0,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 0
+        },
+        "skipped_documents": [
+          {
+            "reason": "missing_or_unusable_ocr_content",
+            "file_name": "衡山技术扫描件.pdf",
+            "relation_id": 18,
+            "identifier_id": "cba4f164-a001-43f0-bfb1-0e832aa5ed68"
+          }
+        ]
+      }
+    },
+    "project": {
+      "id": 23,
+      "deleted": false,
+      "create_time": "2026-05-09T15:48:37.910535",
+      "update_time": "2026-05-09T15:48:37.910535",
+      "identifier_id": "卫星"
+    },
+    "summary": {
+      "suspicious": true,
+      "document_count": 1,
+      "typo_issue_count": 1,
+      "skipped_document_count": 1,
+      "shared_typo_issue_count": 0,
+      "requested_document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "suspicious_typo_document_count": 1
+    }
+  },
+  "bid_document_review": {
+    "config": {
+      "document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "personnel_reuse_scope": "per_document_type",
+      "typo_detection_engine": "rule_based",
+      "typo_stopword_dictionary_enabled": true
+    },
+    "groups": {
+      "business_bid": {
+        "summary": {
+          "suspicious": true,
+          "document_count": 1,
+          "personnel_count": 0,
+          "typo_issue_count": 1,
+          "reused_name_count": 0,
+          "skipped_document_count": 0,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 1
+        },
+        "documents": [
+          {
+            "file_name": "衡山商务扫描件.pdf",
+            "page_count": 25,
+            "relation_id": 18,
+            "table_count": 6,
+            "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+            "layout_section_count": 427,
+            "personnel_entry_count": 0
+          }
+        ],
+        "typo_check": {
+          "notes": [
+            "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。"
+          ],
+          "engine": "rule_based",
+          "documents": [
+            {
+              "items": [
+                {
+                  "bbox": [
+                    128,
+                    494,
+                    106,
+                    13
+                  ],
+                  "page": 20,
+                  "text": "甲方开户银行、帐号：",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "issue_key": "帐号",
+                  "issue_type": "known_typo",
+                  "suggestion": "账号",
+                  "relation_id": 18,
+                  "matched_text": "帐号",
+                  "document_identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6"
+                }
+              ],
+              "file_name": "衡山商务扫描件.pdf",
+              "issue_count": 1,
+              "relation_id": 18,
+              "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6"
+            }
+          ],
+          "issue_count": 1,
+          "shared_issues": [],
+          "document_count": 1,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 1
+        },
+        "skipped_documents": [],
+        "personnel_reuse_check": {
+          "items": [],
+          "notes": [
+            "同名人员跨不同技术标重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ],
+          "documents": [
+            {
+              "file_name": "衡山商务扫描件.pdf",
+              "relation_id": 18,
+              "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+              "personnel_count": 0
+            }
+          ],
+          "document_count": 1,
+          "personnel_count": 0,
+          "reused_name_count": 0
+        }
+      },
+      "technical_bid": {
+        "summary": {
+          "suspicious": false,
+          "document_count": 0,
+          "personnel_count": 0,
+          "typo_issue_count": 0,
+          "reused_name_count": 0,
+          "skipped_document_count": 1,
+          "shared_typo_issue_count": 0,
+          "suspicious_typo_document_count": 0
+        },
+        "documents": [],
+        "typo_check": {
+          "notes": [
+            "当前环境未启用 LanguageTool，本次使用内置错别字词典识别。"
+          ],
+          "engine": "rule_based",
+          "documents": [],
+          "issue_count": 0,
+          "shared_issues": [],
+          "document_count": 0,
+          "shared_issue_count": 0,
+          "suspicious_document_count": 0
+        },
+        "skipped_documents": [
+          {
+            "reason": "missing_or_unusable_ocr_content",
+            "file_name": "衡山技术扫描件.pdf",
+            "relation_id": 18,
+            "identifier_id": "cba4f164-a001-43f0-bfb1-0e832aa5ed68"
+          }
+        ],
+        "personnel_reuse_check": {
+          "items": [],
+          "notes": [
+            "同名人员跨不同技术标重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。"
+          ],
+          "documents": [],
+          "document_count": 0,
+          "personnel_count": 0,
+          "reused_name_count": 0
+        }
+      }
+    },
+    "project": {
+      "id": 23,
+      "deleted": false,
+      "create_time": "2026-05-09T15:48:37.910535",
+      "update_time": "2026-05-09T15:48:37.910535",
+      "identifier_id": "卫星"
+    },
+    "summary": {
+      "suspicious": true,
+      "document_count": 1,
+      "personnel_count": 0,
+      "typo_issue_count": 1,
+      "reused_name_count": 0,
+      "skipped_document_count": 1,
+      "shared_typo_issue_count": 0,
+      "requested_document_types": [
+        "business_bid",
+        "technical_bid"
+      ],
+      "suspicious_typo_document_count": 1
+    }
+  },
+  "business_bid_format_review": {
+    "bidders": [
+      {
+        "checks": {
+          "pricing_check": {
+            "issues": {
+              "failed": [
+                {
+                  "title": "投标总价自检",
+                  "status": "fail",
+                  "message": "一览表中未找到直接报价或下浮率报价信息",
+                  "evidence": {
+                    "type": "未识别",
+                    "result": "失败",
+                    "summary": [
+                      "一览表中未找到直接报价或下浮率报价信息"
+                    ],
+                    "subcheck_code": "price_reasonableness"
+                  },
+                  "severity": "error"
+                },
+                {
+                  "title": "招标限价校验",
+                  "status": "fail",
+                  "message": "未在投标文件中识别到投标总金额/参选总价/报价总价",
+                  "evidence": {
+                    "type": "最高限价校验",
+                    "result": "失败",
+                    "summary": [
+                      "未在投标文件中识别到投标总金额/参选总价/报价总价"
+                    ],
+                    "subcheck_code": "tender_limit_check"
+                  },
+                  "severity": "error"
+                }
+              ],
+              "passed": [],
+              "unclear": []
+            },
+            "review": {
+              "status": "fail",
+              "summary": "一览表中未找到直接报价或下浮率报价信息；未在投标文件中识别到投标总金额/参选总价/报价总价"
+            },
+            "metrics": {
+              "failed_subcheck_count": 2,
+              "passed_subcheck_count": 0,
+              "unclear_subcheck_count": 0
+            },
+            "execution": {
+              "status": "ok",
+              "duration_ms": 99.55
+            },
+            "check_code": "pricing_check",
+            "check_name": "报价合理性审查",
+            "raw_result": {
+              "self_check": {
+                "type": "未识别",
+                "pages": [
+                  5
+                ],
+                "result": "失败",
+                "summary": [
+                  "一览表中未找到直接报价或下浮率报价信息"
+                ],
+                "locations": [
+                  {
+                    "page": 5,
+                    "text": "",
+                    "label": "开标一览表",
+                    "document": "bidder"
+                  }
+                ]
+              },
+              "tender_limit_check": {
+                "type": "最高限价校验",
+                "pages": [
+                  18
+                ],
+                "result": "失败",
+                "summary": [
+                  "未在投标文件中识别到投标总金额/参选总价/报价总价"
+                ],
+                "locations": [
+                  {
+                    "page": 18,
+                    "label": "招标限价",
+                    "document": "tender"
+                  }
+                ]
+              }
+            },
+            "validation": {
+              "reason": "模块返回了报价自检和招标限价校验两部分结果。",
+              "status": "correct"
+            },
+            "source_context": {
+              "focus_scope": "检查商务标报价页和招标限价条款，确认总价书写与限价对比结果。",
+              "focus_sections": [
+                "投标总价自检",
+                "招标限价校验"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "quoted_price_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "tender_limit_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            }
+          },
+          "integrity_check": {
+            "issues": {
+              "failed": [],
+              "passed": [],
+              "unclear": []
+            },
+            "review": {
+              "status": "pass",
+              "summary": "完整性得分 0，共校验 0 项，缺失 0 项。"
+            },
+            "metrics": {
+              "integrity_score": 0,
+              "total_item_count": 0,
+              "failed_item_count": 0,
+              "passed_item_count": 0,
+              "ignored_item_count": 0
+            },
+            "execution": {
+              "status": "ok",
+              "duration_ms": 12.83
+            },
+            "check_code": "integrity_check",
+            "check_name": "商务标完整性审查",
+            "raw_result": {
+              "details": {},
+              "integrity_score": 0,
+              "scored_item_count": 0,
+              "attachment_mapping": {},
+              "ignored_item_count": 0
+            },
+            "validation": {
+              "reason": "模块返回了完整性得分和逐项命中明细。",
+              "status": "correct"
+            },
+            "source_context": {
+              "focus_scope": "对照招标文件中的商务标要求，检查商务标 OCR 结果里是否识别到必备附件和资格证明材料。",
+              "focus_sections": [],
+              "source_documents": [
+                {
+                  "role": "tender",
+                  "purpose": "requirement_source",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                },
+                {
+                  "role": "business",
+                  "purpose": "recognized_business_content",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                }
+              ]
+            }
+          },
+          "consistency_check": {
+            "issues": {
+              "failed": [],
+              "passed": [],
+              "unclear": []
+            },
+            "review": {
+              "status": "unclear",
+              "summary": "未提取到可比较的模板段。"
+            },
+            "metrics": {
+              "failed_segment_count": 0,
+              "passed_segment_count": 0,
+              "skipped_segment_count": 0,
+              "template_segment_count": 0,
+              "evaluated_segment_count": 0
+            },
+            "execution": {
+              "status": "ok",
+              "duration_ms": 30.96
+            },
+            "check_code": "consistency_check",
+            "check_name": "模板一致性审查",
+            "raw_result": {
+              "skipped_segments": [],
+              "evaluated_segments": [],
+              "original_segment_count": 0
+            },
+            "validation": {
+              "reason": "未提取到可比较的模板段，需人工复核模板抽取是否成功。",
+              "status": "unclear"
+            },
+            "source_context": {
+              "focus_scope": "对照招标文件模板锚点，检查商务标对应附件的模板一致性。",
+              "focus_sections": [],
+              "source_documents": [
+                {
+                  "role": "tender",
+                  "purpose": "template_source",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                },
+                {
+                  "role": "business",
+                  "purpose": "recognized_attachment_content",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                }
+              ]
+            }
+          },
+          "verification_check": {
+            "issues": {
+              "failed": [],
+              "passed": [
+                {
+                  "title": "公章与投标人匹配",
+                  "status": "pass",
+                  "message": "检测到的公章与投标人名称匹配。",
+                  "evidence": {
+                    "reason": "matched",
+                    "status": "pass",
+                    "matched": true,
+                    "best_match": {
+                      "score": 1,
+                      "seal_text": "上海衡山汽车服务有限公司",
+                      "bidder_name": "上海衡山汽车服务有限公司"
+                    }
+                  },
+                  "severity": "info"
+                },
+                {
+                  "title": "签字盖章位置检查",
+                  "status": "pass",
+                  "message": "所有必需附件均已找到，未发现缺失签字或盖章。",
+                  "evidence": {
+                    "status": "pass",
+                    "missing_attachments": [],
+                    "missing_seal_attachments": [],
+                    "missing_signature_attachments": [],
+                    "pending_signature_attachments": []
+                  },
+                  "severity": "info"
+                },
+                {
+                  "title": "落款日期检查",
+                  "status": "pass",
+                  "message": "已检测到落款日期，且均未晚于投标截止时间。",
+                  "evidence": {
+                    "status": "pass",
+                    "deadline_date": "2025-08-11",
+                    "late_date_attachments": [],
+                    "matched_deadline_text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启",
+                    "missing_date_attachments": []
+                  },
+                  "severity": "info"
+                }
+              ],
+              "unclear": []
+            },
+            "review": {
+              "status": "unclear",
+              "summary": "未在招标模板中识别到明确要求签字、盖章或填写日期的附件。"
+            },
+            "metrics": {
+              "late_date_count": 0,
+              "missing_date_count": 0,
+              "missing_seal_count": 0,
+              "missing_signature_count": 0,
+              "pending_signature_count": 0,
+              "missing_attachment_count": 0,
+              "required_attachment_count": 0
+            },
+            "execution": {
+              "status": "ok",
+              "duration_ms": 609.6
+            },
+            "check_code": "verification_check",
+            "check_name": "签字盖章日期审查",
+            "raw_result": {
+              "mode": "tender_vs_bid",
+              "summary": "未在招标模板中识别到明确要求签字、盖章或填写日期的附件。",
+              "date_check": {
+                "status": "pass",
+                "deadline_date": "2025-08-11",
+                "late_date_attachments": [],
+                "matched_deadline_text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启",
+                "missing_date_attachments": []
+              },
+              "seal_count": 53,
+              "bidder_name": "上海衡山汽车服务有限公司",
+              "seal_contents": [
+                "上海衡山汽车服务有限公司",
+                "上海倪山汽车服务有限公司",
+                "上海市道路运输管理局 核发机关",
+                "北京中平科学技术院 证书专用章 Seal for Certificate",
+                "上海凯山汽车服务有限公司",
+                "汽车服务有限公司",
+                "公司 专用章",
+                "上海衡山汽车服务有限公司 合同专用章",
+                "China Co., Ltd. Vale Minerals Chna Co., Ltd. 涞水河谷矿产品（中国）有限公司",
+                "上海衡山汽车服务 合同专",
+                "上海电气集团数字 合同",
+                "上海电气集团数字科技有限公司 合同专用章",
+                "CRUIZ BIOYECNNOLOGY 生物技术",
+                "CAITA CRUZ BIOMECHNOLOGY (MAICAN) CO., LTD. 圣克鲁斯生物技术（上海）有限公司",
+                "CO.,LTD",
+                "务有限公司 用章",
+                "三井物産（上） TSU",
+                "上海衡 合同",
+                "VGHAI) LTD",
+                "MITSUX CO.,LTD. 三井物直（上海）贸易有限公司 合同专用章 （1）",
+                "上海衡山",
+                "Missch",
+                "Nishon Trading (Shanghai) CO., LTD. 日健商贸（上海）有限公司",
+                "有限公司",
+                "anghai) CO.",
+                "上服务有限公司",
+                "上海市虹口区市场监督管理局",
+                "上海山汽车服务有限公司"
+              ],
+              "seal_detected": true,
+              "deadline_check": {
+                "source": "tender_document",
+                "status": "pass",
+                "deadline_date": "2025-08-11",
+                "matched_deadline_text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启"
+              },
+              "position_check": {
+                "status": "pass",
+                "missing_attachments": [],
+                "missing_seal_attachments": [],
+                "missing_signature_attachments": [],
+                "pending_signature_attachments": []
+              },
+              "signature_count": 34,
+              "compliance_status": "pending",
+              "attachment_results": [],
+              "seal_company_check": {
+                "reason": "matched",
+                "status": "pass",
+                "matched": true,
+                "best_match": {
+                  "score": 1,
+                  "seal_text": "上海衡山汽车服务有限公司",
+                  "bidder_name": "上海衡山汽车服务有限公司"
+                }
+              },
+              "signature_contents": [
+                "已签字"
+              ],
+              "signature_detected": true,
+              "required_attachments": [],
+              "checked_attachment_count": 0,
+              "required_attachment_count": 0,
+              "skipped_missing_attachments": []
+            },
+            "validation": {
+              "reason": "模块返回了附件级签字、盖章、日期和公章匹配结果。",
+              "status": "correct"
+            },
+            "source_context": {
+              "focus_scope": "检查商务标中的签字、盖章、落款日期，并对照招标截止时间。",
+              "focus_sections": [
+                "公章与投标人匹配",
+                "签字盖章位置检查",
+                "落款日期检查"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "signature_seal_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "deadline_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            }
+          },
+          "itemized_pricing_check": {
+            "issues": {
+              "failed": [],
+              "passed": [
+                {
+                  "title": "疑似重复报价校验",
+                  "status": "pass",
+                  "message": "检测到 0 组疑似重复报价项。",
+                  "evidence": {
+                    "issues": [],
+                    "status": "pass",
+                    "issue_count": 0
+                  },
+                  "severity": "info"
+                }
+              ],
+              "unclear": [
+                {
+                  "title": "分项行算术校验",
+                  "status": "unclear",
+                  "message": "存在 0 条算术错误，另有 0 条未解析行。",
+                  "evidence": {
+                    "issues": [],
+                    "status": "skipped",
+                    "issue_count": 0,
+                    "group_checks": [],
+                    "skipped_count": 5,
+                    "unresolved_rows": [],
+                    "unresolved_count": 0,
+                    "group_check_count": 0
+                  },
+                  "severity": "warning"
+                },
+                {
+                  "title": "分项汇总一致性校验",
+                  "status": "unclear",
+                  "message": "计算合计 10120.00，声明总价 None，差额 None。",
+                  "evidence": {
+                    "status": "unknown",
+                    "difference": null,
+                    "total_mode": "standard",
+                    "opening_total": null,
+                    "declared_total": null,
+                    "subtotal_label": null,
+                    "subtotal_total": null,
+                    "subtotal_status": null,
+                    "calculated_total": "10120.00",
+                    "preferential_total": null,
+                    "matched_total_label": null,
+                    "opening_total_label": null,
+                    "subtotal_difference": null,
+                    "opening_total_status": null,
+                    "opening_total_difference": null,
+                    "preferential_total_label": null
+                  },
+                  "severity": "warning"
+                },
+                {
+                  "title": "人工复核提示",
+                  "status": "unclear",
+                  "message": "分项报价识别存在歧义，建议人工核对识别总价和未完整识别行。",
+                  "evidence": {
+                    "required": true,
+                    "difference": null,
+                    "row_issues": [],
+                    "row_issue_count": 0,
+                    "calculated_total": "10120.00",
+                    "recognized_total": null,
+                    "total_candidates": [],
+                    "unclear_contents": [],
+                    "unclear_content_count": 0
+                  },
+                  "severity": "warning"
+                }
+              ]
+            },
+            "review": {
+              "status": "unclear",
+              "summary": "已识别到报价内容，但当前证据不足以完成完整校验。"
+            },
+            "metrics": {
+              "failed_subcheck_count": 0,
+              "passed_subcheck_count": 1,
+              "unclear_subcheck_count": 3,
+              "itemized_table_detected": true
+            },
+            "execution": {
+              "status": "ok",
+              "duration_ms": 18.45
+            },
+            "check_code": "itemized_pricing_check",
+            "check_name": "分项报价表审查",
+            "raw_result": {
+              "mode": "normal",
+              "checks": {
+                "missing_item": {
+                  "hints": [],
+                  "status": "not_applicable",
+                  "hint_level": null,
+                  "missing_items": [],
+                  "comparison_basis": null
+                },
+                "row_arithmetic": {
+                  "issues": [],
+                  "status": "skipped",
+                  "issue_count": 0,
+                  "group_checks": [],
+                  "skipped_count": 5,
+                  "unresolved_rows": [],
+                  "unresolved_count": 0,
+                  "group_check_count": 0
+                },
+                "duplicate_items": {
+                  "issues": [],
+                  "status": "pass",
+                  "issue_count": 0
+                },
+                "sum_consistency": {
+                  "status": "unknown",
+                  "difference": null,
+                  "total_mode": "standard",
+                  "opening_total": null,
+                  "declared_total": null,
+                  "subtotal_label": null,
+                  "subtotal_total": null,
+                  "subtotal_status": null,
+                  "calculated_total": "10120.00",
+                  "preferential_total": null,
+                  "matched_total_label": null,
+                  "opening_total_label": null,
+                  "subtotal_difference": null,
+                  "opening_total_status": null,
+                  "opening_total_difference": null,
+                  "preferential_total_label": null
+                }
+              },
+              "passed": null,
+              "status": "unknown",
+              "details": [
+                "优先基于 1 张结构化表格进行分项金额与总价校验。",
+                "其中 5 条分项仅声明金额，已参与汇总校验，不执行单价乘数量校验。",
+                "识别到 5 个分项金额。",
+                "已识别到报价内容，但暂时无法可靠完成汇总校验。"
+              ],
+              "summary": "已识别到报价内容，但当前证据不足以完成完整校验。",
+              "evidence": {
+                "analysis_basis": "structured_logical_tables",
+                "extracted_items": [
+                  {
+                    "label": "1.:汽车租赁合同 / 93万 / 提供商务用车 / 淡水河谷矿产品（中国）有限公司",
+                    "amount": "2023.00",
+                    "serial": "1.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 1,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2023.00"
+                  },
+                  {
+                    "label": "2.:汽车租赁合同 / 30万 / 提供商务用车 / 上海电气集团数字科技有限公司",
+                    "amount": "2024.00",
+                    "serial": "2.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 2,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "3.:汽车租赁合同 / 22万 / 提供商务用车 / 圣克鲁斯生物技术（上海）有限公司",
+                    "amount": "2024.00",
+                    "serial": "3.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 3,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "4.:汽车租赁合同 / 846万 / 提供10辆商务用车 / 三井物产（上海）贸易有限公司",
+                    "amount": "2024.00",
+                    "serial": "4.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 4,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "5.:汽车租赁合同 / 92万 / 提供商务用车 / 日触商贸（上海）有限公司",
+                    "amount": "2025.00",
+                    "serial": "5.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 5,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2025.00"
+                  }
+                ],
+                "unresolved_rows": [],
+                "total_candidates": [],
+                "structured_tables": [
+                  {
+                    "pages": [
+                      11
+                    ],
+                    "title": null,
+                    "headers": [
+                      "序号",
+                      "年份",
+                      "项目名称",
+                      "合同金额",
+                      "委托内容",
+                      "委托单位",
+                      "所附证明材料在本响应文件的所在页码"
+                    ],
+                    "table_id": "table_6",
+                    "row_count": 6,
+                    "table_ref": "table_6"
+                  }
+                ],
+                "extracted_item_count": 5,
+                "structured_relations": [
+                  {
+                    "label": "1.:汽车租赁合同 / 93万 / 提供商务用车 / 淡水河谷矿产品（中国）有限公司",
+                    "amount": "2023.00",
+                    "serial": "1.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 1,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2023.00"
+                  },
+                  {
+                    "label": "2.:汽车租赁合同 / 30万 / 提供商务用车 / 上海电气集团数字科技有限公司",
+                    "amount": "2024.00",
+                    "serial": "2.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 2,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "3.:汽车租赁合同 / 22万 / 提供商务用车 / 圣克鲁斯生物技术（上海）有限公司",
+                    "amount": "2024.00",
+                    "serial": "3.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 3,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "4.:汽车租赁合同 / 846万 / 提供10辆商务用车 / 三井物产（上海）贸易有限公司",
+                    "amount": "2024.00",
+                    "serial": "4.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 4,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2024.00"
+                  },
+                  {
+                    "label": "5.:汽车租赁合同 / 92万 / 提供商务用车 / 日触商贸（上海）有限公司",
+                    "amount": "2025.00",
+                    "serial": "5.",
+                    "source": "structured_amount_only_row",
+                    "line_index": 5,
+                    "section_id": "logical_table:table_6",
+                    "relation_type": "amount_only_row",
+                    "section_pages": [
+                      11
+                    ],
+                    "section_anchor": "logical_table",
+                    "declared_line_total": "2025.00"
+                  }
+                ],
+                "structured_group_checks": [],
+                "structured_relation_count": 5
+              },
+              "manual_review": {
+                "required": true,
+                "difference": null,
+                "row_issues": [],
+                "row_issue_count": 0,
+                "calculated_total": "10120.00",
+                "recognized_total": null,
+                "total_candidates": [],
+                "unclear_contents": [],
+                "unclear_content_count": 0
+              },
+              "itemized_table_detected": true
+            },
+            "validation": {
+              "reason": "模块已执行，但当前样本存在未完整识别的分项行，结论需人工复核。",
+              "status": "unclear"
+            },
+            "source_context": {
+              "focus_scope": "检查商务标分项报价表中的单价、数量、合计和汇总一致性。",
+              "focus_sections": [
+                "分项行算术校验",
+                "分项汇总一致性校验",
+                "人工复核提示",
+                "疑似重复报价校验"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "itemized_pricing_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "missing_item_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            }
+          }
+        },
+        "issues": {
+          "failed": [
+            {
+              "title": "投标总价自检",
+              "status": "fail",
+              "message": "一览表中未找到直接报价或下浮率报价信息",
+              "evidence": {
+                "type": "未识别",
+                "result": "失败",
+                "summary": [
+                  "一览表中未找到直接报价或下浮率报价信息"
+                ],
+                "subcheck_code": "price_reasonableness"
+              },
+              "severity": "error",
+              "check_code": "pricing_check",
+              "check_name": "报价合理性审查"
+            },
+            {
+              "title": "招标限价校验",
+              "status": "fail",
+              "message": "未在投标文件中识别到投标总金额/参选总价/报价总价",
+              "evidence": {
+                "type": "最高限价校验",
+                "result": "失败",
+                "summary": [
+                  "未在投标文件中识别到投标总金额/参选总价/报价总价"
+                ],
+                "subcheck_code": "tender_limit_check"
+              },
+              "severity": "error",
+              "check_code": "pricing_check",
+              "check_name": "报价合理性审查"
+            }
+          ],
+          "passed": [
+            {
+              "title": "疑似重复报价校验",
+              "status": "pass",
+              "message": "检测到 0 组疑似重复报价项。",
+              "evidence": {
+                "issues": [],
+                "status": "pass",
+                "issue_count": 0
+              },
+              "severity": "info",
+              "check_code": "itemized_pricing_check",
+              "check_name": "分项报价表审查"
+            },
+            {
+              "title": "公章与投标人匹配",
+              "status": "pass",
+              "message": "检测到的公章与投标人名称匹配。",
+              "evidence": {
+                "reason": "matched",
+                "status": "pass",
+                "matched": true,
+                "best_match": {
+                  "score": 1,
+                  "seal_text": "上海衡山汽车服务有限公司",
+                  "bidder_name": "上海衡山汽车服务有限公司"
+                }
+              },
+              "severity": "info",
+              "check_code": "verification_check",
+              "check_name": "签字盖章日期审查"
+            },
+            {
+              "title": "签字盖章位置检查",
+              "status": "pass",
+              "message": "所有必需附件均已找到，未发现缺失签字或盖章。",
+              "evidence": {
+                "status": "pass",
+                "missing_attachments": [],
+                "missing_seal_attachments": [],
+                "missing_signature_attachments": [],
+                "pending_signature_attachments": []
+              },
+              "severity": "info",
+              "check_code": "verification_check",
+              "check_name": "签字盖章日期审查"
+            },
+            {
+              "title": "落款日期检查",
+              "status": "pass",
+              "message": "已检测到落款日期，且均未晚于投标截止时间。",
+              "evidence": {
+                "status": "pass",
+                "deadline_date": "2025-08-11",
+                "late_date_attachments": [],
+                "matched_deadline_text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启",
+                "missing_date_attachments": []
+              },
+              "severity": "info",
+              "check_code": "verification_check",
+              "check_name": "签字盖章日期审查"
+            }
+          ],
+          "unclear": [
+            {
+              "title": "分项行算术校验",
+              "status": "unclear",
+              "message": "存在 0 条算术错误，另有 0 条未解析行。",
+              "evidence": {
+                "issues": [],
+                "status": "skipped",
+                "issue_count": 0,
+                "group_checks": [],
+                "skipped_count": 5,
+                "unresolved_rows": [],
+                "unresolved_count": 0,
+                "group_check_count": 0
+              },
+              "severity": "warning",
+              "check_code": "itemized_pricing_check",
+              "check_name": "分项报价表审查"
+            },
+            {
+              "title": "分项汇总一致性校验",
+              "status": "unclear",
+              "message": "计算合计 10120.00，声明总价 None，差额 None。",
+              "evidence": {
+                "status": "unknown",
+                "difference": null,
+                "total_mode": "standard",
+                "opening_total": null,
+                "declared_total": null,
+                "subtotal_label": null,
+                "subtotal_total": null,
+                "subtotal_status": null,
+                "calculated_total": "10120.00",
+                "preferential_total": null,
+                "matched_total_label": null,
+                "opening_total_label": null,
+                "subtotal_difference": null,
+                "opening_total_status": null,
+                "opening_total_difference": null,
+                "preferential_total_label": null
+              },
+              "severity": "warning",
+              "check_code": "itemized_pricing_check",
+              "check_name": "分项报价表审查"
+            },
+            {
+              "title": "人工复核提示",
+              "status": "unclear",
+              "message": "分项报价识别存在歧义，建议人工核对识别总价和未完整识别行。",
+              "evidence": {
+                "required": true,
+                "difference": null,
+                "row_issues": [],
+                "row_issue_count": 0,
+                "calculated_total": "10120.00",
+                "recognized_total": null,
+                "total_candidates": [],
+                "unclear_contents": [],
+                "unclear_content_count": 0
+              },
+              "severity": "warning",
+              "check_code": "itemized_pricing_check",
+              "check_name": "分项报价表审查"
+            }
+          ]
+        },
+        "summary": {
+          "check_count": 5,
+          "review_status_counts": {
+            "fail": 1,
+            "pass": 1,
+            "unclear": 3
+          },
+          "overall_review_status": "fail",
+          "execution_status_counts": {
+            "ok": 5,
+            "error": 0
+          },
+          "validation_status_counts": {
+            "failed": 0,
+            "correct": 3,
+            "unclear": 2
+          },
+          "overall_validation_status": "unclear"
+        },
+        "documents": {
+          "tender": {
+            "role": "tender",
+            "sha256": "509cc1e51c1371f27c480205348d3e2d992b1c2f050ceee8bf747d4fb7915e4e",
+            "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+            "file_path": "minio://update-file/（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分_20260509154837939660_22a78d63.pdf",
+            "file_size": 365235,
+            "bidder_key": null,
+            "page_count": 57,
+            "modified_at": "2026-05-09T08:43:02.685351+00:00",
+            "source_type": "stored_document",
+            "identifier_id": "48a38ac5-adb4-4592-bf82-75a561e5d573",
+            "native_table_count": 12,
+            "logical_table_count": 10,
+            "layout_section_count": 640
+          },
+          "business": {
+            "role": "business",
+            "sha256": "080958897227d36fcec1eadde3ed41ee3510116760b3af34f86b809488e734c0",
+            "file_name": "衡山商务扫描件.pdf",
+            "file_path": "minio://update-file/衡山商务扫描件_20260509161315648483_6e54bb6a.pdf",
+            "file_size": 123814,
+            "bidder_key": "衡山商务扫描件",
+            "page_count": 25,
+            "modified_at": "2026-05-09T08:43:02.691330+00:00",
+            "source_type": "stored_document",
+            "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+            "native_table_count": 6,
+            "logical_table_count": 6,
+            "layout_section_count": 427
+          }
+        },
+        "bidder_key": "衡山商务扫描件",
+        "bidder_name": "上海衡山汽车服务有限公司",
+        "reading_guide": {
+          "bidder_key": "衡山商务扫描件",
+          "bidder_name": "上海衡山汽车服务有限公司",
+          "check_navigation": [
+            {
+              "status": "fail",
+              "summary": "一览表中未找到直接报价或下浮率报价信息；未在投标文件中识别到投标总金额/参选总价/报价总价",
+              "check_code": "pricing_check",
+              "check_name": "报价合理性审查",
+              "focus_scope": "检查商务标报价页和招标限价条款，确认总价书写与限价对比结果。",
+              "top_findings": [
+                {
+                  "title": "投标总价自检",
+                  "status": "fail",
+                  "message": "一览表中未找到直接报价或下浮率报价信息"
+                },
+                {
+                  "title": "招标限价校验",
+                  "status": "fail",
+                  "message": "未在投标文件中识别到投标总金额/参选总价/报价总价"
+                }
+              ],
+              "focus_sections": [
+                "投标总价自检",
+                "招标限价校验"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "quoted_price_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "tender_limit_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            },
+            {
+              "status": "unclear",
+              "summary": "未提取到可比较的模板段。",
+              "check_code": "consistency_check",
+              "check_name": "模板一致性审查",
+              "focus_scope": "对照招标文件模板锚点，检查商务标对应附件的模板一致性。",
+              "top_findings": [],
+              "focus_sections": [],
+              "source_documents": [
+                {
+                  "role": "tender",
+                  "purpose": "template_source",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                },
+                {
+                  "role": "business",
+                  "purpose": "recognized_attachment_content",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                }
+              ]
+            },
+            {
+              "status": "unclear",
+              "summary": "已识别到报价内容，但当前证据不足以完成完整校验。",
+              "check_code": "itemized_pricing_check",
+              "check_name": "分项报价表审查",
+              "focus_scope": "检查商务标分项报价表中的单价、数量、合计和汇总一致性。",
+              "top_findings": [
+                {
+                  "title": "分项行算术校验",
+                  "status": "unclear",
+                  "message": "存在 0 条算术错误，另有 0 条未解析行。"
+                },
+                {
+                  "title": "分项汇总一致性校验",
+                  "status": "unclear",
+                  "message": "计算合计 10120.00，声明总价 None，差额 None。"
+                }
+              ],
+              "focus_sections": [
+                "分项行算术校验",
+                "分项汇总一致性校验",
+                "人工复核提示",
+                "疑似重复报价校验"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "itemized_pricing_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "missing_item_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            },
+            {
+              "status": "unclear",
+              "summary": "未在招标模板中识别到明确要求签字、盖章或填写日期的附件。",
+              "check_code": "verification_check",
+              "check_name": "签字盖章日期审查",
+              "focus_scope": "检查商务标中的签字、盖章、落款日期，并对照招标截止时间。",
+              "top_findings": [
+                {
+                  "title": "公章与投标人匹配",
+                  "status": "pass",
+                  "message": "检测到的公章与投标人名称匹配。"
+                },
+                {
+                  "title": "签字盖章位置检查",
+                  "status": "pass",
+                  "message": "所有必需附件均已找到，未发现缺失签字或盖章。"
+                }
+              ],
+              "focus_sections": [
+                "公章与投标人匹配",
+                "签字盖章位置检查",
+                "落款日期检查"
+              ],
+              "source_documents": [
+                {
+                  "role": "business",
+                  "purpose": "signature_seal_source",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                },
+                {
+                  "role": "tender",
+                  "purpose": "deadline_reference",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                }
+              ]
+            },
+            {
+              "status": "pass",
+              "summary": "完整性得分 0，共校验 0 项，缺失 0 项。",
+              "check_code": "integrity_check",
+              "check_name": "商务标完整性审查",
+              "focus_scope": "对照招标文件中的商务标要求，检查商务标 OCR 结果里是否识别到必备附件和资格证明材料。",
+              "top_findings": [],
+              "focus_sections": [],
+              "source_documents": [
+                {
+                  "role": "tender",
+                  "purpose": "requirement_source",
+                  "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+                  "bidder_key": null,
+                  "page_count": 57
+                },
+                {
+                  "role": "business",
+                  "purpose": "recognized_business_content",
+                  "file_name": "衡山商务扫描件.pdf",
+                  "bidder_key": "衡山商务扫描件",
+                  "page_count": 25
+                }
+              ]
+            }
+          ],
+          "tender_file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+          "business_file_name": "衡山商务扫描件.pdf",
+          "check_status_counts": {
+            "fail": 1,
+            "pass": 1,
+            "unclear": 3
+          },
+          "technical_file_name": null,
+          "overall_review_status": "fail"
+        }
+      }
+    ],
+    "dataset": {
+      "tender": {
+        "role": "tender",
+        "sha256": "509cc1e51c1371f27c480205348d3e2d992b1c2f050ceee8bf747d4fb7915e4e",
+        "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+        "file_path": "minio://update-file/（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分_20260509154837939660_22a78d63.pdf",
+        "file_size": 365235,
+        "bidder_key": null,
+        "page_count": 57,
+        "modified_at": "2026-05-09T08:43:02.685351+00:00",
+        "source_type": "stored_document",
+        "identifier_id": "48a38ac5-adb4-4592-bf82-75a561e5d573",
+        "native_table_count": 12,
+        "logical_table_count": 10,
+        "layout_section_count": 640
+      },
+      "bidders": [
+        {
+          "business": {
+            "role": "business",
+            "sha256": "080958897227d36fcec1eadde3ed41ee3510116760b3af34f86b809488e734c0",
+            "file_name": "衡山商务扫描件.pdf",
+            "file_path": "minio://update-file/衡山商务扫描件_20260509161315648483_6e54bb6a.pdf",
+            "file_size": 123814,
+            "bidder_key": "衡山商务扫描件",
+            "page_count": 25,
+            "modified_at": "2026-05-09T08:43:02.691330+00:00",
+            "source_type": "stored_document",
+            "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+            "native_table_count": 6,
+            "logical_table_count": 6,
+            "layout_section_count": 427
+          },
+          "bidder_key": "衡山商务扫描件"
+        }
+      ],
+      "file_count": 2,
+      "input_mode": "project_documents"
+    },
+    "summary": {
+      "bidder_count": 1,
+      "total_check_count": 5,
+      "review_status_counts": {
+        "fail": 1,
+        "pass": 1,
+        "unclear": 3
+      },
+      "execution_status_counts": {
+        "ok": 5,
+        "error": 0
+      },
+      "validation_status_counts": {
+        "failed": 0,
+        "correct": 3,
+        "unclear": 2
+      }
+    },
+    "review_type": "business_bid_format_review",
+    "generated_at": "2026-05-09T08:43:03.624942+00:00",
+    "reading_guide": {
+      "bidder_count": 1,
+      "bidder_overview": [
+        {
+          "bidder_key": "衡山商务扫描件",
+          "bidder_name": "上海衡山汽车服务有限公司",
+          "business_file_name": "衡山商务扫描件.pdf",
+          "failed_check_codes": [
+            "pricing_check"
+          ],
+          "failed_check_names": [
+            "报价合理性审查"
+          ],
+          "technical_file_name": null,
+          "overall_review_status": "fail"
+        }
+      ],
+      "tender_file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+      "recommended_reading_order": [
+        "1) overview.bidder_overview",
+        "2) review.extraction_tables.catalog",
+        "3) review.extraction_tables.tender_table.rows",
+        "4) review.extraction_tables.bidder_tables[].rows",
+        "5) review.bidders[].reading_guide.check_navigation",
+        "6) review.bidders[].checks.<check_code>.source_context",
+        "7) review.bidders[].checks.<check_code>.issues"
+      ]
+    },
+    "schema_version": "1.1",
+    "extraction_tables": {
+      "catalog": {
+        "checks": {
+          "pricing_check": {
+            "bid_field_groups": [
+              "bid_total_amount",
+              "pricing_subcheck"
+            ],
+            "tender_field_groups": [
+              "price_constraint"
+            ]
+          },
+          "deviation_check": {
+            "bid_field_groups": [],
+            "tender_field_groups": [
+              "star_requirement"
+            ]
+          },
+          "verification_check": {
+            "bid_field_groups": [
+              "bidder_identity",
+              "seal_detection",
+              "signature_detection"
+            ],
+            "tender_field_groups": [
+              "deadline",
+              "required_attachment"
+            ]
+          },
+          "itemized_pricing_check": {
+            "bid_field_groups": [
+              "itemized_amount"
+            ],
+            "tender_field_groups": []
+          }
+        },
+        "bid_field_groups": [
+          "bid_total_amount",
+          "bidder_identity",
+          "itemized_amount",
+          "pricing_subcheck",
+          "seal_detection",
+          "signature_detection"
+        ],
+        "tender_field_groups": [
+          "deadline",
+          "price_constraint",
+          "required_attachment",
+          "star_requirement"
+        ]
+      },
+      "summary": {
+        "bidder_count": 1,
+        "bid_row_count": 11,
+        "total_row_count": 15,
+        "tender_row_count": 4
+      },
+      "tender_table": {
+        "rows": [
+          {
+            "value": {
+              "keyword": "项目预算",
+              "raw_amount": "24,000元",
+              "amount_yuan": 24000
+            },
+            "row_id": "tender:pricing_check:0001",
+            "status": "extracted",
+            "evidence": {
+              "context": "2、基础租金上限：含税 24,000 元/辆/月\n包含：车辆基本租金；驾驶员成本；驾驶服务费（含洗车、通讯、夜间停车、午餐等）；燃油费（里程限额3000公里/月），超出部分按按照上限3元/公里计算。\n3、超时服务费、误餐费及出省费包干上限：含税2600元/辆/月。（除上述费用以外，在用车过程中发生的其他费用均由中选人承担，本项目预算不含此费用。）\n16"
+            },
+            "page_refs": [
+              18
+            ],
+            "check_code": "pricing_check",
+            "field_name": "tender_limit_or_budget",
+            "field_group": "price_constraint",
+            "document_role": "tender",
+            "document_side": "tender",
+            "expected_document_role": "business"
+          },
+          {
+            "value": [],
+            "row_id": "tender:deviation_check:0002",
+            "status": "missing",
+            "evidence": {
+              "reason": "no_star_requirements_detected"
+            },
+            "page_refs": [],
+            "check_code": "deviation_check",
+            "field_name": "star_requirements",
+            "field_group": "star_requirement",
+            "document_role": "tender",
+            "document_side": "tender",
+            "expected_document_role": "combined"
+          },
+          {
+            "value": [],
+            "row_id": "tender:verification_check:0003",
+            "status": "missing",
+            "evidence": {
+              "reason": "no_signature_or_seal_attachment_detected"
+            },
+            "page_refs": [],
+            "check_code": "verification_check",
+            "field_name": "required_attachments",
+            "field_group": "required_attachment",
+            "document_role": "tender",
+            "document_side": "tender",
+            "expected_document_role": "business"
+          },
+          {
+            "value": {
+              "date": "2025-08-11",
+              "text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启"
+            },
+            "row_id": "tender:verification_check:0004",
+            "status": "extracted",
+            "evidence": {
+              "matched_text": "递交截止时间及递交地点（同比选开启时间及地点）时间：2025年8月11日10:00（北京时间）地点：腾讯会议线上开标：224-221-087开启"
+            },
+            "page_refs": [
+              8
+            ],
+            "check_code": "verification_check",
+            "field_name": "submission_deadline",
+            "field_group": "deadline",
+            "document_role": "tender",
+            "document_side": "tender",
+            "expected_document_role": "business"
+          }
+        ],
+        "document": {
+          "role": "tender",
+          "purpose": "tender_extraction_source",
+          "file_name": "（定稿）JH-ZJ-202502-19-17-0010 上海垣信及北京分.pdf",
+          "bidder_key": null,
+          "page_count": 57
+        },
+        "row_count": 4,
+        "check_row_counts": {
+          "pricing_check": 1,
+          "deviation_check": 1,
+          "verification_check": 2
+        }
+      },
+      "bidder_tables": [
+        {
+          "rows": [
+            {
+              "value": null,
+              "row_id": "bid:pricing_check:0001",
+              "status": "missing",
+              "evidence": {
+                "reason": "bid_total_not_detected"
+              },
+              "page_refs": [],
+              "check_code": "pricing_check",
+              "field_name": "bid_total_amount",
+              "field_group": "bid_total_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "type": "未识别",
+                "summary": [
+                  "一览表中未找到直接报价或下浮率报价信息"
+                ]
+              },
+              "row_id": "bid:pricing_check:0002",
+              "status": "fail",
+              "page_refs": [],
+              "check_code": "pricing_check",
+              "field_name": "price_reasonableness",
+              "field_group": "pricing_subcheck",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "type": "最高限价校验",
+                "summary": [
+                  "未在投标文件中识别到投标总金额/参选总价/报价总价"
+                ]
+              },
+              "row_id": "bid:pricing_check:0003",
+              "status": "fail",
+              "page_refs": [],
+              "check_code": "pricing_check",
+              "field_name": "tender_limit_check",
+              "field_group": "pricing_subcheck",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "amount": "2023.00",
+                "serial": "1.",
+                "source": "structured_amount_only_row",
+                "section_anchor": "logical_table"
+              },
+              "row_id": "bid:itemized_pricing_check:0004",
+              "status": "found",
+              "page_refs": [
+                11
+              ],
+              "check_code": "itemized_pricing_check",
+              "field_name": "1.:汽车租赁合同 / 93万 / 提供商务用车 / 淡水河谷矿产品（中国）有限公司",
+              "field_group": "itemized_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "amount": "2024.00",
+                "serial": "2.",
+                "source": "structured_amount_only_row",
+                "section_anchor": "logical_table"
+              },
+              "row_id": "bid:itemized_pricing_check:0005",
+              "status": "found",
+              "page_refs": [
+                11
+              ],
+              "check_code": "itemized_pricing_check",
+              "field_name": "2.:汽车租赁合同 / 30万 / 提供商务用车 / 上海电气集团数字科技有限公司",
+              "field_group": "itemized_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "amount": "2024.00",
+                "serial": "3.",
+                "source": "structured_amount_only_row",
+                "section_anchor": "logical_table"
+              },
+              "row_id": "bid:itemized_pricing_check:0006",
+              "status": "found",
+              "page_refs": [
+                11
+              ],
+              "check_code": "itemized_pricing_check",
+              "field_name": "3.:汽车租赁合同 / 22万 / 提供商务用车 / 圣克鲁斯生物技术（上海）有限公司",
+              "field_group": "itemized_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "amount": "2024.00",
+                "serial": "4.",
+                "source": "structured_amount_only_row",
+                "section_anchor": "logical_table"
+              },
+              "row_id": "bid:itemized_pricing_check:0007",
+              "status": "found",
+              "page_refs": [
+                11
+              ],
+              "check_code": "itemized_pricing_check",
+              "field_name": "4.:汽车租赁合同 / 846万 / 提供10辆商务用车 / 三井物产（上海）贸易有限公司",
+              "field_group": "itemized_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": {
+                "amount": "2025.00",
+                "serial": "5.",
+                "source": "structured_amount_only_row",
+                "section_anchor": "logical_table"
+              },
+              "row_id": "bid:itemized_pricing_check:0008",
+              "status": "found",
+              "page_refs": [
+                11
+              ],
+              "check_code": "itemized_pricing_check",
+              "field_name": "5.:汽车租赁合同 / 92万 / 提供商务用车 / 日触商贸（上海）有限公司",
+              "field_group": "itemized_amount",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": "上海衡山汽车服务有限公司",
+              "row_id": "bid:verification_check:0009",
+              "status": "found",
+              "page_refs": [],
+              "check_code": "verification_check",
+              "field_name": "bidder_name",
+              "field_group": "bidder_identity",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": [
+                "上海衡山汽车服务有限公司",
+                "上海倪山汽车服务有限公司",
+                "上海市道路运输管理局 核发机关",
+                "北京中平科学技术院 证书专用章 Seal for Certificate",
+                "上海凯山汽车服务有限公司",
+                "汽车服务有限公司",
+                "公司 专用章",
+                "上海衡山汽车服务有限公司 合同专用章",
+                "China Co., Ltd. Vale Minerals Chna Co., Ltd. 涞水河谷矿产品（中国）有限公司",
+                "上海衡山汽车服务 合同专"
+              ],
+              "row_id": "bid:verification_check:0010",
+              "status": "found",
+              "page_refs": [],
+              "check_code": "verification_check",
+              "field_name": "seal_texts",
+              "field_group": "seal_detection",
+              "document_role": "business",
+              "document_side": "bid"
+            },
+            {
+              "value": [
+                "已签字"
+              ],
+              "row_id": "bid:verification_check:0011",
+              "status": "found",
+              "page_refs": [],
+              "check_code": "verification_check",
+              "field_name": "signature_texts",
+              "field_group": "signature_detection",
+              "document_role": "business",
+              "document_side": "bid"
+            }
+          ],
+          "documents": {
+            "business_file_name": "衡山商务扫描件.pdf",
+            "technical_file_name": null
+          },
+          "row_count": 11,
+          "bidder_key": "衡山商务扫描件",
+          "bidder_name": "上海衡山汽车服务有限公司",
+          "check_row_counts": {
+            "pricing_check": 3,
+            "verification_check": 3,
+            "itemized_pricing_check": 5
+          }
+        }
+      ],
+      "schema_version": "1.0"
+    },
+    "function_validation": {
+      "pricing_check": {
+        "check_name": "报价合理性审查",
+        "review_status_counts": {
+          "fail": 1,
+          "pass": 0,
+          "unclear": 0
+        },
+        "execution_status_counts": {
+          "ok": 1,
+          "error": 0
+        },
+        "validation_status_counts": {
+          "failed": 0,
+          "correct": 1,
+          "unclear": 0
+        }
+      },
+      "integrity_check": {
+        "check_name": "商务标完整性审查",
+        "review_status_counts": {
+          "fail": 0,
+          "pass": 1,
+          "unclear": 0
+        },
+        "execution_status_counts": {
+          "ok": 1,
+          "error": 0
+        },
+        "validation_status_counts": {
+          "failed": 0,
+          "correct": 1,
+          "unclear": 0
+        }
+      },
+      "consistency_check": {
+        "check_name": "模板一致性审查",
+        "review_status_counts": {
+          "fail": 0,
+          "pass": 0,
+          "unclear": 1
+        },
+        "execution_status_counts": {
+          "ok": 1,
+          "error": 0
+        },
+        "validation_status_counts": {
+          "failed": 0,
+          "correct": 0,
+          "unclear": 1
+        }
+      },
+      "verification_check": {
+        "check_name": "签字盖章日期审查",
+        "review_status_counts": {
+          "fail": 0,
+          "pass": 0,
+          "unclear": 1
+        },
+        "execution_status_counts": {
+          "ok": 1,
+          "error": 0
+        },
+        "validation_status_counts": {
+          "failed": 0,
+          "correct": 1,
+          "unclear": 0
+        }
+      },
+      "itemized_pricing_check": {
+        "check_name": "分项报价表审查",
+        "review_status_counts": {
+          "fail": 0,
+          "pass": 0,
+          "unclear": 1
+        },
+        "execution_status_counts": {
+          "ok": 1,
+          "error": 0
+        },
+        "validation_status_counts": {
+          "failed": 0,
+          "correct": 0,
+          "unclear": 1
+        }
+      }
+    },
+    "project_identifier_id": "卫星"
+  },
+  "business_bid_duplicate_check": {
+    "config": {
+      "detection_mode": "exact_plus_similarity",
+      "document_types": [
+        "business_bid"
+      ],
+      "max_pairs_per_type": 0,
+      "block_matching_unit": "sentence",
+      "max_evidence_sections": 5,
+      "template_exclusion_source": "tender_document",
+      "template_exclusion_enabled": true,
+      "business_similarity_enabled": true
+    },
+    "groups": {
+      "business_bid": {
+        "items": [],
+        "documents": [
+          {
+            "file_name": "衡山商务扫描件.pdf",
+            "block_count": 2,
+            "image_count": 0,
+            "relation_id": 18,
+            "table_count": 2,
+            "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+            "section_count": 1
+          }
+        ],
+        "pair_count": 0,
+        "document_count": 1,
+        "skipped_documents": [],
+        "reported_pair_count": 0,
+        "high_risk_pair_count": 0,
+        "suspicious_pair_count": 0,
+        "medium_risk_pair_count": 0
+      }
+    },
+    "project": {
+      "id": 23,
+      "deleted": false,
+      "create_time": "2026-05-09T15:48:37.910535",
+      "update_time": "2026-05-09T15:48:37.910535",
+      "identifier_id": "卫星"
+    },
+    "summary": {
+      "pair_count": 0,
+      "document_count": 1,
+      "reported_pair_count": 0,
+      "high_risk_pair_count": 0,
+      "suspicious_pair_count": 0,
+      "medium_risk_pair_count": 0,
+      "requested_document_types": [
+        "business_bid"
+      ]
+    }
+  },
+  "business_bid_duplicate_clusters": {
+    "config": {
+      "merge_strategy": "duplicate_pair_cluster_merge",
+      "source_pair_count": 0,
+      "source_document_types": [
+        "business_bid"
+      ],
+      "source_reported_pair_count": 0,
+      "source_suspicious_pair_count": 0
+    },
+    "project": {
+      "id": 23,
+      "deleted": false,
+      "create_time": "2026-05-09T15:48:37.910535",
+      "update_time": "2026-05-09T15:48:37.910535",
+      "identifier_id": "卫星"
+    },
+    "summary": {
+      "pair_count": 0,
+      "cluster_count": 0,
+      "document_count": 1,
+      "reported_pair_count": 0,
+      "high_risk_pair_count": 0,
+      "suspicious_pair_count": 0,
+      "medium_risk_pair_count": 0,
+      "high_risk_cluster_count": 0,
+      "suspicious_cluster_count": 0,
+      "medium_risk_cluster_count": 0
+    },
+    "clusters": [],
+    "documents": [
+      {
+        "file_name": "衡山商务扫描件.pdf",
+        "block_count": 2,
+        "image_count": 0,
+        "relation_id": 18,
+        "table_count": 2,
+        "identifier_id": "a968fd67-98be-424c-aef2-60d40571ebd6",
+        "section_count": 1
+      }
+    ],
+    "document_type": "business_bid",
+    "merged_result_key": "business_bid_duplicate_clusters",
+    "skipped_documents": [],
+    "source_result_key": "business_bid_duplicate_check"
+  }
+}

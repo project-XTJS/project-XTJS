@@ -13,7 +13,7 @@ from typing import Any
 # 可修改参数
 # =========================
 # 默认项目文件夹。留空时运行脚本会在终端中提示输入。
-DEFAULT_PROJECT_FOLDER = "项目优化/2026.5.18仪仗"
+DEFAULT_PROJECT_FOLDER = "项目优化/2026.5.19卫星科技"
 # 默认检查项。支持编号字符串，例如 ["1", "3", "6"]。留空时运行脚本会在终端中提示输入。
 DEFAULT_CHECKS: list[str] = ["4"]
 # 默认原 result JSON 路径。留空时自动在项目文件夹中识别。
