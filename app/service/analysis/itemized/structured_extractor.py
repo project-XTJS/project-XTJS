@@ -25,6 +25,7 @@ class StructuredExtractorMixin:
         document: dict | None,
         *,
         item_sections: list[dict] | None = None,
+        total_sections: list[dict] | None = None,
     ) -> dict:
         """优先从结构化 logical table 中抽取报价行关系。"""
         empty_result = {
@@ -45,6 +46,11 @@ class StructuredExtractorMixin:
             return empty_result
 
         allowed_table_refs = self._collect_itemized_logical_table_refs(item_sections)
+        fallback_pages = (
+            self._collect_structured_fallback_pages(total_sections)
+            if not allowed_table_refs
+            else set()
+        )
         extracted_items = []
         extracted_totals = []
         row_issues = []
@@ -59,10 +65,28 @@ class StructuredExtractorMixin:
             if allowed_table_refs and table_ref not in allowed_table_refs:
                 continue
             headers = self._get_logical_table_headers(table)
+            if (
+                not allowed_table_refs
+                and not self._should_consider_structured_table_fallback(
+                    table,
+                    headers=headers,
+                    fallback_pages=fallback_pages,
+                )
+            ):
+                continue
             column_map = self._resolve_structured_price_columns_for_table(
                 table, headers=headers
             )
             if column_map is None:
+                continue
+            if (
+                not allowed_table_refs
+                and not self._looks_like_fallback_itemized_table(
+                    table,
+                    headers=headers,
+                    column_map=column_map,
+                )
+            ):
                 continue
 
             table_result = self._analyze_structured_itemized_table(
@@ -117,6 +141,96 @@ class StructuredExtractorMixin:
                 if ref:
                     refs.add(str(ref))
         return refs
+
+    def _collect_structured_fallback_pages(
+        self, sections: list[dict] | None
+    ) -> set[int]:
+        """收集结构化回退时可参考的总价页码。"""
+        pages: set[int] = set()
+        for section in sections or []:
+            for page in section.get("pages") or []:
+                if isinstance(page, int):
+                    pages.add(page)
+            page = section.get("page")
+            if isinstance(page, int):
+                pages.add(page)
+        return pages
+
+    def _should_consider_structured_table_fallback(
+        self,
+        table: dict,
+        *,
+        headers: list[str],
+        fallback_pages: set[int],
+    ) -> bool:
+        """找不到分项锚点时，先按页码邻近性和明显负面表头做一轮筛选。"""
+        pages = self._get_logical_table_pages(table)
+        if fallback_pages:
+            if not pages:
+                return False
+            nearby_gap = int(
+                getattr(self, "STRUCTURED_FALLBACK_NEARBY_PAGE_GAP", 3) or 3
+            )
+            min_gap = min(
+                abs(table_page - ref_page)
+                for table_page in pages
+                for ref_page in fallback_pages
+            )
+            if min_gap > nearby_gap:
+                return False
+
+        combined_text = self._normalize_label_key(
+            " ".join(
+                part
+                for part in [str(table.get("title") or "").strip(), *headers]
+                if part
+            )
+        )
+        negative_hints = (
+            "业绩",
+            "案例",
+            "委托单位",
+            "委托时间",
+            "项目完成时间",
+            "合同金额",
+            "合同名称",
+            "客户名称",
+            "采购单位",
+        )
+        return not any(hint in combined_text for hint in negative_hints)
+
+    def _looks_like_fallback_itemized_table(
+        self,
+        table: dict,
+        *,
+        headers: list[str],
+        column_map: dict,
+    ) -> bool:
+        """限制空锚点时的结构化回退，只保留真正像报价表的 logical table。"""
+        combined_text = self._normalize_label_key(
+            " ".join(
+                part
+                for part in [str(table.get("title") or "").strip(), *headers]
+                if part
+            )
+        )
+        explicit_pricing_hints = (
+            "报价",
+            "分项",
+            "清单",
+            "投标",
+            "单价",
+            "总价",
+            "小计",
+            "合价",
+        )
+        if any(hint in combined_text for hint in explicit_pricing_hints):
+            return True
+        return (
+            column_map.get("mode") == "arithmetic"
+            and column_map.get("quantity") is not None
+            and column_map.get("line_total") is not None
+        )
 
     # 结构化列映射与推断
     def _resolve_structured_price_columns(self, headers: list[str]) -> dict | None:

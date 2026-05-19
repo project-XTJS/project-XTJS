@@ -74,6 +74,11 @@ class TableExtractorMixin:
             ):
                 continue
 
+            anchor_page = (
+                int(section.get("page"))
+                if isinstance(section.get("page"), int)
+                else None
+            )
             lines = []
             pages = []
             logical_table_refs = []
@@ -87,6 +92,15 @@ class TableExtractorMixin:
 
                 if not table_started:
                     if section_type == "table":
+                        follower_page = (
+                            int(follower.get("page"))
+                            if isinstance(follower.get("page"), int)
+                            else None
+                        )
+                        if not self._is_layout_table_near_anchor(
+                            anchor_page, follower_page
+                        ):
+                            break
                         table_started = True
                         payload = self._extract_layout_table_payload(
                             follower, logical_tables
@@ -116,6 +130,11 @@ class TableExtractorMixin:
                 break
 
             if not lines:
+                continue
+            if (
+                matched_anchor in self.TOTAL_SECTION_ANCHORS
+                and self._looks_like_financial_receipt_section(lines)
+            ):
                 continue
 
             deduped_pages = []
@@ -149,6 +168,31 @@ class TableExtractorMixin:
 
         sections.sort(key=lambda item: item.get("start", 0))
         return self._dedupe_sections(sections)
+
+    def _is_layout_table_near_anchor(
+        self, anchor_page: int | None, table_page: int | None
+    ) -> bool:
+        """限制标题与首张表的页码距离，避免把远处附件表误挂到当前锚点。"""
+        if anchor_page is None or table_page is None:
+            return True
+        max_gap = int(getattr(self, "LAYOUT_TABLE_START_PAGE_GAP", 2) or 2)
+        return abs(table_page - anchor_page) <= max_gap
+
+    def _looks_like_financial_receipt_section(self, lines: list[str]) -> bool:
+        """识别投标保证金回单等金融凭证，避免误当成报价总价表。"""
+        combined = self._normalize_label_key(" ".join(lines))
+        receipt_hints = (
+            "付款人",
+            "收款人",
+            "开户银行",
+            "交易时间",
+            "交易流水号",
+            "投标保证金",
+            "账号",
+            "网上汇款",
+        )
+        hint_hits = sum(1 for hint in receipt_hints if hint in combined)
+        return hint_hits >= 3
 
     def _prioritize_item_sections(self, sections: list[dict]) -> list[dict]:
         """优先保留更像正式分项报价表的核心区段。"""

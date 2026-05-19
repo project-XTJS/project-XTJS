@@ -38,6 +38,7 @@ class NormalModeMixin:
         structured_analysis = self._extract_structured_itemized_entries(
             document,
             item_sections=item_sections,
+            total_sections=total_sections,
         )
         extracted_items = list(structured_analysis["items"])
         extracted_totals = list(structured_analysis["totals"])

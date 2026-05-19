@@ -87,6 +87,6 @@ class ItemizedNormalModeTests(unittest.TestCase):
         self.assertEqual(len(extracted_items), 1)
         self.assertEqual(extracted_items[0].get("label"), "安装服务")
 
-
+  
 if __name__ == "__main__":
     unittest.main()

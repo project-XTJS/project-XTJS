@@ -26,8 +26,33 @@ class ItemizedPricingChecker(
     NormalModeMixin,
 ):
     # 报价表/总价表锚点与关键词配置（类常量）
-    ITEM_SECTION_ANCHORS = ("分项报价表","供应清单","货物清单","工程量清单","报价表","投标价格表",)
-    PRIMARY_ITEM_SECTION_ANCHORS = ("分项报价表","报价表","投标价格表",)
+    ITEM_SECTION_ANCHORS = (
+        "分项报价表",
+        "分项报价明细",
+        "投标报价明细表",
+        "报价明细一览表",
+        "报价分类明细",
+        "报价明细",
+        "标价明细",
+        "已标价工程量清单",
+        "已标价清单",
+        "供应清单",
+        "货物清单",
+        "工程量清单",
+        "投标价格表",
+        "报价表",
+    )
+    PRIMARY_ITEM_SECTION_ANCHORS = (
+        "分项报价表",
+        "分项报价明细",
+        "投标报价明细表",
+        "报价明细一览表",
+        "报价分类明细",
+        "报价明细",
+        "标价明细",
+        "已标价工程量清单",
+        "已标价清单",
+    )
     TOTAL_SECTION_ANCHORS = ("开标一览表","报价一览表","投标总价","总报价",)
     TOTAL_KEYWORDS = ("合计","总计","总价","总报价","投标总价","单价合计","金额合计","报价合计",)
     OPENING_TOTAL_KEYWORDS = ("投标总价","总报价","开标一览表","报价一览表",)
@@ -46,6 +71,8 @@ class ItemizedPricingChecker(
     }
     MONEY_TOLERANCE = Decimal("0.10")
     PRIMARY_ITEM_SECTION_NEARBY_PAGE_GAP = 2
+    LAYOUT_TABLE_START_PAGE_GAP = 2
+    STRUCTURED_FALLBACK_NEARBY_PAGE_GAP = 3
     LOW_CONFIDENCE_UNRESOLVED_THRESHOLD = 3
 
     # 主入口方法（保留在原类中，因为它不属于某个特定 Mixin）

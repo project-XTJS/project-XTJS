@@ -235,7 +235,53 @@ class ArithmeticCheckerMixin:
     ) -> list[dict]:
         """提取“小写金额/报价金额”这类显式金额声明行。"""
         entries = []
+        multiline_amount_indexes = set()
+        if force_total:
+            for idx in range(len(lines) - 1):
+                current_line = lines[idx]
+                next_line = lines[idx + 1]
+                if self._should_skip_line(current_line) or self._is_table_header_line(
+                    current_line
+                ):
+                    continue
+                if self._extract_money_candidates(current_line):
+                    continue
+                if (
+                    not self._looks_like_total_line(current_line)
+                    and "报价" not in current_line
+                ):
+                    continue
+                if self._should_skip_line(next_line) or self._is_table_header_line(
+                    next_line
+                ):
+                    continue
+                amounts = self._extract_money_candidates(next_line)
+                if len(amounts) != 1:
+                    continue
+
+                label = (
+                    str((section_context or {}).get("anchor") or "").strip()
+                    or self._clean_label(current_line)
+                    or "总价"
+                )
+                entries.append(
+                    {
+                        "label": label,
+                        "amount": amounts[0],
+                        "source": "explicit_amount",
+                        "is_total": True,
+                        **self._build_entry_context(
+                            section_context,
+                            serial=self._extract_row_serial(next_line),
+                            line_index=idx + 1,
+                        ),
+                    }
+                )
+                multiline_amount_indexes.add(idx + 1)
+
         for idx, line in enumerate(lines):
+            if idx in multiline_amount_indexes:
+                continue
             if (
                 "小写" not in line
                 and "金额" not in line
