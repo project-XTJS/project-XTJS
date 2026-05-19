@@ -1235,22 +1235,6 @@ class VerificationChecker:
             return {"status": "fail", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
         seal_texts = list(dict.fromkeys(str(x).strip() for x in (bid_section.get("seal_texts") or []) if str(x).strip()))
         seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
-        detected, matched, best_match = bool(seal_texts or seal_locations), bool(seal_texts or seal_locations), None
-        if bidder_name and seal_texts:
-            for seal_text in seal_texts:
-                score = self._company_score(bidder_name, seal_text)
-                if best_match is None or score > best_match["score"]:
-                    best_match = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
-            matched = bool(best_match and best_match["score"] >= 0.45)
-        return {"status": "pass" if detected and matched else "fail", "detected": detected, "matched": matched, "seal_texts": seal_texts, "seal_locations": seal_locations, "best_match": best_match}
-
-    def _seal_check(self, attachment: dict, bid_section: dict | None, bidder_name: str | None) -> dict:
-        if not attachment["requirements"].get("requires_seal"):
-            return {"status": "not_required", "detected": False, "matched": None, "seal_texts": [], "best_match": None}
-        if bid_section is None:
-            return {"status": "fail", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
-        seal_texts = list(dict.fromkeys(str(x).strip() for x in (bid_section.get("seal_texts") or []) if str(x).strip()))
-        seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
         textual_seals = self._textual_seal_evidences(bid_section, bidder_name)
         detected = bool(seal_texts or seal_locations or textual_seals)
         matched = bool(seal_texts or seal_locations)

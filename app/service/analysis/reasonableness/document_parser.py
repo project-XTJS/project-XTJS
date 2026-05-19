@@ -130,11 +130,12 @@ class DocumentParserMixin:
         if not context_ok:
             return False
 
+        label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
         patterns = [
-            r"(?:参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)"
-            r"[^\n]{0,20}?(?:小写[：:]?)?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
-            r"(?:参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)"
-            r"[^\n]{0,20}?(?:为人民币)?[^\n]{0,40}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
+            label_pattern
+            + r"[^\n]{0,20}?(?:小写[：:]?)?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?",
+            label_pattern
+            + r"[^\n]{0,20}?(?:为人民币)?[^\n]{0,40}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
             r"[^\n]{0,40}?小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
             r"小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?"
             r".{0,60}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+",
@@ -331,38 +332,3 @@ class DocumentParserMixin:
             for page, texts in page_map.items()
         }
 
-    def _has_bid_total_amount_signal(
-        self, text: str, *, assume_opening_context: bool = False
-    ) -> bool:
-        """兼容“最终报价(总价、元)”等开标总价字段。"""
-        if not text or not str(text).strip():
-            return False
-        search_text = self._strip_price_markup(str(text))
-        context_ok = assume_opening_context or self._has_bid_opening_context(search_text)
-        if not context_ok:
-            return False
-
-        label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
-        patterns = [
-            label_pattern
-            + r"[^\n]{0,20}?(?:小写[：:]?)?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?",
-            label_pattern
-            + r"[^\n]{0,20}?(?:为人民币)?[^\n]{0,40}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
-            r"[^\n]{0,40}?小写[：:]?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?",
-            r"小写[：:]?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?"
-            r".{0,60}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+",
-            r"大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
-            r".{0,60}?小写[：:]?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?",
-        ]
-        return any(re.search(pattern, search_text, re.IGNORECASE | re.DOTALL) for pattern in patterns)
-
-    def _bid_total_label_patterns(self) -> list[str]:
-        return [
-            r"参选总价",
-            r"投标总价",
-            r"报价总价",
-            r"响应总报价",
-            r"投标报价总价",
-            r"总报价",
-            r"最终报价(?:\s*[\(（]?\s*总价\s*[、,，/]?\s*元?\s*[\)）]?)?",
-        ]

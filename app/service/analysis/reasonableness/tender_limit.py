@@ -292,9 +292,10 @@ class TenderLimitMixin:
         ):
             return None
 
+        label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
         direct_total_patterns = [
-            r"(参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            r"(参选总价|投标总价|报价总价|响应总报价|投标报价总价|总报价)[^\n]{0,20}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            rf"({label_pattern})[^\n\d]{{0,20}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            rf"({label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
             r"小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
 
@@ -416,82 +417,3 @@ class TenderLimitMixin:
             "pages": pages,
             "locations": locations,
         }
-
-    def _extract_bid_total_amount(self, bid_source: Any) -> Optional[Dict]:
-        parsed = self._parse_input(bid_source)
-        bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
-
-        if not bid_opening_text or not bid_opening_text.strip():
-            return None
-
-        normalized_opening_text = self._strip_price_markup(bid_opening_text)
-        has_opening_context = (
-            self._contains_bid_opening_title(bid_opening_text)
-            or self._has_bid_opening_context(bid_opening_text)
-        )
-        if not self._has_bid_total_amount_signal(
-            bid_opening_text,
-            assume_opening_context=self._contains_bid_opening_title(bid_opening_text),
-        ):
-            return None
-
-        label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
-        direct_total_patterns = [
-            rf"({label_pattern})[^\n\d]{{0,20}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            rf"({label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            r"小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-        ]
-
-        search_texts = [normalized_opening_text]
-        if normalized_opening_text != bid_opening_text:
-            search_texts.append(bid_opening_text)
-
-        for search_text in search_texts:
-            for pattern in direct_total_patterns:
-                for m in re.finditer(pattern, search_text):
-                    raw_amount = (
-                        m.group(2).strip()
-                        if len(m.groups()) >= 2
-                        else m.group(1).strip()
-                    )
-                    amount = self._clean_small_price(raw_amount)
-                    if amount is None:
-                        continue
-                    return {
-                        "page": bid_page,
-                        "amount_yuan": round(amount, 2),
-                        "raw_amount": raw_amount,
-                        "context": normalized_opening_text[:400] or bid_opening_text[:400],
-                    }
-
-        price_pairs = self._extract_direct_price_pairs(normalized_opening_text)
-        for pair in price_pairs:
-            small_price = pair.get("small_price")
-            if small_price is None:
-                continue
-            return {
-                "page": bid_page,
-                "amount_yuan": round(float(small_price), 2),
-                "raw_amount": pair.get("small_price_str") or str(small_price),
-                "context": bid_opening_text[:400],
-            }
-
-        if has_opening_context and not self._looks_like_itemized_total_page(bid_opening_text):
-            line_patterns = [
-                r"(合计)[^\n\d]{0,20}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            ]
-            for search_text in search_texts:
-                for pattern in line_patterns:
-                    for m in re.finditer(pattern, search_text):
-                        raw_amount = m.group(2).strip()
-                        amount = self._clean_small_price(raw_amount)
-                        if amount is None:
-                            continue
-                        return {
-                            "page": bid_page,
-                            "amount_yuan": round(amount, 2),
-                            "raw_amount": raw_amount,
-                            "context": normalized_opening_text[:400] or bid_opening_text[:400],
-                        }
-
-        return None
