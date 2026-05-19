@@ -1235,14 +1235,41 @@ class VerificationChecker:
             return {"status": "fail", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
         seal_texts = list(dict.fromkeys(str(x).strip() for x in (bid_section.get("seal_texts") or []) if str(x).strip()))
         seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
-        detected, matched, best_match = bool(seal_texts or seal_locations), bool(seal_texts or seal_locations), None
+        textual_seals = self._textual_seal_evidences(bid_section, bidder_name)
+        detected = bool(seal_texts or seal_locations or textual_seals)
+        matched = bool(seal_texts or seal_locations)
+        best_match = None
         if bidder_name and seal_texts:
             for seal_text in seal_texts:
                 score = self._company_score(bidder_name, seal_text)
                 if best_match is None or score > best_match["score"]:
                     best_match = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
             matched = bool(best_match and best_match["score"] >= 0.45)
-        return {"status": "pass" if detected and matched else "fail", "detected": detected, "matched": matched, "seal_texts": seal_texts, "seal_locations": seal_locations, "best_match": best_match}
+        if bidder_name and textual_seals:
+            textual_best = None
+            for item in textual_seals:
+                score = self._company_score(bidder_name, item.get("text") or item.get("company") or "")
+                if textual_best is None or score > textual_best["score"]:
+                    textual_best = {
+                        "bidder_name": bidder_name,
+                        "seal_text": item.get("text"),
+                        "score": round(score, 4),
+                        "mode": "textual_seal_line",
+                        "page": item.get("page"),
+                    }
+            if textual_best and textual_best["score"] >= 0.45:
+                if best_match is None or textual_best["score"] >= best_match["score"]:
+                    best_match = textual_best
+                matched = True
+        return {
+            "status": "pass" if detected and matched else "fail",
+            "detected": detected,
+            "matched": matched,
+            "seal_texts": seal_texts,
+            "seal_locations": seal_locations,
+            "textual_seal_evidences": textual_seals,
+            "best_match": best_match,
+        }
 
     def _date_check(self, attachment: dict, bid_section: dict | None, deadline: dict | None) -> dict:
         if not attachment["requirements"].get("requires_date"):
@@ -1397,3 +1424,42 @@ class VerificationChecker:
                 best = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
         matched = bool(best and best["score"] >= 0.45)
         return {"status": "pass" if matched else "fail", "matched": matched, "reason": "matched" if matched else "low_similarity", "best_match": best}
+
+    def _textual_seal_evidences(self, bid_section: dict | None, bidder_name: str | None) -> list[dict]:
+        if not isinstance(bid_section, dict):
+            return []
+        bidder_norm = self._normalize_company(bidder_name) if bidder_name else ""
+        evidences: list[dict] = []
+        seen: set[tuple[int | None, str]] = set()
+        for section in bid_section.get("sections") or []:
+            page = section.get("page") if isinstance(section.get("page"), int) else None
+            section_text = str(section.get("text") or "").strip()
+            if not section_text:
+                continue
+            for line in self._lines(section_text):
+                compact = self._compact(line)
+                if not compact or not any(marker in compact for marker in self.SEAL_MARKERS):
+                    continue
+                normalized_company = self._normalize_company(line)
+                if bidder_norm:
+                    if bidder_norm not in normalized_company:
+                        continue
+                    company_value = bidder_norm
+                else:
+                    match = self.COMPANY_RE.search(compact)
+                    if not match:
+                        continue
+                    company_value = self._normalize_company(match.group(1))
+                key = (page, compact)
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidences.append(
+                    {
+                        "page": page,
+                        "box": self._normalize_bbox(section.get("bbox")),
+                        "text": line,
+                        "company": company_value,
+                    }
+                )
+        return evidences

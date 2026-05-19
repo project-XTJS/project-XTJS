@@ -886,12 +886,36 @@ class ConsistencyChecker:
 
             norm_t = self._normalize(fixed_bid_body)
             anchors = template_analysis["anchors"]
-            missing = [a for a in anchors if a not in norm_t]
+            normalized_title = self._normalize(title)
+            has_equivalent_final_quote = (
+                any(marker in normalized_title for marker in ("开标一览表", "报价一览表"))
+                and bool(re.search(r"[¥￥]|\d[\d,，.]*", t_body or fixed_bid_body or ""))
+                and any(
+                    marker in self._normalize(f"{fixed_bid_body}\n{t_body}")
+                    for marker in ("最终报价总价元", "最终报价总价", "最终报价")
+                )
+            )
+            missing = [
+                a
+                for a in anchors
+                if a not in norm_t
+                and not (has_equivalent_final_quote and a in {"投标总价", "报价总价", "总报价", "小写"})
+            ]
             dynamic_missing = self._evaluate_dynamic_slot_specs(
                 dynamic_slot_specs,
                 t_body,
                 fixed_bid_body,
             )
+            if has_equivalent_final_quote and dynamic_missing:
+                equivalent_total_fields = {
+                    self._normalize(field)
+                    for field in ("投标总价", "报价总价", "总报价", "小写", "投标总价（小写）", "报价总价（小写）")
+                }
+                dynamic_missing = [
+                    field
+                    for field in dynamic_missing
+                    if self._normalize(field) not in equivalent_total_fields
+                ]
             if dynamic_missing:
                 combined_missing: List[str] = []
                 seen_missing: set[str] = set()

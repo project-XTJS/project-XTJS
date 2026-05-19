@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Callable
 
@@ -156,11 +157,11 @@ class HelpersMixin:
         """专门针对报价结果的字符串映射。"""
         result_text = str(result_value or "").strip()
         combined = f"{result_text} {summary_text}".strip()
-        if "合格" in combined or __import__("re").search(r"\bpass\b", combined, __import__("re").IGNORECASE):
-            return "pass"
         fail_keywords = ("不合格", "超出", "异常", "失败", "错误")
         if any(keyword in combined for keyword in fail_keywords):
             return "fail"
+        if "合格" in combined or re.search(r"\bpass\b", combined, re.IGNORECASE):
+            return "pass"
         unclear_keywords = ("未识别", "未找到", "无法", "暂无法", "人工复核", "待复核")
         if any(keyword in combined for keyword in unclear_keywords):
             return "unclear"
