@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any
+from difflib import SequenceMatcher
 
 
 class RateModeMixin:
@@ -20,6 +20,8 @@ class RateModeMixin:
     ITEM_SECTION_ANCHORS: tuple
     TOTAL_KEYWORDS: tuple
     UNIT_KEYWORDS: tuple
+    RATE_LABEL_MATCH_SIMILARITY_THRESHOLD = 0.78
+    RATE_LABEL_MATCH_CONTAINMENT_MIN_LENGTH = 4
 
     # 下浮率模式入口
     def _check_downward_rate_mode(
@@ -39,10 +41,8 @@ class RateModeMixin:
         if not relevant_sections:
             relevant_sections = candidate_sections
 
-        serials = []
         extracted_items = []
         for section in relevant_sections:
-            serials.extend(self._extract_serials(section["lines"]))
             extracted_items.extend(
                 self._extract_rate_items(section["lines"], section_context=section)
             )
@@ -50,7 +50,8 @@ class RateModeMixin:
         extracted_items = self._dedupe_entries(extracted_items)
         serial_gap_hints = self._extract_serial_gap_hints(relevant_sections)
         comparison_items = self._extract_comparison_items_from_sections(
-            relevant_sections, rate_mode=True
+            relevant_sections,
+            rate_mode=True,
         )
         reference_items = (
             self._extract_reference_items(tender_document)
@@ -68,11 +69,17 @@ class RateModeMixin:
             missing_item_status = "unknown"
             comparison_basis = None
             status = "unknown"
+            matched_items = []
+            match_strategy_stats = {}
         else:
             missing_items = comparison_result["missing_items"]
             missing_item_status = "fail" if missing_items else "pass"
             comparison_basis = comparison_result["comparison_basis"]
             status = "fail" if missing_items else "pass"
+            matched_items = list(comparison_result.get("matched_items") or [])
+            match_strategy_stats = dict(
+                comparison_result.get("match_strategy_stats") or {}
+            )
 
         details = [
             "检测到下浮率模式，按业务规则跳过下浮率数值本身的校验。",
@@ -88,6 +95,11 @@ class RateModeMixin:
         else:
             details.append(
                 "已对比招标文件与投标文件列项，暂未发现明显删减项。"
+            )
+        if match_strategy_stats.get("label_fallback"):
+            details.append(
+                f"其中 {match_strategy_stats['label_fallback']} 个列项通过标签回退匹配确认覆盖，"
+                "说明投标文件的列项序号存在调整。"
             )
         if serial_gap_hints:
             details.append(
@@ -125,6 +137,10 @@ class RateModeMixin:
                     "status": missing_item_status,
                     "missing_items": missing_items,
                     "comparison_basis": comparison_basis,
+                    "matched_count": len(matched_items),
+                    "reference_count": len(reference_items),
+                    "bid_count": len(comparison_items),
+                    "match_strategies": match_strategy_stats,
                     "hints": serial_gap_hints,
                     "hint_level": "info" if serial_gap_hints else None,
                 },
@@ -136,6 +152,8 @@ class RateModeMixin:
                 "comparison_items": self._serialize_entries(comparison_items),
                 "reference_item_count": len(reference_items),
                 "reference_items": self._serialize_entries(reference_items),
+                "matched_items": matched_items,
+                "unmatched_reference_items": missing_items,
             },
             "details": details,
         }
@@ -190,9 +208,7 @@ class RateModeMixin:
             return []
 
         missing = []
-        int_serials = sorted(
-            {int(serial) for serial in serials if serial.isdigit()}
-        )
+        int_serials = sorted({int(serial) for serial in serials if serial.isdigit()})
         # 如果序号跨度异常大，可能不是连续编号，放弃整数推断
         if (
             len(int_serials) >= 3
@@ -202,9 +218,7 @@ class RateModeMixin:
         for left, right in zip(int_serials, int_serials[1:]):
             if right - left <= 1:
                 continue
-            missing.extend(
-                [str(number) for number in range(left + 1, right)]
-            )
+            missing.extend([str(number) for number in range(left + 1, right)])
 
         grouped_children = {}
         for serial in serials:
@@ -231,16 +245,16 @@ class RateModeMixin:
     ) -> list[dict]:
         """在下浮率模式下提取可用于比对的列项标签。"""
         items = []
-        for idx, line in enumerate(lines):
-            if (
-                not any(keyword in line for keyword in self.RATE_KEYWORDS)
-                and "%" not in line
-                and "％" not in line
-            ):
+        row_blocks = self._build_table_row_blocks(lines)
+        for block in row_blocks:
+            block_text = " ".join(block.get("lines") or [])
+            if not self._has_rate_signal(block_text):
                 continue
-            if "序号" in line and "项目名称" in line:
-                continue
-            label = self._extract_row_label(line, idx)
+            label = self._extract_comparison_label(
+                block_text,
+                int(block.get("start_index") or 0),
+                rate_mode=True,
+            )
             if not label:
                 continue
             items.append(
@@ -248,6 +262,31 @@ class RateModeMixin:
                     "label": label,
                     "amount": None,
                     "source": "downward_rate",
+                    "raw_text": block_text[:160],
+                    **self._build_entry_context(
+                        section_context,
+                        serial=block.get("serial") or self._extract_row_serial(block_text),
+                        line_index=block.get("start_index"),
+                    ),
+                }
+            )
+        if items:
+            return items
+
+        for idx, line in enumerate(lines):
+            if not self._has_rate_signal(line):
+                continue
+            if "序号" in line and "项目名称" in line:
+                continue
+            label = self._extract_comparison_label(line, idx, rate_mode=True)
+            if not label:
+                continue
+            items.append(
+                {
+                    "label": label,
+                    "amount": None,
+                    "source": "downward_rate",
+                    "raw_text": line[:160],
                     **self._build_entry_context(
                         section_context,
                         serial=self._extract_row_serial(line),
@@ -296,6 +335,15 @@ class RateModeMixin:
         self, lines: list[str], *, rate_mode: bool
     ) -> list[dict]:
         """从单个区段中提取用于招投标比对的列项。"""
+        row_blocks = self._build_table_row_blocks(lines)
+        if row_blocks:
+            block_items = self._extract_comparison_items_from_row_blocks(
+                row_blocks,
+                rate_mode=rate_mode,
+            )
+            if block_items:
+                return block_items
+
         items = []
         for idx, line in enumerate(lines):
             compact = re.sub(r"\s+", "", line)
@@ -315,11 +363,7 @@ class RateModeMixin:
                 continue
 
             serial = self._extract_row_serial(line)
-            has_rate = (
-                any(keyword in line for keyword in self.RATE_KEYWORDS)
-                or "%" in line
-                or "％" in line
-            )
+            has_rate = self._has_rate_signal(line)
             if not (self._looks_like_item_row(line) or serial or has_rate):
                 continue
             if rate_mode and not has_rate and not serial:
@@ -332,7 +376,41 @@ class RateModeMixin:
                 {
                     "serial": serial,
                     "label": label,
-                    "label_key": self._normalize_label_key(label),
+                    "label_key": self._build_comparison_label_key(label),
+                    "source": "rate_item" if rate_mode else "reference_item",
+                }
+            )
+        return items
+
+    def _extract_comparison_items_from_row_blocks(
+        self, row_blocks: list[dict], *, rate_mode: bool
+    ) -> list[dict]:
+        """优先按重建后的行块抽取列项，降低 OCR 拆行对比对结果的干扰。"""
+        items = []
+        for block in row_blocks:
+            block_text = " ".join(block.get("lines") or [])
+            if not block_text:
+                continue
+            serial = str(
+                block.get("serial") or self._extract_row_serial(block_text) or ""
+            ).strip()
+            has_rate = self._has_rate_signal(block_text)
+            if not (self._looks_like_item_row(block_text) or serial or has_rate):
+                continue
+            if rate_mode and not (has_rate or serial):
+                continue
+            label = self._extract_comparison_label(
+                block_text,
+                int(block.get("start_index") or 0),
+                rate_mode=rate_mode,
+            )
+            if not label or self._is_generic_comparison_label(label):
+                continue
+            items.append(
+                {
+                    "serial": serial or None,
+                    "label": label,
+                    "label_key": self._build_comparison_label_key(label),
                     "source": "rate_item" if rate_mode else "reference_item",
                 }
             )
@@ -340,7 +418,7 @@ class RateModeMixin:
 
     def _extract_comparison_label(
         self, line: str, index: int, *, rate_mode: bool
-    ) -> str:
+    ) -> str | None:
         """清洗比较用标签，去掉金额、单位和下浮率尾巴。"""
         label = re.sub(r"^\s*\d+(?:\.\d+)?\s*", "", line)
         label = re.sub(r"^\s*\d+(?:\.\d+)?\s+", "", label)
@@ -360,36 +438,59 @@ class RateModeMixin:
             label,
         )
         label = re.sub(r"\s+", " ", label).strip("：: /")
-        return label[:80] if label else f"第{index + 1}行"
+        return label[:80] if label else None
+
+    def _build_comparison_label_key(self, label: str | None) -> str:
+        """构造列项比对用标签键，去掉空白和常见标点，保留核心词。"""
+        normalized = self._normalize_label_key(label)
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]+", "", normalized)
+
+    def _is_generic_comparison_label(self, label: str | None) -> bool:
+        """判断标签是否只是兜底生成的泛化占位文本。"""
+        return bool(re.fullmatch(r"第\d+行", str(label or "").strip()))
+
+    def _has_reliable_comparison_label(self, item: dict) -> bool:
+        """判断列项是否具备足够稳定的标签，可用于序号变化时的回退匹配。"""
+        label = str(item.get("label") or "").strip()
+        label_key = str(item.get("label_key") or "").strip()
+        return bool(
+            label_key
+            and not self._is_generic_comparison_label(label)
+            and len(label_key) >= 2
+        )
+
+    def _has_rate_signal(self, text: str) -> bool:
+        """判断文本中是否包含下浮率/优惠率信号。"""
+        return bool(text) and (
+            any(keyword in text for keyword in self.RATE_KEYWORDS)
+            or "%" in text
+            or "％" in text
+        )
 
     def _compare_reference_items(
         self, reference_items: list[dict], bid_items: list[dict]
     ) -> dict:
         """比较招标与投标列项，输出疑似缺失项。"""
-        reference_with_serial = [
-            item for item in reference_items if item.get("serial")
-        ]
-        bid_serials = {
-            item["serial"] for item in bid_items if item.get("serial")
-        }
         missing_items = []
-        comparison_basis = "tender_vs_bid_label"
+        matched_items = []
+        match_strategy_stats: Counter[str] = Counter()
+        has_serial_reference = any(item.get("serial") for item in reference_items)
+        has_serial_bid = any(item.get("serial") for item in bid_items)
 
-        if reference_with_serial and bid_serials:
-            comparison_basis = "tender_vs_bid_serial"
-            for item in reference_with_serial:
-                if item["serial"] in bid_serials:
-                    continue
+        for item in reference_items:
+            match_payload = self._match_reference_item(item, bid_items)
+            if match_payload is None:
                 missing_items.append(self._format_comparison_item(item))
-        else:
-            bid_label_keys = {
-                item["label_key"] for item in bid_items if item.get("label_key")
-            }
-            for item in reference_items:
-                label_key = item.get("label_key")
-                if not label_key or label_key in bid_label_keys:
-                    continue
-                missing_items.append(self._format_comparison_item(item))
+                continue
+            strategy = str(match_payload["strategy"])
+            match_strategy_stats[strategy] += 1
+            matched_items.append(
+                {
+                    "reference": self._format_comparison_item(item),
+                    "bid": self._format_comparison_item(match_payload["bid_item"]),
+                    "strategy": strategy,
+                }
+            )
 
         deduped_missing = []
         seen = set()
@@ -398,10 +499,130 @@ class RateModeMixin:
                 continue
             seen.add(item)
             deduped_missing.append(item)
+        comparison_basis = self._resolve_comparison_basis(
+            has_serial_reference=has_serial_reference,
+            has_serial_bid=has_serial_bid,
+            match_strategy_stats=match_strategy_stats,
+        )
         return {
             "comparison_basis": comparison_basis,
             "missing_items": deduped_missing,
+            "matched_items": matched_items,
+            "match_strategy_stats": dict(match_strategy_stats),
         }
+
+    def _match_reference_item(
+        self, reference_item: dict, bid_items: list[dict]
+    ) -> dict | None:
+        """为招标列项寻找最合适的投标列项匹配，优先序号+标签，再回退到标签。"""
+        reference_serial = str(reference_item.get("serial") or "").strip()
+        same_serial_candidates = (
+            [
+                item
+                for item in bid_items
+                if str(item.get("serial") or "").strip() == reference_serial
+            ]
+            if reference_serial
+            else []
+        )
+
+        same_serial_label_match = self._find_best_label_match(
+            reference_item,
+            same_serial_candidates,
+        )
+        if same_serial_label_match is not None:
+            return {
+                "bid_item": same_serial_label_match,
+                "strategy": "serial_and_label",
+            }
+
+        any_label_match = self._find_best_label_match(reference_item, bid_items)
+        if any_label_match is not None:
+            matched_serial = str(any_label_match.get("serial") or "").strip()
+            strategy = (
+                "label_fallback"
+                if reference_serial and matched_serial and matched_serial != reference_serial
+                else "label"
+            )
+            return {
+                "bid_item": any_label_match,
+                "strategy": strategy,
+            }
+
+        if same_serial_candidates and (
+            not self._has_reliable_comparison_label(reference_item)
+            or any(
+                not self._has_reliable_comparison_label(candidate)
+                for candidate in same_serial_candidates
+            )
+        ):
+            return {
+                "bid_item": same_serial_candidates[0],
+                "strategy": "serial_only",
+            }
+        return None
+
+    def _find_best_label_match(
+        self, reference_item: dict, bid_items: list[dict]
+    ) -> dict | None:
+        """根据标签相似度为参考列项选择最佳候选。"""
+        reference_label_key = str(reference_item.get("label_key") or "").strip()
+        if not reference_label_key:
+            return None
+
+        best_item = None
+        best_score = 0.0
+        for bid_item in bid_items:
+            candidate_label_key = str(bid_item.get("label_key") or "").strip()
+            score = self._score_comparison_label_keys(
+                reference_label_key,
+                candidate_label_key,
+            )
+            if score > best_score:
+                best_score = score
+                best_item = bid_item
+
+        threshold = float(
+            getattr(self, "RATE_LABEL_MATCH_SIMILARITY_THRESHOLD", 0.78) or 0.78
+        )
+        return best_item if best_item is not None and best_score >= threshold else None
+
+    def _score_comparison_label_keys(
+        self, reference_label_key: str, candidate_label_key: str
+    ) -> float:
+        """计算两个列项标签键的匹配分数。"""
+        if not reference_label_key or not candidate_label_key:
+            return 0.0
+        if reference_label_key == candidate_label_key:
+            return 1.0
+
+        threshold = float(
+            getattr(self, "RATE_LABEL_MATCH_SIMILARITY_THRESHOLD", 0.78) or 0.78
+        )
+        min_length = int(
+            getattr(self, "RATE_LABEL_MATCH_CONTAINMENT_MIN_LENGTH", 4) or 4
+        )
+        shorter, longer = sorted(
+            (reference_label_key, candidate_label_key),
+            key=len,
+        )
+        if len(shorter) >= min_length and shorter in longer:
+            return max(threshold, len(shorter) / max(len(longer), 1))
+        return SequenceMatcher(None, reference_label_key, candidate_label_key).ratio()
+
+    def _resolve_comparison_basis(
+        self,
+        *,
+        has_serial_reference: bool,
+        has_serial_bid: bool,
+        match_strategy_stats: Counter[str],
+    ) -> str:
+        """根据匹配过程归纳本次删减项比对的主要依据。"""
+        if match_strategy_stats.get("label_fallback"):
+            return "tender_vs_bid_serial_then_label"
+        if has_serial_reference and has_serial_bid:
+            return "tender_vs_bid_serial"
+        return "tender_vs_bid_label"
 
     def _format_comparison_item(self, item: dict) -> str:
         """把列项格式化成便于展示和人工复核的字符串。"""

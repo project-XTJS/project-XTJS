@@ -32,8 +32,6 @@ class ItemizedPricingChecker(
     TOTAL_KEYWORDS = ("合计","总计","总价","总报价","投标总价","单价合计","金额合计","报价合计",)
     OPENING_TOTAL_KEYWORDS = ("投标总价","总报价","开标一览表","报价一览表",)
     SUBTOTAL_KEYWORDS = ("小计",)
-    PREFERENTIAL_TOTAL_KEYWORDS = ("最终优惠价","优惠价","折后","优惠后","让利后","下浮后",)
-    PREFERENTIAL_TOTAL_LINE_WINDOW = 5
     RATE_KEYWORDS = ("下浮率","优惠率","折扣率","折让率","下浮",)
     UNIT_KEYWORDS = ("台","套","项","个","批","次","人","年","月","日","米","吨","樘","组","m2","㎡",)
     ZERO_AMOUNT_KEYWORDS = ("包含","免费","赠送","无偿","不收费",)

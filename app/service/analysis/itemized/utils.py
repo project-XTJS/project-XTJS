@@ -240,7 +240,6 @@ class UtilsMixin:
             entry.get("source"),
             bool(entry.get("is_total")),
             bool(entry.get("is_subtotal")),
-            bool(entry.get("is_preferential_total")),
             self._entry_context_key(entry),
         )
 

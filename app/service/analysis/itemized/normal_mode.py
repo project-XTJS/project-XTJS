@@ -2,7 +2,7 @@
 """
 分项报价 - 普通模式 Mixin
 
-包含普通报价模式（非下浮率）下的汇总校验、优惠价模式检测、
+包含普通报价模式（非下浮率）下的汇总校验、
 结果总结与人工复核提示生成等逻辑。
 """
 
@@ -19,8 +19,6 @@ class NormalModeMixin:
     # 依赖常量与其它 Mixin 提供的方法
     MONEY_TOLERANCE: Decimal
     SUBTOTAL_KEYWORDS: tuple
-    PREFERENTIAL_TOTAL_KEYWORDS: tuple
-    PREFERENTIAL_TOTAL_LINE_WINDOW: int
     TOTAL_KEYWORDS: tuple
     OPENING_TOTAL_KEYWORDS: tuple
     ZERO_AMOUNT_KEYWORDS: tuple
@@ -45,18 +43,21 @@ class NormalModeMixin:
         extracted_totals = list(structured_analysis["totals"])
         row_issues = list(structured_analysis["row_issues"])
         unresolved_rows = list(structured_analysis["unresolved_rows"])
-        preferential_mode = self._detect_preferential_total_mode(document)
 
         if structured_analysis["used_tables"]:
-            extracted_totals.extend(
-                self._collect_section_totals(total_sections or candidate_sections)
-            )
+            if not total_sections:
+                extracted_totals.extend(
+                    self._collect_section_totals(candidate_sections)
+                )
         else:
             section_analysis = self._collect_section_analysis(item_source_sections)
             extracted_items.extend(section_analysis["items"])
             extracted_totals.extend(section_analysis["totals"])
             row_issues.extend(section_analysis["row_issues"])
             unresolved_rows.extend(section_analysis["unresolved_rows"])
+
+        if total_sections:
+            extracted_totals.extend(self._collect_section_totals(total_sections))
 
         # 已识别到结构化分项表时，总价页只补总价候选，不再回退生成分项项。
         if not extracted_items and total_sections and not structured_analysis["used_tables"]:
@@ -65,11 +66,6 @@ class NormalModeMixin:
             extracted_totals.extend(fallback_analysis["totals"])
             row_issues.extend(fallback_analysis["row_issues"])
             unresolved_rows.extend(fallback_analysis["unresolved_rows"])
-
-        if preferential_mode and document is not None:
-            extracted_totals.extend(
-                self._extract_preferential_total_entries(document.get("lines") or [])
-            )
 
         if not extracted_totals or all(
             entry.get("is_subtotal") for entry in extracted_totals
@@ -93,7 +89,6 @@ class NormalModeMixin:
             extracted_totals,
             item_sections=item_sections,
             total_sections=total_sections,
-            preferential_mode=preferential_mode,
         )
         duplicate_items = self._extract_duplicate_items(extracted_items)
         serial_gap_hints = (
@@ -103,9 +98,7 @@ class NormalModeMixin:
         table_detected = bool(
             item_sections or total_sections or extracted_items or extracted_totals
         )
-        sum_check = self._evaluate_sum_check(
-            extracted_items, extracted_totals, preferential_mode=preferential_mode
-        )
+        sum_check = self._evaluate_sum_check(extracted_items, extracted_totals)
         confidence = self._assess_itemized_confidence(
             item_sections=item_sections,
             total_sections=total_sections,
@@ -222,8 +215,6 @@ class NormalModeMixin:
                     "matched_total_label": sum_check["matched_total_label"],
                     "raw_status": sum_check.get("raw_status"),
                     "total_mode": sum_check.get("total_mode"),
-                    "preferential_total": sum_check.get("preferential_total"),
-                    "preferential_total_label": sum_check.get("preferential_total_label"),
                     "subtotal_total": sum_check.get("subtotal_total"),
                     "subtotal_label": sum_check.get("subtotal_label"),
                     "subtotal_difference": sum_check.get("subtotal_difference"),
@@ -281,107 +272,6 @@ class NormalModeMixin:
             "details": details,
         }
 
-    # 优惠价/小计模式识别
-    def _detect_preferential_total_mode(self, document: dict | None) -> bool:
-        """识别文档是否存在“小计 + 最终优惠价”的特殊总价模式。"""
-        if not document:
-            return False
-        lines = document.get("lines") or []
-        preferential_entries = self._extract_preferential_total_entries(lines)
-        if not preferential_entries:
-            return False
-
-        subtotal_entries = self._extract_document_subtotal_entries(lines)
-        if not subtotal_entries:
-            return False
-
-        for preferential_entry in preferential_entries:
-            for subtotal_entry in subtotal_entries:
-                if (
-                    abs(
-                        preferential_entry["line_index"]
-                        - subtotal_entry["line_index"]
-                    )
-                    > self.PREFERENTIAL_TOTAL_LINE_WINDOW
-                ):
-                    continue
-                if (
-                    preferential_entry["amount"]
-                    <= subtotal_entry["amount"] + self.MONEY_TOLERANCE
-                ):
-                    return True
-        return False
-
-    def _extract_preferential_total_entries(
-        self, lines: list[str]
-    ) -> list[dict]:
-        """从全文中提取“最终优惠价/优惠价”等特殊总价声明。"""
-        entries = []
-        for idx, line in enumerate(lines):
-            if not self._looks_like_preferential_total_line(line):
-                continue
-            amounts = self._extract_money_candidates(line)
-            if len(amounts) != 1:
-                continue
-            entries.append(
-                {
-                    "label": self._clean_label(line) or "最终优惠价",
-                    "amount": amounts[0],
-                    "source": "preferential_total",
-                    "is_total": True,
-                    "is_preferential_total": True,
-                    "line_index": idx,
-                }
-            )
-        return entries
-
-    def _extract_document_subtotal_entries(
-        self, lines: list[str]
-    ) -> list[dict]:
-        """从全文中提取小计行，供优惠价模式下对账使用。"""
-        entries = []
-        for idx, line in enumerate(lines):
-            if not self._looks_like_subtotal_line(line):
-                continue
-            amounts = self._extract_money_candidates(line)
-            if not amounts:
-                continue
-            entries.append(
-                {
-                    "label": self._clean_label(line) or "小计",
-                    "amount": amounts[-1],
-                    "source": "document_subtotal",
-                    "is_total": True,
-                    "is_subtotal": True,
-                    "line_index": idx,
-                }
-            )
-        return entries
-
-    def _looks_like_preferential_total_line(self, line: str) -> bool:
-        """判断某一行是否像“最终优惠价”声明。"""
-        compact = re.sub(r"\s+", "", line)
-        if not compact or self._is_table_header_line(line):
-            return False
-        if len(self._extract_money_candidates(line)) != 1:
-            return False
-        if self._looks_like_item_row(line):
-            return False
-
-        strong_keywords = ("最终优惠价", "优惠价")
-        weak_keywords = tuple(
-            keyword
-            for keyword in self.PREFERENTIAL_TOTAL_KEYWORDS
-            if keyword not in strong_keywords
-        )
-        has_strong_keyword = any(keyword in compact for keyword in strong_keywords)
-        has_weak_keyword = any(keyword in compact for keyword in weak_keywords)
-        if not (has_strong_keyword or has_weak_keyword):
-            return False
-        if has_strong_keyword:
-            return True
-        return any(keyword in compact for keyword in self.TOTAL_KEYWORDS)
-
     def _looks_like_opening_total_label(self, label: str | None) -> bool:
         """判断总价标签是否更像开标一览表/总报价口径的声明总价。"""
         compact = re.sub(r"\s+", "", str(label or ""))
@@ -410,107 +300,13 @@ class NormalModeMixin:
                     len(str(item.get("label") or "")),
                 ),
             )
-
-        preferential_candidates = [
-            item for item in totals if item.get("is_preferential_total")
-        ]
-        if preferential_candidates:
-            return min(
-                preferential_candidates,
-                key=lambda item: (
-                    0 if item.get("source") == "explicit_amount" else 1,
-                    len(str(item.get("label") or "")),
-                ),
-            )
         return None
 
     # 汇总校验
-    def _evaluate_preferential_sum_check(
-        self, calculated_total: Decimal, totals: list[dict]
-    ) -> dict | None:
-        """对优惠价模式进行专门的汇总校验。"""
-        subtotal_candidates = [
-            item for item in totals if item.get("is_subtotal")
-        ]
-        preferential_candidates = [
-            item for item in totals if item.get("is_preferential_total")
-        ]
-        if not subtotal_candidates:
-            return None
-
-        best_subtotal = min(
-            subtotal_candidates,
-            key=lambda item: abs(item["amount"] - calculated_total),
-        )
-        subtotal_difference = calculated_total - best_subtotal["amount"]
-        subtotal_status = (
-            "pass"
-            if abs(subtotal_difference) <= self.MONEY_TOLERANCE
-            else "fail"
-        )
-
-        best_preferential_total = None
-        if preferential_candidates:
-            best_preferential_total = min(
-                preferential_candidates,
-                key=lambda item: abs(item["amount"] - calculated_total),
-            )
-
-        best_opening_total = self._select_opening_total_candidate(totals)
-        opening_total_difference = (
-            calculated_total - best_opening_total["amount"]
-            if best_opening_total is not None
-            else None
-        )
-        opening_total_status = (
-            "pass"
-            if best_opening_total is not None
-            and abs(opening_total_difference) <= self.MONEY_TOLERANCE
-            else ("fail" if best_opening_total is not None else None)
-        )
-
-        matched_total = best_subtotal
-        matched_difference = subtotal_difference
-        overall_status = subtotal_status
-        prefer_subtotal_basis = (
-            subtotal_status == "pass"
-            and best_preferential_total is not None
-            and best_opening_total is not None
-            and abs(best_opening_total["amount"] - best_preferential_total["amount"])
-            <= self.MONEY_TOLERANCE
-        )
-        if best_opening_total is not None:
-            if not prefer_subtotal_basis:
-                matched_total = best_opening_total
-                matched_difference = opening_total_difference
-            if not prefer_subtotal_basis and opening_total_status == "fail":
-                overall_status = "fail"
-
-        return self._build_sum_check_result(
-            status=overall_status,
-            calculated_total=calculated_total,
-            declared_total=matched_total["amount"],
-            difference=matched_difference,
-            matched_total_label=matched_total["label"],
-            total_mode="preferential_total",
-            preferential_total=(best_preferential_total or {}).get("amount"),
-            preferential_total_label=(best_preferential_total or {}).get("label"),
-            subtotal_total=best_subtotal["amount"],
-            subtotal_label=best_subtotal["label"],
-            subtotal_difference=subtotal_difference,
-            subtotal_status=subtotal_status,
-            opening_total=(best_opening_total or {}).get("amount"),
-            opening_total_label=(best_opening_total or {}).get("label"),
-            opening_total_difference=opening_total_difference,
-            opening_total_status=opening_total_status,
-        )
-
     def _evaluate_sum_check(
         self,
         items: list[dict],
         totals: list[dict],
-        *,
-        preferential_mode: bool = False,
     ) -> dict:
         """计算分项汇总与声明总价的关系。"""
         calculated_total = self._sum_entry_amounts(items)
@@ -519,15 +315,52 @@ class NormalModeMixin:
             return self._build_sum_check_result(
                 status="unknown" if items else "not_detected",
                 calculated_total=calculated_total if items else None,
-                total_mode="preferential_total" if preferential_mode else "standard",
             )
 
-        if preferential_mode:
-            preferential_result = self._evaluate_preferential_sum_check(
-                calculated_total, totals
+        opening_total = self._select_opening_total_candidate(totals)
+        subtotal_candidates = [item for item in totals if item.get("is_subtotal")]
+        best_subtotal = (
+            min(
+                subtotal_candidates,
+                key=lambda item: abs(item["amount"] - calculated_total),
             )
-            if preferential_result is not None:
-                return preferential_result
+            if subtotal_candidates
+            else None
+        )
+        subtotal_difference = (
+            calculated_total - best_subtotal["amount"]
+            if best_subtotal is not None
+            else None
+        )
+        subtotal_status = (
+            "pass"
+            if best_subtotal is not None
+            and abs(subtotal_difference) <= self.MONEY_TOLERANCE
+            else ("fail" if best_subtotal is not None else None)
+        )
+
+        if opening_total is not None:
+            opening_total_difference = calculated_total - opening_total["amount"]
+            opening_total_status = (
+                "pass"
+                if abs(opening_total_difference) <= self.MONEY_TOLERANCE
+                else "fail"
+            )
+            return self._build_sum_check_result(
+                status=opening_total_status,
+                calculated_total=calculated_total,
+                declared_total=opening_total["amount"],
+                difference=opening_total_difference,
+                matched_total_label=opening_total["label"],
+                subtotal_total=(best_subtotal or {}).get("amount"),
+                subtotal_label=(best_subtotal or {}).get("label"),
+                subtotal_difference=subtotal_difference,
+                subtotal_status=subtotal_status,
+                opening_total=opening_total["amount"],
+                opening_total_label=opening_total["label"],
+                opening_total_difference=opening_total_difference,
+                opening_total_status=opening_total_status,
+            )
 
         best_total = min(
             totals,
@@ -546,6 +379,10 @@ class NormalModeMixin:
             declared_total=best_total["amount"],
             difference=difference,
             matched_total_label=best_total["label"],
+            subtotal_total=(best_subtotal or {}).get("amount"),
+            subtotal_label=(best_subtotal or {}).get("label"),
+            subtotal_difference=subtotal_difference,
+            subtotal_status=subtotal_status,
         )
 
     def _build_single_item_total_candidate(
@@ -591,7 +428,6 @@ class NormalModeMixin:
         *,
         item_sections: list[dict],
         total_sections: list[dict],
-        preferential_mode: bool,
     ) -> tuple[list[dict], list[dict]]:
         """只保留主报价表附近及开标总价口径的总价候选，隔离无关附件。"""
         if not totals:
@@ -618,8 +454,6 @@ class NormalModeMixin:
             }
             keep = False
             if self._looks_like_opening_total_label(total.get("label")):
-                keep = True
-            elif preferential_mode and total.get("is_preferential_total"):
                 keep = True
             elif pages and self._pages_intersect_or_near(pages, primary_pages):
                 keep = True
@@ -935,51 +769,27 @@ class NormalModeMixin:
             )
 
         if sum_check["status"] == "pass":
-            if sum_check.get("total_mode") == "preferential_total":
-                if sum_check.get("opening_total") is not None:
-                    details.append(
-                        "检测到最终优惠价模式，分项金额汇总、分项小计与开标一览表总价一致。"
-                    )
-                else:
-                    details.append(
-                        "检测到最终优惠价模式，分项金额汇总与分项小计一致。"
-                    )
-                if sum_check.get("preferential_total") is not None:
-                    details.append(
-                        f"文档同时声明最终优惠价 {sum_check['preferential_total']}"
-                        f"（{sum_check.get('preferential_total_label') or '最终优惠价'}）。"
-                    )
+            if sum_check.get("opening_total") is not None:
+                details.append("分项金额汇总与开标一览表总价一致。")
             else:
                 details.append("分项金额汇总与声明总价一致。")
         elif sum_check["status"] == "fail":
-            if sum_check.get("total_mode") == "preferential_total":
-                if (
-                    sum_check.get("subtotal_status") == "pass"
-                    and sum_check.get("opening_total_status") == "fail"
-                    and sum_check.get("opening_total") is not None
-                ):
-                    details.append(
-                        f"分项金额汇总与分项小计一致，但与开标一览表总价不一致："
-                        f"分项小计 {sum_check.get('subtotal_total')}，"
-                        f"开标一览表总价 {sum_check.get('opening_total')}。"
-                    )
-                elif sum_check.get("subtotal_status") == "fail":
-                    details.append(
-                        f"检测到最终优惠价模式，但分项金额汇总与分项小计不一致："
-                        f"计算值 {sum_check['calculated_total']}，"
-                        f"小计 {sum_check.get('subtotal_total') or sum_check['declared_total']}。"
-                    )
-                    if sum_check.get("opening_total") is not None:
-                        details.append(
-                            f"同时，开标一览表总价为 {sum_check.get('opening_total')}"
-                            f"（{sum_check.get('opening_total_label')}）。"
-                        )
-                else:
-                    details.append(
-                        f"检测到最终优惠价模式，但总价口径存在不一致："
-                        f"计算值 {sum_check['calculated_total']}，"
-                        f"声明值 {sum_check['declared_total']}。"
-                    )
+            if (
+                sum_check.get("subtotal_status") == "pass"
+                and sum_check.get("opening_total_status") == "fail"
+                and sum_check.get("opening_total") is not None
+            ):
+                details.append(
+                    f"分项金额汇总与分项表合计一致，但与开标一览表总价不一致："
+                    f"分项汇总 {sum_check['calculated_total']}，"
+                    f"开标一览表总价 {sum_check.get('opening_total')}。"
+                )
+            elif sum_check.get("opening_total") is not None:
+                details.append(
+                    f"分项金额汇总与开标一览表总价不一致："
+                    f"计算值 {sum_check['calculated_total']}，"
+                    f"开标一览表总价 {sum_check.get('opening_total')}。"
+                )
             else:
                 details.append(
                     f"分项金额汇总与声明总价不一致："
