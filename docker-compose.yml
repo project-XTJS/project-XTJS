@@ -1,6 +1,9 @@
 services:
   # 主应用服务
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: project-xtjs:release-ee8ceab
     container_name: project-xtjs
     ports:
