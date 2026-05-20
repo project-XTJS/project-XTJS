@@ -222,6 +222,75 @@ def _format_stage_labels(stages: list[dict]) -> str:
     return " -> ".join(item["label"] for item in stages)
 
 
+def _project_identifier_from_payload(payload: dict, fallback: str) -> str:
+    project = payload.get("project") or {}
+    return str(project.get("identifier_id") or fallback)
+
+
+def _normalize_resume_target_stage(target_stage: str) -> str:
+    raw_stage = str(target_stage or "").strip().lower()
+    aliases = {
+        "tender": _OCR_STAGE_TENDER,
+        "招标": _OCR_STAGE_TENDER,
+        "招标文件": _OCR_STAGE_TENDER,
+        "business": _OCR_STAGE_BUSINESS,
+        "business_bid": _OCR_STAGE_BUSINESS,
+        "商务": _OCR_STAGE_BUSINESS,
+        "商务标": _OCR_STAGE_BUSINESS,
+        "technical": _OCR_STAGE_TECHNICAL,
+        "technical_bid": _OCR_STAGE_TECHNICAL,
+        "技术": _OCR_STAGE_TECHNICAL,
+        "技术标": _OCR_STAGE_TECHNICAL,
+    }
+    normalized = aliases.get(raw_stage)
+    if normalized:
+        return normalized
+    raise HTTPException(
+        status_code=400,
+        detail="target_stage 只能是 tender/business/technical，或 招标文件/商务标/技术标。",
+    )
+
+
+def _ocr_stage_progress(payload: dict) -> list[dict]:
+    """汇总项目各 OCR 阶段的断点状态。"""
+    progress: list[dict] = []
+    for stage in _OCR_STAGE_SEQUENCE:
+        documents = _collect_documents_by_stage(payload, stage)
+        pending = _pending_documents(documents)
+        completed = [item for item in documents if item.get("extracted")]
+        progress.append(
+            {
+                "stage": stage,
+                "label": _OCR_STAGE_LABELS[stage],
+                "required_parsing_status": _OCR_STAGE_REQUIRED_STATUS[stage],
+                "total_count": len(documents),
+                "completed_count": len(completed),
+                "pending_count": len(pending),
+                "completed_documents": completed,
+                "pending_documents": pending,
+            }
+        )
+    return progress
+
+
+def _ocr_progress_totals(stage_progress: list[dict]) -> dict:
+    total_count = sum(int(item.get("total_count") or 0) for item in stage_progress)
+    completed_count = sum(int(item.get("completed_count") or 0) for item in stage_progress)
+    pending_count = sum(int(item.get("pending_count") or 0) for item in stage_progress)
+    return {
+        "total_count": total_count,
+        "completed_count": completed_count,
+        "pending_count": pending_count,
+    }
+
+
+def _planned_completed_count(planned_stages: list[dict]) -> int:
+    return sum(
+        max(0, len(item.get("documents") or []) - len(item.get("pending_documents") or []))
+        for item in planned_stages
+    )
+
+
 async def _run_project_ocr_task(
     *,
     identifier_id: str,
@@ -425,6 +494,7 @@ async def _build_async_ocr_response(
     )
     project = refreshed_project or (payload.get("project") or {})
     current_status = int(project.get("parsing_status") or 0)
+    stage_progress = _ocr_stage_progress(payload)
     # 这里会把缺失但已绑定的前置阶段一并规划进队列。
     planned_stages = _planned_ocr_stages(payload, current_status, target_stage)
     if not planned_stages:
@@ -439,10 +509,14 @@ async def _build_async_ocr_response(
             "project_identifier": identifier_id,
             "project": refreshed_project or (payload.get("project") or {}),
             "queued_count": 0,
-            "skipped_count": 0,
+            "skipped_count": _ocr_progress_totals(stage_progress)["completed_count"],
             "ocr_type": ocr_type,
             "endpoint": endpoint_name,
             "queued_stages": [],
+            "ocr_progress": {
+                "totals": _ocr_progress_totals(stage_progress),
+                "stages": stage_progress,
+            },
         }
 
     await _enqueue_project_ocr_pipeline(
@@ -462,10 +536,14 @@ async def _build_async_ocr_response(
         "project_identifier": identifier_id,
         "project": project,
         "queued_count": sum(len(item["pending_documents"]) for item in planned_stages),
-        "skipped_count": 0,
+        "skipped_count": _planned_completed_count(planned_stages),
         "ocr_type": ocr_type,
         "endpoint": endpoint_name,
         "queued_stages": [item["stage"] for item in planned_stages],
+        "ocr_progress": {
+            "totals": _ocr_progress_totals(stage_progress),
+            "stages": stage_progress,
+        },
     }
 
 
@@ -931,6 +1009,87 @@ async def _recognize_existing_documents_batch(
     return items
 
 
+def _build_project_ocr_status_response(
+    *,
+    payload: dict,
+    project_identifier: str,
+) -> dict:
+    project = payload.get("project") or {}
+    stage_progress = _ocr_stage_progress(payload)
+    active_task = _PROJECT_OCR_QUEUE_TAILS.get(project_identifier)
+    return {
+        "status": "success",
+        "mode": "checkpoint",
+        "project_identifier": project_identifier,
+        "project": project,
+        "is_queued": bool(active_task and not active_task.done()),
+        "parsing_status": project.get("parsing_status"),
+        "parsing_status_label": project.get("parsing_status_label"),
+        "ocr_progress": {
+            "totals": _ocr_progress_totals(stage_progress),
+            "stages": stage_progress,
+        },
+        "resume_endpoint": f"/api/postgresql/projects/{project_identifier}/resume-ocr",
+    }
+
+
+@router.get("/projects/{identifier_id}/ocr-status", summary="查询项目 OCR 断点状态")
+async def get_project_ocr_status(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """查询项目下各阶段文档 OCR 完成/待处理数量。"""
+    refreshed_project = await run_in_threadpool(
+        db_service.refresh_project_parsing_status,
+        identifier_id,
+    )
+    if not refreshed_project:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+
+    project_identifier = str(refreshed_project["identifier_id"])
+    payload = await run_in_threadpool(
+        db_service.get_project_documents_for_duplicate_check,
+        project_identifier,
+    )
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    return _build_project_ocr_status_response(
+        payload=payload,
+        project_identifier=project_identifier,
+    )
+
+
+@router.post("/projects/{identifier_id}/resume-ocr", summary="恢复项目 OCR（跳过已完成文档）")
+async def resume_project_ocr(
+    identifier_id: str,
+    parallelism: int = Form(default=1, ge=1, le=16),
+    target_stage: str = Form(
+        default=_OCR_STAGE_TECHNICAL,
+        description="恢复目标阶段：tender/business/technical，或 招标文件/商务标/技术标",
+    ),
+    analysis_service=Depends(get_text_analysis_service),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """恢复项目 OCR，按招标文件、商务标、技术标顺序只处理未 extracted 的文档。"""
+    _ = parallelism
+    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    project_identifier = _project_identifier_from_payload(payload, identifier_id)
+    normalized_target_stage = _normalize_resume_target_stage(target_stage)
+    return await _build_async_ocr_response(
+        identifier_id=project_identifier,
+        payload=payload,
+        target_stage=normalized_target_stage,
+        ocr_type=f"项目{_OCR_STAGE_LABELS[normalized_target_stage]}",
+        endpoint_name=f"/api/postgresql/projects/{project_identifier}/resume-ocr",
+        db_service=db_service,
+        oss_service=oss_service,
+        analysis_service=analysis_service,
+    )
+
+
 @router.post("/projects/{identifier_id}/run-tender-ocr", summary="异步执行项目招标文件 OCR")
 async def run_project_tender_ocr(
     identifier_id: str,
@@ -944,12 +1103,13 @@ async def run_project_tender_ocr(
     payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    project_identifier = _project_identifier_from_payload(payload, identifier_id)
     return await _build_async_ocr_response(
-        identifier_id=identifier_id,
+        identifier_id=project_identifier,
         payload=payload,
         target_stage=_OCR_STAGE_TENDER,
         ocr_type="招标文件",
-        endpoint_name=f"/api/postgresql/projects/{identifier_id}/run-tender-ocr",
+        endpoint_name=f"/api/postgresql/projects/{project_identifier}/run-tender-ocr",
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,
@@ -969,12 +1129,13 @@ async def run_project_business_ocr(
     payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    project_identifier = _project_identifier_from_payload(payload, identifier_id)
     return await _build_async_ocr_response(
-        identifier_id=identifier_id,
+        identifier_id=project_identifier,
         payload=payload,
         target_stage=_OCR_STAGE_BUSINESS,
         ocr_type="商务标",
-        endpoint_name=f"/api/postgresql/projects/{identifier_id}/run-business-ocr",
+        endpoint_name=f"/api/postgresql/projects/{project_identifier}/run-business-ocr",
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,
@@ -994,12 +1155,13 @@ async def continue_project_technical_ocr(
     payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    project_identifier = _project_identifier_from_payload(payload, identifier_id)
     return await _build_async_ocr_response(
-        identifier_id=identifier_id,
+        identifier_id=project_identifier,
         payload=payload,
         target_stage=_OCR_STAGE_TECHNICAL,
         ocr_type="技术标",
-        endpoint_name=f"/api/postgresql/projects/{identifier_id}/continue-technical-ocr",
+        endpoint_name=f"/api/postgresql/projects/{project_identifier}/continue-technical-ocr",
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,
