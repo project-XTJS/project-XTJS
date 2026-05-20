@@ -146,28 +146,28 @@ async def load_uploaded_bid_json_documents(
 # 确保项目存在，必要时创建
 async def ensure_upload_project(
     db_service: PostgreSQLService,
-    project_identifier: Optional[str],
+    project_name: Optional[str],
 ) -> tuple[dict[str, Any], bool]:
-    """根据标识查找项目，若不存在且提供了标识则创建，未提供标识则自动生成。"""
-    normalized_identifier = (project_identifier or "").strip()
-    if normalized_identifier:
+    """根据项目名称查找项目，若不存在则创建，UUID 由数据库自动生成。"""
+    normalized_project_name = (project_name or "").strip()
+    if normalized_project_name:
         existing = await run_in_threadpool(
-            db_service.get_project_by_identifier,
-            normalized_identifier,
+            db_service.get_project_by_name,
+            normalized_project_name,
         )
         if existing:
             return existing, False
         try:
             created = await run_in_threadpool(
                 db_service.create_project,
-                normalized_identifier,
+                normalized_project_name,
             )
             return created, True
         except PsycopgError as exc:
             if getattr(exc, "pgcode", None) == "23505":
                 existing = await run_in_threadpool(
-                    db_service.get_project_by_identifier,
-                    normalized_identifier,
+                    db_service.get_project_by_name,
+                    normalized_project_name,
                 )
                 if existing:
                     return existing, False
@@ -228,10 +228,10 @@ async def persist_uploaded_json_project_documents(
     tender_document: dict[str, Any],
     business_bid_documents: Optional[list[dict[str, Any]]] = None,
     technical_bid_documents: Optional[list[dict[str, Any]]] = None,
-    project_identifier: Optional[str] = None,
+    project_name: Optional[str] = None,
 ) -> dict[str, Any]:
     """将招标文件与商务标/技术标 JSON 上传持久化，并尝试按上传顺序绑定关系。"""
-    project, project_created = await ensure_upload_project(db_service, project_identifier)
+    project, project_created = await ensure_upload_project(db_service, project_name)
     resolved_project_identifier = str(project["identifier_id"])
 
     # 分别持久化三类文档

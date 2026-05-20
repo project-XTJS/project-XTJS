@@ -599,9 +599,9 @@ async def upload_business_bid_format_review(
         default=None,
         description="可选的技术标 OCR JSON 文件，按上传顺序与商务标对齐以便绑定项目关系",
     ),
-    project_identifier: Optional[str] = Form(
+    project_name: Optional[str] = Form(
         default=None,
-        description="可选项目标识；不传时自动创建",
+        description="项目名称；不传时自动生成临时项目名",
     ),
     result_key: str = Form(
         default=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
@@ -645,7 +645,7 @@ async def upload_business_bid_format_review(
             tender_document=tender_document,
             business_bid_documents=business_documents,
             technical_bid_documents=technical_documents,
-            project_identifier=project_identifier,
+            project_name=project_name,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
 
@@ -670,7 +670,7 @@ async def upload_business_bid_format_review(
 # 路由：创建项目并上传全部文件后启动商务阶段 OCR 及审查
 @router.post("/projects/batch/ingest-recognize", summary="创建项目并上传全部文件（后续 OCR 手动触发）")
 async def ingest_and_recognize_project_documents(
-    project_name: str = Form(..., description="项目名称；当前作为项目标识使用"),
+    project_name: str = Form(..., description="项目名称；UUID 由系统自动生成"),
     tender_file: UploadFile = File(..., description="招标文件"),
     business_bid_files: list[UploadFile] = File(
         ...,

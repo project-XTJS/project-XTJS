@@ -13,26 +13,19 @@ from pydantic import BaseModel, Field
 
 
 class DocumentDataModel(BaseModel):
-    """文档基础数据模型（标识、文件名、URL）。"""
+    """文档基础数据模型（UUID 标识、文件名、URL）。"""
     identifier_id: str
     file_name: str
     file_url: str
 
 
 class ProjectCreateRequest(BaseModel):
-    """创建项目请求，可指定标识，省略时自动生成。"""
-    identifier_id: Optional[str] = Field(
-        default=None,
-        description="项目业务标识，省略时自动生成。",
-    )
+    """创建项目请求，项目 UUID 由系统自动生成。"""
+    project_name: str = Field(..., min_length=1, description="用户输入的项目名称。")
 
 
 class DocumentCreateRequest(BaseModel):
-    """创建文档请求，需提供文件名和文件 URL。"""
-    identifier_id: Optional[str] = Field(
-        default=None,
-        description="文档业务标识，省略时自动生成。",
-    )
+    """创建文档请求，文档 UUID 由系统自动生成。"""
     file_name: str
     file_url: str = Field(
         ...,
@@ -48,8 +41,8 @@ class ProjectBindDocumentsRequest(BaseModel):
 
 
 class ProjectUpdateRequest(BaseModel):
-    """更新项目标识请求。"""
-    new_identifier_id: Optional[str] = None
+    """更新项目名称请求。"""
+    project_name: Optional[str] = None
 
 
 class DocumentUpdateRequest(BaseModel):
@@ -69,11 +62,11 @@ class ProjectRelationUpdateRequest(BaseModel):
 
 
 class IdentifierBatchDeleteRequest(BaseModel):
-    """批量删除标识请求（适用于项目或文档）。"""
+    """批量删除 UUID 标识请求（适用于项目或文档）。"""
     identifier_ids: list[str] = Field(
         ...,
         min_length=1,
-        description="批量删除的业务标识列表。",
+        description="批量删除的 UUID 标识列表。",
     )
 
 
@@ -88,7 +81,7 @@ class RelationBatchDeleteRequest(BaseModel):
 
 class ProjectResultUpsertRequest(BaseModel):
     """创建或覆盖项目分析结果请求。"""
-    project_identifier_id: str = Field(..., description="项目业务标识。")
+    project_identifier_id: str = Field(..., description="项目 UUID 标识。")
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 

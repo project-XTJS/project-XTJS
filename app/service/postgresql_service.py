@@ -6,6 +6,7 @@ PostgreSQL 数据访问服务模块。
 """
 
 import logging
+import re
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -26,6 +27,11 @@ from app.core.document_types import (
 )
 
 logger = logging.getLogger(__name__)
+
+UUID_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+UUID_TEXT_PATTERN = re.compile(rf"(?i)\b{UUID_TEXT}\b")
+UUID_SUFFIX_PATTERN = re.compile(rf"(?i)\(({UUID_TEXT})\)\s*$")
+MISSING_UUID_SENTINEL = "00000000-0000-0000-0000-000000000000"
 
 # 全局连接池（模块级单例）
 _db_pool = None
@@ -88,15 +94,24 @@ class PostgreSQLService:
 
     # 标识/字段清理工具
     @staticmethod
+    def _extract_identifier(value: Optional[str]) -> str:
+        """从 Swagger 展示值中提取 UUID，兼容“名称 (UUID)”格式。"""
+        text = (value or "").strip()
+        if UUID_TEXT_PATTERN.fullmatch(text):
+            return text
+        match = UUID_SUFFIX_PATTERN.search(text)
+        return match.group(1) if match else text
+
+    @staticmethod
     def _normalize_identifier(identifier_id: Optional[str]) -> str:
         """若传入标识为空则自动生成 UUID。"""
-        identifier = (identifier_id or "").strip()
+        identifier = PostgreSQLService._extract_identifier(identifier_id)
         return identifier or str(uuid4())
 
     @staticmethod
     def _normalize_required_identifier(identifier_id: str, field_name: str) -> str:
         """验证标识非空并返回清理后的值。"""
-        normalized = (identifier_id or "").strip()
+        normalized = PostgreSQLService._extract_identifier(identifier_id)
         if not normalized:
             raise ValueError(f"{field_name} cannot be empty")
         return normalized
@@ -107,6 +122,14 @@ class PostgreSQLService:
         normalized = (value or "").strip()
         if not normalized:
             raise ValueError(f"{field_name} cannot be empty")
+        return normalized
+
+    @staticmethod
+    def _normalize_project_name(project_name: Optional[str]) -> str:
+        """验证项目名称非空并返回清理后的值。"""
+        normalized = (project_name or "").strip()
+        if not normalized:
+            raise ValueError("project_name cannot be empty")
         return normalized
 
     @classmethod
@@ -178,28 +201,73 @@ class PostgreSQLService:
         return normalized
 
     # 内部记录获取
-    def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
+    def _resolve_project_identifier(self, cursor, identifier_or_name: str) -> str:
+        """将项目 UUID、Swagger 展示值或项目名解析为项目 UUID。"""
+        normalized = self._normalize_required_identifier(identifier_or_name, "identifier_id")
+        if UUID_TEXT_PATTERN.fullmatch(normalized):
+            return normalized
+
         cursor.execute(
             """
-            SELECT id, identifier_id, parsing_status
+            SELECT identifier_id
+            FROM xtjs_projects
+            WHERE project_name = %s AND deleted = FALSE
+            LIMIT 2
+            """,
+            (normalized,),
+        )
+        rows = cursor.fetchall()
+        if len(rows) == 1:
+            return str(rows[0]["identifier_id"] if isinstance(rows[0], dict) else rows[0][0])
+        if len(rows) > 1:
+            raise ValueError(f"项目名匹配到多个项目，请使用 UUID：{normalized}")
+        return MISSING_UUID_SENTINEL
+
+    def _resolve_document_identifier(self, cursor, identifier_or_file_name: str) -> str:
+        """将文档 UUID、Swagger 展示值或文件名解析为文档 UUID。"""
+        normalized = self._normalize_required_identifier(identifier_or_file_name, "identifier_id")
+        if UUID_TEXT_PATTERN.fullmatch(normalized):
+            return normalized
+
+        cursor.execute(
+            """
+            SELECT identifier_id
+            FROM xtjs_documents
+            WHERE file_name = %s AND deleted = FALSE
+            LIMIT 2
+            """,
+            (normalized,),
+        )
+        rows = cursor.fetchall()
+        if len(rows) == 1:
+            return str(rows[0]["identifier_id"] if isinstance(rows[0], dict) else rows[0][0])
+        if len(rows) > 1:
+            raise ValueError(f"文件名匹配到多个文档，请选择带 UUID 的选项：{normalized}")
+        return MISSING_UUID_SENTINEL
+
+    def _get_project_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
+        resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+        cursor.execute(
+            """
+            SELECT identifier_id, project_name, parsing_status
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
             """,
-            (identifier_id,),
+            (resolved_identifier,),
         )
         project = cursor.fetchone()
         return self._decorate_project_record(dict(project)) if project else None
 
     def _get_document_record(self, cursor, identifier_id: str) -> Optional[Dict[str, Any]]:
+        resolved_identifier = self._resolve_document_identifier(cursor, identifier_id)
         cursor.execute(
             """
-            SELECT id, identifier_id, document_type
+            SELECT identifier_id, document_type
             FROM xtjs_documents
             WHERE identifier_id = %s AND deleted = FALSE
-            ORDER BY id ASC
             LIMIT 1
             """,
-            (identifier_id,),
+            (resolved_identifier,),
         )
         document = cursor.fetchone()
         return dict(document) if document else None
@@ -230,19 +298,46 @@ class PostgreSQLService:
     # 项目 CRUD
     def create_project(
         self,
+        project_name: Optional[str] = None,
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """创建项目，支持自动生成标识。"""
-        identifier = self._normalize_identifier(identifier_id)
+        """创建项目，项目 UUID 默认由数据库生成。"""
+        normalized_project_name = self._normalize_project_name(
+            f"project-{uuid4().hex[:8]}" if project_name is None else project_name
+        )
+        normalized_identifier = (identifier_id or "").strip() or None
+        if normalized_identifier:
+            query = """
+                INSERT INTO xtjs_projects (identifier_id, project_name, parsing_status)
+                VALUES (%s, %s, %s)
+                RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            """
+            values = (normalized_identifier, normalized_project_name, self.PARSING_STATUS_UPLOADED)
+        else:
+            query = """
+                INSERT INTO xtjs_projects (project_name, parsing_status)
+                VALUES (%s, %s)
+                RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            """
+            values = (normalized_project_name, self.PARSING_STATUS_UPLOADED)
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, values)
+                return self._decorate_project_record(dict(cursor.fetchone()))
+
+    def get_project_by_name(self, project_name: str) -> Optional[Dict[str, Any]]:
+        """根据项目名称获取未删除项目。"""
+        normalized_project_name = self._normalize_project_name(project_name)
         query = """
-            INSERT INTO xtjs_projects (identifier_id, parsing_status)
-            VALUES (%s, %s)
-            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
+            SELECT identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            FROM xtjs_projects
+            WHERE project_name = %s AND deleted = FALSE
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (identifier, self.PARSING_STATUS_UPLOADED))
-                return self._decorate_project_record(dict(cursor.fetchone()))
+                cursor.execute(query, (normalized_project_name,))
+                result = cursor.fetchone()
+                return self._decorate_project_record(dict(result)) if result else None
 
     def list_projects(
         self,
@@ -257,9 +352,9 @@ class PostgreSQLService:
         conditions = ["p.deleted = FALSE"]
         values: List[Any] = []
         if normalized_keyword:
-            conditions.append("p.identifier_id ILIKE %s")
+            conditions.append("(p.identifier_id::text ILIKE %s OR p.project_name ILIKE %s)")
             keyword_like = f"%{normalized_keyword}%"
-            values.append(keyword_like)
+            values.extend([keyword_like, keyword_like])
         where_clause = " AND ".join(conditions)
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -275,8 +370,8 @@ class PostgreSQLService:
                 cursor.execute(
                     f"""
                     SELECT
-                        p.id,
                         p.identifier_id,
+                        p.project_name,
                         p.parsing_status,
                         p.deleted,
                         p.create_time,
@@ -306,20 +401,20 @@ class PostgreSQLService:
                         LEFT JOIN (
                             SELECT pd2.tender_document_id AS doc_id
                             FROM xtjs_project_documents pd2
-                            WHERE pd2.project_id = p.id
+                            WHERE pd2.project_id = p.identifier_id
                             UNION
                             SELECT pd2.business_bid_document_id AS doc_id
                             FROM xtjs_project_documents pd2
-                            WHERE pd2.project_id = p.id
+                            WHERE pd2.project_id = p.identifier_id
                             UNION
                             SELECT pd2.technical_bid_document_id AS doc_id
                             FROM xtjs_project_documents pd2
-                            WHERE pd2.project_id = p.id AND pd2.technical_bid_document_id IS NOT NULL
+                            WHERE pd2.project_id = p.identifier_id AND pd2.technical_bid_document_id IS NOT NULL
                         ) docs ON TRUE
                         LEFT JOIN xtjs_documents doc_meta
-                            ON doc_meta.id = docs.doc_id
+                            ON doc_meta.identifier_id = docs.doc_id
                            AND doc_meta.deleted = FALSE
-                        WHERE pd.project_id = p.id
+                        WHERE pd.project_id = p.identifier_id
                     ) rel ON TRUE
                     LEFT JOIN LATERAL (
                         SELECT
@@ -344,7 +439,7 @@ class PostgreSQLService:
                         LIMIT 1
                     ) res ON TRUE
                     WHERE {where_clause}
-                    ORDER BY p.create_time DESC, p.id DESC
+                    ORDER BY p.create_time DESC, p.identifier_id DESC
                     LIMIT %s OFFSET %s
                     """,
                     tuple(values + [normalized_limit, normalized_offset]),
@@ -368,35 +463,85 @@ class PostgreSQLService:
                     SELECT identifier_id
                     FROM xtjs_projects
                     WHERE deleted = FALSE
-                    ORDER BY create_time DESC, id DESC
+                    ORDER BY create_time DESC, identifier_id DESC
                     """
                 )
                 return [str(identifier_id) for (identifier_id,) in cursor.fetchall()]
 
+    def list_project_display_choices(self) -> List[str]:
+        """获取 Swagger 使用的项目下拉显示值。"""
+        with self._get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT project_name
+                    FROM xtjs_projects
+                    WHERE deleted = FALSE
+                    ORDER BY create_time DESC, identifier_id DESC
+                    """
+                )
+                return [str(project_name) for (project_name,) in cursor.fetchall()]
+
+    def list_document_display_choices(
+        self,
+        document_type: Optional[str] = None,
+    ) -> List[str]:
+        """获取 Swagger 使用的文档下拉显示值；文件名重复时附带 UUID。"""
+        normalized_type = (document_type or "").strip().lower()
+        conditions = ["deleted = FALSE"]
+        values: List[Any] = []
+        if normalized_type:
+            conditions.append("document_type = %s")
+            values.append(self._normalize_document_type(normalized_type))
+        where_clause = " AND ".join(conditions)
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        identifier_id,
+                        file_name,
+                        COUNT(*) OVER (PARTITION BY file_name) AS same_name_count
+                    FROM xtjs_documents
+                    WHERE {where_clause}
+                    ORDER BY create_time DESC, identifier_id DESC
+                    """,
+                    tuple(values),
+                )
+                choices: List[str] = []
+                for row in cursor.fetchall():
+                    file_name = str(row["file_name"])
+                    if int(row.get("same_name_count") or 0) > 1:
+                        choices.append(f"{file_name} ({row['identifier_id']})")
+                    else:
+                        choices.append(file_name)
+                return choices
+
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取项目记录。"""
         query = """
-            SELECT id, identifier_id, parsing_status, deleted, create_time, update_time
+            SELECT identifier_id, project_name, parsing_status, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (identifier_id,))
+                resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute(query, (resolved_identifier,))
                 result = cursor.fetchone()
                 return self._decorate_project_record(dict(result)) if result else None
 
     def update_project(
         self,
         identifier_id: str,
-        new_identifier_id: Optional[str] = None,
+        project_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """更新项目标识（仅允许修改标识）。"""
+        """更新项目名称。项目 UUID 不允许被业务接口修改。"""
         updates: List[str] = []
         values: List[Any] = []
-        if new_identifier_id is not None:
-            updates.append("identifier_id = %s")
-            values.append(self._normalize_required_identifier(new_identifier_id, "new_identifier_id"))
+        if project_name is not None:
+            updates.append("project_name = %s")
+            values.append(self._normalize_project_name(project_name))
         if not updates:
             raise ValueError("at least one project field must be provided")
 
@@ -404,11 +549,12 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET {", ".join(updates)}, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, tuple(values + [identifier_id]))
+                resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute(query, tuple(values + [resolved_identifier]))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
@@ -418,55 +564,54 @@ class PostgreSQLService:
         parsing_status: int,
     ) -> Optional[Dict[str, Any]]:
         # 路由层统一通过这里同步项目 OCR 阶段状态。
-        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         normalized_status = self._normalize_parsing_status(parsing_status)
         query = """
             UPDATE xtjs_projects
             SET parsing_status = %s, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING id, identifier_id, parsing_status, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_project_identifier(cursor, identifier_id)
                 cursor.execute(query, (normalized_status, normalized_identifier))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
     def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """按项目下文档 extracted 状态重算 0/1/2/3 的 OCR 阶段。"""
-        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         status_query = """
             WITH project_row AS (
-                SELECT id
+                SELECT identifier_id
                 FROM xtjs_projects
                 WHERE identifier_id = %s AND deleted = FALSE
             ),
             document_stats AS (
                 SELECT
                     -- 这里按“文档类型整体是否全部 extracted”来推进项目阶段。
-                    COUNT(DISTINCT td.id) AS tender_count,
-                    COUNT(DISTINCT CASE WHEN COALESCE(td.extracted, FALSE) = TRUE THEN td.id END) AS tender_extracted_count,
-                    COUNT(DISTINCT bbd.id) AS business_count,
-                    COUNT(DISTINCT CASE WHEN COALESCE(bbd.extracted, FALSE) = TRUE THEN bbd.id END) AS business_extracted_count,
-                    COUNT(DISTINCT CASE WHEN pd.technical_bid_document_id IS NOT NULL THEN tbd.id END) AS technical_count,
+                    COUNT(DISTINCT td.identifier_id) AS tender_count,
+                    COUNT(DISTINCT CASE WHEN COALESCE(td.extracted, FALSE) = TRUE THEN td.identifier_id END) AS tender_extracted_count,
+                    COUNT(DISTINCT bbd.identifier_id) AS business_count,
+                    COUNT(DISTINCT CASE WHEN COALESCE(bbd.extracted, FALSE) = TRUE THEN bbd.identifier_id END) AS business_extracted_count,
+                    COUNT(DISTINCT CASE WHEN pd.technical_bid_document_id IS NOT NULL THEN tbd.identifier_id END) AS technical_count,
                     COUNT(
                         DISTINCT CASE
                             WHEN pd.technical_bid_document_id IS NOT NULL
                              AND COALESCE(tbd.extracted, FALSE) = TRUE
-                            THEN tbd.id
+                            THEN tbd.identifier_id
                         END
                     ) AS technical_extracted_count
                 FROM project_row pr
                 JOIN xtjs_project_documents pd
-                  ON pd.project_id = pr.id
+                  ON pd.project_id = pr.identifier_id
                 JOIN xtjs_documents td
-                  ON td.id = pd.tender_document_id
+                  ON td.identifier_id = pd.tender_document_id
                  AND td.deleted = FALSE
                 JOIN xtjs_documents bbd
-                  ON bbd.id = pd.business_bid_document_id
+                  ON bbd.identifier_id = pd.business_bid_document_id
                  AND bbd.deleted = FALSE
                 LEFT JOIN xtjs_documents tbd
-                  ON tbd.id = pd.technical_bid_document_id
+                  ON tbd.identifier_id = pd.technical_bid_document_id
                  AND tbd.deleted = FALSE
             )
             SELECT CASE
@@ -488,6 +633,7 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_project_identifier(cursor, identifier_id)
                 cursor.execute(status_query, (normalized_identifier,))
                 row = cursor.fetchone()
                 if row is None:
@@ -506,7 +652,8 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(query, (identifier_id,))
+                resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute(query, (resolved_identifier,))
                 return cursor.rowcount > 0
 
     def soft_delete_projects(self, identifier_ids: list[str]) -> int:
@@ -521,7 +668,7 @@ class PostgreSQLService:
         query = """
             UPDATE xtjs_projects
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
-            WHERE identifier_id = ANY(%s) AND deleted = FALSE
+            WHERE identifier_id = ANY(%s::uuid[]) AND deleted = FALSE
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
@@ -536,41 +683,62 @@ class PostgreSQLService:
         document_type: str,
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """创建文档记录（不含识别内容）。"""
-        identifier = self._normalize_identifier(identifier_id)
+        """创建文档记录（不含识别内容），文档 UUID 默认由数据库生成。"""
+        identifier = (identifier_id or "").strip() or None
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
         normalized_document_type = self._normalize_document_type(document_type)
 
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                existing = self._get_document_record(cursor, identifier)
-                if existing:
-                    raise ValueError(f"文档标识已存在：{identifier}")
-
-                cursor.execute(
-                    """
-                    INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING
-                        id,
-                        identifier_id,
-                        document_type,
-                        file_name,
-                        file_url,
-                        extracted,
-                        content,
-                        deleted,
-                        create_time,
-                        update_time
-                    """,
-                    (
-                        identifier,
-                        normalized_document_type,
-                        normalized_file_name,
-                        normalized_file_url,
-                    ),
-                )
+                if identifier:
+                    existing = self._get_document_record(cursor, identifier)
+                    if existing:
+                        raise ValueError(f"文档标识已存在：{identifier}")
+                    cursor.execute(
+                        """
+                        INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING
+                            identifier_id,
+                            document_type,
+                            file_name,
+                            file_url,
+                            extracted,
+                            content,
+                            deleted,
+                            create_time,
+                            update_time
+                        """,
+                        (
+                            identifier,
+                            normalized_document_type,
+                            normalized_file_name,
+                            normalized_file_url,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO xtjs_documents (document_type, file_name, file_url)
+                        VALUES (%s, %s, %s)
+                        RETURNING
+                            identifier_id,
+                            document_type,
+                            file_name,
+                            file_url,
+                            extracted,
+                            content,
+                            deleted,
+                            create_time,
+                            update_time
+                        """,
+                        (
+                            normalized_document_type,
+                            normalized_file_name,
+                            normalized_file_url,
+                        ),
+                    )
                 return dict(cursor.fetchone())
 
     def create_document_with_content(
@@ -581,8 +749,8 @@ class PostgreSQLService:
         recognition_content: Dict[str, Any],
         identifier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """创建文档记录并同时写入识别内容。"""
-        identifier = self._normalize_identifier(identifier_id)
+        """创建文档记录并同时写入识别内容，文档 UUID 默认由数据库生成。"""
+        identifier = (identifier_id or "").strip() or None
         normalized_file_name = self._normalize_file_value(file_name, "file_name")
         normalized_file_url = self._normalize_file_value(file_url, "file_url")
         normalized_document_type = self._normalize_document_type(document_type)
@@ -592,32 +760,44 @@ class PostgreSQLService:
 
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                existing = self._get_document_record(cursor, identifier)
-                if existing:
-                    raise ValueError(f"文档标识已存在：{identifier}")
-
-                cursor.execute(
-                    """
-                    INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id, identifier_id, document_type
-                    """,
-                    (
-                        identifier,
-                        normalized_document_type,
-                        normalized_file_name,
-                        normalized_file_url,
-                    ),
-                )
+                if identifier:
+                    existing = self._get_document_record(cursor, identifier)
+                    if existing:
+                        raise ValueError(f"文档标识已存在：{identifier}")
+                    cursor.execute(
+                        """
+                        INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING identifier_id, document_type
+                        """,
+                        (
+                            identifier,
+                            normalized_document_type,
+                            normalized_file_name,
+                            normalized_file_url,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO xtjs_documents (document_type, file_name, file_url)
+                        VALUES (%s, %s, %s)
+                        RETURNING identifier_id, document_type
+                        """,
+                        (
+                            normalized_document_type,
+                            normalized_file_name,
+                            normalized_file_url,
+                        ),
+                    )
                 document = dict(cursor.fetchone())
 
                 cursor.execute(
                     """
                     UPDATE xtjs_documents
                     SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE identifier_id = %s
                     RETURNING
-                        id,
                         identifier_id,
                         document_type,
                         file_name,
@@ -628,7 +808,7 @@ class PostgreSQLService:
                         create_time,
                         update_time
                     """,
-                    (Json(recognition_content), document["id"]),
+                    (Json(recognition_content), document["identifier_id"]),
                 )
                 updated_document = dict(cursor.fetchone())
 
@@ -650,7 +830,7 @@ class PostgreSQLService:
         conditions = ["deleted = FALSE"]
         values: List[Any] = []
         if normalized_keyword:
-            conditions.append("(identifier_id ILIKE %s OR file_name ILIKE %s)")
+            conditions.append("(identifier_id::text ILIKE %s OR file_name ILIKE %s)")
             keyword_like = f"%{normalized_keyword}%"
             values.extend([keyword_like, keyword_like])
         if normalized_document_type:
@@ -674,7 +854,6 @@ class PostgreSQLService:
                 cursor.execute(
                     f"""
                     SELECT
-                        id,
                         identifier_id,
                         document_type,
                         file_name,
@@ -686,7 +865,7 @@ class PostgreSQLService:
                         update_time
                     FROM xtjs_documents
                     WHERE {where_clause}
-                    ORDER BY create_time DESC, id DESC
+                    ORDER BY create_time DESC, identifier_id DESC
                     LIMIT %s OFFSET %s
                     """,
                     tuple(values + [normalized_limit, normalized_offset]),
@@ -703,7 +882,6 @@ class PostgreSQLService:
         """根据标识获取文档完整信息。"""
         query = """
             SELECT
-                id,
                 identifier_id,
                 document_type,
                 file_name,
@@ -715,12 +893,12 @@ class PostgreSQLService:
                 update_time
             FROM xtjs_documents
             WHERE identifier_id = %s AND deleted = FALSE
-            ORDER BY id ASC
             LIMIT 1
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (identifier_id,))
+                resolved_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute(query, (resolved_identifier,))
                 result = cursor.fetchone()
                 return dict(result) if result else None
 
@@ -744,13 +922,11 @@ class PostgreSQLService:
             raise ValueError("file_name 和 file_url 至少需要提供一个")
 
         updates.append("update_time = CURRENT_TIMESTAMP")
-        values.append(identifier_id)
         query = f"""
             UPDATE xtjs_documents
             SET {", ".join(updates)}
             WHERE identifier_id = %s AND deleted = FALSE
             RETURNING
-                id,
                 identifier_id,
                 document_type,
                 file_name,
@@ -764,6 +940,7 @@ class PostgreSQLService:
 
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                values.append(self._resolve_document_identifier(cursor, identifier_id))
                 cursor.execute(query, tuple(values))
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
@@ -774,7 +951,6 @@ class PostgreSQLService:
         recognition_content: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """覆盖写入文档的识别内容，并标记为已提取。"""
-        normalized_identifier = self._normalize_required_identifier(identifier_id, "identifier_id")
         if not isinstance(recognition_content, dict):
             raise ValueError("recognition_content 必须是 JSON 对象")
 
@@ -783,7 +959,6 @@ class PostgreSQLService:
             SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
             RETURNING
-                id,
                 identifier_id,
                 document_type,
                 file_name,
@@ -796,6 +971,7 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
                 cursor.execute(query, (Json(recognition_content), normalized_identifier))
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
@@ -809,7 +985,8 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(query, (identifier_id,))
+                resolved_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute(query, (resolved_identifier,))
                 return cursor.rowcount > 0
 
     def soft_delete_documents(self, identifier_ids: list[str]) -> int:
@@ -824,7 +1001,7 @@ class PostgreSQLService:
         query = """
             UPDATE xtjs_documents
             SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
-            WHERE identifier_id = ANY(%s) AND deleted = FALSE
+            WHERE identifier_id = ANY(%s::uuid[]) AND deleted = FALSE
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
@@ -882,10 +1059,10 @@ class PostgreSQLService:
                     LIMIT 1
                     """,
                     (
-                        project["id"],
-                        tender["id"],
-                        business_bid["id"],
-                        technical_bid["id"] if technical_bid else None,
+                        project["identifier_id"],
+                        tender["identifier_id"],
+                        business_bid["identifier_id"],
+                        technical_bid["identifier_id"] if technical_bid else None,
                     ),
                 )
                 duplicated = cursor.fetchone()
@@ -912,19 +1089,21 @@ class PostgreSQLService:
                         create_time
                     """,
                     (
-                        project["id"],
-                        tender["id"],
-                        business_bid["id"],
-                        technical_bid["id"] if technical_bid else None,
+                        project["identifier_id"],
+                        tender["identifier_id"],
+                        business_bid["identifier_id"],
+                        technical_bid["identifier_id"] if technical_bid else None,
                     ),
                 )
                 binding = dict(cursor.fetchone())
                 return {
                     **binding,
-                    "project_identifier": project_identifier,
-                    "tender_document_identifier": tender_document_identifier,
-                    "business_bid_document_identifier": business_bid_document_identifier,
-                    "technical_bid_document_identifier": normalized_technical_identifier,
+                    "project_identifier": project["identifier_id"],
+                    "tender_document_identifier": tender["identifier_id"],
+                    "business_bid_document_identifier": business_bid["identifier_id"],
+                    "technical_bid_document_identifier": (
+                        technical_bid["identifier_id"] if technical_bid else None
+                    ),
                 }
 
     def get_relation_by_id(self, relation_id: int) -> Optional[Dict[str, Any]]:
@@ -933,6 +1112,7 @@ class PostgreSQLService:
             SELECT
                 pd.id AS relation_id,
                 p.identifier_id AS project_identifier,
+                p.project_name,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
@@ -947,11 +1127,11 @@ class PostgreSQLService:
                 tbd.file_url AS technical_bid_file_url,
                 pd.create_time
             FROM xtjs_project_documents pd
-            JOIN xtjs_projects p ON pd.project_id = p.id AND p.deleted = FALSE
-            JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
-            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+            JOIN xtjs_projects p ON pd.project_id = p.identifier_id AND p.deleted = FALSE
+            JOIN xtjs_documents td ON pd.tender_document_id = td.identifier_id AND td.deleted = FALSE
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.identifier_id AND bbd.deleted = FALSE
             LEFT JOIN xtjs_documents tbd
-                ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
+                ON pd.technical_bid_document_id = tbd.identifier_id AND tbd.deleted = FALSE
             WHERE pd.id = %s
         """
         with self._get_connection() as conn:
@@ -979,39 +1159,44 @@ class PostgreSQLService:
         ]
         values: List[Any] = []
         if normalized_project_identifier:
-            conditions.append("p.identifier_id = %s")
-            values.append(normalized_project_identifier)
+            conditions.append("(p.identifier_id::text = %s OR p.project_name = %s)")
+            values.extend([
+                self._extract_identifier(normalized_project_identifier),
+                normalized_project_identifier,
+            ])
         if normalized_keyword:
             keyword_like = f"%{normalized_keyword}%"
             conditions.append(
                 """
                 (
-                    p.identifier_id ILIKE %s
-                    OR td.identifier_id ILIKE %s
+                    p.identifier_id::text ILIKE %s
+                    OR p.project_name ILIKE %s
+                    OR td.identifier_id::text ILIKE %s
                     OR td.file_name ILIKE %s
-                    OR bbd.identifier_id ILIKE %s
+                    OR bbd.identifier_id::text ILIKE %s
                     OR bbd.file_name ILIKE %s
-                    OR COALESCE(tbd.identifier_id, '') ILIKE %s
+                    OR COALESCE(tbd.identifier_id::text, '') ILIKE %s
                     OR COALESCE(tbd.file_name, '') ILIKE %s
                 )
                 """
             )
-            values.extend([keyword_like] * 7)
+            values.extend([keyword_like] * 8)
         where_clause = " AND ".join(conditions)
 
         count_query = f"""
             SELECT COUNT(*) AS total
             FROM xtjs_project_documents pd
-            JOIN xtjs_projects p ON pd.project_id = p.id
-            JOIN xtjs_documents td ON pd.tender_document_id = td.id
-            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id
-            LEFT JOIN xtjs_documents tbd ON pd.technical_bid_document_id = tbd.id
+            JOIN xtjs_projects p ON pd.project_id = p.identifier_id
+            JOIN xtjs_documents td ON pd.tender_document_id = td.identifier_id
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.identifier_id
+            LEFT JOIN xtjs_documents tbd ON pd.technical_bid_document_id = tbd.identifier_id
             WHERE {where_clause}
         """
         data_query = f"""
             SELECT
                 pd.id AS relation_id,
                 p.identifier_id AS project_identifier,
+                p.project_name,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
@@ -1026,10 +1211,10 @@ class PostgreSQLService:
                 tbd.file_url AS technical_bid_file_url,
                 pd.create_time
             FROM xtjs_project_documents pd
-            JOIN xtjs_projects p ON pd.project_id = p.id
-            JOIN xtjs_documents td ON pd.tender_document_id = td.id
-            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id
-            LEFT JOIN xtjs_documents tbd ON pd.technical_bid_document_id = tbd.id
+            JOIN xtjs_projects p ON pd.project_id = p.identifier_id
+            JOIN xtjs_documents td ON pd.tender_document_id = td.identifier_id
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.identifier_id
+            LEFT JOIN xtjs_documents tbd ON pd.technical_bid_document_id = tbd.identifier_id
             WHERE {where_clause}
             ORDER BY pd.create_time DESC, pd.id DESC
             LIMIT %s OFFSET %s
@@ -1107,9 +1292,9 @@ class PostgreSQLService:
                     """,
                     (
                         relation["project_id"],
-                        tender["id"],
-                        business_bid["id"],
-                        technical_bid["id"] if technical_bid else None,
+                        tender["identifier_id"],
+                        business_bid["identifier_id"],
+                        technical_bid["identifier_id"] if technical_bid else None,
                         relation_id,
                     ),
                 )
@@ -1136,9 +1321,9 @@ class PostgreSQLService:
                         create_time
                     """,
                     (
-                        tender["id"],
-                        business_bid["id"],
-                        technical_bid["id"] if technical_bid else None,
+                        tender["identifier_id"],
+                        business_bid["identifier_id"],
+                        technical_bid["identifier_id"] if technical_bid else None,
                         relation_id,
                     ),
                 )
@@ -1148,7 +1333,7 @@ class PostgreSQLService:
                     """
                     SELECT identifier_id
                     FROM xtjs_projects
-                    WHERE id = %s
+                    WHERE identifier_id = %s
                     """,
                     (updated["project_id"],),
                 )
@@ -1157,9 +1342,11 @@ class PostgreSQLService:
                 return {
                     **updated,
                     "project_identifier": project_identifier,
-                    "tender_document_identifier": tender_document_identifier,
-                    "business_bid_document_identifier": business_bid_document_identifier,
-                    "technical_bid_document_identifier": normalized_technical_identifier,
+                    "tender_document_identifier": tender["identifier_id"],
+                    "business_bid_document_identifier": business_bid["identifier_id"],
+                    "technical_bid_document_identifier": (
+                        technical_bid["identifier_id"] if technical_bid else None
+                    ),
                 }
 
     def attach_technical_bid_to_relation(
@@ -1191,24 +1378,24 @@ class PostgreSQLService:
                 if not project:
                     raise ValueError(f"项目不存在：{normalized_project_identifier}")
 
-                self._get_required_document_record(
+                business_bid = self._get_required_document_record(
                     cursor,
                     normalized_business_identifier,
                     role_label="商务标文件",
                     allowed_types=set(BUSINESS_BID_COMPATIBLE_TYPES),
                 )
-                self._get_required_document_record(
+                technical_bid = self._get_required_document_record(
                     cursor,
                     normalized_technical_identifier,
                     role_label="技术标文件",
                     allowed_types=set(TECHNICAL_BID_COMPATIBLE_TYPES),
                 )
 
-                values: list[Any] = [project["id"], normalized_business_identifier]
+                values: list[Any] = [project["identifier_id"], business_bid["identifier_id"]]
                 tender_filter = ""
                 if normalized_tender_identifier:
                     tender_filter = "AND td.identifier_id = %s"
-                    values.append(normalized_tender_identifier)
+                    values.append(self._resolve_document_identifier(cursor, normalized_tender_identifier))
 
                 cursor.execute(
                     f"""
@@ -1218,10 +1405,10 @@ class PostgreSQLService:
                         bbd.identifier_id AS business_bid_document_identifier,
                         tbd.identifier_id AS technical_bid_document_identifier
                     FROM xtjs_project_documents pd
-                    JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
-                    JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+                    JOIN xtjs_documents td ON pd.tender_document_id = td.identifier_id AND td.deleted = FALSE
+                    JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.identifier_id AND bbd.deleted = FALSE
                     LEFT JOIN xtjs_documents tbd
-                        ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
+                        ON pd.technical_bid_document_id = tbd.identifier_id AND tbd.deleted = FALSE
                     WHERE pd.project_id = %s
                       AND bbd.identifier_id = %s
                       {tender_filter}
@@ -1246,7 +1433,7 @@ class PostgreSQLService:
                 )
                 if (
                     existing_technical_identifier
-                    and existing_technical_identifier != normalized_technical_identifier
+                    and existing_technical_identifier != technical_bid["identifier_id"]
                 ):
                     raise ValueError(
                         "该商务标已绑定技术标，如需替换请使用更新关联接口。"
@@ -1259,8 +1446,8 @@ class PostgreSQLService:
                 return self.update_relation(
                     int(relation["relation_id"]),
                     resolved_tender_identifier,
-                    normalized_business_identifier,
-                    normalized_technical_identifier,
+                    business_bid["identifier_id"],
+                    technical_bid["identifier_id"],
                 )
 
     def delete_relation(self, relation_id: int) -> bool:
@@ -1316,16 +1503,16 @@ class PostgreSQLService:
                 tbd.file_url AS technical_bid_file_url,
                 pd.create_time
             FROM xtjs_project_documents pd
-            JOIN xtjs_documents td ON pd.tender_document_id = td.id AND td.deleted = FALSE
-            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.id AND bbd.deleted = FALSE
+            JOIN xtjs_documents td ON pd.tender_document_id = td.identifier_id AND td.deleted = FALSE
+            JOIN xtjs_documents bbd ON pd.business_bid_document_id = bbd.identifier_id AND bbd.deleted = FALSE
             LEFT JOIN xtjs_documents tbd
-                ON pd.technical_bid_document_id = tbd.id AND tbd.deleted = FALSE
+                ON pd.technical_bid_document_id = tbd.identifier_id AND tbd.deleted = FALSE
             WHERE pd.project_id = %s
             ORDER BY pd.create_time DESC
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (project["id"],))
+                cursor.execute(query, (project["identifier_id"],))
                 relations: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
         return {"project": project, "relations": relations}
 
@@ -1342,7 +1529,7 @@ class PostgreSQLService:
             SELECT
                 pd.id AS relation_id,
                 'business_bid' AS relation_role,
-                bbd.id AS document_id,
+                bbd.identifier_id AS document_id,
                 bbd.identifier_id,
                 bbd.document_type,
                 bbd.file_name,
@@ -1358,10 +1545,10 @@ class PostgreSQLService:
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
-              ON pd.tender_document_id = td.id
+              ON pd.tender_document_id = td.identifier_id
              AND td.deleted = FALSE
             JOIN xtjs_documents bbd
-              ON pd.business_bid_document_id = bbd.id
+              ON pd.business_bid_document_id = bbd.identifier_id
              AND bbd.deleted = FALSE
             WHERE pd.project_id = %s
 
@@ -1370,7 +1557,7 @@ class PostgreSQLService:
             SELECT
                 pd.id AS relation_id,
                 'technical_bid' AS relation_role,
-                tbd.id AS document_id,
+                tbd.identifier_id AS document_id,
                 tbd.identifier_id,
                 tbd.document_type,
                 tbd.file_name,
@@ -1386,10 +1573,10 @@ class PostgreSQLService:
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
-              ON pd.tender_document_id = td.id
+              ON pd.tender_document_id = td.identifier_id
              AND td.deleted = FALSE
             JOIN xtjs_documents tbd
-              ON pd.technical_bid_document_id = tbd.id
+              ON pd.technical_bid_document_id = tbd.identifier_id
              AND tbd.deleted = FALSE
             WHERE pd.project_id = %s
 
@@ -1397,7 +1584,7 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (project["id"], project["id"]))
+                cursor.execute(query, (project["identifier_id"], project["identifier_id"]))
                 documents: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
 
         return {"project": project, "documents": documents}
@@ -1407,7 +1594,6 @@ class PostgreSQLService:
         """获取项目分析结果记录。"""
         query = """
             SELECT
-                id,
                 project_identifier_id,
                 result,
                 create_time,
@@ -1418,7 +1604,11 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (project_identifier_id,))
+                normalized_project_identifier = self._resolve_project_identifier(
+                    cursor,
+                    project_identifier_id,
+                )
+                cursor.execute(query, (normalized_project_identifier,))
                 result = cursor.fetchone()
                 return dict(result) if result else None
 
@@ -1436,8 +1626,8 @@ class PostgreSQLService:
         values: List[Any] = []
         if normalized_keyword:
             keyword_like = f"%{normalized_keyword}%"
-            conditions.append("r.project_identifier_id ILIKE %s")
-            values.append(keyword_like)
+            conditions.append("(r.project_identifier_id::text ILIKE %s OR p.project_name ILIKE %s)")
+            values.extend([keyword_like, keyword_like])
         where_clause = " AND ".join(conditions)
 
         count_query = f"""
@@ -1448,15 +1638,15 @@ class PostgreSQLService:
         """
         data_query = f"""
             SELECT
-                r.id,
                 r.project_identifier_id,
+                p.project_name,
                 r.result,
                 r.create_time,
                 r.update_time
             FROM xtjs_result r
             JOIN xtjs_projects p ON r.project_identifier_id = p.identifier_id
             WHERE {where_clause}
-            ORDER BY r.update_time DESC, r.id DESC
+            ORDER BY r.update_time DESC, r.project_identifier_id DESC
             LIMIT %s OFFSET %s
         """
         with self._get_connection() as conn:
@@ -1478,15 +1668,12 @@ class PostgreSQLService:
         result: Dict[str, Any],
     ) -> Dict[str, Any]:
         """创建或完全覆盖项目的分析结果。"""
-        normalized_project_identifier = self._normalize_required_identifier(
-            project_identifier_id,
-            "project_identifier_id",
-        )
         if not isinstance(result, dict):
             raise ValueError("result must be a JSON object")
-        project = self.get_project_by_identifier(normalized_project_identifier)
+        project = self.get_project_by_identifier(project_identifier_id)
         if not project:
-            raise ValueError(f"项目不存在：{normalized_project_identifier}")
+            raise ValueError(f"项目不存在：{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
 
         query = """
             INSERT INTO xtjs_result (project_identifier_id, result)
@@ -1497,7 +1684,6 @@ class PostgreSQLService:
                 result = EXCLUDED.result,
                 update_time = CURRENT_TIMESTAMP
             RETURNING
-                id,
                 project_identifier_id,
                 result,
                 create_time,
@@ -1510,16 +1696,16 @@ class PostgreSQLService:
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
         """删除项目分析结果记录。"""
-        normalized_project_identifier = self._normalize_required_identifier(
-            project_identifier_id,
-            "project_identifier_id",
-        )
         query = """
             DELETE FROM xtjs_result
             WHERE project_identifier_id = %s
         """
         with self._get_connection() as conn:
-            with conn.cursor() as cursor:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_project_identifier = self._resolve_project_identifier(
+                    cursor,
+                    project_identifier_id,
+                )
                 cursor.execute(query, (normalized_project_identifier,))
                 return cursor.rowcount > 0
 
@@ -1534,7 +1720,7 @@ class PostgreSQLService:
             return 0
         query = """
             DELETE FROM xtjs_result
-            WHERE project_identifier_id = ANY(%s)
+            WHERE project_identifier_id = ANY(%s::uuid[])
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
@@ -1548,17 +1734,14 @@ class PostgreSQLService:
         result_value: Dict[str, Any],
     ) -> Dict[str, Any]:
         """向项目结果中合并一个键值对（保留已有键）。"""
-        normalized_project_identifier = self._normalize_required_identifier(
-            project_identifier_id,
-            "project_identifier_id",
-        )
         normalized_result_key = self._normalize_required_identifier(result_key, "result_key")
         if not isinstance(result_value, dict):
             raise ValueError("result_value must be a JSON object")
 
-        project = self.get_project_by_identifier(normalized_project_identifier)
+        project = self.get_project_by_identifier(project_identifier_id)
         if not project:
-            raise ValueError(f"项目不存在：{normalized_project_identifier}")
+            raise ValueError(f"项目不存在：{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
 
         payload = jsonable_encoder({normalized_result_key: result_value})
         query = """
@@ -1570,7 +1753,6 @@ class PostgreSQLService:
                 result = COALESCE(xtjs_result.result, '{}'::jsonb) || EXCLUDED.result,
                 update_time = CURRENT_TIMESTAMP
             RETURNING
-                id,
                 project_identifier_id,
                 result,
                 create_time,

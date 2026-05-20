@@ -21,6 +21,11 @@ from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
 # 服务层（用于获取项目列表）
 from app.service.postgresql_service import PostgreSQLService
+from app.core.document_types import (
+    DOCUMENT_TYPE_BUSINESS_BID,
+    DOCUMENT_TYPE_TECHNICAL_BID,
+    DOCUMENT_TYPE_TENDER,
+)
 
 app = FastAPI(
     title="XTJS 接口文档",
@@ -50,7 +55,20 @@ app.include_router(postgresql_router, prefix="/api/postgresql", tags=["项目业
 app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["项目业务"])
 
 
-# ── OpenAPI 增强：为项目标识字段注入可选值 ──
+# ── OpenAPI 增强：为项目/文档标识字段注入人类可读可选值 ──
+
+HTTP_METHODS = ("get", "post", "put", "delete", "patch")
+PROJECT_FIELD_NAMES = {
+    "identifier_id",
+    "project_identifier",
+    "project_identifier_id",
+}
+DOCUMENT_FIELD_CHOICES = {
+    "document_identifier": "all",
+    "tender_document_identifier": DOCUMENT_TYPE_TENDER,
+    "business_bid_document_identifier": DOCUMENT_TYPE_BUSINESS_BID,
+    "technical_bid_document_identifier": DOCUMENT_TYPE_TECHNICAL_BID,
+}
 
 def _inject_string_choices(schema: dict, choices: list[str]) -> None:
     """将字符串类型 schema 替换为枚举，并设置默认值。"""
@@ -94,61 +112,166 @@ def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict
     return schema
 
 
-def _inject_project_identifier_choices(openapi_schema: dict) -> dict:
-    """
-    在 OpenAPI schema 中为项目相关的 identifier_id 参数和请求体字段
-    注入可选值列表（从数据库获取已存在的项目标识）。
-    """
+def _load_openapi_display_choices() -> tuple[list[str], dict[str, list[str]]]:
+    """从数据库加载 Swagger 下拉展示值。"""
     try:
-        project_identifiers = PostgreSQLService().list_project_identifiers()
+        db_service = PostgreSQLService()
+        project_choices = db_service.list_project_display_choices()
+        document_choices = {
+            "all": db_service.list_document_display_choices(),
+            DOCUMENT_TYPE_TENDER: db_service.list_document_display_choices(DOCUMENT_TYPE_TENDER),
+            DOCUMENT_TYPE_BUSINESS_BID: db_service.list_document_display_choices(
+                DOCUMENT_TYPE_BUSINESS_BID,
+            ),
+            DOCUMENT_TYPE_TECHNICAL_BID: db_service.list_document_display_choices(
+                DOCUMENT_TYPE_TECHNICAL_BID,
+            ),
+        }
     except Exception:
-        project_identifiers = []
+        project_choices = []
+        document_choices = {
+            "all": [],
+            DOCUMENT_TYPE_TENDER: [],
+            DOCUMENT_TYPE_BUSINESS_BID: [],
+            DOCUMENT_TYPE_TECHNICAL_BID: [],
+        }
+    return project_choices, document_choices
+
+
+def _parameter_schema(parameter: dict) -> dict:
+    """返回参数 schema，必要时补上字符串 schema。"""
+    return parameter.setdefault("schema", {"type": "string"})
+
+
+def _mark_project_parameter(parameter: dict, choices: list[str]) -> None:
+    """把参数展示成项目名选择。"""
+    schema = _parameter_schema(parameter)
+    schema.setdefault("title", "项目名")
+    parameter["description"] = (
+        "请选择或输入项目名；旧 UUID 仍兼容。Swagger 下拉值会由后端解析为项目 UUID。"
+    )
+    _inject_string_choices(schema, choices)
+
+
+def _mark_document_parameter(parameter: dict, choices: list[str]) -> None:
+    """把参数展示成文件名选择。"""
+    schema = _parameter_schema(parameter)
+    schema.setdefault("title", "文件名")
+    parameter["description"] = (
+        "请选择或输入文件名；旧 UUID 仍兼容。文件名重复时下拉值会附带 UUID。"
+    )
+    _inject_string_choices(schema, choices)
+
+
+def _inject_body_display_choices(
+    openapi_schema: dict,
+    operation: dict,
+    project_choices: list[str],
+    document_choices: dict[str, list[str]],
+) -> None:
+    """为请求体中的项目/文档标识字段注入人类可读选项。"""
+    request_body = operation.get("requestBody") or {}
+    content = request_body.get("content") or {}
+    for media_type in content.values():
+        schema = _resolve_schema_reference(openapi_schema, media_type.get("schema"))
+        if not isinstance(schema, dict):
+            continue
+        properties = schema.get("properties") or {}
+        for field_name, field_schema in properties.items():
+            if field_name in PROJECT_FIELD_NAMES and isinstance(field_schema, dict):
+                _inject_string_choices(field_schema, project_choices)
+                field_schema.setdefault("title", "项目名")
+                field_schema["description"] = "请选择或输入项目名；旧 UUID 仍兼容。"
+            choice_key = DOCUMENT_FIELD_CHOICES.get(field_name)
+            if choice_key and isinstance(field_schema, dict):
+                _inject_string_choices(field_schema, document_choices.get(choice_key, []))
+                field_schema.setdefault("title", "文件名")
+                field_schema["description"] = "请选择或输入文件名；旧 UUID 仍兼容。"
+
+
+def _inject_display_choices(openapi_schema: dict) -> dict:
+    """
+    在 OpenAPI schema 中将 UUID 参数转换成人类可读的项目名/文件名下拉值。
+
+    注意：这里只改变 Swagger 展示和提交值，后端仍兼容 UUID。
+    """
+    project_choices, document_choices = _load_openapi_display_choices()
 
     paths = openapi_schema.get("paths", {})
-    project_path_prefix = "/api/postgresql/projects"
+    rewritten_paths: dict[str, dict] = {}
 
     for path, path_item in paths.items():
-        if not str(path).startswith(project_path_prefix):
-            continue
+        path_text = str(path)
+        is_project_path = "/projects/{identifier_id}" in path_text
+        is_document_path = "/documents/{identifier_id}" in path_text
+        is_project_result_path = "/results/{project_identifier_id}" in path_text
+        rewritten_path = path_text
+        if is_project_path:
+            rewritten_path = rewritten_path.replace("{identifier_id}", "{project_name}")
+        if is_document_path:
+            rewritten_path = rewritten_path.replace("{identifier_id}", "{file_name}")
+        if is_project_result_path:
+            rewritten_path = rewritten_path.replace(
+                "{project_identifier_id}",
+                "{project_name}",
+            )
 
-        for method in ("get", "post", "put", "delete", "patch"):
+        for method in HTTP_METHODS:
             operation = path_item.get(method)
             if not isinstance(operation, dict):
                 continue
 
-            # 处理路径/查询参数中的 identifier_id
+            # 处理路径/查询参数中的项目和文档标识
             for parameter in operation.get("parameters", []):
-                if parameter.get("name") != "identifier_id":
+                parameter_name = parameter.get("name")
+                parameter_location = parameter.get("in")
+                if parameter_location not in {"query", "path"}:
                     continue
-                if parameter.get("in") not in {"query", "path"}:
-                    continue
-                schema = parameter.setdefault("schema", {"type": "string"})
-                _inject_string_choices(schema, project_identifiers)
 
-            # 处理请求体中的 project_identifier 字段
-            request_body = operation.get("requestBody") or {}
-            content = request_body.get("content") or {}
-            for media_type in content.values():
-                schema = _resolve_schema_reference(openapi_schema, media_type.get("schema"))
-                if not isinstance(schema, dict):
+                if parameter_location == "path" and is_project_path and parameter_name == "identifier_id":
+                    parameter["name"] = "project_name"
+                    _mark_project_parameter(parameter, project_choices)
                     continue
-                properties = schema.get("properties") or {}
-                project_identifier_schema = properties.get("project_identifier")
-                if isinstance(project_identifier_schema, dict):
-                    _inject_string_choices(project_identifier_schema, project_identifiers)
 
+                if parameter_location == "path" and is_document_path and parameter_name == "identifier_id":
+                    parameter["name"] = "file_name"
+                    _mark_document_parameter(parameter, document_choices.get("all", []))
+                    continue
+
+                if (
+                    parameter_location == "path"
+                    and is_project_result_path
+                    and parameter_name == "project_identifier_id"
+                ):
+                    parameter["name"] = "project_name"
+                    _mark_project_parameter(parameter, project_choices)
+                    continue
+
+                if parameter_location == "query" and parameter_name in PROJECT_FIELD_NAMES:
+                    _mark_project_parameter(parameter, project_choices)
+
+            _inject_body_display_choices(
+                openapi_schema,
+                operation,
+                project_choices,
+                document_choices,
+            )
+
+        rewritten_paths[rewritten_path] = path_item
+
+    openapi_schema["paths"] = rewritten_paths
     return openapi_schema
 
 
 def custom_openapi():
-    """自定义 OpenAPI 生成函数，注入项目标识可选值。"""
+    """自定义 OpenAPI 生成函数，注入项目名/文件名可选值。"""
     openapi_schema = get_openapi(
         title=app.title,
         version=app.version,
         description=app.description,
         routes=app.routes,
     )
-    return _inject_project_identifier_choices(openapi_schema)
+    return _inject_display_choices(openapi_schema)
 
 
 app.openapi = custom_openapi

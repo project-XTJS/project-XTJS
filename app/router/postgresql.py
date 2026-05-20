@@ -1130,7 +1130,7 @@ async def _persist_uploaded_analysis_documents(
     tender_json_file: UploadFile,
     business_bid_json_files: Optional[list[UploadFile]],
     technical_bid_json_files: Optional[list[UploadFile]],
-    project_identifier: Optional[str],
+    project_name: Optional[str],
     db_service: PostgreSQLService,
 ) -> tuple[dict, list[dict]]:
     tender_document = await read_uploaded_json_file(
@@ -1152,7 +1152,7 @@ async def _persist_uploaded_analysis_documents(
         tender_document=tender_document,
         business_bid_documents=business_documents,
         technical_bid_documents=technical_documents,
-        project_identifier=project_identifier,
+        project_name=project_name,
     )
     document_records = build_uploaded_project_document_records(persisted_documents)
     return persisted_documents, document_records
@@ -1330,14 +1330,14 @@ async def create_project(
     payload: ProjectCreateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
-    """创建新项目，若项目标识已存在则返回 409。"""
+    """创建新项目，项目 UUID 由系统自动生成，若项目名称已存在则返回 409。"""
     try:
         return db_service.create_project(
-            identifier_id=payload.identifier_id,
+            project_name=payload.project_name,
         )
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
-            raise HTTPException(status_code=409, detail="项目标识已存在") from exc
+            raise HTTPException(status_code=409, detail="项目名称已存在") from exc
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
@@ -1347,7 +1347,7 @@ async def list_projects(
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     offset: Optional[int] = Query(default=None, ge=0),
-    keyword: Optional[str] = Query(default=None, description="按项目标识模糊搜索"),
+    keyword: Optional[str] = Query(default=None, description="按项目名称或 UUID 模糊搜索"),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     """分页查询项目列表，支持关键字搜索。"""
@@ -1402,17 +1402,17 @@ async def get_project_detail(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.put("/projects/{identifier_id}", summary="更新项目标识")
+@router.put("/projects/{identifier_id}", summary="更新项目名称")
 async def update_project(
     identifier_id: str,
     payload: ProjectUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
-    """修改项目标识为新的标识字符串。"""
+    """修改项目名称，项目 UUID 不允许修改。"""
     try:
         updated = db_service.update_project(
             identifier_id=identifier_id,
-            new_identifier_id=payload.new_identifier_id,
+            project_name=payload.project_name,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="项目不存在")
@@ -1423,7 +1423,7 @@ async def update_project(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
-            raise HTTPException(status_code=409, detail="项目标识已存在") from exc
+            raise HTTPException(status_code=409, detail="项目名称已存在") from exc
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
@@ -1831,7 +1831,7 @@ async def upload_business_bid_duplicate_check(
     tender_json_file: UploadFile = File(...),
     business_bid_json_files: list[UploadFile] = File(...),
     technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    project_identifier: Optional[str] = Form(default=None),
+    project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
     max_evidence_sections: int = Form(default=5, ge=1, le=20),
     max_pairs_per_type: int = Form(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -1847,7 +1847,7 @@ async def upload_business_bid_duplicate_check(
             tender_json_file=tender_json_file,
             business_bid_json_files=uploads,
             technical_bid_json_files=technical_bid_json_files,
-            project_identifier=project_identifier,
+            project_name=project_name,
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
@@ -1929,7 +1929,7 @@ async def upload_technical_bid_duplicate_check(
     tender_json_file: UploadFile = File(...),
     technical_bid_json_files: list[UploadFile] = File(...),
     business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    project_identifier: Optional[str] = Form(default=None),
+    project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
     max_evidence_sections: int = Form(default=5, ge=1, le=20),
     max_pairs_per_type: int = Form(default=0, ge=0, le=500),
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -1945,7 +1945,7 @@ async def upload_technical_bid_duplicate_check(
             tender_json_file=tender_json_file,
             business_bid_json_files=business_bid_json_files,
             technical_bid_json_files=uploads,
-            project_identifier=project_identifier,
+            project_name=project_name,
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
@@ -2021,7 +2021,7 @@ async def upload_personnel_reuse_check(
     tender_json_file: UploadFile = File(...),
     business_bid_json_files: list[UploadFile] = File(...),
     technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    project_identifier: Optional[str] = Form(default=None),
+    project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
@@ -2035,7 +2035,7 @@ async def upload_personnel_reuse_check(
             tender_json_file=tender_json_file,
             business_bid_json_files=uploads,
             technical_bid_json_files=technical_bid_json_files,
-            project_identifier=project_identifier,
+            project_name=project_name,
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
@@ -2106,7 +2106,7 @@ async def upload_typo_check(
     tender_json_file: UploadFile = File(...),
     business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    project_identifier: Optional[str] = Form(default=None),
+    project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
@@ -2121,7 +2121,7 @@ async def upload_typo_check(
             tender_json_file=tender_json_file,
             business_bid_json_files=business_uploads,
             technical_bid_json_files=technical_uploads,
-            project_identifier=project_identifier,
+            project_name=project_name,
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]

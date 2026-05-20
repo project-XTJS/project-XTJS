@@ -233,27 +233,27 @@ class DocumentLoaderMixin:
                 return parsed if isinstance(parsed, dict) else {}
         return {}
 
-    # 项目标识相关辅助
+    # 项目名称相关辅助
     def _default_project_identifier(self, dataset_dir: Path) -> str:
-        """基于目录路径生成默认的项目标识。"""
+        """基于目录路径生成默认的项目名称。"""
         digest = hashlib.sha1(str(dataset_dir).encode("utf-8")).hexdigest()[:10]
         return f"unified_business_review_{digest}"
 
-    def _get_or_create_project(self, identifier_id: str) -> dict[str, Any]:
-        """查找或创建项目。"""
-        project = self.db_service.get_project_by_identifier(identifier_id)
+    def _get_or_create_project(self, project_name: str) -> dict[str, Any]:
+        """按项目名称查找或创建项目。"""
+        project = self.db_service.get_project_by_name(project_name)
         if project:
             return project
-        return self.db_service.create_project(identifier_id)
+        return self.db_service.create_project(project_name)
 
     def _ensure_project(self, project_identifier: str | None) -> dict[str, Any]:
-        """确保项目存在（若指定标识则查找/创建，否则自动创建）。"""
-        normalized_identifier = (project_identifier or "").strip()
-        if normalized_identifier:
-            existing = self.db_service.get_project_by_identifier(normalized_identifier)
+        """确保项目存在（入参现在按项目名称处理，UUID 由数据库生成）。"""
+        normalized_project_name = (project_identifier or "").strip()
+        if normalized_project_name:
+            existing = self.db_service.get_project_by_name(normalized_project_name)
             if existing:
                 return existing
-            return self.db_service.create_project(normalized_identifier)
+            return self.db_service.create_project(normalized_project_name)
         return self.db_service.create_project()
 
     # 投标人标识处理
