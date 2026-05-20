@@ -31,10 +31,12 @@ RUN apt-get update \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
+        openjdk-17-jre-headless \
         python3 \
         python3-pip \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
+RUN java -version
 
 COPY wheels/ /tmp/wheels/
 
@@ -65,6 +67,7 @@ RUN if [ "${INSTALL_HPI_DEPS}" = "true" ]; then python -m paddleocr install_hpi_
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 RUN python -c "import fitz; print('PyMuPDF import ok')"
+RUN python -c "import language_tool_python; print('LanguageTool Python import ok')"
 
 COPY . .
 
