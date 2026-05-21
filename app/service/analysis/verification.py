@@ -13,7 +13,7 @@ from .compliance.template_extractor import TemplateExtractor
 class VerificationChecker:
     DATE_PATTERNS = (
         r"(?P<year>20\d{2})[年/\-.](?P<month>1[0-2]|0?[1-9])[月/\-.](?P<day>3[01]|[12]\d|0?[1-9])(?:日)?",
-        r"(?P<year>20\d{2})(?P<month>0[1-9]|1[0-2])(?P<day>0[1-9]|[12]\d|3[01])",
+        r"(?<!\d)(?P<year>20\d{2})(?P<month>0[1-9]|1[0-2])(?P<day>0[1-9]|[12]\d|3[01])(?!\d)",
     )
     DEADLINE_ANCHORS = (
         "投标截止时间", "投标截止日期", "递交截止时间", "递交截止日期",
@@ -27,6 +27,7 @@ class VerificationChecker:
     DATE_FIELD_ANCHORS = ("日期", "填写日期", "签署日期", "落款日期", "签订日期")
     COMPANY_ANCHORS = ("投标人名称", "投标人", "供应商名称", "供应商", "单位名称", "公司名称", "企业名称", "声明人")
     OPTIONAL_MARKERS = ("如有", "可选", "如适用", "如需")
+    BIDDER_NAME_NOISE_MARKERS = ("可另外再附", "可另附", "可后附", "公司简介", "如有", "详见后附")
     EXCLUDE_ATTACHMENTS = ("拟派项目负责人情况表", "项目人员配置表", "人员配置表")
     ATTACHMENT_RE = re.compile(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?附件\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)")
     ATTACHMENT_TITLE_PREFIX_PATTERNS = (
@@ -54,6 +55,8 @@ class VerificationChecker:
     )
     COMMON_ATTACHMENT_TITLES = (
         "投标保证书",
+        "投标承诺书",
+        "投标函",
         "开标一览表",
         "分项报价表",
         "商务条款偏离表",
@@ -72,10 +75,12 @@ class VerificationChecker:
     )
     RESPONSE_FORMAT_ZONE_MARKERS = (
         "响应文件格式附件",
+        "投标文件格式附件",
         "部分格式附件",
     )
     RESPONSE_FORMAT_CHAPTER_MARKERS = (
         "响应文件格式",
+        "投标文件格式",
     )
     RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS = (
         "法定代表人资格证明书",
@@ -568,6 +573,10 @@ class VerificationChecker:
 
     def _response_format_sections(self, tender_payload: dict | None) -> list[dict]:
         payload = self._as_document(tender_payload) or {}
+        shared_sections = TemplateExtractor._response_format_sections(payload)
+        if shared_sections:
+            return shared_sections
+
         container = self._container(payload)
         sections, _ = TemplateExtractor.preprocess_sections(
             container.get("layout_sections", []),
@@ -620,6 +629,8 @@ class VerificationChecker:
         return any(marker in compact for marker in self.RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS)
 
     def _is_response_format_attachment_heading(self, section: dict) -> bool:
+        if TemplateExtractor._is_response_format_attachment_heading(section):
+            return True
         if self._is_attachment_heading(section):
             return True
         return self._is_embedded_response_format_heading(section)
@@ -1396,26 +1407,73 @@ class VerificationChecker:
             text = text.replace(anchor, "")
         return text
 
+    def _looks_like_placeholder_bidder_name(self, text: str) -> bool:
+        compact = self._compact(text)
+        if not compact:
+            return True
+        return any(marker in compact for marker in self.BIDDER_NAME_NOISE_MARKERS)
+
+    def _best_company_candidate(self, candidates: list[str], seal_texts: list[str]) -> str | None:
+        deduped = [candidate for candidate in dict.fromkeys(candidates) if candidate]
+        if not deduped:
+            return None
+        if not seal_texts:
+            return deduped[0]
+        best_candidate = None
+        best_score = -1.0
+        for candidate in deduped:
+            score = max(self._company_score(candidate, seal_text) for seal_text in seal_texts)
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        if best_candidate and best_score >= 0.45:
+            return best_candidate
+        return deduped[0]
+
+    def _extract_company_candidate(self, text: str) -> str | None:
+        compact = self._compact(text)
+        match = self.COMPANY_RE.search(compact)
+        if match:
+            candidate = self._normalize_company(match.group(1))
+            if candidate:
+                return candidate
+        normalized_text = self._normalize_company(text)
+        if len(normalized_text) >= 4 and normalized_text.endswith(
+            ("有限责任公司", "股份有限公司", "集团有限公司", "有限公司", "公司")
+        ):
+            return normalized_text
+        return None
+
     def _bidder_name(self, payload: dict | None, seal_texts: list[str]) -> str | None:
         container = self._container(payload)
+        fallback = None
         for key in ("bidder_name", "company_name", "supplier_name"):
             value = container.get(key)
             if isinstance(value, str) and value.strip():
                 normalized = self._normalize_company(value)
-                if len(normalized) >= 4:
-                    return normalized
+                if len(normalized) >= 4 and not self._looks_like_placeholder_bidder_name(normalized):
+                    fallback = normalized
+                    break
+        section_candidates: list[str] = []
         for section in self._sections(payload):
             compact = self._compact(section["text"])
             for anchor in self.COMPANY_ANCHORS:
                 if anchor in compact:
-                    match = self.COMPANY_RE.search(compact.split(anchor, 1)[-1])
-                    if match:
-                        return self._normalize_company(match.group(1))
+                    candidate = self._extract_company_candidate(compact.split(anchor, 1)[-1])
+                    if candidate and not self._looks_like_placeholder_bidder_name(candidate):
+                        section_candidates.append(candidate)
+        best_section_candidate = self._best_company_candidate(section_candidates, seal_texts)
+        if best_section_candidate:
+            return best_section_candidate
+        seal_candidates: list[str] = []
         for seal_text in seal_texts:
-            match = self.COMPANY_RE.search(self._compact(seal_text))
-            if match:
-                return self._normalize_company(match.group(1))
-        return None
+            candidate = self._extract_company_candidate(seal_text)
+            if candidate and not self._looks_like_placeholder_bidder_name(candidate):
+                seal_candidates.append(candidate)
+        best_seal_candidate = self._best_company_candidate(seal_candidates, seal_texts)
+        if best_seal_candidate:
+            return best_seal_candidate
+        return fallback
 
     def _company_score(self, bidder_name: str, seal_text: str) -> float:
         bidder, seal = self._normalize_company(bidder_name), self._normalize_company(seal_text)

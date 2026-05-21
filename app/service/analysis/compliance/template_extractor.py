@@ -147,8 +147,8 @@ class TemplateExtractor:
         r'(?<![\dA-Z一二三四五六七八九十百零\-－])'
         r'(?=(?:\d+[．\.、)]|[A-Z][．\.、)]|[一二三四五六七八九十百零]+[、．\.]|[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]))'
     )
-    RESPONSE_FORMAT_ZONE_MARKERS = ("响应文件格式附件", "部分格式附件")
-    RESPONSE_FORMAT_CHAPTER_MARKERS = ("响应文件格式",)
+    RESPONSE_FORMAT_ZONE_MARKERS = ("响应文件格式附件", "投标文件格式附件", "部分格式附件")
+    RESPONSE_FORMAT_CHAPTER_MARKERS = ("响应文件格式", "投标文件格式")
     RESPONSE_FORMAT_EMBEDDED_TITLE_MARKERS = (
         "法定代表人资格证明书",
         "法定代表人证明书",
@@ -165,6 +165,25 @@ class TemplateExtractor:
         "组成及部分格式",
         "文件组成及部分格式",
         "资格证明文件组成",
+    )
+    RESPONSE_FORMAT_ATTACHMENT_TITLE_MARKERS = (
+        "投标承诺书",
+        "投标函",
+        "开标一览表",
+        "法定代表人证明",
+        "法定代表人授权委托书",
+        "授权委托书",
+        "项目管理机构人员情况表",
+        "项目管理机构人员组成表",
+        "项目经理简历表",
+        "主要项目管理人员简历表",
+        "投标人基本资料",
+        "投标人基本情况表",
+        "近年完成的类似项目情况表",
+        "投标保证金",
+        "开具增值税专用发票承诺书",
+        "施工组织设计",
+        "其他材料",
     )
     CHAPTER_HEADING_RE = re.compile(r'^\s*第[一二三四五六七八九十百零\d]+章')
     ATTACHMENT_NUMBER_RE = re.compile(
@@ -337,7 +356,8 @@ class TemplateExtractor:
             marker in compact
             for marker in (
                 "表", "书", "函", "清单", "凭证", "介绍", "执照", "证明",
-                "委托", "授权", "承诺", "声明", "偏离", "合同",
+                "委托", "授权", "承诺", "声明", "偏离", "合同", "资料",
+                "许可证", "证书", "保证金", "合格证",
             )
         )
 
@@ -377,15 +397,47 @@ class TemplateExtractor:
     def _is_response_format_attachment_heading(cls, section: dict) -> bool:
         text = str(section.get('text') or '').strip()
         compact = cls._compact(text)
+        if str(section.get('type') or '').strip().lower() != 'heading':
+            return False
+        if not compact or compact in {"目录", "附"}:
+            return False
+        if "包括" in compact and ("商务标" in compact or "技术标" in compact):
+            return False
+        if "及其" in compact and ("、" in compact or "附录" in compact):
+            return False
         attachment_number = cls._attachment_number(text)
         if attachment_number is not None:
             attachment_index = compact.find("附件")
             if attachment_index >= 0 and attachment_index <= 12:
                 return True
+        if any(marker in compact for marker in cls.RESPONSE_FORMAT_ATTACHMENT_TITLE_MARKERS):
+            return True
         return (
             SectionClassifier.is_attachment_heading_text(text)
             or cls._is_embedded_response_format_heading(section)
         )
+
+    @classmethod
+    def _find_business_format_start_index(cls, sections: list[dict]) -> int | None:
+        """跳过投标文件格式章内的目录，定位真正的“商务标”模板正文。"""
+        for idx, section in enumerate(sections):
+            if str(section.get('type') or '').strip().lower() != 'heading':
+                continue
+            compact = cls._compact(section.get('text') or '')
+            if not compact:
+                continue
+            if "商务标" not in compact or "技术" in compact or "包括" in compact:
+                continue
+            if "：" in compact or ":" in compact or compact.endswith("商务标"):
+                return idx
+        return None
+
+    @classmethod
+    def _is_response_format_chapter_heading(cls, text: str) -> bool:
+        """判断标题是否正是“响应文件格式/投标文件格式”章名。"""
+        compact = cls._compact(text).strip("：:；;。")
+        compact = re.sub(r'^第[一二三四五六七八九十百零\d]+章', '', compact)
+        return compact in cls.RESPONSE_FORMAT_CHAPTER_MARKERS
 
     @classmethod
     def _response_format_sections(cls, model_raw_json: dict) -> list[dict]:
@@ -400,14 +452,24 @@ class TemplateExtractor:
 
         start_index = None
         for idx, section in enumerate(sections):
-            compact = cls._compact(section.get('text') or '')
-            if any(marker in compact for marker in cls.RESPONSE_FORMAT_ZONE_MARKERS):
+            text = str(section.get('text') or '').strip()
+            if cls._is_noise(text, set(), section.get('type')):
+                continue
+            compact = cls._compact(text)
+            if any(
+                compact == marker or (compact.endswith(marker) and len(compact) <= len(marker) + 8)
+                for marker in cls.RESPONSE_FORMAT_ZONE_MARKERS
+            ):
                 start_index = idx
                 break
         if start_index is None:
             for idx, section in enumerate(sections):
-                compact = cls._compact(section.get('text') or '')
-                if any(marker in compact for marker in cls.RESPONSE_FORMAT_CHAPTER_MARKERS):
+                text = str(section.get('text') or '').strip()
+                if str(section.get('type') or '').strip().lower() != 'heading':
+                    continue
+                if cls._is_noise(text, set(), section.get('type')):
+                    continue
+                if cls._is_response_format_chapter_heading(text):
                     start_index = idx
                     break
         if start_index is None:
@@ -434,16 +496,19 @@ class TemplateExtractor:
         if not sections:
             return []
 
+        effective_start = cls._find_business_format_start_index(sections)
+        section_offset = (effective_start + 1) if effective_start is not None else 0
+        candidate_sections = sections[section_offset:]
         starts = [
             idx
-            for idx, section in enumerate(sections)
+            for idx, section in enumerate(candidate_sections)
             if cls._is_response_format_attachment_heading(section)
         ]
         attachments: list[dict] = []
         current_top_level_number: str | None = None
         for pos, start in enumerate(starts):
-            end = starts[pos + 1] if pos + 1 < len(starts) else len(sections)
-            chunk = sections[start:end]
+            end = starts[pos + 1] if pos + 1 < len(starts) else len(candidate_sections)
+            chunk = candidate_sections[start:end]
             if not chunk:
                 continue
             title = str(chunk[0].get('text') or '').strip()
@@ -484,7 +549,7 @@ class TemplateExtractor:
             - attachment_mapping: 序号 → 附件编号列表。
         """
         business_scope = cls.extract_business_attachment_scope(model_raw_json)
-        response_attachments, _ = cls.filter_business_response_attachments(model_raw_json)
+        response_attachments, scoped = cls.filter_business_response_attachments(model_raw_json)
 
         attachments_by_number: dict[str, dict] = {}
         for attachment in response_attachments:
@@ -526,13 +591,14 @@ class TemplateExtractor:
                 continue
             push_requirement(str(entry.get("content") or "").strip())
 
-        # 无组成时回退全量附件；有组成时补齐仍未被条目覆盖的模板附件。
-        for attachment in response_attachments:
-            title = str(attachment.get("title") or "").strip()
-            if not title or attachment.get("is_composite"):
-                continue
-            attachment_number = str(attachment.get("attachment_number") or "").strip()
-            push_requirement(title, [attachment_number] if attachment_number else None)
+        # 只有未能识别商务标组成范围时才回退全量附件；已识别范围时避免把技术标模板混入商务完整性。
+        if not scoped:
+            for attachment in response_attachments:
+                title = str(attachment.get("title") or "").strip()
+                if not title or attachment.get("is_composite"):
+                    continue
+                attachment_number = str(attachment.get("attachment_number") or "").strip()
+                push_requirement(title, [attachment_number] if attachment_number else None)
 
         return ordered_list, attachment_mapping
 
@@ -660,20 +726,38 @@ class TemplateExtractor:
 
             compact = cls._compact(text)
             if sec['type'] == 'heading':
-                if stage == 0 and '文件' in text and '组成' in text:
+                if stage == 0 and '投标文件' in text and '组成' in text:
                     stage = 1
                     found_composition = True
                     continue
-                if stage == 1 and '商务' in compact and '技术' not in compact:
-                    stage = 2
-                    entered_business = True
-                    continue
-                if stage == 2 and '技术' in compact:
-                    break
+
+            direct_business_heading = bool(
+                re.match(r"^(?:\d+(?:\.\d+)*|[（(]?[一二三四五六七八九十]+[)）]?、?)?商务标", compact)
+            )
+            if (
+                stage == 1
+                and (sec.get('type') == 'heading' or direct_business_heading)
+                and '商务' in compact
+                and '技术' not in compact
+            ):
+                stage = 2
+                entered_business = True
+                continue
+            direct_technical_heading = bool(
+                re.match(r"^(?:\d+(?:\.\d+)*|[（(]?[一二三四五六七八九十]+[)）]?、?)?技术标", compact)
+            )
+            if (
+                stage == 2
+                and (sec.get('type') == 'heading' or direct_technical_heading)
+                and '技术' in compact
+                and '商务' not in compact
+            ):
+                break
 
             if stage != 2:
                 continue
 
+            parsed_any = False
             for part in cls._split_requirement_parts(text):
                 seq, content = cls._parse_requirement_item(part)
                 if not seq or not content:
@@ -697,6 +781,25 @@ class TemplateExtractor:
                 if attach_numbers:
                     attachment_mapping[seq] = attach_numbers
                     required_numbers.update(attach_numbers)
+                parsed_any = True
+
+            if parsed_any:
+                continue
+
+            if cls._looks_like_requirement_leaf(text) and len(compact) <= 80:
+                cleaned = cls._clean_label(text)
+                if cleaned:
+                    seq = str(len(item_entries) + 1)
+                    ordered_items.append(f"{seq}. {cleaned}")
+                    required_titles.add(cls._compact(cleaned))
+                    item_entries.append(
+                        {
+                            "seq": seq,
+                            "content": cleaned,
+                            "attachment_numbers": [],
+                            "title_core": cls._requirement_core_title(cleaned),
+                        }
+                    )
 
         return {
             "has_business_composition": found_composition and entered_business,
@@ -721,6 +824,8 @@ class TemplateExtractor:
 
         required_numbers = {str(x).strip() for x in scope.get("required_numbers") or set() if str(x).strip()}
         required_titles = {str(x).strip() for x in scope.get("required_titles") or set() if str(x).strip()}
+        if not required_numbers and not required_titles:
+            return source_attachments, False
 
         filtered: list[dict] = []
         for attachment in source_attachments:

@@ -157,9 +157,28 @@ class HelpersMixin:
     def _map_price_result(self, result_value: Any, summary_text: str) -> str:
         """专门针对报价结果的字符串映射。"""
         result_text = str(result_value or "").strip()
+        normalized_result = result_text.lower()
+        if normalized_result in {"合格", "通过", "pass", "passed", "ok", "success"}:
+            return "pass"
+        if normalized_result in {"不合格", "失败", "未通过", "fail", "failed", "error"}:
+            return "fail"
+
         combined = f"{result_text} {summary_text}".strip()
+        # 摘要里可能出现“未识别到投标总金额不作为失败项”这类否定语义，
+        # 不能因为包含“失败”两个字就覆盖结构化的合格结论。
+        benign_fail_phrases = (
+            "不作为失败项",
+            "不判失败",
+            "不是失败项",
+            "不按总价限价校验判失败",
+            "不按总价限价判失败",
+            "不作为总价限价校验失败项",
+        )
+        combined_for_fail = combined
+        for phrase in benign_fail_phrases:
+            combined_for_fail = combined_for_fail.replace(phrase, "")
         fail_keywords = ("不合格", "超出", "异常", "失败", "错误")
-        if any(keyword in combined for keyword in fail_keywords):
+        if any(keyword in combined_for_fail for keyword in fail_keywords):
             return "fail"
         if "合格" in combined or re.search(r"\bpass\b", combined, re.IGNORECASE):
             return "pass"

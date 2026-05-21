@@ -23,6 +23,8 @@ class IntegrityChecker:
         "基本情况": ["基本情况"],
         "类似项目业绩": ["类似项目业绩清单", "业绩证明"],
         "营业执照": ["营业执照", "经营许可"],
+        "安全生产许可证": ["安全生产许可证", "有效的安全生产许可证"],
+        "投标保证金": ["投标保证金", "保证金缴纳凭证", "投标保证金汇款凭证"],
         "制造商声明函": ["制造商声明", "制造商授权", "原厂授权"],
         "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
         "缴纳社保": ["社会保险个人权益记录", "社保缴纳证明", "劳动合同证明"],
@@ -61,6 +63,17 @@ class IntegrityChecker:
             "社会保障资金",
             "声明函",
         ],
+        "信用中国及中国裁判文书网证明材料": [
+            "信用中国",
+            "失信被执行人",
+            "重大税收违法",
+            "中国裁判文书网",
+        ],
+        "拟派项目经理有效的注册建造师、安全生产考核证书": [
+            "项目经理",
+            "注册建造师",
+            "安全生产考核合格证书",
+        ],
         "制造商声明函": ["制造商声明", "制造商授权", "原厂授权"],
         "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
         "资格证明文件": [
@@ -94,7 +107,23 @@ class IntegrityChecker:
                 "原厂授权",
             ],
             "min_hits": 2,
-        }
+        },
+        "信用中国及中国裁判文书网证明材料": {
+            "markers": [
+                "失信被执行人",
+                "重大税收违法",
+                "中国裁判文书网",
+            ],
+            "min_hits": 2,
+        },
+        "拟派项目经理有效的注册建造师、安全生产考核证书": {
+            "markers": [
+                "项目经理",
+                "注册建造师",
+                "安全生产考核合格证书",
+            ],
+            "min_hits": 2,
+        },
     }
 
     BODY_MATCH_FRAGMENTS = (
@@ -121,6 +150,11 @@ class IntegrityChecker:
         "偏离表",
         "报价表",
         "一览表",
+        "信用中国",
+        "失信被执行人",
+        "裁判文书",
+        "注册建造师",
+        "安全生产考核",
     )
 
     # 标题前缀模式（用于去除编号）
@@ -253,7 +287,12 @@ class IntegrityChecker:
     def _is_optional_item(self, item: str) -> bool:
         normalized = str(item or "").strip()
         # 完整性阶段只有标题本身带“如有”才允许缺失。
-        return "如有" in normalized
+        compact = re.sub(r"\s+", "", normalized)
+        return (
+            "如有" in normalized
+            or "认为需要补充" in compact
+            or ("其他内容" in compact and "前附表规定" in compact)
+        )
 
     # 从 section 中提取位置信息
     def _location_from_section(self, section: dict | None) -> dict[str, Any] | None:
@@ -465,11 +504,17 @@ class IntegrityChecker:
             return False
 
         normalized_text = self._normalize_title_text(text)
-        normalized_keyword = self._normalize_title_text(keyword)
-        if not normalized_keyword or normalized_keyword not in normalized_text:
+        candidate_lengths = [
+            len(candidate_norm)
+            for candidate in self._candidate_titles(keyword)
+            if (candidate_norm := self._normalize_title_text(candidate))
+            and candidate_norm in normalized_text
+        ]
+        if not candidate_lengths:
             return False
 
-        return len(normalized_text) <= max(len(normalized_keyword) + 12, len(normalized_keyword) * 2)
+        matched_length = max(candidate_lengths)
+        return len(normalized_text) <= max(matched_length + 24, matched_length * 2)
 
     # heading 没找到时，再按附件名回查 text，确认是否只是 OCR 把标题切成了正文
     def _find_text_section(self, sections: list, headers: set, keyword: str, toc_pages: set[int]) -> dict | None:

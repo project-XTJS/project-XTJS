@@ -28,8 +28,63 @@ class RateModeMixin:
         self,
         candidate_sections: list[dict],
         tender_document: dict | None = None,
+        item_sections: list[dict] | None = None,
     ) -> dict:
         """执行下浮率报价模式下的列项抽取和删减项比对。"""
+        # 下浮率报价常出现在“开标一览表”中；它只能证明有报价页，
+        # 不能等同于已识别到“分项报价表/已标价工程量清单”。
+        if not item_sections:
+            return {
+                "itemized_table_detected": False,
+                "mode": "downward_rate",
+                "status": "not_detected",
+                "passed": None,
+                "summary": "未识别到分项报价表，当前仅检测到下浮率报价页。",
+                "checks": {
+                    "row_arithmetic": {
+                        "status": "not_detected",
+                        "issue_count": 0,
+                        "issues": [],
+                    },
+                    "sum_consistency": {
+                        "status": "not_detected",
+                        "calculated_total": None,
+                        "declared_total": None,
+                        "difference": None,
+                        "matched_total_label": None,
+                    },
+                    "duplicate_items": {
+                        "status": "not_detected",
+                        "issue_count": 0,
+                        "issues": [],
+                    },
+                    "missing_item": {
+                        "status": "missing",
+                        "missing_items": [],
+                        "comparison_basis": None,
+                        "matched_count": 0,
+                        "reference_count": 0,
+                        "bid_count": 0,
+                        "match_strategies": {},
+                        "hints": [],
+                        "hint_level": None,
+                    },
+                },
+                "evidence": {
+                    "extracted_item_count": 0,
+                    "extracted_items": [],
+                    "total_candidates": [],
+                    "comparison_items": [],
+                    "reference_item_count": 0,
+                    "reference_items": [],
+                    "matched_items": [],
+                    "unmatched_reference_items": [],
+                },
+                "details": [
+                    "检测到下浮率模式，但未识别到分项报价表或已标价工程量清单。",
+                ],
+            }
+
         relevant_sections = [
             section
             for section in candidate_sections
@@ -108,28 +163,28 @@ class RateModeMixin:
             )
 
         return {
-            "itemized_table_detected": bool(
-                relevant_sections or extracted_items or comparison_items
-            ),
+            # Only a real itemized/priced BOQ section should mark this as detected.
+            # Opening-bid/rate pages are handled above as missing itemized tables.
+            "itemized_table_detected": bool(item_sections),
             "mode": "downward_rate",
             "status": status,
             "passed": self._status_to_passed(status),
             "summary": self._build_downward_rate_summary(missing_item_status),
             "checks": {
                 "row_arithmetic": {
-                    "status": "skipped",
+                    "status": "not_applicable",
                     "issue_count": 0,
                     "issues": [],
                 },
                 "sum_consistency": {
-                    "status": "skipped",
+                    "status": "not_applicable",
                     "calculated_total": None,
                     "declared_total": None,
                     "difference": None,
                     "matched_total_label": None,
                 },
                 "duplicate_items": {
-                    "status": "skipped",
+                    "status": "not_applicable",
                     "issue_count": 0,
                     "issues": [],
                 },
@@ -372,6 +427,8 @@ class RateModeMixin:
             label = self._extract_comparison_label(line, idx, rate_mode=rate_mode)
             if not label:
                 continue
+            if self._should_skip_comparison_item_label(label, line, rate_mode=rate_mode):
+                continue
             items.append(
                 {
                     "serial": serial,
@@ -405,6 +462,12 @@ class RateModeMixin:
                 rate_mode=rate_mode,
             )
             if not label or self._is_generic_comparison_label(label):
+                continue
+            if self._should_skip_comparison_item_label(
+                label,
+                block_text,
+                rate_mode=rate_mode,
+            ):
                 continue
             items.append(
                 {
@@ -448,6 +511,68 @@ class RateModeMixin:
     def _is_generic_comparison_label(self, label: str | None) -> bool:
         """判断标签是否只是兜底生成的泛化占位文本。"""
         return bool(re.fullmatch(r"第\d+行", str(label or "").strip()))
+
+    def _should_skip_comparison_item_label(
+        self,
+        label: str | None,
+        source_text: str | None,
+        *,
+        rate_mode: bool,
+    ) -> bool:
+        """过滤明显不是报价列项的招标/合同条款，避免当作缺失报价项。"""
+        if rate_mode:
+            return False
+        compact_label = re.sub(r"\s+", "", str(label or ""))
+        compact_source = re.sub(r"\s+", "", str(source_text or ""))
+        combined = compact_label + compact_source
+        if not compact_label:
+            return True
+        if compact_label in {"偏离", "响应", "说明", "条款", "目录"}:
+            return True
+
+        clause_markers = (
+            "投标人",
+            "中标人",
+            "招标人",
+            "本章第",
+            "本项目",
+            "应当",
+            "应按",
+            "须",
+            "不得",
+            "分包",
+            "合同",
+            "条款",
+            "自行施工",
+            "施工总承包",
+            "接受",
+        )
+        strong_clause_markers = (
+            "投标人中标后",
+            "本章第",
+            "分包",
+            "偏离",
+            "合同约定",
+            "招标人负责",
+        )
+        price_markers = (
+            "下浮率",
+            "优惠率",
+            "折扣率",
+            "报价",
+            "单价",
+            "合价",
+            "金额",
+            "清单",
+        )
+        clause_hit_count = sum(1 for marker in clause_markers if marker in combined)
+        if any(marker in combined for marker in strong_clause_markers):
+            return True
+        if clause_hit_count >= 2:
+            return True
+        if clause_hit_count and not any(marker in compact_label for marker in price_markers):
+            return True
+        return False
 
     def _has_reliable_comparison_label(self, item: dict) -> bool:
         """判断列项是否具备足够稳定的标签，可用于序号变化时的回退匹配。"""

@@ -119,6 +119,14 @@ class DocumentParserMixin:
             r"最终报价(?:\s*[\(（]?\s*总价\s*[、,，/]?\s*元?\s*[\)）]?)?",
         ]
 
+    def _annual_total_label_patterns(self) -> list[str]:
+        return [
+            r"年总价",
+            r"年度总价",
+            r"服务期总价",
+            r"(?:含税|不含税)?总价\s*[\(（]?\s*元?\s*/\s*年[\)）]?",
+        ]
+
     def _has_bid_total_amount_signal(
         self, text: str, *, assume_opening_context: bool = False
     ) -> bool:
@@ -131,6 +139,8 @@ class DocumentParserMixin:
             return False
 
         label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
+        annual_label_pattern = r"(?:%s)" % "|".join(self._annual_total_label_patterns())
+        amount_pattern = r"(?:[￥¥]?\s*\d[\d,，]*(?:\.\d+)?)"
         patterns = [
             label_pattern
             + r"[^\n]{0,20}?(?:小写[：:]?)?\s*[￥¥]?\s*\d[\d,，,]*(?:\.\d+)?\s*元?",
@@ -141,6 +151,8 @@ class DocumentParserMixin:
             r".{0,60}?大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+",
             r"大写[：:]?[零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿圆元角分整正]+"
             r".{0,60}?小写[：:]?\s*[￥¥]?\s*\d[\d,，]*(?:\.\d+)?\s*元?",
+            annual_label_pattern + r"[^\n\d]{0,20}?" + amount_pattern + r"(?:\s*元)?",
+            amount_pattern + r"(?:\s*元)?[^\n]{0,20}?" + annual_label_pattern,
         ]
         return any(
             re.search(pattern, search_text, re.IGNORECASE | re.DOTALL)

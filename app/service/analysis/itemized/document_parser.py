@@ -313,6 +313,8 @@ class DocumentParserMixin:
         score = amount_hits + total_hits
         if anchor in ("开标一览表", "报价一览表"):
             score += 2
+        if anchor in self.PRIMARY_ITEM_SECTION_ANCHORS:
+            score += 2
         if "目录" in text and amount_hits == 0:
             return 0
         return score

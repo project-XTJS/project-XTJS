@@ -388,6 +388,28 @@ class TenderLimitMixin:
             return True
         return self._extract_bid_total_amount(bid_source) is not None
 
+    def _is_float_rate_quote_mode(self, bid_source: Any) -> bool:
+        parsed = self._parse_input(bid_source)
+        bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
+        if not bid_opening_text or not bid_opening_text.strip():
+            bid_opening_text = str(parsed.get("raw_text") or "")
+        if not bid_opening_text or not bid_opening_text.strip():
+            return False
+        if not self._contains_float_rate_keywords(bid_opening_text):
+            return False
+        rules = self._extract_float_rate_rules(bid_opening_text)
+        rows = self._extract_float_rate_rows(parsed, bid_page, bid_opening_text, rules)
+        if rows:
+            return True
+        if self._extract_single_float_rate_from_table(parsed, bid_page, bid_opening_text) is not None:
+            return True
+        return bool(
+            re.search(
+                r"(?:下浮率|优惠率|折扣率|折让率)[\s\S]{0,120}\d+(?:\.\d+)?\s*%?",
+                bid_opening_text,
+            )
+        )
+
     # 投标总价提取
     def _extract_bid_total_amount(self, bid_source: Any) -> Optional[Dict]:
         parsed = self._parse_input(bid_source)
@@ -413,6 +435,11 @@ class TenderLimitMixin:
             rf"({label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
             r"小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
+        annual_label_pattern = r"(?:%s)" % "|".join(self._annual_total_label_patterns())
+        annual_total_patterns = [
+            rf"({annual_label_pattern})[^\n\d]{{0,20}}([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
+            rf"({annual_label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
+        ]
 
         search_texts = [normalized_opening_text]
         if normalized_opening_text != bid_opening_text:
@@ -426,6 +453,20 @@ class TenderLimitMixin:
                         if len(m.groups()) >= 2
                         else m.group(1).strip()
                     )
+                    amount = self._clean_small_price(raw_amount)
+                    if amount is None:
+                        continue
+                    return {
+                        "page": bid_page,
+                        "amount_yuan": round(amount, 2),
+                        "raw_amount": raw_amount,
+                        "context": normalized_opening_text[:400] or bid_opening_text[:400],
+                    }
+
+        for search_text in search_texts:
+            for pattern in annual_total_patterns:
+                for m in re.finditer(pattern, search_text):
+                    raw_amount = m.group(2).strip()
                     amount = self._clean_small_price(raw_amount)
                     if amount is None:
                         continue
@@ -474,6 +515,14 @@ class TenderLimitMixin:
     ) -> Dict:
         tender_limit = self._extract_tender_max_limit(tender_source)
         if not tender_limit:
+            if self._is_float_rate_quote_mode(bid_source):
+                return {
+                    "result": "合格",
+                    "type": "最高限价校验",
+                    "summary": ["检测到投标文件采用下浮率报价模式，未识别到最高限价时不按总价限价校验判失败。"],
+                    "pages": [],
+                    "locations": [],
+                }
             if self._is_direct_quote_mode(bid_source):
                 return {
                     "result": "合格",
@@ -492,6 +541,23 @@ class TenderLimitMixin:
 
         bid_total = self._extract_bid_total_amount(bid_source)
         if not bid_total:
+            if self._is_float_rate_quote_mode(bid_source):
+                bid_page = self._locate_bid_opening_page_and_text(
+                    self._parse_input(bid_source)
+                )[0]
+                return {
+                    "result": "合格",
+                    "type": "最高限价校验",
+                    "summary": [
+                        "检测到投标文件采用下浮率报价模式，未识别到投标总金额不作为总价限价校验失败项。",
+                    ],
+                    "pages": [bid_page] if isinstance(bid_page, int) else [],
+                    "locations": (
+                        [{"page": bid_page, "label": "下浮率报价", "document": "bidder"}]
+                        if isinstance(bid_page, int)
+                        else []
+                    ),
+                }
             tender_page = tender_limit.get("page")
             return {
                 "result": "失败",

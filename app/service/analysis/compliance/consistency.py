@@ -55,6 +55,8 @@ class ConsistencyChecker:
     FILLED_UNDERLINE_CAPTURE_RE = re.compile(
         r"\$?\s*\\underline\{\s*(?:\\text\{)?(?P<content>[^{}\n]{0,200})(?:\})?\s*\}\s*\$?"
     )
+    URL_TEXT_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+    BRACKET_PLACEHOLDER_RE = re.compile(r"【[^】\n]{1,80}】|\[[^\]\n]{1,80}\]|「[^」\n]{1,80}」")
     FILLED_BLANK_SPAN_RE = re.compile(r"_{2,}\s*[^_\n]{0,120}?\s*_{2,}")
     SHORT_PAREN_RE = re.compile(r"[（(][^()（）\n]{0,80}[）)]")
     FOOTER_PAGE_RE = re.compile(r"^\s*(?:第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?|\d+\s*/\s*\d+|\d+)\s*$")
@@ -70,6 +72,28 @@ class ConsistencyChecker:
         "偏离说明",
         "劳动合同",
         "退休人员",
+    )
+    TEMPLATE_PLACEHOLDER_HINT_MARKERS = (
+        "招标人名称",
+        "采购人名称",
+        "项目名称",
+        "项目编号",
+        "包件名称",
+        "标段名称",
+        "投标人名称",
+        "供应商名称",
+    )
+    NON_COMPARABLE_SLOT_MARKERS = (
+        "单位公章",
+        "盖章",
+        "签章",
+        "签字",
+        "身份证号码",
+        "手机",
+    )
+    ANCHOR_EQUIVALENT_REPLACEMENTS = (
+        ("招标公告", "投标邀请书"),
+        ("投标邀请书", "招标公告"),
     )
     # 表格型附件只校验表头和固定说明，不把数据行数值带入一致性比较。
     TABLE_HEADER_GROUPS = (
@@ -241,6 +265,8 @@ class ConsistencyChecker:
         normalized = self._normalize(plain)
         if len(normalized) < 6:
             return False
+        if self.URL_TEXT_RE.search(plain):
+            return True
         if any(marker in normalized for marker in self.UNDERLINE_PRESERVE_MARKERS):
             return True
         if re.search(r"[，。；：、】【、]", plain) and len(normalized) >= 10:
@@ -265,11 +291,17 @@ class ConsistencyChecker:
         text = self._plain_text(line)
         if not text:
             return ""
+        if self._is_non_comparable_slot_line(text):
+            return ""
         table_header_projection = self._table_header_projection(text)
         if table_header_projection:
             return table_header_projection
         normalized_text = self._normalize(text)
         compact_text = self._compact_text(text)
+        if "已签字" in compact_text and any(
+            marker in compact_text for marker in ("法定代表人", "委托代理人", "项目经理", "投标人")
+        ):
+            return ""
         has_dynamic_marker = bool(
             self.FILLED_UNDERLINE_RE.search(text)
             or self.FILLED_BLANK_SPAN_RE.search(text)
@@ -432,10 +464,23 @@ class ConsistencyChecker:
 
     def _strip_placeholder_hints(self, line: str) -> str:
         stripped = self._plain_text(line)
+        stripped = self._strip_named_placeholder_hints(stripped)
         stripped = self.PLACEHOLDER_SPAN_RE.sub("", stripped)
         stripped = re.sub(r"[（(]\s*[)）]", "", stripped)
         stripped = re.sub(r"\s+", " ", stripped)
         return stripped.strip()
+
+    def _strip_named_placeholder_hints(self, line: str) -> str:
+        """移除 【项目名称】 这类模板变量提示，避免把变量名当固定正文。"""
+
+        def repl(match: re.Match[str]) -> str:
+            content = match.group(0)
+            normalized = self._normalize(content)
+            if any(self._normalize(marker) in normalized for marker in self.TEMPLATE_PLACEHOLDER_HINT_MARKERS):
+                return ""
+            return content
+
+        return self.BRACKET_PLACEHOLDER_RE.sub(repl, line)
 
     def _looks_like_table_line(self, line: str) -> bool:
         return "|" in str(line or "") and str(line or "").count("|") >= 2
@@ -492,6 +537,8 @@ class ConsistencyChecker:
         text = self._plain_text(line)
         if not text or self._looks_like_table_line(text):
             return None
+        if self._is_non_comparable_slot_line(text):
+            return None
 
         compact = self._compact_text(text)
         placeholder_matches = list(self.PLACEHOLDER_SPAN_RE.finditer(compact))
@@ -525,6 +572,19 @@ class ConsistencyChecker:
             "fixed_parts": fixed_parts,
             "fallback_anchors": fallback_anchors,
         }
+
+    def _is_non_comparable_slot_line(self, line: str) -> bool:
+        """签章、联系方式、纯日期等填空行由签章/日期模块处理，不参与模板一致性。"""
+        compact = self._compact_text(line)
+        if not compact:
+            return False
+        stripped = self._strip_placeholder_hints(line)
+        normalized = self._normalize(stripped)
+        if normalized and re.fullmatch(r"[年月日]+", normalized):
+            return True
+        return self.PLACEHOLDER_SPAN_RE.search(compact) is not None and any(
+            marker in compact for marker in self.NON_COMPARABLE_SLOT_MARKERS
+        )
 
     def _candidate_line_windows(self, bid_lines: List[str], max_window: int = 3) -> List[str]:
         """生成单行和相邻多行窗口，兼容 OCR 将一条模板句拆成多行的情况。"""
@@ -570,7 +630,9 @@ class ConsistencyChecker:
                 return True
         return False
 
-    def _evaluate_dynamic_slot_specs(self, slot_specs: List[dict], bid_body: str, fixed_bid_body: str) -> List[str]:
+    def _evaluate_dynamic_slot_specs(
+        self, slot_specs: List[dict], bid_body: str, fixed_bid_body: str, title: str = ""
+    ) -> List[str]:
         """先用模板槽位规则匹配，未命中时再回退到严格锚点比对。"""
         if not slot_specs:
             return []
@@ -581,7 +643,11 @@ class ConsistencyChecker:
             if self._dynamic_slot_spec_matches(slot_spec, bid_lines):
                 continue
             fallback_anchors = slot_spec.get("fallback_anchors") or []
-            slot_missing = [anchor for anchor in fallback_anchors if anchor not in strict_bid_norm]
+            slot_missing = [
+                anchor
+                for anchor in fallback_anchors
+                if not self._anchor_present_in_bid(anchor, strict_bid_norm, title=title)
+            ]
             missing.extend(slot_missing)
         return missing
 
@@ -802,9 +868,56 @@ class ConsistencyChecker:
             norm = self._normalize(p)
             if '粘贴' in norm or ('签字' in norm and '盖章' in norm) or norm.isdigit(): 
                 continue
-            if len(norm) >= 2 or norm in ['年', '月', '日']: 
+            if len(norm) >= 2 or norm in ['年', '月', '日']:
                 anchors.append(norm)
         return anchors
+
+    def _anchor_variants(self, anchor: str) -> List[str]:
+        variants = {anchor}
+        for source, target in self.ANCHOR_EQUIVALENT_REPLACEMENTS:
+            source_key = self._normalize(source)
+            target_key = self._normalize(target)
+            if source_key and target_key and source_key in anchor:
+                variants.add(anchor.replace(source_key, target_key))
+        return [variant for variant in variants if variant]
+
+    def _manufacturer_either_or_anchor_present(
+        self, title: str, anchor: str, normalized_bid_body: str
+    ) -> bool:
+        normalized_title = self._normalize(title)
+        if "制造商声明函" not in normalized_title or "制造商授权书" not in normalized_title:
+            return False
+        declaration_markers = (
+            self._normalize("我公司为本次项目所投产品制造商"),
+            self._normalize("所投产品制造商"),
+            self._normalize("制造商声明"),
+        )
+        authorization_markers = (
+            self._normalize("授权投标人参与本项目"),
+            self._normalize("授权投标人"),
+            self._normalize("制造商授权"),
+            self._normalize("授权书"),
+        )
+        anchor_is_declaration = any(marker in anchor for marker in declaration_markers)
+        anchor_is_authorization = any(marker in anchor for marker in authorization_markers)
+        has_declaration = any(marker in normalized_bid_body for marker in declaration_markers)
+        has_authorization = any(marker in normalized_bid_body for marker in authorization_markers)
+        return (anchor_is_authorization and has_declaration) or (
+            anchor_is_declaration and has_authorization
+        )
+
+    def _anchor_present_in_bid(
+        self, anchor: str, normalized_bid_body: str, *, title: str = ""
+    ) -> bool:
+        if not anchor:
+            return True
+        if anchor in normalized_bid_body:
+            return True
+        if any(variant in normalized_bid_body for variant in self._anchor_variants(anchor)):
+            return True
+        return self._manufacturer_either_or_anchor_present(
+            title, anchor, normalized_bid_body
+        )
 
     def compare_raw_data(self, model_json: dict, test_json: dict) -> List[Dict]:
         """
@@ -898,13 +1011,14 @@ class ConsistencyChecker:
             missing = [
                 a
                 for a in anchors
-                if a not in norm_t
+                if not self._anchor_present_in_bid(a, norm_t, title=title)
                 and not (has_equivalent_final_quote and a in {"投标总价", "报价总价", "总报价", "小写"})
             ]
             dynamic_missing = self._evaluate_dynamic_slot_specs(
                 dynamic_slot_specs,
                 t_body,
                 fixed_bid_body,
+                title=title,
             )
             if has_equivalent_final_quote and dynamic_missing:
                 equivalent_total_fields = {

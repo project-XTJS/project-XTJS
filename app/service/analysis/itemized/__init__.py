@@ -84,5 +84,9 @@ class ItemizedPricingChecker(
 
         if self._detect_downward_rate_mode(candidate_sections):
             tender_document = self._prepare_document(tender_text) if tender_text is not None else None
-            return self._check_downward_rate_mode(candidate_sections, tender_document=tender_document)
+            return self._check_downward_rate_mode(
+                candidate_sections,
+                tender_document=tender_document,
+                item_sections=item_sections,
+            )
         return self._check_normal_mode(item_sections, total_sections, candidate_sections, document=document)
