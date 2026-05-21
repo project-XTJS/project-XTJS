@@ -69,6 +69,7 @@ from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.service.project_runtime import cancel_project_runtime
 
 router = APIRouter()
 
@@ -1375,6 +1376,9 @@ async def batch_delete_projects(
     """软删除指定标识集合中的项目。"""
     try:
         deleted_count = db_service.soft_delete_projects(payload.identifier_ids)
+        for identifier_id in payload.identifier_ids:
+            if str(identifier_id or "").strip():
+                cancel_project_runtime(identifier_id)
         return {
             "requested_count": len(payload.identifier_ids),
             "deleted_count": deleted_count,
@@ -1434,9 +1438,14 @@ async def delete_project(
 ):
     """软删除项目。"""
     try:
+        existing_project = db_service.get_project_by_identifier(identifier_id)
+        if not existing_project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        resolved_identifier = str(existing_project["identifier_id"])
         deleted = db_service.soft_delete_project(identifier_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="项目不存在")
+        cancel_project_runtime(resolved_identifier)
         return {"status": "deleted"}
     except HTTPException:
         raise
@@ -1478,12 +1487,13 @@ async def get_project_results(
             if view == "display"
             else raw_results
         )
+        selected_result_keys = sorted(selected_results.keys())
         payload = {
             "project": project,
             "view": view,
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
             "results": selected_results,
-            "available_result_keys": sorted(selected_results.keys()),
+            "available_result_keys": selected_result_keys,
         }
         if include_result_record:
             payload["result_record"] = refreshed_record or result_record
@@ -1547,9 +1557,10 @@ async def get_project_merged_results(
 ):
     """获取查重后的合并结果（聚类视图）。"""
     try:
-        project = db_service.get_project_by_identifier(identifier_id)
-        if not project:
+        project_detail = db_service.get_project_detail(identifier_id)
+        if not project_detail:
             raise HTTPException(status_code=404, detail="project not found")
+        project = project_detail.get("project") or {"identifier_id": identifier_id}
 
         requested_keys: Optional[list[str]] = None
         if result_key is not None:
@@ -1568,11 +1579,12 @@ async def get_project_merged_results(
         if requested_keys and requested_keys[0] not in merged_results:
             raise HTTPException(status_code=404, detail="merged result not found")
 
+        merged_result_keys = sorted(merged_results.keys())
         payload = {
             "project": project,
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
             "results": merged_results,
-            "available_result_keys": sorted(merged_results.keys()),
+            "available_result_keys": merged_result_keys,
         }
         if include_result_record:
             payload["result_record"] = refreshed_record or result_record

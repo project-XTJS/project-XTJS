@@ -954,7 +954,7 @@ class StructuredExtractorMixin:
         preferred_index: int | None,
         serial_index: int | None,
     ) -> Decimal | None:
-        """鍦ㄤ粎鍚噾棰濇ā寮忎笅锛屼紭鍏堜娇鐢ㄦ帹鏂噾棰濆垪锛屽け璐ユ椂鍥為€€鍒拌鍐呭彸渚ч噾棰濄€?"""
+        """仅存在金额列时，优先取目标列，否则回退到最靠右的有效金额。"""
         preferred_cell = self._structured_cell_value(cells, preferred_index)
         preferred_amounts = self._extract_row_amounts(preferred_cell) if preferred_cell else []
         if preferred_amounts:
@@ -991,7 +991,7 @@ class StructuredExtractorMixin:
         line_total: Decimal | None,
         carry: dict,
     ) -> dict | None:
-        """淇宸﹀彸閿欎綅鐨勫垎椤规姤浠疯锛屽悜鍙虫悳绱㈤噾棰濆苟鍥炲～鏂囨湰鍒椼€?"""
+        """修复左右错位的分项报价行，向右搜索金额并回填文本列。"""
         money_cells = self._collect_structured_money_cells(cells)
         if not money_cells:
             return None
@@ -1074,7 +1074,7 @@ class StructuredExtractorMixin:
     def _collect_structured_money_cells(
         self, cells: list[str]
     ) -> list[tuple[int, Decimal]]:
-        """鏀堕泦缁撴瀯鍖栬涓殑閲戦鍊欓€夈€?"""
+        """收集结构化行中的金额候选。"""
         matches: list[tuple[int, Decimal]] = []
         for index, cell in enumerate(cells):
             cell_text = str(cell).strip()
@@ -1089,7 +1089,7 @@ class StructuredExtractorMixin:
     def _find_structured_repair_quantity(
         self, cells: list[str], *, before_index: int
     ) -> tuple[int | None, Decimal | None]:
-        """浠庨噾棰濆墠鐨勫崟鍏冩牸涓弽鍚戞壘鍒版渶鍍忔暟閲忕殑鍊笺€?"""
+        """从金额前的单元格中反向找到最像数量的值。"""
         search_limit = min(len(cells), max(before_index, 0))
         for index in range(search_limit - 1, -1, -1):
             quantity = self._extract_structured_repair_quantity_value(cells[index])
@@ -1100,7 +1100,7 @@ class StructuredExtractorMixin:
     def _extract_structured_repair_quantity_value(
         self, value: str | None
     ) -> Decimal | None:
-        """鍙妸鈥滅函鏁板瓧/鏁板瓧+鍗曚綅鈥濈殑鍗曞厓鏍艰涓烘暟閲忥紝閬垮厤璇妸 5P 绛夋枃鏈綋鎴愭暟閲忋€?"""
+        """只把“纯数字/数字+单位”的单元格视为数量，避免误把 5P 等文本当成数量。"""
         normalized = str(value or "").replace(",", "").strip()
         if not normalized:
             return None
@@ -1125,7 +1125,7 @@ class StructuredExtractorMixin:
         return self._to_quantity_decimal(normalized)
 
     def _is_reasonable_repair_quantity(self, value: Decimal | None) -> bool:
-        """鍒ゆ柇鏁伴噺鍊兼槸鍚﹁惤鍦ㄥ悎鐞嗚寖鍥村唴锛岄伩鍏嶆妸閲戦褰撴垚鏁伴噺銆?"""
+        """判断数量值是否落在合理范围内，避免把金额当成数量。"""
         if value is None:
             return False
         return Decimal("0") <= value <= Decimal("10000")
@@ -1133,7 +1133,7 @@ class StructuredExtractorMixin:
     def _collect_structured_leading_texts(
         self, cells: list[str], *, before_index: int
     ) -> list[str]:
-        """鏀堕泦鏁伴噺鍓嶇殑鍙俊鏂囨湰鍒椼€?"""
+        """收集数量前的可信文本列。"""
         texts = []
         for cell in cells[: max(before_index, 0)]:
             text = self._structured_repair_trusted_text(cell)
@@ -1142,7 +1142,7 @@ class StructuredExtractorMixin:
         return texts
 
     def _structured_repair_trusted_text(self, value: str | None) -> str | None:
-        """杩囨护鎺夐噾棰濄€佹暟閲忓拰鍗犱綅绗﹀悗锛屼繚鐣欏彲鐢ㄤ簬鍥炲～鐨勬枃鏈€?"""
+        """过滤掉金额、数量和占位符后，保留可用于回填的文本。"""
         text = str(value or "").strip()
         if not text or self._is_placeholder_amount_text(text):
             return None
@@ -1153,7 +1153,7 @@ class StructuredExtractorMixin:
         return text
 
     def _looks_like_structured_serial_value(self, value: str | None) -> bool:
-        """鍒ゆ柇鏄惁涓虹函搴忓彿鍗曞厓鏍笺€?"""
+        """判断是否为纯序号单元格。"""
         text = str(value or "").strip()
         return bool(text) and bool(re.fullmatch(r"\d+(?:\.\d+)*", text))
 

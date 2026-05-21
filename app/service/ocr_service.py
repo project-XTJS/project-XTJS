@@ -2,7 +2,7 @@
 import threading
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable
 
 from app.config.settings import settings
 from app.service.ocr_progress import OCRProgressMonitor
@@ -34,8 +34,17 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
         self._prepare_runtime_env()
         self._run_on_engine_thread(self._init_engine)
 
-    def _postprocess_page_payload(self, page_payload: dict[str, Any], fallback_page_no: int, pdf_page_sizes: dict[int, tuple[float, float]] | None) -> dict[str, Any]:
+    def _postprocess_page_payload(
+        self,
+        page_payload: dict[str, Any],
+        fallback_page_no: int,
+        pdf_page_sizes: dict[int, tuple[float, float]] | None,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """后处理核心单页流水线"""
+        if cancel_check is not None:
+            cancel_check()
         page_no = self._page_number_from_payload(page_payload, fallback_page_no)
         coordinate_context = self._page_coordinate_context(page_payload, page_no, pdf_page_sizes)
         page_blocks = self._extract_layout_blocks(page_payload, page_no)
@@ -52,13 +61,26 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             "coordinate_context": coordinate_context,
         }
 
-    def extract_all(self, file_path: str, file_type: str = "pdf") -> dict[str, Any]:
+    def extract_all(
+        self,
+        file_path: str,
+        file_type: str = "pdf",
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         """
         全量提取接口。包含文档分发拆块 -> GPU/CPU推理 -> 后处理提取表格/印章/签名/文本
         """
         if not self._is_engine_thread():
-            return self._run_on_engine_thread(self.extract_all, file_path, file_type)
-            
+            return self._run_on_engine_thread(
+                self.extract_all,
+                file_path,
+                file_type,
+                cancel_check=cancel_check,
+            )
+
+        if cancel_check is not None:
+            cancel_check()
         total_pages = self._estimate_total_pages(file_path, file_type)
         print(f"OCRService: OCR inference started ({self._describe_document(file_path, file_type, total_pages)}, device={self.active_device})", flush=True)
         
@@ -75,12 +97,25 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             # 第一阶段：推理（预测）
             raw_results, chunked_predict = [], len(pipeline_inputs) > 1
             for idx, p_input in enumerate(pipeline_inputs, start=1):
+                if cancel_check is not None:
+                    cancel_check()
                 page_offset, page_count = int(p_input.get("page_offset", 0) or 0), int(p_input.get("page_count", 0) or 0)
                 if progress_monitor and chunked_predict:
                     progress_monitor.update(stage="predict", current=max(page_offset, 0), total=max(total_pages, 1), detail=f"predict chunk {idx}/{len(pipeline_inputs)}", emit=True)
-                raw_results.extend(self._run_pipeline(str(p_input["input_path"]), progress_monitor=progress_monitor, total_pages=page_count, progress_page_offset=page_offset, progress_total_pages=total_pages))
+                raw_results.extend(
+                    self._run_pipeline(
+                        str(p_input["input_path"]),
+                        progress_monitor=progress_monitor,
+                        total_pages=page_count,
+                        progress_page_offset=page_offset,
+                        progress_total_pages=total_pages,
+                        cancel_check=cancel_check,
+                    )
+                )
             
             # 第二阶段：版面重组
+            if cancel_check is not None:
+                cancel_check()
             results = self._restructure_pipeline_results(raw_results, progress_monitor=progress_monitor)
             if not results: raise RuntimeError("PaddleOCR-VL-1.5 returned no results.")
             total_res_pages = max(total_pages, len(results))
@@ -97,14 +132,32 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             processed_pages = []
             if (worker_count := self._resolve_postprocess_workers(len(page_payloads))) > 1:
                 with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="ocr-postprocess") as executor:
-                    futures = {executor.submit(self._postprocess_page_payload, p, fpn, pdf_page_sizes): fpn for fpn, p in page_payloads}
+                    futures = {
+                        executor.submit(
+                            self._postprocess_page_payload,
+                            p,
+                            fpn,
+                            pdf_page_sizes,
+                            cancel_check=cancel_check,
+                        ): fpn
+                        for fpn, p in page_payloads
+                    }
                     for count, future in enumerate(as_completed(futures), start=1):
+                        if cancel_check is not None:
+                            cancel_check()
                         res = future.result()
                         processed_pages.append(res)
                         progress_monitor.update(stage="postprocess", current=count, total=max(total_res_pages, count, 1), detail=f"parsed page {res['page_no']}", emit=True)
             else:
                 for count, (fpn, p) in enumerate(page_payloads, start=1):
-                    res = self._postprocess_page_payload(p, fpn, pdf_page_sizes)
+                    if cancel_check is not None:
+                        cancel_check()
+                    res = self._postprocess_page_payload(
+                        p,
+                        fpn,
+                        pdf_page_sizes,
+                        cancel_check=cancel_check,
+                    )
                     processed_pages.append(res)
                     progress_monitor.update(stage="postprocess", current=count, total=max(total_res_pages, count, 1), detail=f"parsed page {res['page_no']}", emit=True)
 
@@ -141,6 +194,8 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             }
 
             # 最终阶段：表格解析挂载
+            if cancel_check is not None:
+                cancel_check()
             progress_monitor.update(stage="tables", current=0, total=1, detail="building logical tables", emit=False)
             payload = self._attach_table_outputs(payload)
             progress_monitor.update(stage="tables", current=1, total=1, detail="logical tables ready", emit=False)
