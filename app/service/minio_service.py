@@ -6,6 +6,7 @@ MinIO 对象存储服务模块。
 对象存在性检查、URL 解析等能力，并包含审计日志记录。
 """
 
+import io
 import os
 import logging
 from datetime import datetime, timedelta
@@ -234,6 +235,66 @@ class MinioService:
             )
             raise RuntimeError(f"MinIO upload error: {exc}") from exc
 
+    def upload_bytes(
+        self,
+        data: bytes,
+        *,
+        filename: str,
+        content_type: str = "application/octet-stream",
+        object_name: str | None = None,
+    ) -> dict:
+        """Upload an in-memory payload to MinIO and return object metadata plus URLs."""
+        size = len(data or b"")
+        if size <= 0:
+            raise ValueError("Upload content cannot be empty")
+        if size > settings.MINIO_MAX_FILE_SIZE:
+            max_mb = settings.MINIO_MAX_FILE_SIZE // 1024 // 1024
+            raise ValueError(f"File size must be between 1B and {max_mb}MB")
+        if not filename or not filename.strip():
+            raise ValueError("File name cannot be empty")
+
+        try:
+            self.ensure_bucket()
+            object_name = self._resolve_upload_object_name(filename, object_name)
+            self.client.put_object(
+                bucket_name=self.bucket_name,
+                object_name=object_name,
+                data=io.BytesIO(data),
+                length=size,
+                content_type=content_type,
+            )
+            presigned_url = self.get_presigned_url(object_name)
+            file_url = self.build_file_url(object_name, self.bucket_name)
+            self._audit(action="upload_bytes", status="success", object_name=object_name)
+            return {
+                "object_name": object_name,
+                "bucket_name": self.bucket_name,
+                "file_url": file_url,
+                "presigned_url": presigned_url,
+                "size": size,
+                "content_type": content_type,
+            }
+        except ValueError:
+            raise
+        except RuntimeError:
+            raise
+        except S3Error as exc:
+            self._audit(
+                action="upload_bytes",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            raise RuntimeError(f"MinIO upload failed: {exc}") from exc
+        except Exception as exc:
+            self._audit(
+                action="upload_bytes",
+                status="failed",
+                object_name=object_name,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            raise RuntimeError(f"MinIO upload error: {exc}") from exc
+
     def get_presigned_url(self, object_name: str, bucket_name: str | None = None) -> str:
         """生成指定对象的预签名下载 URL，默认过期天数由配置决定。"""
         if not object_name or not object_name.strip():
@@ -245,10 +306,11 @@ class MinioService:
                 raise ValueError("Bucket name cannot be empty")
             if resolved_bucket_name == self.bucket_name:
                 self.ensure_bucket()
+            expires_days = max(1, min(int(settings.MINIO_PRESIGNED_EXPIRES_DAYS), 7))
             presigned_url = self.client.presigned_get_object(
                 resolved_bucket_name,
                 object_name,
-                expires=timedelta(days=settings.MINIO_PRESIGNED_EXPIRES_DAYS),
+                expires=timedelta(days=expires_days),
             )
             self._audit(action="get_presigned_url", status="success", object_name=object_name)
             return presigned_url

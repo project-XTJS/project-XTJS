@@ -7,6 +7,7 @@ FastAPI 应用主入口模块。
 """
 
 import uvicorn
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -320,4 +321,10 @@ if __name__ == "__main__":
     browser_timer = threading.Timer(1.5, lambda: webbrowser.open(swagger_url))
     browser_timer.daemon = True
     browser_timer.start()
-    uvicorn.run("app.main:app", host=host, port=port, reload=False)
+    uvicorn.run(
+        "app.main:app",
+        host=host,
+        port=port,
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parents[1])],
+    )

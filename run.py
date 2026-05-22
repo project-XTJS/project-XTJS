@@ -30,12 +30,7 @@ def _resolve_server_config() -> tuple[str, int, bool]:
     """从环境变量解析服务器监听地址、端口及热重载开关。"""
     host = os.getenv("UVICORN_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("UVICORN_PORT", "8080"))
-    reload_enabled = _env_flag("UVICORN_RELOAD", default=False)
-
-    # Windows 下 reload 可能导致端口冲突，自动禁用
-    if sys.platform == "win32" and reload_enabled:
-        print("Detected Windows local launch, disabling reload to avoid WinError 10013.")
-        reload_enabled = False
+    reload_enabled = _env_flag("UVICORN_RELOAD", default=True)
 
     return host, port, reload_enabled
 
@@ -59,5 +54,6 @@ if __name__ == "__main__":
         host=host,
         port=port,
         reload=reload_enabled,
+        reload_dirs=[current_dir] if reload_enabled else None,
         log_level="info",
     )

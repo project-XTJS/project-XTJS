@@ -1518,40 +1518,477 @@ class PostgreSQLService:
         return {"project": project, "relations": relations}
 
     @staticmethod
-    def _collect_project_file_urls(project_detail: Optional[Dict[str, Any]]) -> List[str]:
-        urls: List[str] = []
-        seen: set[str] = set()
+    def _real_file_url(file_url: Any, oss_service: MinioService) -> str:
+        """将内部 minio:// 地址转换成可直接访问的真实 URL。"""
+        normalized = str(file_url or "").strip()
+        if not normalized:
+            return ""
+        if normalized.startswith("minio://"):
+            bucket_name, object_name = MinioService.bucket_and_object_from_file_url(normalized)
+            normalized = oss_service.get_presigned_url(object_name, bucket_name)
+        return normalized if normalized.startswith(("http://", "https://")) else ""
+
+    @staticmethod
+    def _file_name_lookup_keys(file_name: Any) -> list[str]:
+        normalized = str(file_name or "").strip()
+        if not normalized:
+            return []
+        keys = [normalized]
+        basename = re.split(r"[\\/]", normalized)[-1]
+        if basename and basename not in keys:
+            keys.append(basename)
+        return keys
+
+    @staticmethod
+    def _first_page_number(*values: Any) -> Optional[int]:
+        pages: list[int] = []
+
+        def collect(value: Any) -> None:
+            if value is None or isinstance(value, bool):
+                return
+            if isinstance(value, int):
+                if value > 0:
+                    pages.append(value)
+                return
+            if isinstance(value, float):
+                if value.is_integer() and value > 0:
+                    pages.append(int(value))
+                return
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.isdigit() and int(stripped) > 0:
+                    pages.append(int(stripped))
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    collect(item)
+                return
+            if isinstance(value, dict):
+                for key in (
+                    "source_page",
+                    "page",
+                    "pages",
+                    "page_refs",
+                    "section_pages",
+                    "response_page",
+                    "requirement_page",
+                    "start_page",
+                ):
+                    collect(value.get(key))
+
+        for raw_value in values:
+            collect(raw_value)
+        return min(pages) if pages else None
+
+    @classmethod
+    def _register_document_source_ref(
+        cls,
+        index: dict[str, dict[str, dict[str, Any]]],
+        ref: dict[str, Any],
+    ) -> None:
+        identifier = str(ref.get("identifier_id") or "").strip()
+        if identifier:
+            index["by_identifier"][identifier] = ref
+
+        for key in cls._file_name_lookup_keys(ref.get("file_name")):
+            index["by_file_name"].setdefault(key, ref)
+
+        for key in (ref.get("raw_file_url"), ref.get("file_url")):
+            normalized = str(key or "").strip()
+            if normalized:
+                index["by_file_url"][normalized] = ref
+
+    @classmethod
+    def _build_project_document_source_index(
+        cls,
+        project_detail: Optional[Dict[str, Any]],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        index: dict[str, dict[str, dict[str, Any]]] = {
+            "by_identifier": {},
+            "by_file_name": {},
+            "by_file_url": {},
+        }
         oss_service = MinioService()
         field_groups = (
-            ("tender_identifier_id", "tender_file_url"),
-            ("business_bid_identifier_id", "business_bid_file_url"),
-            ("technical_bid_identifier_id", "technical_bid_file_url"),
+            (
+                "tender",
+                "tender_identifier_id",
+                "tender_document_type",
+                "tender_file_name",
+                "tender_file_url",
+            ),
+            (
+                "business_bid",
+                "business_bid_identifier_id",
+                "business_bid_document_type",
+                "business_bid_file_name",
+                "business_bid_file_url",
+            ),
+            (
+                "technical_bid",
+                "technical_bid_identifier_id",
+                "technical_bid_document_type",
+                "technical_bid_file_name",
+                "technical_bid_file_url",
+            ),
         )
+        seen_identifiers: set[str] = set()
         for relation in (project_detail or {}).get("relations") or []:
-            for identifier_field, file_url_field in field_groups:
+            for role, identifier_field, document_type_field, file_name_field, file_url_field in field_groups:
                 identifier = str(relation.get(identifier_field) or "").strip()
-                file_url = str(relation.get(file_url_field) or "").strip()
-                if not identifier or not file_url or identifier in seen:
+                raw_file_url = str(relation.get(file_url_field) or "").strip()
+                if not identifier or not raw_file_url or identifier in seen_identifiers:
                     continue
-                seen.add(identifier)
-                if file_url.startswith("minio://"):
-                    bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
-                    urls.append(oss_service.get_presigned_url(object_name, bucket_name))
-                elif MinioService.is_presigned_url(file_url):
-                    urls.append(file_url)
-                else:
-                    urls.append(file_url)
-        return urls
+                seen_identifiers.add(identifier)
+                cls._register_document_source_ref(
+                    index,
+                    {
+                        "identifier_id": identifier,
+                        "relation_id": relation.get("relation_id"),
+                        "role": role,
+                        "document_type": relation.get(document_type_field),
+                        "file_name": relation.get(file_name_field),
+                        "raw_file_url": raw_file_url,
+                        "file_url": cls._real_file_url(raw_file_url, oss_service),
+                    },
+                )
+        return index
 
-    def _attach_project_file_urls_to_result(
+    @classmethod
+    def _resolve_document_source_ref(
+        cls,
+        node: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+    ) -> Optional[dict[str, Any]]:
+        for field_name in (
+            "document_identifier_id",
+            "document_id",
+            "identifier_id",
+        ):
+            identifier = str(node.get(field_name) or "").strip()
+            if identifier and identifier in index["by_identifier"]:
+                return index["by_identifier"][identifier]
+
+        for field_name in ("file_url", "file_path", "source_url"):
+            file_url = str(node.get(field_name) or "").strip()
+            if file_url and file_url in index["by_file_url"]:
+                return index["by_file_url"][file_url]
+
+        for field_name in ("file_name", "document_file_name"):
+            for key in cls._file_name_lookup_keys(node.get(field_name)):
+                if key in index["by_file_name"]:
+                    return index["by_file_name"][key]
+        return None
+
+    @classmethod
+    def _resolve_file_name_source_ref(
+        cls,
+        file_name: Any,
+        index: dict[str, dict[str, dict[str, Any]]],
+    ) -> Optional[dict[str, Any]]:
+        for key in cls._file_name_lookup_keys(file_name):
+            if key in index["by_file_name"]:
+                return index["by_file_name"][key]
+        return None
+
+    @classmethod
+    def _resolve_prefixed_document_source_refs(
+        cls,
+        node: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+        context: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        refs: dict[str, dict[str, Any]] = {}
+        for prefix in (
+            "left",
+            "right",
+            "tender",
+            "business",
+            "technical",
+            "business_bid",
+            "technical_bid",
+        ):
+            candidates = (
+                f"{prefix}_document_identifier",
+                f"{prefix}_document_identifier_id",
+                f"{prefix}_document_id",
+                f"{prefix}_identifier_id",
+            )
+            for field_name in candidates:
+                identifier = str(node.get(field_name) or "").strip()
+                if identifier and identifier in index["by_identifier"]:
+                    refs[prefix] = index["by_identifier"][identifier]
+                    break
+            if prefix in refs:
+                continue
+
+            for key in cls._file_name_lookup_keys(node.get(f"{prefix}_file_name")):
+                if key in index["by_file_name"]:
+                    refs[prefix] = index["by_file_name"][key]
+                    break
+            if prefix in refs:
+                continue
+
+            file_url = str(node.get(f"{prefix}_file_url") or "").strip()
+            if file_url and file_url in index["by_file_url"]:
+                refs[prefix] = index["by_file_url"][file_url]
+            elif prefix in context:
+                refs[prefix] = context[prefix]
+        return refs
+
+    @classmethod
+    def _context_from_documents_node(
+        cls,
+        node: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+    ) -> dict[str, dict[str, Any]]:
+        documents = node.get("documents")
+        if not isinstance(documents, dict):
+            return {}
+
+        context: dict[str, dict[str, Any]] = {}
+        for role, document in documents.items():
+            if not isinstance(document, dict):
+                continue
+            ref = cls._resolve_document_source_ref(document, index)
+            if not ref:
+                continue
+            role_key = str(role or "").strip()
+            if role_key:
+                context[role_key] = ref
+        return context
+
+    @classmethod
+    def _node_page_number(cls, node: dict[str, Any], prefix: Optional[str] = None) -> Optional[int]:
+        if prefix:
+            return cls._first_page_number(
+                node.get(f"{prefix}_source_page"),
+                node.get(f"{prefix}_page"),
+                node.get(f"{prefix}_pages"),
+                node.get(f"{prefix}_page_refs"),
+            )
+        return cls._first_page_number(
+            node.get("source_page"),
+            node.get("page"),
+            node.get("pages"),
+            node.get("page_refs"),
+            node.get("section_pages"),
+            node.get("response_page"),
+            node.get("requirement_page"),
+            node.get("evidence"),
+        )
+
+    @classmethod
+    def _file_urls_by_file_for_node(
+        cls,
+        node: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+    ) -> dict[str, str]:
+        file_names: list[str] = []
+
+        def append_file_name(value: Any) -> None:
+            file_name = str(value or "").strip()
+            if file_name and file_name not in file_names:
+                file_names.append(file_name)
+
+        for file_name in node.get("files") or []:
+            append_file_name(file_name)
+
+        doc_ranges_by_file = node.get("doc_ranges_by_file")
+        if isinstance(doc_ranges_by_file, dict):
+            for file_name in doc_ranges_by_file.keys():
+                append_file_name(file_name)
+
+        docs_by_file = node.get("docs")
+        if isinstance(docs_by_file, dict):
+            for file_name in docs_by_file.keys():
+                append_file_name(file_name)
+
+        file_urls: dict[str, str] = {}
+        for file_name in file_names:
+            ref = cls._resolve_file_name_source_ref(file_name, index)
+            file_url = str((ref or {}).get("file_url") or "").strip()
+            if file_url:
+                file_urls[file_name] = file_url
+        return file_urls
+
+    @classmethod
+    def _append_file_keyed_source_maps(
+        cls,
+        enriched: dict[str, Any],
+        original: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+    ) -> None:
+        file_urls = cls._file_urls_by_file_for_node(original, index)
+        if not file_urls:
+            return
+        enriched["file_urls_by_file"] = file_urls
+
+    @classmethod
+    def _enrich_file_keyed_document_map(
+        cls,
+        value: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+        context: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        enriched: dict[str, Any] = {}
+        for file_name, item in value.items():
+            enriched_item = cls._enrich_result_node_with_document_sources(item, index, context)
+            ref = cls._resolve_file_name_source_ref(file_name, index)
+            if ref and isinstance(enriched_item, dict):
+                page = cls._first_page_number(
+                    item.get("source_page") if isinstance(item, dict) else None,
+                    item.get("page") if isinstance(item, dict) else None,
+                    item.get("pages") if isinstance(item, dict) else None,
+                    item.get("page_refs") if isinstance(item, dict) else None,
+                )
+                cls._append_single_source_fields(enriched_item, ref, page)
+            enriched[file_name] = enriched_item
+        return enriched
+
+    @classmethod
+    def _append_single_source_fields(
+        cls,
+        node: dict[str, Any],
+        ref: dict[str, Any],
+        page: Optional[int],
+    ) -> None:
+        file_url = str(ref.get("file_url") or "").strip()
+        if not file_url:
+            return
+        node["file_url"] = file_url
+        if page:
+            node.setdefault("source_page", page)
+
+    @classmethod
+    def _append_prefixed_source_fields(
+        cls,
+        node: dict[str, Any],
+        prefix: str,
+        ref: dict[str, Any],
+        page: Optional[int],
+    ) -> None:
+        file_url = str(ref.get("file_url") or "").strip()
+        if not file_url:
+            return
+        node[f"{prefix}_file_url"] = file_url
+        if page:
+            node.setdefault(f"{prefix}_source_page", page)
+
+    @classmethod
+    def _is_legacy_source_url_field(cls, key: Any) -> bool:
+        text = str(key)
+        return (
+            text in {
+                "project_file_urls",
+                "source_page_url",
+                "source_page_urls_by_file",
+                "source_location",
+                "source_locations_by_file",
+                "page_url",
+            }
+            or text.endswith("_source_page_url")
+            or text.endswith("_source_location")
+        )
+
+    @classmethod
+    def _is_generated_file_url_field(cls, key: Any) -> bool:
+        text = str(key)
+        return text == "file_url" or text == "file_urls_by_file" or text.endswith("_file_url")
+
+    @classmethod
+    def _enrich_result_node_with_document_sources(
+        cls,
+        value: Any,
+        index: dict[str, dict[str, dict[str, Any]]],
+        context: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> Any:
+        if isinstance(value, list):
+            inherited_context = dict(context or {})
+            return [
+                cls._enrich_result_node_with_document_sources(item, index, inherited_context)
+                for item in value
+            ]
+        if not isinstance(value, dict):
+            return value
+
+        inherited_context = dict(context or {})
+        local_context = dict(inherited_context)
+        local_context.update(cls._context_from_documents_node(value, index))
+
+        single_ref = cls._resolve_document_source_ref(value, index)
+        if single_ref:
+            local_context.setdefault("default", single_ref)
+
+        prefix_refs = cls._resolve_prefixed_document_source_refs(value, index, local_context)
+        local_context.update(prefix_refs)
+
+        enriched: dict[str, Any] = {}
+        for key, item in value.items():
+            if cls._is_legacy_source_url_field(key) or cls._is_generated_file_url_field(key):
+                continue
+            if key == "docs" and isinstance(item, dict):
+                enriched[key] = cls._enrich_file_keyed_document_map(item, index, local_context)
+            else:
+                enriched[key] = cls._enrich_result_node_with_document_sources(
+                    item,
+                    index,
+                    local_context,
+                )
+
+        cls._append_file_keyed_source_maps(enriched, value, index)
+
+        if single_ref:
+            cls._append_single_source_fields(enriched, single_ref, cls._node_page_number(value))
+
+        for prefix, ref in prefix_refs.items():
+            page = cls._node_page_number(value, prefix=prefix)
+            has_explicit_prefix = any(
+                field_name in value
+                for field_name in (
+                    f"{prefix}_document_identifier",
+                    f"{prefix}_document_identifier_id",
+                    f"{prefix}_document_id",
+                    f"{prefix}_identifier_id",
+                    f"{prefix}_file_name",
+                    f"{prefix}_file_url",
+                )
+            )
+            if has_explicit_prefix or page is not None:
+                cls._append_prefixed_source_fields(enriched, prefix, ref, page)
+
+        return enriched
+
+    @classmethod
+    def _strip_legacy_project_file_urls(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return [cls._strip_legacy_project_file_urls(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: cls._strip_legacy_project_file_urls(item)
+                for key, item in value.items()
+                if not cls._is_legacy_source_url_field(key)
+            }
+        return value
+
+    @classmethod
+    def _sanitize_project_result_record(cls, record: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(record)
+        if "result" in payload:
+            payload["result"] = cls._strip_legacy_project_file_urls(payload.get("result"))
+        return payload
+
+    def _prepare_project_result_for_persistence(
         self,
         project_identifier_id: str,
         result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        payload = dict(result or {})
         project_detail = self.get_project_detail(project_identifier_id)
-        payload["project_file_urls"] = self._collect_project_file_urls(project_detail)
-        return payload
+        source_index = self._build_project_document_source_index(project_detail)
+        return self._enrich_result_node_with_document_sources(
+            dict(result or {}),
+            source_index,
+        )
 
     def get_project_documents_for_duplicate_check(
         self,
@@ -1647,7 +2084,7 @@ class PostgreSQLService:
                 )
                 cursor.execute(query, (normalized_project_identifier,))
                 result = cursor.fetchone()
-                return dict(result) if result else None
+                return self._sanitize_project_result_record(dict(result)) if result else None
 
     def list_project_results(
         self,
@@ -1691,7 +2128,10 @@ class PostgreSQLService:
                 cursor.execute(count_query, tuple(values))
                 total = int(cursor.fetchone()["total"])
                 cursor.execute(data_query, tuple(values + [normalized_limit, normalized_offset]))
-                items: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
+                items: List[Dict[str, Any]] = [
+                    self._sanitize_project_result_record(dict(item))
+                    for item in cursor.fetchall()
+                ]
         return self._build_paginated_response(
             total=total,
             limit=normalized_limit,
@@ -1711,7 +2151,7 @@ class PostgreSQLService:
         if not project:
             raise ValueError(f"项目不存在：{project_identifier_id}")
         normalized_project_identifier = str(project["identifier_id"])
-        persisted_result = self._attach_project_file_urls_to_result(
+        persisted_result = self._prepare_project_result_for_persistence(
             normalized_project_identifier,
             result,
         )
@@ -1790,7 +2230,7 @@ class PostgreSQLService:
             raise ValueError(f"项目不存在：{project_identifier_id}")
         normalized_project_identifier = str(project["identifier_id"])
 
-        payload = self._attach_project_file_urls_to_result(
+        payload = self._prepare_project_result_for_persistence(
             normalized_project_identifier,
             {normalized_result_key: result_value},
         )
@@ -1800,7 +2240,7 @@ class PostgreSQLService:
             ON CONFLICT (project_identifier_id)
             DO UPDATE
             SET
-                result = COALESCE(xtjs_result.result, '{}'::jsonb) || EXCLUDED.result,
+                result = (COALESCE(xtjs_result.result, '{}'::jsonb) - 'project_file_urls') || EXCLUDED.result,
                 update_time = CURRENT_TIMESTAMP
             RETURNING
                 project_identifier_id,

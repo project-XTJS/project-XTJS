@@ -1,6 +1,7 @@
 ﻿# --- Web 框架核心 ---
 fastapi==0.104.1
 uvicorn==0.24.0.post1
+watchfiles>=0.21.0
 python-multipart==0.0.6
 pydantic-settings>=2.0.0
 
