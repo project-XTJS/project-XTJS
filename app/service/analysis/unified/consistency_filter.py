@@ -39,10 +39,15 @@ class ConsistencyFilterMixin:
         check_code = "consistency_check"
         check_name = "模板一致性审查"
         try:
-            raw_segments = self.consistency_checker.compare_raw_data(tender_payload, business_payload)
+            integrity_raw = integrity_check.get("raw_result")
+            raw_segments = self.consistency_checker.compare_raw_data(
+                tender_payload,
+                business_payload,
+                integrity_raw=integrity_raw,
+            )
             evaluated_segments, skipped_segments = self._filter_consistency_segments(
                 raw_segments,
-                integrity_check.get("raw_result"),
+                integrity_raw,
             )
             raw_result = {
                 "evaluated_segments": evaluated_segments,
@@ -135,11 +140,24 @@ class ConsistencyFilterMixin:
         details = integrity_raw.get("details", {}) if isinstance(integrity_raw, dict) else {}
         segment_title = str(segment.get("name") or "")
         normalized_segment_title = self._normalize_match_text(segment_title)
+        segment_ref_keys = self._attachment_ref_keys(segment_title)
 
         for item_name, detail in details.items():
             if not isinstance(detail, dict):
                 continue
             if detail.get("is_passed") or not detail.get("scored", True):
+                continue
+
+            missing_ref_keys = self._attachment_ref_keys(item_name)
+            if segment_ref_keys and missing_ref_keys:
+                matched_refs = sorted(segment_ref_keys & missing_ref_keys)
+                if matched_refs:
+                    return {
+                        "type": "integrity_attachment_missing",
+                        "integrity_item": item_name,
+                        "integrity_status": detail.get("status"),
+                        "matched_tokens": matched_refs,
+                    }
                 continue
 
             missing_tokens = self._integrity_missing_tokens(item_name, detail)
@@ -148,6 +166,7 @@ class ConsistencyFilterMixin:
 
             if any(token in normalized_segment_title for token in missing_tokens):
                 return {
+                    "type": "integrity_attachment_missing",
                     "integrity_item": item_name,
                     "integrity_status": detail.get("status"),
                     "matched_tokens": sorted(missing_tokens),
@@ -343,6 +362,14 @@ class ConsistencyFilterMixin:
         for match in self.ATTACHMENT_REF_RE.findall(str(text or "")):
             refs.append(re.sub(r"\s+", " ", match).strip())
         return refs
+
+    def _attachment_ref_keys(self, text: str) -> set[str]:
+        """提取规范化附件引用，要求附件号精确一致，避免附件8误匹配附件8-1。"""
+        return {
+            self._normalize_match_text(ref)
+            for ref in self._extract_attachment_refs(text)
+            if ref
+        }
 
     def _simplify_integrity_item_title(self, item_name: str) -> str:
         """简化完整性条目标题，去除编号和括号内容。"""

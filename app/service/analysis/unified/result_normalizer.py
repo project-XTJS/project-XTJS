@@ -109,6 +109,7 @@ class ResultNormalizerMixin:
         short_body_skipped = 0
         attachment_not_found_skipped = 0
         integrity_skipped = 0
+        self_defined_skipped = 0
 
         for skipped in skipped_segments:
             skip_reason = skipped.get("skip_reason") or {}
@@ -117,6 +118,8 @@ class ResultNormalizerMixin:
                 short_body_skipped += 1
             elif skip_type in {"attachment_not_found", "optional_attachment_not_provided"}:
                 attachment_not_found_skipped += 1
+            elif skip_type == "self_defined_format":
+                self_defined_skipped += 1
             else:
                 integrity_skipped += 1
 
@@ -178,6 +181,7 @@ class ResultNormalizerMixin:
                 f"共比对 {total_segments} 个模板段，实际校验 {len(segments)} 个，"
                 f"已通过 {len(passed)}/{len(segments)} 个；"
                 f"正文不足20字跳过 {short_body_skipped} 个，"
+                f"格式自拟跳过 {self_defined_skipped} 个，"
                 f"附件未稳定定位跳过 {attachment_not_found_skipped} 个，"
                 f"因完整性结果跳过 {integrity_skipped} 个。"
             )
@@ -192,6 +196,7 @@ class ResultNormalizerMixin:
                 "evaluated_segment_count": len(segments),
                 "skipped_segment_count": len(skipped_segments),
                 "short_body_skipped_count": short_body_skipped,
+                "self_defined_skipped_count": self_defined_skipped,
                 "attachment_not_found_skipped_count": attachment_not_found_skipped,
                 "integrity_skipped_count": integrity_skipped,
                 "passed_segment_count": len(passed),

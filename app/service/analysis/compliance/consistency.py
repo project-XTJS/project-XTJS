@@ -1,12 +1,12 @@
 """
-??????????
+格式模板一致性检查模块。
 
-??????????????????????????????????
-???????????
+对照招标文件中的商务标格式附件，检查投标文件中对应模板的固定正文
+是否被删除或改动。
 """
 
 import re
-from typing import List, Dict
+from typing import Any, List, Dict
 
 from .template_extractor import TemplateExtractor 
 from ..verification import VerificationChecker
@@ -18,6 +18,7 @@ class ConsistencyChecker:
 
     # 正文过短的附件不参与一致性判断，避免只靠标题/零散字段误报
     MIN_BODY_LENGTH = 20
+    INTEGRITY_ATTACHMENT_REF_RE = re.compile(r"附件\s*\d+(?:\s*[-－—]\s*\d+)?")
 
     # 正式标题行模式（如“附件1”、“第一章”）
     FORMAL_TITLE_LINE_RE = re.compile(
@@ -82,6 +83,22 @@ class ConsistencyChecker:
         "标段名称",
         "投标人名称",
         "供应商名称",
+        "公司名称",
+        "单位名称",
+        "法定代表人姓名",
+        "法定代表人姓名职务",
+        "被授权人的姓名",
+        "被授权人的姓名职务",
+        "被授权人姓名",
+        "被授权人姓名职务",
+        "公司地址",
+    )
+    DYNAMIC_BRACKET_PLACEHOLDER_MARKERS = TEMPLATE_PLACEHOLDER_HINT_MARKERS + (
+        "名称",
+        "姓名",
+        "职务",
+        "地址",
+        "编号",
     )
     NON_COMPARABLE_SLOT_MARKERS = (
         "单位公章",
@@ -160,6 +177,169 @@ class ConsistencyChecker:
         no_brackets = re.sub(r'\(.*?\)|（.*?）', '', text)
         clean = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]|附件|附表|附录|格式', '', no_brackets)
         return re.sub(r'^[\d一二三四五六七八九十百]+', '', clean)
+
+    def _normalize_match_text(self, text: str) -> str:
+        """归一化文本用于跨模块标题匹配。"""
+        return "".join(ch for ch in str(text or "") if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+
+    def _normalize_attachment_number(self, number: Any) -> str:
+        """统一附件号写法，避免空格和全角横线造成不匹配。"""
+        text = str(number or "").strip()
+        text = text.replace("－", "-").replace("—", "-").replace("–", "-")
+        return re.sub(r"\s+", "", text)
+
+    def _attachment_numbers_from_text(self, text: str) -> set[str]:
+        """从标题/完整性条目中提取附件号。"""
+        numbers: set[str] = set()
+        direct_number = self._verification_checker._attachment_number(str(text or ""))
+        normalized_direct = self._normalize_attachment_number(direct_number)
+        if normalized_direct:
+            numbers.add(normalized_direct)
+
+        for attachment_ref in self.INTEGRITY_ATTACHMENT_REF_RE.findall(str(text or "")):
+            ref_number = self._verification_checker._attachment_number(attachment_ref)
+            normalized_ref = self._normalize_attachment_number(ref_number)
+            if normalized_ref:
+                numbers.add(normalized_ref)
+        return numbers
+
+    def _simplify_integrity_item_title(self, item_name: str) -> str:
+        """简化完整性条目标题，去除编号和括号内容。"""
+        text = str(item_name or "").strip()
+        text = re.sub(r"^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百]+)[.、]\s*", "", text)
+        text = re.sub(r"（.*?）|\(.*?\)", "", text).strip()
+        if not text or len(text) > 36:
+            return ""
+        if any(sep in text for sep in ("；", ";", "，", ",")):
+            return ""
+        return text
+
+    def _integrity_title_tokens(self, item_name: str) -> set[str]:
+        """提取完整性缺失项可用于匹配一致性模板标题的标题 token。"""
+        tokens: set[str] = set()
+        simplified_title = self._simplify_integrity_item_title(item_name)
+        if simplified_title:
+            tokens.add(self._normalize_match_text(simplified_title))
+
+        attachment_title = self._verification_checker._attachment_title(str(item_name or ""))
+        attachment_title = re.sub(r"（.*?）|\(.*?\)", "", attachment_title).strip()
+        normalized_attachment_title = self._normalize_match_text(attachment_title)
+        if 4 <= len(normalized_attachment_title) <= 80:
+            tokens.add(normalized_attachment_title)
+
+        return {token for token in tokens if token}
+
+    def _integrity_skip_reason_for_title(
+        self, title: str, integrity_raw: dict | None
+    ) -> dict | None:
+        """若完整性已判定该模板附件缺失，则返回一致性前置跳过原因。"""
+        if not isinstance(integrity_raw, dict):
+            return None
+
+        details = integrity_raw.get("details", {})
+        if not isinstance(details, dict):
+            return None
+
+        segment_title = str(title or "")
+        normalized_segment_title = self._normalize_match_text(segment_title)
+        segment_numbers = self._attachment_numbers_from_text(segment_title)
+
+        for item_name, detail in details.items():
+            if not isinstance(detail, dict):
+                continue
+            if detail.get("is_passed") or not detail.get("scored", True):
+                continue
+
+            item_numbers = self._attachment_numbers_from_text(str(item_name or ""))
+            matched_number = sorted(segment_numbers & item_numbers)
+            if matched_number:
+                return {
+                    "type": "integrity_attachment_missing",
+                    "integrity_item": item_name,
+                    "integrity_status": detail.get("status"),
+                    "matched_attachment_number": matched_number[0],
+                }
+
+            if segment_numbers and item_numbers:
+                continue
+
+            matched_tokens = [
+                token
+                for token in self._integrity_title_tokens(str(item_name or ""))
+                if token and token in normalized_segment_title
+            ]
+            if matched_tokens:
+                return {
+                    "type": "integrity_attachment_missing",
+                    "integrity_item": item_name,
+                    "integrity_status": detail.get("status"),
+                    "matched_tokens": sorted(matched_tokens),
+                }
+
+        return None
+
+    def _integrity_pass_reason_for_title(
+        self, title: str, integrity_raw: dict | None
+    ) -> dict | None:
+        """若完整性已确认该模板附件存在，则返回可用于跳过格式自拟正文检查的依据。"""
+        if not isinstance(integrity_raw, dict):
+            return None
+
+        details = integrity_raw.get("details", {})
+        if not isinstance(details, dict):
+            return None
+
+        segment_title = str(title or "")
+        normalized_segment_title = self._normalize_match_text(segment_title)
+        segment_numbers = self._attachment_numbers_from_text(segment_title)
+
+        for item_name, detail in details.items():
+            if not isinstance(detail, dict):
+                continue
+            if not detail.get("is_passed") or not detail.get("scored", True):
+                continue
+
+            item_numbers = self._attachment_numbers_from_text(str(item_name or ""))
+            matched_number = sorted(segment_numbers & item_numbers)
+            if matched_number:
+                return {
+                    "integrity_item": item_name,
+                    "integrity_status": detail.get("status"),
+                    "matched_attachment_number": matched_number[0],
+                }
+
+            if segment_numbers and item_numbers:
+                continue
+
+            matched_tokens = [
+                token
+                for token in self._integrity_title_tokens(str(item_name or ""))
+                if token and token in normalized_segment_title
+            ]
+            if matched_tokens:
+                return {
+                    "integrity_item": item_name,
+                    "integrity_status": detail.get("status"),
+                    "matched_tokens": sorted(matched_tokens),
+                }
+
+        return None
+
+    def _is_self_defined_format_template(self, title: str, text: str) -> bool:
+        """格式自拟附件不做固定正文逐字一致性检查。"""
+        return "格式自拟" in f"{title}\n{text}"
+
+    def _self_defined_skip_reason(
+        self, integrity_reason: dict | None = None, *, source: str = "attachment"
+    ) -> dict:
+        reason = {
+            "type": "self_defined_format",
+            "reason": "格式自拟附件不进行固定正文一致性检查",
+            "source": source,
+        }
+        if integrity_reason:
+            reason.update(integrity_reason)
+        return reason
 
     def _is_formal_title_line(self, text: str) -> bool:
         """判断是否为正式的标题行（附件号或章节）。"""
@@ -542,6 +722,12 @@ class ConsistencyChecker:
 
         compact = self._compact_text(text)
         placeholder_matches = list(self.PLACEHOLDER_SPAN_RE.finditer(compact))
+        placeholder_matches.extend(
+            match
+            for match in self.SHORT_PAREN_RE.finditer(compact)
+            if self._is_dynamic_bracket_placeholder(match.group(0))
+        )
+        placeholder_matches = sorted(placeholder_matches, key=lambda item: item.start())
         if not placeholder_matches:
             return None
 
@@ -553,7 +739,7 @@ class ConsistencyChecker:
             if fixed_fragment:
                 pattern_parts.append(re.escape(fixed_fragment))
                 fixed_parts_raw.append(fixed_fragment)
-            pattern_parts.append(r".*?")
+            pattern_parts.append(r".{0,160}?")
             cursor = match.end()
         tail = compact[cursor:]
         if tail:
@@ -572,6 +758,18 @@ class ConsistencyChecker:
             "fixed_parts": fixed_parts,
             "fallback_anchors": fallback_anchors,
         }
+
+    def _is_dynamic_bracket_placeholder(self, text: str) -> bool:
+        """判断括号内容是否是模板填写项，而不是“格式”等普通说明。"""
+        content = str(text or "").strip("（）() ")
+        if not content or len(content) > 40:
+            return False
+        normalized = self._normalize(content)
+        if not normalized:
+            return False
+        if normalized in {"格式", "自拟", "如有", "说明", "盖章", "签字", "复印件", "原件"}:
+            return False
+        return any(self._normalize(marker) in normalized for marker in self.DYNAMIC_BRACKET_PLACEHOLDER_MARKERS)
 
     def _is_non_comparable_slot_line(self, line: str) -> bool:
         """签章、联系方式、纯日期等填空行由签章/日期模块处理，不参与模板一致性。"""
@@ -919,7 +1117,12 @@ class ConsistencyChecker:
             title, anchor, normalized_bid_body
         )
 
-    def compare_raw_data(self, model_json: dict, test_json: dict) -> List[Dict]:
+    def compare_raw_data(
+        self,
+        model_json: dict,
+        test_json: dict,
+        integrity_raw: dict | None = None,
+    ) -> List[Dict]:
         """
         主比对方法：将招标文件模板与投标文件段落进行比对，
         返回每个模板的通过状态及缺失锚点列表。
@@ -933,13 +1136,47 @@ class ConsistencyChecker:
             }
             for t in temps
         ]
-        bid_by_no, bid_sections = self._build_attachment_lookup(test_json, model_segments)
+
+        integrity_skip_reasons: dict[int, dict] = {}
+        active_model_segments: List[Dict] = []
+        for index, m_seg in enumerate(model_segments):
+            skip_reason = self._integrity_skip_reason_for_title(m_seg["title"], integrity_raw)
+            if skip_reason is not None:
+                integrity_skip_reasons[index] = skip_reason
+                continue
+            active_model_segments.append(m_seg)
+
+        bid_by_no: dict[str, list[dict]] = {}
+        bid_sections: list[dict] = []
+        if active_model_segments:
+            bid_by_no, bid_sections = self._build_attachment_lookup(test_json, active_model_segments)
 
         results = []
-        for m_seg in model_segments:
+        for index, m_seg in enumerate(model_segments):
             m_txt = m_seg["text"]
             title = m_seg["title"]
             is_optional = bool(m_seg.get("is_optional"))
+            is_self_defined_format = self._is_self_defined_format_template(title, m_txt)
+            self_defined_integrity_reason = (
+                self._integrity_pass_reason_for_title(title, integrity_raw)
+                if is_self_defined_format
+                else None
+            )
+
+            integrity_skip_reason = integrity_skip_reasons.get(index)
+            if integrity_skip_reason is not None:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": True,
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "pages": [],
+                        "locations": [],
+                        "skip_reason": integrity_skip_reason,
+                    }
+                )
+                continue
 
             attachment_probe = {
                 "attachment_number": self._verification_checker._attachment_number(title),
@@ -947,6 +1184,22 @@ class ConsistencyChecker:
             }
             matched_section = self._verification_checker._match_attachment(attachment_probe, bid_by_no, bid_sections)
             if matched_section is None:
+                if is_self_defined_format and self_defined_integrity_reason is not None:
+                    results.append(
+                        {
+                            "name": title,
+                            "is_passed": True,
+                            "missing_anchors": [],
+                            "unfilled_fields": [],
+                            "pages": [],
+                            "locations": [],
+                            "skip_reason": self._self_defined_skip_reason(
+                                self_defined_integrity_reason,
+                                source="integrity",
+                            ),
+                        }
+                    )
+                    continue
                 results.append(
                     {
                         "name": title,
@@ -970,6 +1223,22 @@ class ConsistencyChecker:
 
             matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
             matched_locations = self._serialize_section_locations(matched_section)
+            if is_self_defined_format:
+                results.append(
+                    {
+                        "name": title,
+                        "is_passed": True,
+                        "missing_anchors": [],
+                        "unfilled_fields": [],
+                        "pages": matched_pages,
+                        "locations": matched_locations,
+                        "skip_reason": self._self_defined_skip_reason(
+                            self_defined_integrity_reason,
+                            source="attachment",
+                        ),
+                    }
+                )
+                continue
             template_analysis = self._analyze_template_segment(title, m_txt)
             dynamic_slot_specs = template_analysis.get("dynamic_slot_specs") or []
             if int(template_analysis.get("fixed_body_length") or 0) <= self.MIN_BODY_LENGTH and not dynamic_slot_specs:

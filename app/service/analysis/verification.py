@@ -496,6 +496,25 @@ class VerificationChecker:
         title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
         return title.strip("：:；;，,。")
 
+    def _attachment_title_match_keys(self, text: str) -> set[str]:
+        """生成标题匹配 key，兼容“声明函或授权书”这类二选一模板标题。"""
+        raw_title = self._strip_attachment_title_prefix(self._attachment_title(text))
+        raw_title = re.split(r"[；;。]", raw_title, maxsplit=1)[0]
+        keys = {self._attachment_title_key(raw_title)}
+        if "或" in raw_title:
+            for part in re.split(r"\s*或\s*", raw_title):
+                part_key = self._attachment_title_key(part)
+                if part_key:
+                    keys.add(part_key)
+        return {key for key in keys if key}
+
+    def _attachment_titles_compatible(self, expected_title: str, actual_title: str) -> bool:
+        expected_keys = self._attachment_title_match_keys(expected_title)
+        actual_keys = self._attachment_title_match_keys(actual_title)
+        if not expected_keys or not actual_keys:
+            return False
+        return bool(expected_keys & actual_keys)
+
     def _attachment_title_hints(self, attachments: list[dict] | None = None) -> list[dict]:
         result, seen = [], set()
         for item in attachments or []:
@@ -522,7 +541,11 @@ class VerificationChecker:
         for item in expected_attachments or []:
             expected_number = item.get("attachment_number")
             expected_title_key = str(item.get("title_key") or "").strip()
-            if title_key and expected_title_key == title_key:
+            expected_title = str(item.get("title") or "")
+            if title_key and (
+                expected_title_key == title_key
+                or self._attachment_titles_compatible(expected_title, text)
+            ):
                 if attachment_number and expected_number == attachment_number:
                     return item
                 matched_by_title = matched_by_title or item
@@ -849,12 +872,46 @@ class VerificationChecker:
         # 先按标题精确匹配，再在同号候选里兜底，避免后文同号附件串到前面的正式表单。
         attachment_number = attachment.get("attachment_number")
         title_key = self._attachment_title_key(attachment.get("title") or "")
+
+        def best_title_match(candidates: list[dict]) -> dict | None:
+            if not candidates:
+                return None
+
+            def normalize_for_search(value: str) -> str:
+                return re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", str(value or ""))
+
+            def first_section_text(section: dict) -> str:
+                for item in section.get("sections") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        return text
+                return str(section.get("text") or "").strip()
+
+            def score(section: dict) -> tuple[int, int, int, int]:
+                first_text = first_section_text(section)
+                first_title_key = self._attachment_title_key(first_text)
+                full_text = str(section.get("text") or "")
+                searchable = normalize_for_search(full_text)
+                match_keys = self._attachment_title_match_keys(attachment.get("title") or "")
+                positions = [searchable.find(key) for key in match_keys if key and searchable.find(key) >= 0]
+                position = min(positions) if positions else -1
+                return (
+                    0 if first_title_key in match_keys else 1,
+                    position if position >= 0 else 999999,
+                    len(section.get("pages") or []),
+                    len(full_text),
+                )
+
+            return min(candidates, key=score)
+
         title_matches = []
         if title_key:
             title_matches = [
                 section
                 for section in all_sections
-                if self._attachment_title_key(section.get("title") or "") == title_key
+                if self._attachment_titles_compatible(attachment.get("title") or "", section.get("title") or "")
             ]
         if attachment_number in bid_by_no:
             candidates = bid_by_no.get(attachment_number) or []
@@ -862,10 +919,10 @@ class VerificationChecker:
                 exact = [
                     section
                     for section in candidates
-                    if self._attachment_title_key(section.get("title") or "") == title_key
+                    if self._attachment_titles_compatible(attachment.get("title") or "", section.get("title") or "")
                 ]
                 if exact:
-                    return exact[0]
+                    return best_title_match(exact)
             if len(candidates) == 1:
                 return candidates[0]
         # 编号体系可能因投标人将资格证明文件拆成子编号（如 8-2/8-3/8-5）而与模板不同；
@@ -875,7 +932,7 @@ class VerificationChecker:
         if attachment_number:
             return None
         if not attachment_number and title_matches:
-            return title_matches[0]
+            return best_title_match(title_matches)
         return None
 
     def _evaluate_attachment(self, attachment: dict, bid_section: dict | None, deadline: dict | None, bidder_name: str | None) -> dict:
