@@ -10,6 +10,7 @@ from functools import lru_cache
 import os
 import subprocess
 import threading
+from typing import Callable
 
 from app.config.settings import settings
 from app.service.ocr_service import OCRService
@@ -42,7 +43,13 @@ class AnalysisService:
         """返回支持的文件扩展名列表副本。"""
         return self.SUPPORTED_EXTENSIONS.copy()
 
-    def extract_text_result(self, file_path: str, file_extension: str) -> dict:
+    def extract_text_result(
+        self,
+        file_path: str,
+        file_extension: str,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict:
         """
         对指定文件执行 OCR 提取，返回标准化的结果字典。
 
@@ -58,7 +65,15 @@ class AnalysisService:
         if not bool(getattr(self.ocr_service, "available", False)):
             raise RuntimeError("PaddleOCR-VL-1.5 is unavailable.")
 
-        ocr_result = self.ocr_service.extract_all(file_path, normalized_extension)
+        if cancel_check is not None:
+            cancel_check()
+        ocr_result = self.ocr_service.extract_all(
+            file_path,
+            normalized_extension,
+            cancel_check=cancel_check,
+        )
+        if cancel_check is not None:
+            cancel_check()
         raw_text = str(ocr_result.get("text") or "")
         pages = ocr_result.get("pages") or []
         page_count = len(pages) if isinstance(pages, list) else 0
@@ -212,8 +227,16 @@ class AnalysisServiceDispatcher:
             self._inflight[idx] = max(0, self._inflight[idx] - 1)
         self._permits[idx].release()
 
-    def extract_text_result(self, file_path: str, file_extension: str) -> dict:
+    def extract_text_result(
+        self,
+        file_path: str,
+        file_extension: str,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict:
         """获取槽位后，在对应设备上执行 OCR 文本提取。"""
+        if cancel_check is not None:
+            cancel_check()
         idx = self._acquire_slot()
         try:
             service = self._services[idx]
@@ -223,7 +246,11 @@ class AnalysisServiceDispatcher:
                     f"AnalysisServiceDispatcher: route request to worker={idx}, "
                     f"configured_device={device}, active_device={service.ocr_service.active_device}"
                 )
-            return service.extract_text_result(file_path, file_extension)
+            return service.extract_text_result(
+                file_path,
+                file_extension,
+                cancel_check=cancel_check,
+            )
         finally:
             self._release_slot(idx)
 

@@ -8,7 +8,7 @@
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.document_types import DocumentType
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.service.project_runtime import ProjectTaskCancelledError
 from app.utils.text_utils import cleanup_temp_file, save_temp_file
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def _extract_recognition_content(
     file_bytes: bytes,
     file_name: str,
     analysis_service,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     """对单文件执行识别，并输出用于存储的精简识别结果。"""
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
@@ -121,10 +123,15 @@ def _extract_recognition_content(
 
     temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
     try:
+        if cancel_check is not None:
+            cancel_check()
         recognition_result = analysis_service.extract_text_result(
             temp_file_path,
             file_extension,
+            cancel_check=cancel_check,
         )
+        if cancel_check is not None:
+            cancel_check()
         # 去掉大字段，避免把完整文本和分页内容直接写入数据库。
         recognition_result.pop("content", None)
         recognition_result.pop("pages", None)
@@ -164,6 +171,7 @@ def _extract_recognition_content(
     file_bytes: bytes,
     file_name: str,
     analysis_service,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict:
     """
     对单文件执行 OCR 提取，返回精简的识别结果字典。
@@ -179,10 +187,15 @@ def _extract_recognition_content(
 
     temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
     try:
+        if cancel_check is not None:
+            cancel_check()
         recognition_result = analysis_service.extract_text_result(
             temp_file_path,
             file_extension,
+            cancel_check=cancel_check,
         )
+        if cancel_check is not None:
+            cancel_check()
         # 精简识别内容，避免数据库膨胀
         recognition_result.pop("content", None)
         recognition_result.pop("pages", None)
@@ -343,6 +356,8 @@ async def upload_and_create_document_without_ocr(
 async def recognize_existing_document(
     *,
     document_identifier: str,
+    project_identifier: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,
@@ -351,6 +366,8 @@ async def recognize_existing_document(
     document: dict[str, Any] | None = None
     object_context: Optional[dict[str, Any]] = None
     try:
+        if cancel_check is not None:
+            cancel_check()
         document = await run_in_threadpool(db_service.get_document_by_identifier, document_identifier)
         if not document:
             raise ValueError(f"document not found: {document_identifier}")
@@ -368,17 +385,24 @@ async def recognize_existing_document(
             raise ValueError(f"unsupported document file_url: {file_url}")
         object_context = {"bucket_name": bucket_name, "object_name": object_name}
 
+        if cancel_check is not None:
+            cancel_check()
         file_bytes, _ = await run_in_threadpool(
             oss_service.get_object_bytes,
             object_name,
             bucket_name,
         )
+        if cancel_check is not None:
+            cancel_check()
         recognition_content = await run_in_threadpool(
             _extract_recognition_content,
             file_bytes,
             str(document.get("file_name") or document_identifier),
             analysis_service,
+            cancel_check,
         )
+        if cancel_check is not None:
+            cancel_check()
         updated_document = await run_in_threadpool(
             db_service.update_document_content,
             document_identifier,
@@ -392,6 +416,13 @@ async def recognize_existing_document(
             "document_summary": compact_document_payload(updated_document),
             "recognition_content": recognition_content,
         }
+    except ProjectTaskCancelledError:
+        logger.info(
+            "document recognition cancelled project_identifier=%s document_identifier=%s",
+            str(project_identifier or "").strip() or "<none>",
+            document_identifier,
+        )
+        raise
     except Exception as exc:
         _log_document_pipeline_exception(
             operation="recognize_existing_document",

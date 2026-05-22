@@ -8,7 +8,7 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
@@ -40,6 +40,13 @@ from app.service.document_ingest_service import (
 )
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.service.project_runtime import (
+    ProjectTaskCancelledError,
+    check_project_cancelled,
+    ensure_project_cancel_event,
+    register_project_task,
+    unregister_project_task,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -296,13 +303,16 @@ async def _run_project_ocr_task(
     identifier_id: str,
     documents: list[dict],
     ocr_type: str,
+    cancel_check: Callable[[], None],
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,
 ) -> None:
     """后台串行执行指定类型 OCR，结束后刷新项目总状态。"""
     try:
+        cancel_check()
         async with _get_ocr_task_lock():
+            cancel_check()
             logger.info(
                 "project ocr task started identifier=%s ocr_type=%s pending_count=%s",
                 identifier_id,
@@ -312,10 +322,13 @@ async def _run_project_ocr_task(
             items = await _recognize_existing_documents_batch(
                 documents=documents,
                 parallelism=1,
+                project_identifier=identifier_id,
+                cancel_check=cancel_check,
                 db_service=db_service,
                 oss_service=oss_service,
                 analysis_service=analysis_service,
             )
+        cancel_check()
         summary = _summarize_batch_items(items)
         refreshed_project = await run_in_threadpool(
             db_service.refresh_project_parsing_status,
@@ -329,6 +342,20 @@ async def _run_project_ocr_task(
             summary.get("failed"),
             (refreshed_project or {}).get("parsing_status"),
         )
+    except asyncio.CancelledError:
+        logger.info(
+            "project ocr task cancelled identifier=%s ocr_type=%s",
+            identifier_id,
+            ocr_type,
+        )
+        raise
+    except ProjectTaskCancelledError:
+        logger.info(
+            "project ocr task aborted due to project deletion identifier=%s ocr_type=%s",
+            identifier_id,
+            ocr_type,
+        )
+        raise
     except Exception:
         logger.exception(
             "project ocr task failed identifier=%s ocr_type=%s",
@@ -342,11 +369,123 @@ async def _run_project_ocr_pipeline(
     previous_task: asyncio.Task | None,
     identifier_id: str,
     target_stage: str,
+    cancel_check: Callable[[], None],
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,
 ) -> None:
     """同一项目的 OCR 请求按阶段顺序串起来执行。"""
+    async def _run_pipeline_impl() -> None:
+        if previous_task is not None:
+            try:
+                cancel_check()
+                await previous_task
+            except Exception:
+                logger.exception("previous project ocr task failed identifier=%s", identifier_id)
+
+        while True:
+            cancel_check()
+            refreshed_project = await run_in_threadpool(
+                db_service.refresh_project_parsing_status,
+                identifier_id,
+            )
+            if not refreshed_project:
+                logger.warning("project ocr pipeline aborted because project disappeared identifier=%s", identifier_id)
+                return
+
+            current_status = int(refreshed_project.get("parsing_status") or 0)
+            target_status = _OCR_STAGE_REQUIRED_STATUS[target_stage]
+            if current_status >= target_status:
+                logger.info(
+                    "project ocr pipeline completed identifier=%s target_stage=%s parsing_status=%s",
+                    identifier_id,
+                    target_stage,
+                    current_status,
+                )
+                return
+
+            payload = await run_in_threadpool(
+                db_service.get_project_documents_for_duplicate_check,
+                identifier_id,
+            )
+            if not payload:
+                logger.warning("project ocr pipeline missing payload identifier=%s", identifier_id)
+                return
+
+            stage = _next_stage_to_run(current_status, target_stage)
+            if stage is None:
+                return
+            documents = _collect_documents_by_stage(payload, stage)
+            if not documents:
+                logger.warning(
+                    "project ocr pipeline missing stage documents identifier=%s stage=%s",
+                    identifier_id,
+                    stage,
+                )
+                return
+
+            pending_documents = _pending_documents(documents)
+            if not pending_documents:
+                refreshed_project = await run_in_threadpool(
+                    db_service.refresh_project_parsing_status,
+                    identifier_id,
+                )
+                if not PostgreSQLService.parsing_status_reached(
+                    (refreshed_project or {}).get("parsing_status"),
+                    _OCR_STAGE_REQUIRED_STATUS[stage],
+                ):
+                    logger.warning(
+                        "project ocr pipeline paused identifier=%s stage=%s reason=status_not_advanced",
+                        identifier_id,
+                        stage,
+                    )
+                    return
+                continue
+
+            await _run_project_ocr_task(
+                identifier_id=identifier_id,
+                documents=pending_documents,
+                ocr_type=_OCR_STAGE_LABELS[stage],
+                cancel_check=cancel_check,
+                db_service=db_service,
+                oss_service=oss_service,
+                analysis_service=analysis_service,
+            )
+
+            cancel_check()
+            refreshed_project = await run_in_threadpool(
+                db_service.refresh_project_parsing_status,
+                identifier_id,
+            )
+            if not PostgreSQLService.parsing_status_reached(
+                (refreshed_project or {}).get("parsing_status"),
+                _OCR_STAGE_REQUIRED_STATUS[stage],
+            ):
+                logger.warning(
+                    "project ocr pipeline paused identifier=%s stage=%s parsing_status=%s",
+                    identifier_id,
+                    stage,
+                    (refreshed_project or {}).get("parsing_status"),
+                )
+                return
+
+    try:
+        return await _run_pipeline_impl()
+    except asyncio.CancelledError:
+        logger.info(
+            "project ocr pipeline cancelled identifier=%s target_stage=%s",
+            identifier_id,
+            target_stage,
+        )
+        raise
+    except ProjectTaskCancelledError:
+        logger.info(
+            "project ocr pipeline aborted due to project deletion identifier=%s target_stage=%s",
+            identifier_id,
+            target_stage,
+        )
+        return
+
     if previous_task is not None:
         try:
             # 同项目存在前序任务时，先等前序任务完成再继续。
@@ -450,17 +589,21 @@ async def _enqueue_project_ocr_pipeline(
     """给项目追加一个 OCR 请求，后来的请求会接在前一个请求后面。"""
     async with _get_project_ocr_queue_lock():
         previous_task = _PROJECT_OCR_QUEUE_TAILS.get(identifier_id)
+        cancel_event = ensure_project_cancel_event(identifier_id)
+        cancel_check = lambda: check_project_cancelled(cancel_event, identifier_id=identifier_id)
         # 新任务直接挂到当前队尾，形成项目内串行链。
         task = asyncio.create_task(
             _run_project_ocr_pipeline(
                 previous_task=previous_task,
                 identifier_id=identifier_id,
                 target_stage=target_stage,
+                cancel_check=cancel_check,
                 db_service=db_service,
                 oss_service=oss_service,
                 analysis_service=analysis_service,
             )
         )
+        register_project_task(identifier_id, task)
         _PROJECT_OCR_QUEUE_TAILS[identifier_id] = task
 
     def _cleanup_queue_tail(finished_task: asyncio.Task) -> None:
@@ -470,6 +613,7 @@ async def _enqueue_project_ocr_pipeline(
                 # 只有自己还是队尾时才清掉，避免误删后来追加的新任务。
                 if current_task is finished_task:
                     _PROJECT_OCR_QUEUE_TAILS.pop(identifier_id, None)
+            unregister_project_task(identifier_id, finished_task)
 
         asyncio.create_task(_cleanup())
 
@@ -963,6 +1107,8 @@ async def _recognize_existing_documents_batch(
     *,
     documents: list[dict],
     parallelism: int,
+    project_identifier: str,
+    cancel_check: Callable[[], None],
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,
@@ -976,13 +1122,17 @@ async def _recognize_existing_documents_batch(
     _ = parallelism
     items: list[dict] = []
     for document_meta in normalized_documents:
+        cancel_check()
         result = await recognize_existing_document(
             document_identifier=document_meta["identifier_id"],
+            project_identifier=project_identifier,
+            cancel_check=cancel_check,
             db_service=db_service,
             oss_service=oss_service,
             analysis_service=analysis_service,
             raise_http_exception=False,
         )
+        cancel_check()
         if not result["ok"]:
             logger.error(
                 "manual recognize existing document failed identifier=%s file_name=%s status_code=%s error=%s",

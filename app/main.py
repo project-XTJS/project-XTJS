@@ -55,7 +55,7 @@ app.include_router(postgresql_router, prefix="/api/postgresql", tags=["项目业
 app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["项目业务"])
 
 
-# ── OpenAPI 增强：为项目/文档标识字段注入人类可读可选值 ──
+# —— OpenAPI 增强：为项目/文档标识字段注入人类可读可选值 ——
 
 HTTP_METHODS = ("get", "post", "put", "delete", "patch")
 PROJECT_FIELD_NAMES = {
@@ -69,6 +69,7 @@ DOCUMENT_FIELD_CHOICES = {
     "business_bid_document_identifier": DOCUMENT_TYPE_BUSINESS_BID,
     "technical_bid_document_identifier": DOCUMENT_TYPE_TECHNICAL_BID,
 }
+
 
 def _inject_string_choices(schema: dict, choices: list[str]) -> None:
     """将字符串类型 schema 替换为枚举，并设置默认值。"""
@@ -96,7 +97,7 @@ def _inject_string_choices(schema: dict, choices: list[str]) -> None:
 
 
 def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict | None:
-    """解析 $ref 引用，返回目标 schema 定义。"""
+    """解析 `$ref` 引用，返回目标 schema 定义。"""
     if not isinstance(schema, dict):
         return None
 
@@ -112,10 +113,11 @@ def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict
     return schema
 
 
-def _load_openapi_display_choices() -> tuple[list[str], dict[str, list[str]]]:
+def _load_openapi_display_choices() -> tuple[list[str], list[str], dict[str, list[str]]]:
     """从数据库加载 Swagger 下拉展示值。"""
     try:
         db_service = PostgreSQLService()
+        project_identifier_choices = db_service.list_project_identifiers()
         project_choices = db_service.list_project_display_choices()
         document_choices = {
             "all": db_service.list_document_display_choices(),
@@ -128,6 +130,7 @@ def _load_openapi_display_choices() -> tuple[list[str], dict[str, list[str]]]:
             ),
         }
     except Exception:
+        project_identifier_choices = []
         project_choices = []
         document_choices = {
             "all": [],
@@ -135,7 +138,7 @@ def _load_openapi_display_choices() -> tuple[list[str], dict[str, list[str]]]:
             DOCUMENT_TYPE_BUSINESS_BID: [],
             DOCUMENT_TYPE_TECHNICAL_BID: [],
         }
-    return project_choices, document_choices
+    return project_identifier_choices, project_choices, document_choices
 
 
 def _parameter_schema(parameter: dict) -> dict:
@@ -144,7 +147,7 @@ def _parameter_schema(parameter: dict) -> dict:
 
 
 def _mark_project_parameter(parameter: dict, choices: list[str]) -> None:
-    """把参数展示成项目名选择。"""
+    """把参数展示成项目名下拉选择。"""
     schema = _parameter_schema(parameter)
     schema.setdefault("title", "项目名")
     parameter["description"] = (
@@ -153,8 +156,18 @@ def _mark_project_parameter(parameter: dict, choices: list[str]) -> None:
     _inject_string_choices(schema, choices)
 
 
+def _mark_project_identifier_parameter(parameter: dict, choices: list[str]) -> None:
+    """把参数展示成项目 identifier_id（UUID）下拉选择。"""
+    schema = _parameter_schema(parameter)
+    schema["type"] = "string"
+    schema["title"] = "identifier_id"
+    schema.pop("nullable", None)
+    parameter["description"] = "请选择或输入项目 identifier_id（UUID）。"
+    _inject_string_choices(schema, choices)
+
+
 def _mark_document_parameter(parameter: dict, choices: list[str]) -> None:
-    """把参数展示成文件名选择。"""
+    """把参数展示成文件名下拉选择。"""
     schema = _parameter_schema(parameter)
     schema.setdefault("title", "文件名")
     parameter["description"] = (
@@ -195,7 +208,7 @@ def _inject_display_choices(openapi_schema: dict) -> dict:
 
     注意：这里只改变 Swagger 展示和提交值，后端仍兼容 UUID。
     """
-    project_choices, document_choices = _load_openapi_display_choices()
+    project_identifier_choices, project_choices, document_choices = _load_openapi_display_choices()
 
     paths = openapi_schema.get("paths", {})
     rewritten_paths: dict[str, dict] = {}
@@ -203,10 +216,11 @@ def _inject_display_choices(openapi_schema: dict) -> dict:
     for path, path_item in paths.items():
         path_text = str(path)
         is_project_path = "/projects/{identifier_id}" in path_text
+        is_project_detail_path = path_text.endswith("/projects/{identifier_id}")
         is_document_path = "/documents/{identifier_id}" in path_text
         is_project_result_path = "/results/{project_identifier_id}" in path_text
         rewritten_path = path_text
-        if is_project_path:
+        if is_project_path and not is_project_detail_path:
             rewritten_path = rewritten_path.replace("{identifier_id}", "{project_name}")
         if is_document_path:
             rewritten_path = rewritten_path.replace("{identifier_id}", "{file_name}")
@@ -229,6 +243,9 @@ def _inject_display_choices(openapi_schema: dict) -> dict:
                     continue
 
                 if parameter_location == "path" and is_project_path and parameter_name == "identifier_id":
+                    if is_project_detail_path:
+                        _mark_project_identifier_parameter(parameter, project_identifier_choices)
+                        continue
                     parameter["name"] = "project_name"
                     _mark_project_parameter(parameter, project_choices)
                     continue
@@ -277,7 +294,8 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 
-# ── 系统状态接口 ──
+# —— 系统状态接口 ——
+
 
 @app.get("/", summary="系统根目录", tags=["系统"])
 def read_root():
@@ -289,7 +307,7 @@ def health_check():
     return {"status": "healthy"}
 
 
-# ── 开发模式直接启动 ──
+# —— 开发模式直接启动 ——
 
 if __name__ == "__main__":
     import threading

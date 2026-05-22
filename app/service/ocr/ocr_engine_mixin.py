@@ -6,7 +6,7 @@ import shutil
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from app.config.settings import settings
 from app.service.ocr_progress import OCRProgressMonitor
 
@@ -296,17 +296,32 @@ class OCREngineMixin:
             return [{"input_path": input_path, "page_offset": 0, "page_count": total_pages, "cleanup_path": staged_path, "page_range": (1, total_pages if total_pages > 0 else 1)}], staged_path
         return self._build_pdf_chunk_inputs(file_path, total_pages=total_pages, chunk_pages=chunk_pages)
 
-    def _run_pipeline(self, input_path: str, *, progress_monitor: OCRProgressMonitor | None = None, total_pages: int = 0, progress_page_offset: int = 0, progress_total_pages: int | None = None) -> list[Any]:
+    def _run_pipeline(
+        self,
+        input_path: str,
+        *,
+        progress_monitor: OCRProgressMonitor | None = None,
+        total_pages: int = 0,
+        progress_page_offset: int = 0,
+        progress_total_pages: int | None = None,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> list[Any]:
         """实际触发 Paddle OCR 模型推理的方法。"""
         if not self.available or self.pipeline is None: raise RuntimeError("PaddleOCR-VL-1.5 is unavailable.")
+        if cancel_check is not None:
+            cancel_check()
         with self._predictor_lock:
             if progress_monitor is not None: progress_monitor.update(stage="predict", current=max(progress_page_offset, 0), total=max(int(progress_total_pages or total_pages or 1), 1), detail="starting pipeline.predict_iter", emit=False)
             results = []
             for index, item in enumerate(self.pipeline.predict_iter(input_path), start=1):
+                if cancel_check is not None:
+                    cancel_check()
                 results.append(item)
                 if progress_monitor is not None:
                     current_page = max(progress_page_offset + index, 0)
                     progress_monitor.update(stage="predict", current=current_page, total=max(int(progress_total_pages or total_pages or 1), current_page, 1), detail=f"page/batch {current_page} predicted", emit=True)
+            if cancel_check is not None:
+                cancel_check()
             return results
 
     def _restructure_pipeline_results(self, results: list[Any], *, progress_monitor: OCRProgressMonitor | None = None) -> list[Any]:

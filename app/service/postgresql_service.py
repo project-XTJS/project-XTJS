@@ -25,6 +25,7 @@ from app.core.document_types import (
     TECHNICAL_BID_COMPATIBLE_TYPES,
     get_document_type_label,
 )
+from app.service.minio_service import MinioService
 
 logger = logging.getLogger(__name__)
 
@@ -1516,6 +1517,42 @@ class PostgreSQLService:
                 relations: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
         return {"project": project, "relations": relations}
 
+    @staticmethod
+    def _collect_project_file_urls(project_detail: Optional[Dict[str, Any]]) -> List[str]:
+        urls: List[str] = []
+        seen: set[str] = set()
+        oss_service = MinioService()
+        field_groups = (
+            ("tender_identifier_id", "tender_file_url"),
+            ("business_bid_identifier_id", "business_bid_file_url"),
+            ("technical_bid_identifier_id", "technical_bid_file_url"),
+        )
+        for relation in (project_detail or {}).get("relations") or []:
+            for identifier_field, file_url_field in field_groups:
+                identifier = str(relation.get(identifier_field) or "").strip()
+                file_url = str(relation.get(file_url_field) or "").strip()
+                if not identifier or not file_url or identifier in seen:
+                    continue
+                seen.add(identifier)
+                if file_url.startswith("minio://"):
+                    bucket_name, object_name = MinioService.bucket_and_object_from_file_url(file_url)
+                    urls.append(oss_service.get_presigned_url(object_name, bucket_name))
+                elif MinioService.is_presigned_url(file_url):
+                    urls.append(file_url)
+                else:
+                    urls.append(file_url)
+        return urls
+
+    def _attach_project_file_urls_to_result(
+        self,
+        project_identifier_id: str,
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = dict(result or {})
+        project_detail = self.get_project_detail(project_identifier_id)
+        payload["project_file_urls"] = self._collect_project_file_urls(project_detail)
+        return payload
+
     def get_project_documents_for_duplicate_check(
         self,
         identifier_id: str,
@@ -1674,6 +1711,10 @@ class PostgreSQLService:
         if not project:
             raise ValueError(f"项目不存在：{project_identifier_id}")
         normalized_project_identifier = str(project["identifier_id"])
+        persisted_result = self._attach_project_file_urls_to_result(
+            normalized_project_identifier,
+            result,
+        )
 
         query = """
             INSERT INTO xtjs_result (project_identifier_id, result)
@@ -1691,7 +1732,13 @@ class PostgreSQLService:
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (normalized_project_identifier, Json(jsonable_encoder(result))))
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(jsonable_encoder(persisted_result)),
+                    ),
+                )
                 return dict(cursor.fetchone())
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
@@ -1743,7 +1790,10 @@ class PostgreSQLService:
             raise ValueError(f"项目不存在：{project_identifier_id}")
         normalized_project_identifier = str(project["identifier_id"])
 
-        payload = jsonable_encoder({normalized_result_key: result_value})
+        payload = self._attach_project_file_urls_to_result(
+            normalized_project_identifier,
+            {normalized_result_key: result_value},
+        )
         query = """
             INSERT INTO xtjs_result (project_identifier_id, result)
             VALUES (%s, %s)
@@ -1764,7 +1814,7 @@ class PostgreSQLService:
                     query,
                     (
                         normalized_project_identifier,
-                        Json(payload),
+                        Json(jsonable_encoder(payload)),
                     ),
                 )
                 return dict(cursor.fetchone())
