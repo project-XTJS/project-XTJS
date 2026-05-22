@@ -27,11 +27,21 @@ class IntegrityChecker:
         "投标保证金": ["投标保证金", "保证金缴纳凭证", "投标保证金汇款凭证"],
         "制造商声明函": ["制造商声明", "制造商授权", "原厂授权"],
         "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
-        "缴纳社保": ["社会保险个人权益记录", "社保缴纳证明", "劳动合同证明"],
+        "缴纳社保": [
+            "社会保险个人权益记录",
+            "社保缴纳证明",
+            "被授权人社保缴纳证明",
+            "劳动合同证明",
+            "劳动合同",
+            "劳动合同书",
+            "被授权人的劳动合同书",
+        ],
         "财务状况，依法缴纳税收和社会保障资金的声明函": [
             "财务状况，依法缴纳税收和社会保障资金的声明函",
             "财务状况及税收、社会保障资金缴纳情况声明函",
             "财务状况及税收和社会保障资金缴纳情况声明函",
+            "财务状况及税收、社会保障资金缴纳情况、没有重大违法记录声明函",
+            "财务状况及税收和社会保障资金缴纳情况、没有重大违法记录声明函",
             "依法缴纳税收和社会保障资金的声明函",
             "社会保障资金缴纳情况声明函",
         ],
@@ -180,6 +190,7 @@ class IntegrityChecker:
     PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
         r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
+        r'^\s*\d+(?:\s*[.．]\s*\d+)+[.．、]?\s*',
         r'^\s*(?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[．\.、]\s*',
         r'^\s*[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*',
         r'^\s*\d+[)）]\s*',
@@ -201,6 +212,7 @@ class IntegrityChecker:
     # 去标题前缀
     def _strip_heading_prefix(self, name: str) -> str:
         text = str(name or "").strip()
+        text = re.sub(r"\\([.．、)）])", r"\1", text)
         previous = None
         while text and text != previous:
             previous = text
@@ -362,12 +374,20 @@ class IntegrityChecker:
         }
 
     # 在区段列表中查找指定关键词的标题区段
-    def _find_heading_section(self, sections: list, headers: set, keyword: str) -> dict | None:
+    def _find_heading_section(
+        self,
+        sections: list,
+        headers: set,
+        keyword: str,
+        toc_pages: set[int] | None = None,
+    ) -> dict | None:
         # 特例：营业执照和社保可以不依赖编号前缀
         EXEMPT_KEYWORDS = ["营业执照", "社会保险"]
 
         for sec in sections:
             if sec.get('type') != 'heading':
+                continue
+            if toc_pages and sec.get("page") in toc_pages:
                 continue
             text = sec['text']
             if TemplateExtractor._is_noise(text, headers, sec.get('type')):
@@ -385,7 +405,6 @@ class IntegrityChecker:
     # 第二遍只回查 text 区段，并跳过目录页，避免把目录项当成正文附件
     def _collect_toc_pages(self, sections: list) -> set[int]:
         toc_pages: set[int] = set()
-        toc_line_counts: dict[int, int] = {}
 
         for sec in sections:
             if not isinstance(sec, dict):
@@ -397,13 +416,6 @@ class IntegrityChecker:
 
             compact = re.sub(r"\s+", "", text)
             if compact == "目录" or (compact.startswith("目录") and len(compact) <= 8):
-                toc_pages.add(page)
-
-            if TemplateExtractor._is_noise(text, set(), sec.get("type")):
-                toc_line_counts[page] = toc_line_counts.get(page, 0) + 1
-
-        for page, count in toc_line_counts.items():
-            if count >= 3:
                 toc_pages.add(page)
 
         return toc_pages
@@ -476,12 +488,16 @@ class IntegrityChecker:
         best_score = 0
         best_match_title = None
         best_hits: list[str] = []
+        allow_body_fallback = self._is_legal_representative_proof_target(keyword)
 
         for sec in sections:
             if not self._is_usable_body_section(sec, headers, toc_pages):
                 continue
+            text = str(sec.get("text") or "")
+            if not allow_body_fallback and not self._looks_like_text_title(text, keyword):
+                continue
             score, matched_title, hits = self._content_match_score(
-                str(sec.get("text") or ""), keyword
+                text, keyword
             )
             if score <= best_score:
                 continue
@@ -590,7 +606,7 @@ class IntegrityChecker:
 
     # 完整性检查先认 heading，只有缺失项才做 text 二次确认
     def _find_required_section(self, sections: list, headers: set, keyword: str, toc_pages: set[int]) -> dict | None:
-        match_section = self._find_heading_section(sections, headers, keyword)
+        match_section = self._find_heading_section(sections, headers, keyword, toc_pages)
         if match_section:
             return match_section
         match_section = self._find_text_section(sections, headers, keyword, toc_pages)
