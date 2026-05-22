@@ -157,6 +157,25 @@ class IntegrityChecker:
         "安全生产考核",
     )
 
+    LEGAL_REP_PROOF_TARGET_MARKERS = (
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+    )
+
+    LEGAL_REP_PROOF_EVIDENCE_MARKERS = (
+        "法定代表人资格证明书",
+        "法定代表人证明书",
+        "法定代表人身份证明",
+        "法定代表人证明",
+        "单位负责人证明书",
+        "单位负责人身份证明",
+        "法定代表人或单位负责人证明书",
+        "法定代表人单位负责人证明书",
+    )
+
     # 标题前缀模式（用于去除编号）
     PREFIX_PATTERNS = (
         r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
@@ -246,6 +265,38 @@ class IntegrityChecker:
         if normalized_candidate not in parts:
             parts.append(normalized_candidate)
         return parts
+
+    def _is_legal_representative_proof_target(self, keyword: str) -> bool:
+        normalized_keyword = self._normalize_title_text(keyword)
+        return any(
+            self._normalize_title_text(marker) in normalized_keyword
+            for marker in self.LEGAL_REP_PROOF_TARGET_MARKERS
+        )
+
+    def _legal_representative_proof_match_score(self, text: str) -> tuple[int, str | None, list[str]]:
+        normalized_text = self._normalize_title_text(text)
+        if not normalized_text:
+            return 0, None, []
+
+        hits = []
+        for marker in self.LEGAL_REP_PROOF_EVIDENCE_MARKERS:
+            normalized_marker = self._normalize_title_text(marker)
+            if normalized_marker and normalized_marker in normalized_text and marker not in hits:
+                hits.append(marker)
+
+        if hits:
+            longest_hit = max(len(self._normalize_title_text(hit)) for hit in hits)
+            return 100 + min(longest_hit, 20), hits[0], hits
+
+        if (
+            "兹证明" in normalized_text
+            and "系" in normalized_text
+            and ("法定代表人" in normalized_text or "负责人" in normalized_text)
+        ):
+            hits = ["兹证明", "法定代表人/负责人"]
+            return 90, "兹证明...系法定代表人/负责人", hits
+
+        return 0, None, []
 
     # 将任意标题归一化为标准描述
     def _normalize_target(self, name: str) -> str:
@@ -379,6 +430,9 @@ class IntegrityChecker:
         normalized_text = self._normalize_title_text(text)
         if not normalized_text:
             return 0, None, []
+
+        if self._is_legal_representative_proof_target(keyword):
+            return self._legal_representative_proof_match_score(text)
 
         best_score = 0
         best_title = None
