@@ -13,6 +13,7 @@ class StarExtractMixin:
     REQUIREMENT_CHAPTER_STRONG_HINTS: tuple
     REQUIREMENT_CHAPTER_WEAK_HINTS: tuple
     REQUIREMENT_CHAPTER_EXCLUDE_HINTS: tuple
+    STAR_REQUIREMENT_EXCLUDE_HINTS: tuple
     STOP_HINTS: tuple
 
     # 依赖工具方法
@@ -49,6 +50,8 @@ class StarExtractMixin:
                 req = self._clean_req(entry["text"])
                 req_norm = self._norm(req)
                 if len(req_norm) < 4 or req_norm in seen:
+                    continue
+                if self._should_exclude_star_requirement(req):
                     continue
                 seen.add(req_norm)
                 out.append(
@@ -128,6 +131,27 @@ class StarExtractMixin:
             if score >= max(2, best_score - 2)
         ]
         return selected
+
+    def _should_exclude_star_requirement(self, text: str) -> bool:
+        """过滤不应作为偏离响应必答项的星标说明。"""
+        normalized = self._norm(text)
+        if not normalized:
+            return True
+
+        quote_hits = sum(
+            1
+            for token in getattr(self, "STAR_REQUIREMENT_EXCLUDE_HINTS", ())
+            if self._norm(token) in normalized
+        )
+        if quote_hits < 1:
+            return False
+
+        # 折扣率/下浮率/优惠率这类报价约束由报价合理性检查负责。
+        if any(token in normalized for token in ("折扣率", "下浮率", "优惠率", "折让率")):
+            return True
+
+        # 纯报价、限价、金额约束不要求在偏离表中逐条响应。
+        return "报价" in normalized and any(token in normalized for token in ("不得超过", "不超过", "限价", "金额", "价格"))
 
     def _iter_star_requirement_entries(
         self,

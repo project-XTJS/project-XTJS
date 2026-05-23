@@ -33,7 +33,9 @@ class ReasonablenessChecker(
         self.BID_OPENING_TITLES = ["开标一览表", "报价一览表", "投标一览表", "响应报价一览表", "参选报价一览表"]
         self.ITEMIZED_SECTION_TITLES = ["分项报价表"]
         self.SECTION_END_TITLES = ["分项报价表", "已标价工程量清单", "工程量清单", "商务条款偏离表", "技术条款偏离表", "投标人基本情况介绍", "类似项目业绩清单", "投标人的资格证明文件", "项目人员情况", "资格审查资料", "法定代表人身份证明", "授权委托书", "投标保证书", "比选保证书", "承诺函"]
-        self.FLOAT_RULE_PHRASES = ["低于或等于", "高于或等于", "不低于", "不少于", "不高于", "不大于", "大于", "高于", "低于", "小于", "等于"]
+        self.FLOAT_RULE_PHRASES = ["低于或等于", "高于或等于", "不得超过", "不超过", "不得高于", "不得大于", "不得低于", "不得小于", "不低于", "不少于", "不高于", "不大于", "大于", "高于", "低于", "小于", "等于"]
+        self.RATE_QUOTE_KEYWORDS = ["投标下浮率", "报价下浮率", "下浮率", "投标折扣率", "报价折扣率", "折扣率", "优惠率", "折让率"]
+        self.DISCOUNT_RATE_KEYWORDS = ["投标折扣率", "报价折扣率", "折扣率"]
         self.COMMON_TAX_RATES = {3.0, 6.0, 9.0, 13.0}
         self.TENDER_LIMIT_STRONG_KEYWORDS = ["最高限价", "最高投标限价", "最高响应限价", "最高报价限价", "招标控制价", "控制价", "最高控制价", "最高总价"]
         self.TENDER_LIMIT_MEDIUM_KEYWORDS = ["采购预算", "预算金额", "项目预算", "预算价", "预算", "限价", "总价限价", "投标限价", "响应限价", "采购金额", "最高采购限价"]
@@ -119,6 +121,7 @@ class ReasonablenessChecker(
 
         if rows:
             passed, summary = self._check_float_rate_rows_compliance(rows, rules)
+            price_type = self._rate_quote_type_for_rows(rows)
             # 整理涉及的页面和位置
             row_pages = []
             seen_pages = set()
@@ -132,13 +135,13 @@ class ReasonablenessChecker(
                         row_pages.append(page)
                     row_locations.append({
                         "page": page,
-                        "label": str(row.get("biz_name_raw") or row.get("biz_name") or "下浮率报价"),
+                        "label": str(row.get("biz_name_raw") or row.get("biz_name") or price_type),
                         "text": str(row.get("raw_line") or ""),
                         "document": "bidder",
                     })
             return self._build_result(
                 result_text="合格" if passed else "失败",
-                price_type="下浮率报价",
+                price_type=price_type,
                 summary=summary,
                 pages=row_pages,
                 locations=row_locations,
@@ -148,17 +151,23 @@ class ReasonablenessChecker(
         single_float_rate = self._extract_single_float_rate_from_table(parsed, bid_page, bid_opening_text)
         if single_float_rate is not None:
             # 应用规则判断逻辑...
-            if "__generic__" in rules:
+            if self._contains_discount_rate_keywords(bid_opening_text):
+                passed = single_float_rate < 100
+                summary = [f"折扣率：{single_float_rate:.2f}% < 100% ，{'合格' if passed else '不合格'}"]
+                price_type = "折扣率报价"
+            elif "__generic__" in rules:
                 rule = rules["__generic__"]
                 passed = self._compare_by_rule(single_float_rate, rule["op"], rule["threshold"])
                 summary = [f"下浮率：{single_float_rate:.2f}% {rule['op']} {rule['threshold']:g}% ，{'合格' if passed else '不合格'}"]
+                price_type = "下浮率报价"
             else:
                 passed = single_float_rate > self.min_float_rate
                 summary = [f"下浮率：{single_float_rate:.2f}% > {self.min_float_rate:g}% ，{'合格' if passed else '不合格'}"]
+                price_type = "下浮率报价"
 
             return self._build_result(
                 result_text="合格" if passed else "失败",
-                price_type="下浮率报价",
+                price_type=price_type,
                 summary=summary,
                 pages=fallback_pages,
                 locations=fallback_locations,

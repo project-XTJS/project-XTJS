@@ -146,7 +146,18 @@ class ConsistencyChecker:
             ("合同金额", ("合同金额",)),
             ("委托内容", ("委托内容",)),
             ("委托单位", ("委托单位",)),
-            ("所附证明材料在本响应文件的所在页码", ("所附证明材料在本响应文件的所在页码", "所附证明材料在本投标文件的所在页码", "所附证明材料在本比选文件的所在页码", "所在页码")),
+            (
+                "所附证明材料在本响应文件的所在页码",
+                (
+                    "所附证明材料在本响应文件的所在页码",
+                    "所附证明材料在本投标文件的所在页码",
+                    "所附证明材料在本比选文件的所在页码",
+                    "所附证明材料在本响应文件",
+                    "所附证明材料在本投标文件",
+                    "所附证明材料在本比选文件",
+                    "所在页码",
+                ),
+            ),
         ),
     )
     INSTRUCTIONAL_LINE_MARKERS = (
@@ -470,6 +481,8 @@ class ConsistencyChecker:
         """提取一行中的固定正文，只保留不随填写内容变化的部分。"""
         text = self._plain_text(line)
         if not text:
+            return ""
+        if re.fullmatch(r"[a-z]{1,3}", self._compact_text(text)):
             return ""
         if self._is_non_comparable_slot_line(text):
             return ""
@@ -819,6 +832,8 @@ class ConsistencyChecker:
             compact_candidate = self._compact_text(candidate)
             if not compact_candidate:
                 continue
+            if self._participation_declaration_slot_matches(slot_spec, candidate):
+                return True
             if pattern is not None and pattern.search(compact_candidate):
                 return True
             if fixed_parts and self._ordered_parts_present(fixed_parts, candidate):
@@ -827,6 +842,30 @@ class ConsistencyChecker:
             if fallback_anchors and self._ordered_parts_present(fallback_anchors, candidate):
                 return True
         return False
+
+    def _participation_declaration_slot_matches(self, slot_spec: dict, candidate_text: str) -> bool:
+        """识别“参与某项目/包件/招标编号”的已填写声明句。"""
+        template_key = self._normalize(slot_spec.get("template_line") or "")
+        if "作为投标人参与" not in template_key or "招标编号" not in template_key:
+            return False
+
+        candidate_key = self._normalize(candidate_text)
+        if "作为投标人参与" not in candidate_key or "招标编号" not in candidate_key:
+            return False
+        if "投标" not in candidate_key:
+            return False
+
+        bid_number_match = re.search(r"招标编号[A-Za-z0-9]{3,}", candidate_key)
+        package_match = re.search(r"包(?:件)?[A-Za-z0-9一二三四五六七八九十]+", candidate_key)
+        if bid_number_match is None or package_match is None:
+            return False
+
+        participation_part = candidate_key.split("作为投标人参与", 1)[-1]
+        participation_part = participation_part.split("的投标", 1)[0]
+        project_part = participation_part.split("招标编号", 1)[0]
+        project_part = re.sub(r"包(?:件)?[A-Za-z0-9一二三四五六七八九十]+", "", project_part)
+        project_part = project_part.replace("项目", "").replace("包件号", "")
+        return len(project_part) >= 4
 
     def _evaluate_dynamic_slot_specs(
         self, slot_specs: List[dict], bid_body: str, fixed_bid_body: str, title: str = ""

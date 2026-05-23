@@ -519,7 +519,7 @@ class TenderLimitMixin:
                 return {
                     "result": "合格",
                     "type": "最高限价校验",
-                    "summary": ["检测到投标文件采用下浮率报价模式，未识别到最高限价时不按总价限价校验判失败。"],
+                    "summary": ["检测到投标文件采用下浮率/折扣率报价模式，未识别到最高限价时不按总价限价校验判失败。"],
                     "pages": [],
                     "locations": [],
                 }
@@ -549,11 +549,11 @@ class TenderLimitMixin:
                     "result": "合格",
                     "type": "最高限价校验",
                     "summary": [
-                        "检测到投标文件采用下浮率报价模式，未识别到投标总金额不作为总价限价校验失败项。",
+                        "检测到投标文件采用下浮率/折扣率报价模式，未识别到投标总金额不作为总价限价校验失败项。",
                     ],
                     "pages": [bid_page] if isinstance(bid_page, int) else [],
                     "locations": (
-                        [{"page": bid_page, "label": "下浮率报价", "document": "bidder"}]
+                        [{"page": bid_page, "label": "下浮率/折扣率报价", "document": "bidder"}]
                         if isinstance(bid_page, int)
                         else []
                     ),

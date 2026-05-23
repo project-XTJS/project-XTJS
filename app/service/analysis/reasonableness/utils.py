@@ -18,6 +18,8 @@ class UtilsMixin:
     BID_OPENING_TITLES: list
     ITEMIZED_SECTION_TITLES: list
     FLOAT_RULE_PHRASES: list
+    RATE_QUOTE_KEYWORDS: list
+    DISCOUNT_RATE_KEYWORDS: list
     COMMON_TAX_RATES: set
 
     # 文本归一化
@@ -66,13 +68,17 @@ class UtilsMixin:
         )
 
     def _contains_float_rate_keywords(self, text: str) -> bool:
-        """判断文本中是否含有下浮率报价特征关键词。"""
+        """判断文本中是否含有下浮率/折扣率报价特征关键词。"""
         normalized = self._normalize(text)
         return (
-            "下浮率" in normalized
+            any(keyword in normalized for keyword in getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"]))
             or ("税率" in normalized and "报价" in normalized)
-            or "投标下浮率" in normalized
         )
+
+    def _contains_discount_rate_keywords(self, text: str) -> bool:
+        """判断文本中是否含有折扣率报价特征关键词。"""
+        normalized = self._normalize(text)
+        return any(keyword in normalized for keyword in getattr(self, "DISCOUNT_RATE_KEYWORDS", ["折扣率"]))
 
     # 数字清洗
     def _safe_float(self, value: str) -> Optional[float]:

@@ -108,6 +108,7 @@ class DocumentParserMixin:
             fallback_item_sections,
             total_sections=total_sections,
         )
+        item_sections = self._filter_real_item_sections(item_sections)
         
         # 合并去重候选区段
         candidate_sections = self._dedupe_sections(item_sections + total_sections)
@@ -190,6 +191,69 @@ class DocumentParserMixin:
             ):
                 isolated.append(section)
         return isolated or [best_section]
+
+    def _filter_real_item_sections(self, sections: list[dict]) -> list[dict]:
+        """过滤仅在合同条款/目录式清单中提到“分项报价表”的伪区段。"""
+        return [
+            section
+            for section in sections or []
+            if self._looks_like_real_item_section(section)
+        ]
+
+    def _looks_like_real_item_section(self, section: dict) -> bool:
+        lines = [str(line or "").strip() for line in section.get("lines") or [] if str(line or "").strip()]
+        if not lines:
+            return False
+
+        has_table_header = any(self._is_table_header_line(line) for line in lines)
+        data_row_count = sum(
+            1
+            for line in lines[1:]
+            if self._looks_like_itemized_data_row(line)
+        )
+
+        if has_table_header and data_row_count >= 1:
+            return True
+        if data_row_count >= 1:
+            return True
+
+        # 没有真实列项时，不能仅凭“分项报价表”这个词认定表存在。
+        return False
+
+    def _looks_like_itemized_data_row(self, line: str) -> bool:
+        compact = re.sub(r"\s+", "", str(line or ""))
+        if not compact:
+            return False
+        if self._should_skip_line(line):
+            return False
+        if self._is_table_header_line(line):
+            return False
+        if self._looks_like_total_line(line):
+            return False
+        if any(anchor in compact for anchor in self.ITEM_SECTION_ANCHORS) and not self._extract_row_amounts(line):
+            return False
+        if any(
+            marker in compact
+            for marker in (
+                "合同文件",
+                "签约合同价",
+                "合同标的",
+                "合同价款",
+                "技术服务和质保期",
+                "甲方",
+                "乙方",
+            )
+        ):
+            return False
+
+        return bool(
+            self._looks_like_item_row(line)
+            and (
+                self._extract_row_amounts(line)
+                or self._contains_quantity_unit(line)
+                or self._contains_zero_amount_hint(line)
+            )
+        )
 
     def _parse_payload(self, payload: object) -> dict | None:
         """将字符串或对象输入解析为 OCR JSON 字典。"""

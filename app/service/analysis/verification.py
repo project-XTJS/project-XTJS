@@ -53,6 +53,10 @@ class VerificationChecker:
         r'及身份证',
         r'如为分支机构投标则须总公司唯一授权函',
     )
+    GENERIC_UNNUMBERED_ATTACHMENT_TITLE_KEYS = {
+        "承诺函",
+        "证书",
+    }
     COMMON_ATTACHMENT_TITLES = (
         "投标保证书",
         "投标承诺书",
@@ -479,7 +483,7 @@ class VerificationChecker:
                 value = re.sub(pattern, "", value).strip()
         return value
 
-    def _attachment_title_key(self, text: str) -> str:
+    def _raw_attachment_title_key(self, text: str) -> str:
         title = self._strip_attachment_title_prefix(self._attachment_title(text))
         title = re.split(r"[；;。]", title, maxsplit=1)[0]
         title = re.sub(r"[（(][^）)]{0,30}(?:格式|自拟|如有|说明|盖章|签字|样式|模板|原件|复印件)[^）)]*[）)]", "", title)
@@ -492,6 +496,11 @@ class VerificationChecker:
             title = re.sub(pattern, repl, title)
         for pattern in self.ATTACHMENT_TITLE_NOISE_PATTERNS:
             title = re.sub(pattern, "", title)
+        title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
+        return title.strip("：:；;，,。")
+
+    def _attachment_title_key(self, text: str) -> str:
+        title = self._raw_attachment_title_key(text)
         title = canonicalize_attachment_title(title)
         title = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", title)
         return title.strip("：:；;，,。")
@@ -535,6 +544,12 @@ class VerificationChecker:
     def _expected_attachment(self, text: str, expected_attachments: list[dict] | None = None) -> dict | None:
         # 先按标题精确命中，避免后文合同/说明里的“附件1/附件2”把正式附件串号。
         attachment_number = self._attachment_number(text)
+        raw_title_key = self._raw_attachment_title_key(text)
+        if (
+            attachment_number is None
+            and raw_title_key in self.GENERIC_UNNUMBERED_ATTACHMENT_TITLE_KEYS
+        ):
+            return None
         title_key = self._attachment_title_key(text)
         matched_by_title = None
         matched_by_number = None

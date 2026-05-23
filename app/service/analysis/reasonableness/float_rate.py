@@ -13,10 +13,48 @@ from typing import Any, Dict, List, Optional, Tuple
 class FloatRateMixin:
     # 依赖常量（来自 __init__ 的实例属性）
     FLOAT_RULE_PHRASES: list
+    RATE_QUOTE_KEYWORDS: list
+    DISCOUNT_RATE_KEYWORDS: list
     COMMON_TAX_RATES: set
     BID_OPENING_TITLES: list
     SECTION_END_TITLES: list
     min_float_rate: float
+
+    def _rate_quote_keyword_pattern(self) -> str:
+        keywords = sorted(
+            getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"]),
+            key=len,
+            reverse=True,
+        )
+        return r"(?:%s)" % "|".join(re.escape(keyword) for keyword in keywords)
+
+    def _rate_rule_phrase_pattern(self) -> str:
+        phrases = sorted(
+            getattr(self, "FLOAT_RULE_PHRASES", []),
+            key=len,
+            reverse=True,
+        )
+        return r"(?:%s)" % "|".join(re.escape(phrase) for phrase in phrases)
+
+    def _pick_rate_label(self, text: Any) -> str:
+        normalized = self._normalize(text)
+        for keyword in sorted(
+            getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"]),
+            key=len,
+            reverse=True,
+        ):
+            if keyword in normalized:
+                return keyword
+        return "下浮率"
+
+    def _is_discount_rate_label(self, label: Any) -> bool:
+        normalized = self._normalize(label)
+        return any(keyword in normalized for keyword in getattr(self, "DISCOUNT_RATE_KEYWORDS", ["折扣率"]))
+
+    def _rate_quote_type_for_rows(self, rows: List[Dict]) -> str:
+        if any(self._is_discount_rate_label(row.get("rate_label")) for row in rows or []):
+            return "折扣率报价"
+        return "下浮率报价"
 
     # 业务名称归一化与相似度
     def _normalize_biz_name(self, name: str) -> str:
@@ -24,7 +62,8 @@ class FloatRateMixin:
         n = self._normalize(name)
         for token in [
             "业务名称", "单位工程名称", "建设工程名称", "项目名称",
-            "报价", "投标报价", "投标下浮率", "下浮率", "税率",
+            "报价", "投标报价", "投标下浮率", "报价下浮率", "下浮率",
+            "投标折扣率", "报价折扣率", "折扣率", "优惠率", "折让率", "税率",
             "暂估金额", "备注", "（含税/万元）", "(含税/万元)",
             "（%）", "(%)", "费", "项目",
         ]:
@@ -59,6 +98,8 @@ class FloatRateMixin:
             "低于或等于": "<=", "高于或等于": ">=", "不低于": ">=", "不少于": ">=",
             "大于": ">", "高于": ">", "低于": "<", "小于": "<",
             "不高于": "<=", "不大于": "<=", "等于": "==",
+            "不得超过": "<=", "不超过": "<=", "不得高于": "<=", "不得大于": "<=",
+            "不得低于": ">=", "不得小于": ">=",
         }
         return mapping.get(phrase, ">=")
 
@@ -75,20 +116,22 @@ class FloatRateMixin:
         text = section_text
         normalized_text = self._normalize(text)
         rules: Dict[str, Dict] = {}
+        rate_label_pattern = self._rate_quote_keyword_pattern()
+        phrase_pattern = self._rate_rule_phrase_pattern()
 
         sentences = self._split_rule_sentences(text)
         biz_pattern = (
             r"(?P<name>[\u4e00-\u9fa5A-Za-z0-9（）()\-、/]+?)"
             r"(?:报价)?(?:费|服务费|业务|项目)?"
-            r"下浮率"
+            rf"(?P<label>{rate_label_pattern})"
             r"(?:须|应|必须|需|不得)?"
-            r"(?P<phrase>低于或等于|高于或等于|不低于|不少于|不高于|不大于|大于|高于|低于|小于|等于)"
+            rf"(?P<phrase>{phrase_pattern})"
             r"[“\"']?(?P<threshold>\d+(?:\.\d+)?)%[”\"']?"
         )
 
         for sentence in sentences:
             normalized_sentence = self._normalize(sentence)
-            if "下浮率" not in normalized_sentence:
+            if not any(keyword in normalized_sentence for keyword in getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"])):
                 continue
             for m in re.finditer(biz_pattern, normalized_sentence):
                 raw_name = m.group("name")
@@ -101,6 +144,7 @@ class FloatRateMixin:
                 rules[biz_name] = {
                     "raw_rule": m.group(0),
                     "biz_name": biz_name,
+                    "rate_label": m.group("label"),
                     "phrase": phrase,
                     "base_op": base_op,
                     "op": base_op,
@@ -109,18 +153,19 @@ class FloatRateMixin:
 
         # 通用规则
         generic_patterns = [
-            r"本项目下浮率(?:须|应|必须|需|不得)?(低于或等于|高于或等于|不低于|不少于|不高于|不大于|大于|高于|低于|小于|等于)[“\"']?(\d+(?:\.\d+)?)%[”\"']?",
-            r"下浮率(?:须|应|必须|需|不得)?(低于或等于|高于或等于|不低于|不少于|不高于|不大于|大于|高于|低于|小于|等于)[“\"']?(\d+(?:\.\d+)?)%[”\"']?",
+            rf"本项目(?P<label>{rate_label_pattern})(?:须|应|必须|需|不得)?(?P<phrase>{phrase_pattern})[“\"']?(?P<threshold>\d+(?:\.\d+)?)%[”\"']?",
+            rf"(?P<label>{rate_label_pattern})(?:须|应|必须|需|不得)?(?P<phrase>{phrase_pattern})[“\"']?(?P<threshold>\d+(?:\.\d+)?)%[”\"']?",
         ]
         for gp in generic_patterns:
             m = re.search(gp, normalized_text)
             if m:
-                phrase = m.group(1)
-                threshold = float(m.group(2))
+                phrase = m.group("phrase")
+                threshold = float(m.group("threshold"))
                 base_op = self._phrase_to_operator(phrase)
                 rules["__generic__"] = {
                     "raw_rule": m.group(0),
                     "biz_name": "__generic__",
+                    "rate_label": m.group("label"),
                     "phrase": phrase,
                     "base_op": base_op,
                     "op": base_op,
@@ -174,7 +219,8 @@ class FloatRateMixin:
             return False
         header_tokens = [
             "业务名称", "单位工程名称", "建设工程名称", "项目名称",
-            "报价", "投标报价", "下浮率", "投标下浮率", "税率", "备注",
+            "报价", "投标报价", "下浮率", "投标下浮率", "报价下浮率",
+            "折扣率", "投标折扣率", "报价折扣率", "优惠率", "折让率", "税率", "备注",
         ]
         return any(token in normalized for token in header_tokens)
 
@@ -190,8 +236,9 @@ class FloatRateMixin:
             if isinstance(rec, dict):
                 texts.extend(str(v) for v in rec.values() if v is not None)
         normalized = self._normalize(" ".join(texts))
+        has_rate_keyword = any(keyword in normalized for keyword in getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"]))
         return (
-            "下浮率" in normalized
+            has_rate_keyword
             and (
                 "税率" in normalized
                 or "报价" in normalized
@@ -199,6 +246,7 @@ class FloatRateMixin:
                 or "单位工程名称" in normalized
                 or "建设工程名称" in normalized
                 or "项目名称" in normalized
+                or self._contains_discount_rate_keywords(normalized)
             )
         )
 
@@ -266,7 +314,11 @@ class FloatRateMixin:
             if not isinstance(rec, dict):
                 continue
             biz_key = self._find_key_by_candidates(rec, ["业务名称", "单位工程名称", "建设工程名称", "项目名称"])
-            float_key = self._find_key_by_candidates(rec, ["投标下浮率（%）", "下浮率（%）", "投标下浮率", "下浮率"])
+            float_key = self._find_key_by_candidates(rec, [
+                "投标下浮率（%）", "报价下浮率（%）", "下浮率（%）", "投标下浮率", "报价下浮率", "下浮率",
+                "投标折扣率（%）", "报价折扣率（%）", "折扣率（%）", "投标折扣率", "报价折扣率", "折扣率",
+                "优惠率（%）", "优惠率", "折让率（%）", "折让率",
+            ])
             tax_key = self._find_key_by_candidates(rec, ["税率（%）", "税率"])
             est_key = self._find_key_by_candidates(rec, ["暂估金额（含税/万元）", "暂估金额", "暂估金额（万元）"])
             bid_key = self._find_key_by_candidates(rec, ["投标报价（含税/万元）", "投标报价", "报价"])
@@ -287,6 +339,7 @@ class FloatRateMixin:
                 "estimated_amount": self._clean_number(rec.get(est_key)) if est_key else None,
                 "tax_rate": self._clean_percent(rec.get(tax_key)) if tax_key else None,
                 "float_rate": float_rate,
+                "rate_label": self._pick_rate_label(float_key),
                 "bid_price": self._clean_number(bid_raw) if bid_raw is not None else None,
                 "raw_line": json.dumps(rec, ensure_ascii=False),
                 "pages": table_pages,
@@ -311,6 +364,14 @@ class FloatRateMixin:
         raw_rows = tb.get("rows", []) or []
         if not raw_rows:
             return rows
+        table_label_text = " ".join(
+            str(cell)
+            for row in raw_rows[:3]
+            if isinstance(row, list)
+            for cell in row
+            if cell is not None
+        )
+        rate_label = self._pick_rate_label(table_label_text)
         table_pages = [page for page in (tb.get("pages") or []) if isinstance(page, int)]
         if not table_pages:
             page = tb.get("page")
@@ -390,6 +451,7 @@ class FloatRateMixin:
                 "estimated_amount": estimated_amount,
                 "tax_rate": tax_rate,
                 "float_rate": float_rate,
+                "rate_label": rate_label,
                 "bid_price": bid_price,
                 "raw_line": " | ".join(non_empty),
                 "pages": table_pages,
@@ -466,7 +528,9 @@ class FloatRateMixin:
         lines = [line.strip() for line in bid_opening_text.splitlines() if line.strip()]
         table_like_lines = [
             line for line in lines
-            if "业务名称" in line and "下浮率" in line and ("投标报价" in line or "报价" in line)
+            if "业务名称" in line
+            and any(keyword in self._normalize(line) for keyword in getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"]))
+            and ("投标报价" in line or "报价" in line)
         ]
         search_texts = table_like_lines[:] if table_like_lines else lines[:]
         candidate_names = []
@@ -485,6 +549,7 @@ class FloatRateMixin:
                 used.add(norm)
                 normalized_candidate_names.append(norm)
         for text in search_texts:
+            rate_label = self._pick_rate_label(text)
             working_text = text
             if "业务名称" in working_text and "备注" in working_text:
                 working_text = working_text.split("备注", 1)[1].strip()
@@ -535,6 +600,7 @@ class FloatRateMixin:
                     "estimated_amount": parsed["estimated_amount"],
                     "tax_rate": parsed["tax_rate"],
                     "float_rate": parsed["float_rate"],
+                    "rate_label": rate_label,
                     "bid_price": parsed["bid_price"],
                     "raw_line": segment,
                     "pages": [bid_page] if isinstance(bid_page, int) else [],
@@ -565,7 +631,14 @@ class FloatRateMixin:
             biz_name = row.get("biz_name_raw") or row.get("biz_name")
             float_rate = row["float_rate"]
             matched_rule = self._match_rule_for_row(row["biz_name"], rules)
-            if matched_rule:
+            if self._is_discount_rate_label(row.get("rate_label")):
+                passed = float_rate < 100
+                if not passed:
+                    all_passed = False
+                summary.append(
+                    f"{biz_name}：折扣率 {float_rate:.2f}% ，规则 < 100% ，{'合格' if passed else '不合格'}"
+                )
+            elif matched_rule:
                 op = matched_rule["op"]
                 threshold = matched_rule["threshold"]
                 passed = self._compare_by_rule(float_rate, op, threshold)
@@ -604,9 +677,10 @@ class FloatRateMixin:
             if bid_page is not None and page is not None and page != bid_page:
                 continue
             table_text = sec.get("text", "")
-            if "下浮率" not in self._normalize(table_text):
+            if not any(keyword in self._normalize(table_text) for keyword in getattr(self, "RATE_QUOTE_KEYWORDS", ["下浮率"])):
                 continue
-            matches = re.findall(r"下浮率[^0-9]{0,8}(\d+(?:\.\d+)?)\s*%", table_text)
+            label_pattern = self._rate_quote_keyword_pattern()
+            matches = re.findall(rf"{label_pattern}[^0-9]{{0,8}}(\d+(?:\.\d+)?)\s*%", table_text)
             for m in matches:
                 v = self._safe_float(m)
                 if v is not None and 0 <= v <= 100:
@@ -638,7 +712,8 @@ class FloatRateMixin:
             r"(?:实际)?(?:报价)?下浮率[：:\s]*([\d]+(?:\.\d+)?)\s*%",
             r"(?:实际)?(?:报价)?下浮[：:\s]*([\d]+(?:\.\d+)?)\s*%",
             r"(?:优惠率)[：:\s]*([\d]+(?:\.\d+)?)\s*%",
-            r"(?:折扣率)[：:\s]*([\d]+(?:\.\d+)?)\s*%",
+            r"(?:实际)?(?:报价)?(?:投标)?折扣率[：:\s]*([\d]+(?:\.\d+)?)\s*%",
+            r"(?:折让率)[：:\s]*([\d]+(?:\.\d+)?)\s*%",
         ]
         for raw_line, line in zip(lines, normalized_lines):
             if any(

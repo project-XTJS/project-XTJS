@@ -29,12 +29,25 @@ class IntegrityChecker:
         "原厂授权函": ["制造商声明", "制造商授权", "原厂授权"],
         "缴纳社保": [
             "社会保险个人权益记录",
+            "社会保险缴费记录",
+            "社会保险缴纳证明",
+            "社会保险缴费证明",
             "社保缴纳证明",
+            "社保缴纳记录",
+            "社保证明",
+            "社保证明材料",
             "被授权人社保缴纳证明",
+            "被授权人社保缴纳记录",
+            "授权代表社保缴纳证明",
+            "授权代表社保缴纳记录",
+            "个人参保证明",
+            "参保证明",
             "劳动合同证明",
             "劳动合同",
             "劳动合同书",
             "被授权人的劳动合同书",
+            "聘用合同",
+            "退休证",
         ],
         "财务状况，依法缴纳税收和社会保障资金的声明函": [
             "财务状况，依法缴纳税收和社会保障资金的声明函",
@@ -59,13 +72,27 @@ class IntegrityChecker:
             "授权委托书",
             "委托代理人",
             "被授权人",
+            "授权代表",
         ],
         "缴纳社保": [
             "被授权人社保缴纳证明",
+            "被授权人社保缴纳记录",
+            "授权代表社保缴纳证明",
+            "授权代表社保缴纳记录",
             "社保缴纳证明",
+            "社保缴纳记录",
+            "社保证明",
+            "社保证明材料",
             "社会保险个人权益记录",
+            "社会保险缴费记录",
+            "社会保险缴纳证明",
+            "社会保险缴费证明",
+            "个人参保证明",
+            "参保证明",
             "劳动合同",
             "劳动合同书",
+            "聘用合同",
+            "退休证",
         ],
         "财务状况，依法缴纳税收和社会保障资金的声明函": [
             "财务状况",
@@ -91,6 +118,8 @@ class IntegrityChecker:
             "法定代表人资格证明书",
             "法定代表人授权委托书",
             "被授权人社保缴纳证明",
+            "授权代表社保缴纳记录",
+            "社会保险个人权益记录",
             "劳动合同书",
             "承诺声明函",
             "不参与围标串标承诺书",
@@ -108,6 +137,8 @@ class IntegrityChecker:
                 "法定代表人资格证明书",
                 "法定代表人授权委托书",
                 "被授权人社保缴纳证明",
+                "授权代表社保缴纳记录",
+                "社会保险个人权益记录",
                 "劳动合同书",
                 "承诺声明函",
                 "不参与围标串标承诺书",
@@ -143,11 +174,19 @@ class IntegrityChecker:
         "授权委托书",
         "授权委托",
         "委托代理人",
+        "授权代表",
         "被授权人",
         "营业执照",
         "社保缴纳",
+        "社保缴费",
+        "社保缴纳记录",
+        "社保证明",
         "社会保险",
+        "社会保险个人权益记录",
+        "社会保险缴费记录",
         "劳动合同",
+        "聘用合同",
+        "退休证",
         "财务状况",
         "税收",
         "社会保障资金",
@@ -184,6 +223,49 @@ class IntegrityChecker:
         "单位负责人身份证明",
         "法定代表人或单位负责人证明书",
         "法定代表人单位负责人证明书",
+    )
+
+    SOCIAL_SECURITY_TARGET_MARKERS = (
+        "缴纳社保",
+        "社保缴纳",
+        "社保证明",
+        "社会保险",
+        "劳动合同",
+        "聘用合同",
+        "退休证",
+    )
+
+    SOCIAL_SECURITY_ROLE_MARKERS = (
+        "被授权人",
+        "授权代表",
+        "授权委托人",
+        "委托代理人",
+        "代理人",
+    )
+
+    SOCIAL_SECURITY_EVIDENCE_MARKERS = (
+        "被授权人社保缴纳证明",
+        "被授权人社保缴纳记录",
+        "授权代表社保缴纳证明",
+        "授权代表社保缴纳记录",
+        "社保缴纳证明",
+        "社保缴纳记录",
+        "社保缴费证明",
+        "社保缴费记录",
+        "社保证明材料",
+        "社保证明",
+        "社会保险个人权益记录",
+        "社会保险缴费记录",
+        "社会保险缴纳证明",
+        "社会保险缴费证明",
+        "个人权益记录",
+        "个人参保证明",
+        "参保证明",
+        "劳动合同证明",
+        "劳动合同书",
+        "劳动合同",
+        "聘用合同",
+        "退休证",
     )
 
     # 标题前缀模式（用于去除编号）
@@ -285,6 +367,13 @@ class IntegrityChecker:
             for marker in self.LEGAL_REP_PROOF_TARGET_MARKERS
         )
 
+    def _is_social_security_target(self, keyword: str) -> bool:
+        normalized_keyword = self._normalize_title_text(keyword)
+        return any(
+            self._normalize_title_text(marker) in normalized_keyword
+            for marker in self.SOCIAL_SECURITY_TARGET_MARKERS
+        )
+
     def _legal_representative_proof_match_score(self, text: str) -> tuple[int, str | None, list[str]]:
         normalized_text = self._normalize_title_text(text)
         if not normalized_text:
@@ -309,6 +398,46 @@ class IntegrityChecker:
             return 90, "兹证明...系法定代表人/负责人", hits
 
         return 0, None, []
+
+    def _social_security_match_score(self, text: str) -> tuple[int, str | None, list[str]]:
+        normalized_text = self._normalize_title_text(text)
+        if not normalized_text:
+            return 0, None, []
+
+        evidence_hits = []
+        for marker in self.SOCIAL_SECURITY_EVIDENCE_MARKERS:
+            normalized_marker = self._normalize_title_text(marker)
+            if normalized_marker and normalized_marker in normalized_text and marker not in evidence_hits:
+                evidence_hits.append(marker)
+
+        role_hits = []
+        for marker in self.SOCIAL_SECURITY_ROLE_MARKERS:
+            normalized_marker = self._normalize_title_text(marker)
+            if normalized_marker and normalized_marker in normalized_text and marker not in role_hits:
+                role_hits.append(marker)
+
+        has_social_security_phrase = (
+            "社保" in normalized_text
+            and any(token in normalized_text for token in ("缴纳", "缴费", "证明", "记录", "参保"))
+        ) or (
+            "社会保险" in normalized_text
+            and any(token in normalized_text for token in ("缴纳", "缴费", "证明", "记录", "权益", "参保"))
+        )
+        if has_social_security_phrase and "社保缴纳/社会保险记录" not in evidence_hits:
+            evidence_hits.append("社保缴纳/社会保险记录")
+
+        has_employment_evidence = any(token in normalized_text for token in ("劳动合同", "聘用合同", "退休证"))
+        if has_employment_evidence and "劳动合同/聘用合同/退休证" not in evidence_hits:
+            evidence_hits.append("劳动合同/聘用合同/退休证")
+
+        if not evidence_hits:
+            return 0, None, []
+
+        longest_hit = max(len(self._normalize_title_text(hit)) for hit in evidence_hits)
+        score = 95 + min(longest_hit, 20)
+        if role_hits:
+            score += 10
+        return score, evidence_hits[0], [*role_hits, *evidence_hits]
 
     # 将任意标题归一化为标准描述
     def _normalize_target(self, name: str) -> str:
@@ -374,6 +503,29 @@ class IntegrityChecker:
         }
 
     # 在区段列表中查找指定关键词的标题区段
+    def _heading_match_score(self, text: str, keyword: str) -> int:
+        """标题匹配评分：优先选择更完整、更具体的附件标题。"""
+        normalized_text = self._normalize_title_text(text)
+        if not normalized_text:
+            return 0
+
+        best_score = 0
+        normalized_keyword = self._normalize_title_text(keyword)
+        if normalized_keyword and normalized_keyword in normalized_text:
+            best_score = max(best_score, 120 + min(len(normalized_keyword), 30))
+
+        for candidate in self._candidate_titles(keyword):
+            normalized_candidate = self._normalize_title_text(candidate)
+            if not normalized_candidate or normalized_candidate not in normalized_text:
+                continue
+            score = 80 + min(len(normalized_candidate), 30)
+            # 泛化标题“承诺函/声明函”可作为兜底，但不能抢掉更完整标题。
+            if normalized_candidate in {"承诺函", "声明函", "证书"}:
+                score = 30 + len(normalized_candidate)
+            best_score = max(best_score, score)
+
+        return best_score
+
     def _find_heading_section(
         self,
         sections: list,
@@ -383,6 +535,8 @@ class IntegrityChecker:
     ) -> dict | None:
         # 特例：营业执照和社保可以不依赖编号前缀
         EXEMPT_KEYWORDS = ["营业执照", "社会保险"]
+        best_section = None
+        best_score = 0
 
         for sec in sections:
             if sec.get('type') != 'heading':
@@ -399,8 +553,11 @@ class IntegrityChecker:
                 is_short_text_title = sec.get('type') == 'text' and len(compact) <= 60
                 is_short_heading_title = sec.get('type') == 'heading' and len(compact) <= 36
                 if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title or is_short_heading_title:
-                    return sec
-        return None
+                    score = self._heading_match_score(text, keyword)
+                    if score > best_score:
+                        best_section = sec
+                        best_score = score
+        return best_section
 
     # 第二遍只回查 text 区段，并跳过目录页，避免把目录项当成正文附件
     def _collect_toc_pages(self, sections: list) -> set[int]:
@@ -446,6 +603,11 @@ class IntegrityChecker:
         if self._is_legal_representative_proof_target(keyword):
             return self._legal_representative_proof_match_score(text)
 
+        if self._is_social_security_target(keyword):
+            social_score, social_title, social_hits = self._social_security_match_score(text)
+            if social_score:
+                return social_score, social_title, social_hits
+
         best_score = 0
         best_title = None
         best_hits: list[str] = []
@@ -488,7 +650,10 @@ class IntegrityChecker:
         best_score = 0
         best_match_title = None
         best_hits: list[str] = []
-        allow_body_fallback = self._is_legal_representative_proof_target(keyword)
+        allow_body_fallback = (
+            self._is_legal_representative_proof_target(keyword)
+            or self._is_social_security_target(keyword)
+        )
 
         for sec in sections:
             if not self._is_usable_body_section(sec, headers, toc_pages):
