@@ -289,8 +289,6 @@ class OrchestratorMixin:
     ) -> dict[str, Any]:
         """对单个投标人执行完整的商务标+技术标审查。"""
         business_payload = bidder["business"]["content"]
-        technical_payload = bidder["technical"]["content"]
-        combined_payload = self._merge_bid_documents(business_payload, technical_payload)
 
         integrity_check = self._execute_check(
             check_code="integrity_check",
@@ -331,7 +329,7 @@ class OrchestratorMixin:
             "deviation_check": self._execute_check(
                 check_code="deviation_check",
                 check_name="偏离条款审查",
-                runner=lambda: self.deviation_checker.check_technical_deviation(tender_payload, combined_payload),
+                runner=lambda: self.deviation_checker.check_technical_deviation(tender_payload, business_payload),
                 normalizer=self._normalize_deviation,
             ),
             "verification_check": self._execute_check(

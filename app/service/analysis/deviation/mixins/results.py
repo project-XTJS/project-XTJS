@@ -39,6 +39,8 @@ class ResultsMixin:
         global_stmt = self._detect_global_no_deviation(sections["combined_text"])
         table_coverage = self._collect_table_coverage(sections)
 
+        if not sections.get("technical"):
+            return self._build_missing_technical_deviation_table_result(star_requirements, sections, table_coverage)
         if not star_requirements:
             return self._build_empty_star_result(sections, global_stmt, table_coverage)
         if not str(sections.get("combined_text") or "").strip():
@@ -188,6 +190,89 @@ class ResultsMixin:
             },
             "key_findings": ["招标文件中未发现带 ★ 的强制性要求，无需执行偏离比对。"],
             "extracted_parameters": [],
+        }
+
+    def _build_missing_technical_deviation_table_result(self, requirements, sections, table_coverage):
+        """商务标未提供技术偏离表时，按未响应判定为 fail。"""
+        evidence = "商务标文件中未识别到技术偏离表，无法核验技术响应。"
+        issue_requirements = requirements or [
+            {
+                "requirement_id": "technical_deviation_table",
+                "requirement": "商务标文件应提供技术偏离表",
+                "section_type": None,
+            }
+        ]
+        missing_items = [
+            {
+                "requirement_id": item["requirement_id"],
+                "requirement": item["requirement"],
+                "response_status": "technical_deviation_table_missing",
+                "response_evidence": evidence,
+            }
+            for item in issue_requirements
+        ]
+        matches = [
+            {
+                "responded": False,
+                "risk_level": "high",
+                "match_score": 0.0,
+                "requirement": item["requirement"],
+                "section_type": item.get("section_type"),
+                "response_page": None,
+                "deviation_type": "missing",
+                "requirement_id": item["requirement_id"],
+                "response_status": "technical_deviation_table_missing",
+                "response_section": "",
+                "explicit_response": False,
+                "response_evidence": evidence,
+                "response_line_number": None,
+                "response_section_title": "",
+            }
+            for item in issue_requirements
+        ]
+        total = len(requirements)
+        missing_count = len(issue_requirements)
+        summary = "商务标文件中未识别到技术偏离表，无法完成偏离比对。"
+        if total:
+            summary = f"共发现 {total} 条带 ★ 的强制性要求，但{summary}"
+        return {
+            "mode": "tender_technical_bid_json",
+            "summary": summary,
+            "compliance_status": "fail",
+            "deviation_status": "technical_deviation_table_missing",
+            "requirement_extraction_mode": "star",
+            "core_requirements_count": total,
+            "core_star_requirements_count": total,
+            "deviation_tables": {
+                "business_found": bool(sections["business"]),
+                "technical_found": False,
+                "business_section_count": len(sections["business"]),
+                "technical_section_count": 0,
+            },
+            "table_coverage": table_coverage,
+            "global_response_statement": None,
+            "star_requirements": requirements,
+            "match_results": matches,
+            "missing_response_items": missing_items,
+            "negative_deviation_items": [],
+            "unclear_response_items": [],
+            "stats": {
+                "responded_count": 0,
+                "missing_count": missing_count,
+                "negative_deviation_count": 0,
+                "positive_deviation_count": 0,
+                "no_deviation_count": 0,
+                "listed_response_count": 0,
+                "unclear_deviation_count": 0,
+                "explicit_response_count": 0,
+                "covered_by_global_statement_count": 0,
+                "covered_by_deviation_table_count": 0,
+            },
+            "key_findings": [
+                f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
+                "商务标文件中未识别到技术偏离表，按未提供必需响应表判定为不通过。",
+            ],
+            "extracted_parameters": [x["requirement"] for x in requirements],
         }
 
     def _build_missing_bid_content_result(self, requirements, sections, table_coverage):

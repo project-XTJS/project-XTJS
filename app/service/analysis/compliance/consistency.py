@@ -74,6 +74,13 @@ class ConsistencyChecker:
         "劳动合同",
         "退休人员",
     )
+    UNDERLINE_FIXED_PHRASE_MARKERS = (
+        "承担相应",
+        "承担责任",
+        "法律责任",
+        "依法承担",
+        "愿承担",
+    )
     TEMPLATE_PLACEHOLDER_HINT_MARKERS = (
         "招标人名称",
         "采购人名称",
@@ -459,6 +466,8 @@ class ConsistencyChecker:
         if self.URL_TEXT_RE.search(plain):
             return True
         if any(marker in normalized for marker in self.UNDERLINE_PRESERVE_MARKERS):
+            return True
+        if any(marker in normalized for marker in self.UNDERLINE_FIXED_PHRASE_MARKERS):
             return True
         if re.search(r"[，。；：、】【、]", plain) and len(normalized) >= 10:
             if re.fullmatch(r"[0-9零一二三四五六七八九十百千万年月日份元圆整]+", normalized):
