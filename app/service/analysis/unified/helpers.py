@@ -77,6 +77,7 @@ class HelpersMixin:
                 "issues": {
                     "passed": [],
                     "failed": [issue],
+                    "missing": [],
                     "unclear": [],
                 },
                 "raw_result": None,
@@ -113,6 +114,7 @@ class HelpersMixin:
         return {
             "passed": [],
             "failed": [],
+            "missing": [],
             "unclear": [],
         }
 
@@ -146,10 +148,25 @@ class HelpersMixin:
 
     # 状态映射与合并
     def _map_generic_status(self, raw_status: Any) -> str:
-        """将原始状态字符串映射到标准状态：pass / fail / unclear。"""
+        """将原始状态字符串映射到标准状态：pass / fail / missing / unclear。"""
         text = str(raw_status or "").strip().lower()
         if text in {"pass", "passed", "ok", "success", "合格"}:
             return "pass"
+        if text in {
+            "missing",
+            "not_found",
+            "not found",
+            "not_detected",
+            "not detected",
+            "missing_date",
+            "missing_deadline",
+            "未找到",
+            "未识别",
+            "缺失",
+            "缺少",
+            "未提供",
+        }:
+            return "missing"
         if text in {"fail", "failed", "error", "不合格"}:
             return "fail"
         return "unclear"
@@ -182,7 +199,10 @@ class HelpersMixin:
             return "fail"
         if "合格" in combined or re.search(r"\bpass\b", combined, re.IGNORECASE):
             return "pass"
-        unclear_keywords = ("未识别", "未找到", "无法", "暂无法", "人工复核", "待复核")
+        missing_keywords = ("未识别", "未找到", "缺少", "缺失", "未提供")
+        if any(keyword in combined for keyword in missing_keywords):
+            return "missing"
+        unclear_keywords = ("无法", "暂无法", "人工复核", "待复核")
         if any(keyword in combined for keyword in unclear_keywords):
             return "unclear"
         return "unclear"
@@ -197,17 +217,17 @@ class HelpersMixin:
         if counts:
             if counts.get("fail", 0) > 0:
                 return "fail"
-            if counts.get("unclear", 0) > 0:
-                return "unclear"
             if counts.get("missing", 0) > 0:
+                return "missing"
+            if counts.get("unclear", 0) > 0:
                 return "unclear"
             return "pass"
 
         if any(status == "fail" for status in statuses):
             return "fail"
-        if any(status == "unclear" for status in statuses):
-            return "unclear"
         if any(status == "missing" for status in statuses):
+            return "missing"
+        if any(status == "unclear" for status in statuses):
             return "unclear"
         return "pass"
 
@@ -223,7 +243,7 @@ class HelpersMixin:
     def _review_status_sort_key(self, status: Any) -> int:
         """用于将状态字符串映射为排序权重，fail 优先。"""
         text = str(status or "").strip().lower()
-        order = {"fail": 0, "unclear": 1, "missing": 2, "pass": 3}
+        order = {"fail": 0, "missing": 1, "unclear": 2, "pass": 3}
         return order.get(text, 3)
 
     def _check_display_index(self, check_code: Any) -> int:
@@ -264,8 +284,8 @@ class HelpersMixin:
         bucket = self._empty_issue_bucket()
         for check_code, check in checks.items():
             check_name = check["check_name"]
-            for status_key in ("passed", "failed", "unclear"):
-                for issue in check["issues"][status_key]:
+            for status_key in ("passed", "failed", "missing", "unclear"):
+                for issue in (check.get("issues") or {}).get(status_key, []):
                     bucket[status_key].append(
                         {
                             "check_code": check_code,

@@ -27,6 +27,7 @@ class ResultNormalizerMixin:
 
         passed = []
         failed = []
+        missing = []
         for item_name, detail in details.items():
             detail = detail or {}
             if not detail.get("scored", True):
@@ -48,9 +49,9 @@ class ResultNormalizerMixin:
                     )
                 )
             else:
-                failed.append(
+                missing.append(
                     self._issue(
-                        status="fail",
+                        status="missing",
                         title=item_name,
                         message="未在商务标中找到该必备项。",
                         evidence=evidence,
@@ -60,9 +61,11 @@ class ResultNormalizerMixin:
         total = (
             raw.get("scored_item_count")
             if isinstance(raw, dict) and isinstance(raw.get("scored_item_count"), int)
-            else len(passed) + len(failed)
+            else len(passed) + len(failed) + len(missing)
         )
-        review_status = "pass" if not failed else "fail"
+        review_status = self._combine_review_status(
+            [issue["status"] for issue in passed + failed + missing]
+        )
         # 摘要使用“已命中/总数”的口径，避免直接使用“缺失 X 项”的表述。
         summary = f"共校验 {total} 项，已命中 {len(passed)}/{total} 项"
         if score is not None:
@@ -84,11 +87,13 @@ class ResultNormalizerMixin:
                 "total_item_count": total,
                 "passed_item_count": len(passed),
                 "failed_item_count": len(failed),
+                "missing_item_count": len(missing),
                 "ignored_item_count": ignored_count,
             },
             "issues": {
                 "passed": passed,
                 "failed": failed,
+                "missing": missing,
                 "unclear": [],
             },
         }
@@ -106,6 +111,7 @@ class ResultNormalizerMixin:
             original_segment_count = len(segments)
         passed = []
         failed = []
+        missing_items = []
         short_body_skipped = 0
         attachment_not_found_skipped = 0
         integrity_skipped = 0
@@ -146,14 +152,17 @@ class ResultNormalizerMixin:
                 parts = []
                 if missing:
                     parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
-                failed.append(
-                    self._issue(
-                        status="fail",
-                        title=title,
-                        message="；".join(parts) or "模板正文固定内容疑似被修改。",
-                        evidence=evidence,
-                    )
+                issue_status = "missing" if missing or unfilled_fields else "fail"
+                issue = self._issue(
+                    status=issue_status,
+                    title=title,
+                    message="；".join(parts) or "模板正文固定内容疑似被修改。",
+                    evidence=evidence,
                 )
+                if issue_status == "missing":
+                    missing_items.append(issue)
+                else:
+                    failed.append(issue)
 
         has_results = bool(segments or skipped_segments)
         if skipped_segments:
@@ -167,10 +176,10 @@ class ResultNormalizerMixin:
                 else "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
             )
 
-        if failed:
-            review_status = "fail"
-        elif has_results:
-            review_status = "pass"
+        if has_results:
+            review_status = self._combine_review_status(
+                [issue["status"] for issue in passed + failed + missing_items]
+            )
         else:
             review_status = "unclear"
 
@@ -201,10 +210,11 @@ class ResultNormalizerMixin:
                 "integrity_skipped_count": integrity_skipped,
                 "passed_segment_count": len(passed),
                 "failed_segment_count": len(failed),
+                "missing_segment_count": len(missing_items),
                 "fillable_field_count": 0,
                 "unfilled_field_count": 0,
             },
-            "issues": {"passed": passed, "failed": failed, "unclear": []},
+            "issues": {"passed": passed, "failed": failed, "missing": missing_items, "unclear": []},
         }
 
     def _normalize_pricing(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -214,6 +224,7 @@ class ResultNormalizerMixin:
 
         passed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
 
         for subcheck_code, title, payload in (
@@ -237,10 +248,14 @@ class ResultNormalizerMixin:
                 passed.append(issue)
             elif status == "fail":
                 failed.append(issue)
+            elif status == "missing":
+                missing.append(issue)
             else:
                 unclear.append(issue)
 
-        review_status = self._combine_review_status([issue["status"] for issue in passed + failed + unclear])
+        review_status = self._combine_review_status(
+            [issue["status"] for issue in passed + failed + missing + unclear]
+        )
         return {
             "validation": {
                 "status": "correct" if self_check or tender_limit_check else "unclear",
@@ -253,9 +268,10 @@ class ResultNormalizerMixin:
             "metrics": {
                 "passed_subcheck_count": len(passed),
                 "failed_subcheck_count": len(failed),
+                "missing_subcheck_count": len(missing),
                 "unclear_subcheck_count": len(unclear),
             },
-            "issues": {"passed": passed, "failed": failed, "unclear": unclear},
+            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }
 
     def _normalize_itemized(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -268,6 +284,15 @@ class ResultNormalizerMixin:
         missing_itemized_table = raw_status in {"not_detected", "missing"} and not itemized_table_detected
 
         if missing_itemized_table:
+            missing_issue = self._issue(
+                status="missing",
+                title="分项报价表",
+                message=str(
+                    raw.get("summary")
+                    or "未识别到分项报价表，无法执行分项报价表一致性校验。"
+                ),
+                evidence={"itemized_table_detected": False, "raw_status": raw_status},
+            )
             return {
                 "validation": {
                     "status": "correct",
@@ -284,13 +309,15 @@ class ResultNormalizerMixin:
                     "itemized_table_detected": False,
                     "passed_subcheck_count": 0,
                     "failed_subcheck_count": 0,
+                    "missing_subcheck_count": 1,
                     "unclear_subcheck_count": 0,
                 },
-                "issues": {"passed": [], "failed": [], "unclear": []},
+                "issues": {"passed": [], "failed": [], "missing": [missing_issue], "unclear": []},
             }
 
         passed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
 
         subcheck_labels = {
@@ -306,6 +333,8 @@ class ResultNormalizerMixin:
                 continue
 
             normalized_status = self._map_generic_status(sub_status)
+            if subcheck_code == "missing_item" and normalized_status == "fail":
+                normalized_status = "missing"
             label = subcheck_labels.get(subcheck_code, subcheck_code)
             message = self._summarize_itemized_subcheck(subcheck_code, payload)
             issue = self._issue(status=normalized_status, title=label, message=message, evidence=payload)
@@ -313,6 +342,8 @@ class ResultNormalizerMixin:
                 passed.append(issue)
             elif normalized_status == "fail":
                 failed.append(issue)
+            elif normalized_status == "missing":
+                missing.append(issue)
             else:
                 unclear.append(issue)
 
@@ -328,7 +359,8 @@ class ResultNormalizerMixin:
 
         validation_status = "correct"
         validation_reason = "模块返回了分项报价校验明细。"
-        review_status = top_status
+        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear]
+        review_status = self._combine_review_status(issue_statuses) if issue_statuses else top_status
         review_summary = str(raw.get("summary") or "未返回分项报价结论。")
         if top_status == "unclear":
             validation_status = "unclear"
@@ -344,9 +376,10 @@ class ResultNormalizerMixin:
                 "itemized_table_detected": raw.get("itemized_table_detected"),
                 "passed_subcheck_count": len(passed),
                 "failed_subcheck_count": len(failed),
+                "missing_subcheck_count": len(missing),
                 "unclear_subcheck_count": len(unclear),
             },
-            "issues": {"passed": passed, "failed": failed, "unclear": unclear},
+            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }
 
     def _normalize_deviation(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -358,6 +391,7 @@ class ResultNormalizerMixin:
 
         passed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
 
         if raw.get("deviation_status") == "no_star_requirements":
@@ -374,9 +408,9 @@ class ResultNormalizerMixin:
             )
 
         for item in missing_items:
-            failed.append(
+            missing.append(
                 self._issue(
-                    status="fail",
+                    status="missing",
                     title=item.get("requirement") or "缺失响应条款",
                     message="未找到对应响应内容。",
                     evidence=item,
@@ -411,6 +445,9 @@ class ResultNormalizerMixin:
                 )
             )
 
+        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear]
+        review_status = self._combine_review_status(issue_statuses) if issue_statuses else compliance_status
+
         total_requirements = raw.get("core_requirements_count")
         if not isinstance(total_requirements, int):
             total_requirements = len(missing_items) + len(negative_items) + len(unclear_items)
@@ -427,7 +464,7 @@ class ResultNormalizerMixin:
                 "reason": "模块返回了星标条款抽取、响应匹配和偏离分类结果。",
             },
             "review": {
-                "status": compliance_status,
+                "status": review_status,
                 "summary": review_summary,
             },
             "metrics": {
@@ -436,7 +473,7 @@ class ResultNormalizerMixin:
                 "negative_deviation_count": len(negative_items),
                 "unclear_deviation_count": len(unclear_items),
             },
-            "issues": {"passed": passed, "failed": failed, "unclear": unclear},
+            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }
 
     def _normalize_verification(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -448,6 +485,7 @@ class ResultNormalizerMixin:
 
         passed: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
 
         missing_attachments = position_check.get("missing_attachments") or []
@@ -472,16 +510,16 @@ class ResultNormalizerMixin:
             )
         else:
             for attachment in missing_attachments:
-                failed.append(
-                    self._issue(status="fail", title=attachment, message="未找到要求签章的附件。", evidence={"attachment": attachment, "source": "position_check"})
+                missing.append(
+                    self._issue(status="missing", title=attachment, message="未找到要求签章的附件。", evidence={"attachment": attachment, "source": "position_check"})
                 )
             for attachment in missing_signature:
-                failed.append(
-                    self._issue(status="fail", title=attachment, message="附件缺少签字。", evidence={"attachment": attachment, "source": "position_check"})
+                missing.append(
+                    self._issue(status="missing", title=attachment, message="附件缺少签字。", evidence={"attachment": attachment, "source": "position_check"})
                 )
             for attachment in missing_seal:
-                failed.append(
-                    self._issue(status="fail", title=attachment, message="附件缺少盖章。", evidence={"attachment": attachment, "source": "position_check"})
+                missing.append(
+                    self._issue(status="missing", title=attachment, message="附件缺少盖章。", evidence={"attachment": attachment, "source": "position_check"})
                 )
 
         for attachment in pending_signature:
@@ -495,8 +533,8 @@ class ResultNormalizerMixin:
             )
         else:
             for attachment in missing_date:
-                failed.append(
-                    self._issue(status="fail", title=attachment, message="附件缺少落款日期。", evidence={"attachment": attachment, "source": "date_check"})
+                missing.append(
+                    self._issue(status="missing", title=attachment, message="附件缺少落款日期。", evidence={"attachment": attachment, "source": "date_check"})
                 )
             for attachment in late_date:
                 failed.append(
@@ -524,9 +562,12 @@ class ResultNormalizerMixin:
                 else " 公章单位匹配需进一步确认。"
             )
 
+        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear]
+        review_status = self._combine_review_status(issue_statuses) if issue_statuses else compliance_status
+
         return {
             "validation": {"status": "correct", "reason": "模块返回了附件级签字、盖章、日期和公章匹配结果。"},
-            "review": {"status": compliance_status, "summary": review_summary},
+            "review": {"status": review_status, "summary": review_summary},
             "metrics": {
                 "required_attachment_count": raw.get("required_attachment_count"),
                 "missing_attachment_count": len(missing_attachments),
@@ -536,5 +577,5 @@ class ResultNormalizerMixin:
                 "missing_date_count": len(missing_date),
                 "late_date_count": len(late_date),
             },
-            "issues": {"passed": passed, "failed": failed, "unclear": unclear},
+            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }

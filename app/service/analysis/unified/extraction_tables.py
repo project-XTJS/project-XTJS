@@ -376,6 +376,11 @@ class ExtractionTablesMixin:
         # 一致性
         consistency_raw = (checks.get("consistency_check") or {}).get("raw_result") or {}
         for segment in consistency_raw.get("evaluated_segments") or []:
+            missing_anchors = list(segment.get("missing_anchors") or [])
+            unfilled_fields = list(segment.get("unfilled_fields") or [])
+            status = "pass" if segment.get("is_passed") else (
+                "missing" if missing_anchors or unfilled_fields else "fail"
+            )
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -385,10 +390,10 @@ class ExtractionTablesMixin:
                     field_group="template_segment",
                     field_name=str(segment.get("name") or "template_segment"),
                     value={
-                        "missing_anchors": list(segment.get("missing_anchors") or []),
-                        "unfilled_fields": list(segment.get("unfilled_fields") or []),
+                        "missing_anchors": missing_anchors,
+                        "unfilled_fields": unfilled_fields,
                     },
-                    status="pass" if segment.get("is_passed") else "fail",
+                    status=status,
                 )
             )
         for segment in consistency_raw.get("skipped_segments") or []:

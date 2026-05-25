@@ -24,6 +24,7 @@ from app.router.dependencies import (
     get_text_analysis_service,
 )
 from app.router.postgresql import (
+    _ensure_project_ocr_idle,
     _ensure_project_analysis_status,
     _refresh_project_or_404,
     _resolve_project_typo_document_types,
@@ -520,6 +521,7 @@ async def _run_selected_project_services(
     business_review_response: dict[str, Any] | None = None
     # 整个项目分析批次只取一次最新项目状态，后续各服务共用这份门槛判断。
     project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+    _ensure_project_ocr_idle(project, analysis_name="项目业务分析")
     typo_document_types: list[str] | None = None
 
     async def _ensure_business_review_response() -> dict[str, Any]:

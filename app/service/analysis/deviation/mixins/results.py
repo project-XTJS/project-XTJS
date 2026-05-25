@@ -193,7 +193,7 @@ class ResultsMixin:
         }
 
     def _build_missing_technical_deviation_table_result(self, requirements, sections, table_coverage):
-        """商务标未提供技术偏离表时，按未响应判定为 fail。"""
+        """商务标未提供技术偏离表时，按内容缺失判定为 missing。"""
         evidence = "商务标文件中未识别到技术偏离表，无法核验技术响应。"
         issue_requirements = requirements or [
             {
@@ -238,7 +238,7 @@ class ResultsMixin:
         return {
             "mode": "tender_technical_bid_json",
             "summary": summary,
-            "compliance_status": "fail",
+            "compliance_status": "missing",
             "deviation_status": "technical_deviation_table_missing",
             "requirement_extraction_mode": "star",
             "core_requirements_count": total,
@@ -270,35 +270,36 @@ class ResultsMixin:
             },
             "key_findings": [
                 f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
-                "商务标文件中未识别到技术偏离表，按未提供必需响应表判定为不通过。",
+                "商务标文件中未识别到技术偏离表，按未提供必需响应表归类为缺失。",
             ],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
 
     def _build_missing_bid_content_result(self, requirements, sections, table_coverage):
-        """技术标 OCR/内容缺失时不能判定为实质未响应，返回不明确。"""
-        unclear_items = [
+        """投标文件 OCR/内容缺失时按 missing 返回。"""
+        missing_items = [
             {
                 "requirement_id": item["requirement_id"],
                 "requirement": item["requirement"],
-                "response_evidence": "技术标 OCR 内容为空，无法核验响应。",
+                "response_status": "bid_content_missing",
+                "response_evidence": "投标文件 OCR 内容为空，无法核验响应。",
             }
             for item in requirements
         ]
         matches = [
             {
                 "responded": False,
-                "risk_level": "medium",
+                "risk_level": "high",
                 "match_score": 0.0,
                 "requirement": item["requirement"],
                 "section_type": item.get("section_type"),
                 "response_page": None,
-                "deviation_type": "unclear",
+                "deviation_type": "missing",
                 "requirement_id": item["requirement_id"],
                 "response_status": "bid_content_missing",
                 "response_section": "",
                 "explicit_response": False,
-                "response_evidence": "技术标 OCR 内容为空，无法核验响应。",
+                "response_evidence": "投标文件 OCR 内容为空，无法核验响应。",
                 "response_line_number": None,
                 "response_section_title": "",
             }
@@ -307,8 +308,8 @@ class ResultsMixin:
         total = len(requirements)
         return {
             "mode": "tender_technical_bid_json",
-            "summary": f"共发现 {total} 条带 ★ 的强制性要求，但技术标 OCR 内容为空，无法完成偏离比对。",
-            "compliance_status": "unclear",
+            "summary": f"共发现 {total} 条带 ★ 的强制性要求，但投标文件 OCR 内容为空，无法完成偏离比对。",
+            "compliance_status": "missing",
             "deviation_status": "bid_content_missing",
             "requirement_extraction_mode": "star",
             "core_requirements_count": total,
@@ -323,24 +324,24 @@ class ResultsMixin:
             "global_response_statement": None,
             "star_requirements": requirements,
             "match_results": matches,
-            "missing_response_items": [],
+            "missing_response_items": missing_items,
             "negative_deviation_items": [],
-            "unclear_response_items": unclear_items,
+            "unclear_response_items": [],
             "stats": {
                 "responded_count": 0,
-                "missing_count": 0,
+                "missing_count": total,
                 "negative_deviation_count": 0,
                 "positive_deviation_count": 0,
                 "no_deviation_count": 0,
                 "listed_response_count": 0,
-                "unclear_deviation_count": total,
+                "unclear_deviation_count": 0,
                 "explicit_response_count": 0,
                 "covered_by_global_statement_count": 0,
                 "covered_by_deviation_table_count": 0,
             },
             "key_findings": [
                 f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
-                "技术标 OCR 内容为空，无法判断投标人是否响应。",
+                "投标文件 OCR 内容为空，按响应内容缺失处理。",
             ],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
@@ -378,10 +379,16 @@ class ResultsMixin:
         """根据统计结果生成总体状态和摘要。"""
         if total == 0:
             return "pass", "no_star_requirements", "未发现带 ★ 的强制性要求，已跳过比对。"
-        if missing > 0 or negative > 0:
+        if negative > 0:
             return (
                 "fail",
                 "fail",
+                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
+            )
+        if missing > 0:
+            return (
+                "missing",
+                "missing_response",
                 f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
             )
         return "pass", "pass", "偏离响应部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"

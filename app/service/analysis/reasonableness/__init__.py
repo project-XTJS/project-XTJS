@@ -41,7 +41,7 @@ class ReasonablenessChecker(
         self.TENDER_LIMIT_MEDIUM_KEYWORDS = ["采购预算", "预算金额", "项目预算", "预算价", "预算", "限价", "总价限价", "投标限价", "响应限价", "采购金额", "最高采购限价"]
         self.TENDER_LIMIT_WEAK_KEYWORDS = ["资金来源", "财政资金", "自筹资金", "国库资金", "专项资金"]
         self.TENDER_LIMIT_EXCLUDE_KEYWORDS = ["营业收入", "净利润", "资产总额", "注册资本", "合同金额", "中标金额", "成交金额", "业绩", "发票", "报价明细", "分项报价表", "开标一览表"]
-        self.BID_TOTAL_KEYWORDS = ["参选总价", "投标总价", "报价总价", "响应总报价", "总报价", "总价", "合计"]
+        self.BID_TOTAL_KEYWORDS = ["参选总价", "投标总价", "投标价格", "报价总价", "响应总报价", "总报价", "总价", "合计"]
 
 
     def check_price_compliance(self, source: Any) -> Dict:

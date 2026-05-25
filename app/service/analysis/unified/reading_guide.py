@@ -221,6 +221,7 @@ class ReadingGuideMixin:
         issues = check.get("issues") or {}
         ordered_issues = (
             list(issues.get("failed") or [])
+            + list(issues.get("missing") or [])
             + list(issues.get("unclear") or [])
             + list(issues.get("passed") or [])
         )
@@ -283,6 +284,7 @@ class ReadingGuideMixin:
         issues = check.get("issues") or {}
         ordered_issues = (
             list(issues.get("failed") or [])
+            + list(issues.get("missing") or [])
             + list(issues.get("unclear") or [])
             + list(issues.get("passed") or [])
         )
@@ -312,7 +314,7 @@ class ReadingGuideMixin:
     def _review_status_sort_key(self, status: Any) -> int:
         """用于将状态字符串映射为排序权重，fail 优先。"""
         text = str(status or "").strip().lower()
-        order = {"fail": 0, "unclear": 1, "pass": 2}
+        order = {"fail": 0, "missing": 1, "unclear": 2, "pass": 3}
         return order.get(text, 3)
 
     def _check_display_index(self, check_code: Any) -> int:

@@ -112,6 +112,7 @@ class DocumentParserMixin:
         return [
             r"参选总价",
             r"投标总价",
+            r"投标价格",
             r"报价总价",
             r"响应总报价",
             r"投标报价总价",

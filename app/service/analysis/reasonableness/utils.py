@@ -177,9 +177,9 @@ class UtilsMixin:
         pages: Optional[List[int]] = None,
         locations: Optional[List[Dict]] = None,
     ) -> Dict:
-        """快捷生成“失败”状态的检查结果。"""
+        """快捷生成“未识别/缺失”状态的检查结果。"""
         return self._build_result(
-            "失败",
+            "未识别",
             "未识别",
             [reason],
             pages=pages,

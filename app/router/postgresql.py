@@ -70,7 +70,10 @@ from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
-from app.service.project_runtime import cancel_project_runtime
+from app.service.project_runtime import (
+    active_project_runtime_identifiers,
+    cancel_project_runtime,
+)
 
 router = APIRouter()
 
@@ -119,9 +122,48 @@ def _ensure_project_analysis_status(
     )
 
 
+def _ensure_project_ocr_idle(project: dict[str, Any], *, analysis_name: str) -> None:
+    """OCR 后台执行时，先阻止会落库的项目级分析抢占运行资源。"""
+    project_identifier = str(project.get("identifier_id") or "").strip()
+    active_identifiers = active_project_runtime_identifiers()
+    if not active_identifiers:
+        return
+    if project_identifier in active_identifiers:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{analysis_name} 未启动：当前项目 OCR 仍在后台运行或排队。"
+                "为避免业务分析读取半成品 OCR 并抢占运行资源，请等待 OCR 完成后重试；"
+                f"可先查询 /api/postgresql/projects/{project_identifier}/ocr-status 查看进度。"
+            ),
+        )
+    active_preview = "、".join(active_identifiers[:3])
+    if len(active_identifiers) > 3:
+        active_preview = f"{active_preview} 等 {len(active_identifiers)} 个项目"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{analysis_name} 未启动：当前有其他项目 OCR 仍在后台运行或排队（{active_preview}）。"
+            "为避免业务分析抢占 OCR 运行资源并影响其他项目 OCR，请等待 OCR 完成后重试；"
+            "可先查询对应项目的 /api/postgresql/projects/{project_id}/ocr-status 查看进度。"
+        ),
+    )
+
+
 def _required_parsing_status_for_duplicate_scope(scope: DuplicateCheckScope) -> int:
     # 综合查重只要带技术标范围，就必须等到技术标 OCR 完成。
     if scope == DuplicateCheckScope.BUSINESS_BID:
+        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
+    return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
+
+
+def _required_parsing_status_for_document_types(document_types: Optional[list[str]]) -> int:
+    normalized = {
+        str(document_type or "").strip().lower()
+        for document_type in (document_types or [])
+        if str(document_type or "").strip()
+    }
+    if normalized and normalized <= {DOCUMENT_TYPE_BUSINESS_BID}:
         return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
@@ -1642,7 +1684,7 @@ def _render_business_format_section(lines: list[str], payload: dict[str, Any]) -
                 review.get("status") or check.get("status"),
                 review.get("summary") or check.get("summary"),
             ])
-        for status_key in ("failed", "unclear", "passed"):
+        for status_key in ("failed", "missing", "unclear", "passed"):
             for issue in ((bidder.get("issues") or {}).get(status_key) or []):
                 if not isinstance(issue, dict):
                     continue
@@ -2345,6 +2387,7 @@ async def project_duplicate_check(
     """执行项目的商务标/技术标内容查重，结果持久化。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="查重分析")
         _ensure_project_analysis_status(
             project,
             required_status=_required_parsing_status_for_duplicate_scope(document_scope),
@@ -2377,6 +2420,7 @@ async def project_business_bid_format_review(
     review_service = UnifiedBusinessReviewService(db_service=db_service)
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="商务标形式审查")
         _ensure_project_analysis_status(
             project,
             required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
@@ -2408,6 +2452,7 @@ async def project_business_bid_duplicate_check(
     """仅对商务标进行内容查重。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="商务标查重")
         _ensure_project_analysis_status(
             project,
             required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
@@ -2506,6 +2551,7 @@ async def project_technical_bid_duplicate_check(
     """仅对技术标进行内容查重。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="技术标查重")
         _ensure_project_analysis_status(
             project,
             required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
@@ -2602,6 +2648,7 @@ async def project_personnel_reuse_check(
     """检查商务标中是否存在同一人员出现在多家投标单位的情况。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="一人多用检查")
         _ensure_project_analysis_status(
             project,
             required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
@@ -2690,6 +2737,7 @@ async def project_typo_check(
     """对项目中的文档进行错别字扫描。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="错别字检查")
         typo_document_types = _resolve_project_typo_document_types(project)
         return await run_in_threadpool(
             _run_project_typo_check,
@@ -2776,6 +2824,13 @@ async def project_bid_document_review(
 ):
     """综合审查投标文件（可指定商务标/技术标范围）。"""
     try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="投标文件审查")
+        _ensure_project_analysis_status(
+            project,
+            required_status=_required_parsing_status_for_duplicate_scope(document_scope),
+            analysis_name="投标文件审查",
+        )
         return await run_in_threadpool(
             _run_project_bid_document_review,
             identifier_id=identifier_id,
@@ -2800,6 +2855,13 @@ async def project_technical_bid_review_legacy(
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
+    project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+    _ensure_project_ocr_idle(project, analysis_name="投标文件审查")
+    _ensure_project_analysis_status(
+        project,
+        required_status=_required_parsing_status_for_duplicate_scope(document_scope),
+        analysis_name="投标文件审查",
+    )
     return await run_in_threadpool(
         _run_project_bid_document_review,
         identifier_id=identifier_id,
@@ -2818,6 +2880,13 @@ async def project_duplicate_check_legacy(
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
 ):
     request_payload = payload or ProjectDuplicateCheckRequest()
+    project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+    _ensure_project_ocr_idle(project, analysis_name="查重分析")
+    _ensure_project_analysis_status(
+        project,
+        required_status=_required_parsing_status_for_document_types(request_payload.document_types),
+        analysis_name="查重分析",
+    )
     return await run_in_threadpool(
         _run_project_duplicate_check,
         identifier_id=identifier_id,

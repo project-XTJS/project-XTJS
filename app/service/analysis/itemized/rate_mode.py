@@ -128,9 +128,9 @@ class RateModeMixin:
             match_strategy_stats = {}
         else:
             missing_items = comparison_result["missing_items"]
-            missing_item_status = "fail" if missing_items else "pass"
+            missing_item_status = "missing" if missing_items else "pass"
             comparison_basis = comparison_result["comparison_basis"]
-            status = "fail" if missing_items else "pass"
+            status = "missing" if missing_items else "pass"
             matched_items = list(comparison_result.get("matched_items") or [])
             match_strategy_stats = dict(
                 comparison_result.get("match_strategy_stats") or {}
@@ -760,7 +760,7 @@ class RateModeMixin:
     # 下浮率模式摘要
     def _build_downward_rate_summary(self, missing_item_status: str) -> str:
         """生成下浮率模式下的摘要结论。"""
-        if missing_item_status == "fail":
+        if missing_item_status == "missing":
             return "检测到下浮率模式，并发现疑似删减项。"
         if missing_item_status == "pass":
             return "检测到下浮率模式，已完成招标列项与投标列项比对，暂未发现删减项。"

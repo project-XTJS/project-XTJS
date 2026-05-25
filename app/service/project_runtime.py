@@ -45,6 +45,45 @@ def register_project_task(identifier_id: str, task: asyncio.Task) -> threading.E
     return event
 
 
+def _active_tasks_locked(identifier_id: str) -> tuple[asyncio.Task, ...]:
+    """返回未完成任务，并顺手清理已经结束的任务登记。"""
+    tasks = _PROJECT_TASKS.get(identifier_id)
+    if not tasks:
+        return ()
+
+    active_tasks = {task for task in tasks if not task.done()}
+    if active_tasks:
+        if len(active_tasks) != len(tasks):
+            _PROJECT_TASKS[identifier_id] = active_tasks
+        return tuple(active_tasks)
+
+    _PROJECT_TASKS.pop(identifier_id, None)
+    _PROJECT_CANCEL_EVENTS.pop(identifier_id, None)
+    return ()
+
+
+def project_runtime_task_count(identifier_id: str) -> int:
+    """返回项目当前仍在运行或排队的后台任务数量。"""
+    normalized = _normalize_project_identifier(identifier_id)
+    with _RUNTIME_LOCK:
+        return len(_active_tasks_locked(normalized))
+
+
+def is_project_runtime_active(identifier_id: str) -> bool:
+    """判断项目是否存在仍在运行或排队的后台任务。"""
+    return project_runtime_task_count(identifier_id) > 0
+
+
+def active_project_runtime_identifiers() -> tuple[str, ...]:
+    """返回当前仍有后台任务运行或排队的项目标识，并顺手清理已结束登记。"""
+    with _RUNTIME_LOCK:
+        active_identifiers: list[str] = []
+        for identifier_id in list(_PROJECT_TASKS):
+            if _active_tasks_locked(identifier_id):
+                active_identifiers.append(identifier_id)
+        return tuple(active_identifiers)
+
+
 def unregister_project_task(identifier_id: str, task: asyncio.Task) -> None:
     """移除项目后台任务登记；当项目没有活跃任务后自动清理运行时状态。"""
     normalized = _normalize_project_identifier(identifier_id)

@@ -451,9 +451,9 @@ class ReportVisualizer:
         total_missing = sum(len(info['missing']) for info in infos)
         has_missing_content = any(not info['bidder_text'] for info in infos)
         if has_missing_content:
-            return ("⚠️ 内容缺失", "tag-err")
+            return ("⚠️ 内容缺失", "tag-missing")
         if total_missing > 0:
-            return (f"⚠️ 缺失 {total_missing} 项", "tag-err")
+            return (f"⚠️ 缺失 {total_missing} 项", "tag-missing")
         return ("✨ 格式匹配", "tag-ok")
 
     def _normalize_bbox(self, bbox):
@@ -1074,7 +1074,7 @@ class ReportVisualizer:
         
         all_matched = (len(missing) == 0)
         uid = ''.join(random.choices(string.ascii_lowercase, k=8))
-        status_badge = "<span class='status-tag tag-ok'>✨ 格式与模版内容完全匹配</span>" if all_matched else f"<span class='status-tag tag-err'>⚠️ 缺失 {len(missing)} 项模版内容</span>"
+        status_badge = "<span class='status-tag tag-ok'>✨ 格式与模版内容完全匹配</span>" if all_matched else f"<span class='status-tag tag-missing'>⚠️ 缺失 {len(missing)} 项模版内容</span>"
 
         return f"""
         <div class="card">
@@ -1186,7 +1186,7 @@ class ReportVisualizer:
             'positive_deviation': ('tag-ok', '正偏离'),
             'negative_deviation': ('tag-err', '负偏离'),
             'listed_response': ('tag-warning', '已响应'),
-            'missing': ('tag-err', '缺失响应'),
+            'missing': ('tag-missing', '缺失响应'),
             'unclear_deviation': ('tag-warning', '偏离不明确')
         }
 
@@ -1427,6 +1427,7 @@ class ReportVisualizer:
         status_map = {
             "pass": ("tag-ok", "通过"),
             "fail": ("tag-err", "未通过"),
+            "missing": ("tag-missing", "缺失"),
             "pending": ("tag-warning", "待复核"),
         }
         tag_cls, tag_text = status_map.get(overall_status, ("tag-missing", "未知"))
@@ -1490,11 +1491,12 @@ class ReportVisualizer:
 
         sub_status_map = {
             "pass": ("tag-ok", "通过"),
-            "fail": ("tag-err", "缺失"),
+            "fail": ("tag-err", "未通过"),
+            "missing": ("tag-missing", "缺失"),
             "pending": ("tag-warning", "待复核"),
             "late": ("tag-err", "晚于截止"),
-            "missing_date": ("tag-err", "缺少日期"),
-            "missing_deadline": ("tag-warning", "缺截止日期"),
+            "missing_date": ("tag-missing", "缺少日期"),
+            "missing_deadline": ("tag-missing", "缺截止日期"),
             "not_required": ("tag-missing", "不要求"),
         }
 

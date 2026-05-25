@@ -98,6 +98,7 @@ class ConsistencyFilterMixin:
                 "issues": {
                     "passed": [],
                     "failed": [issue],
+                    "missing": [],
                     "unclear": [],
                 },
                 "raw_result": None,
@@ -311,7 +312,7 @@ class ConsistencyFilterMixin:
         pending_signature = position_check.get("pending_signature_attachments") or []
         missing_seal = position_check.get("missing_seal_attachments") or []
         if missing_attachments or missing_signature or missing_seal:
-            return "fail"
+            return "missing"
         if pending_signature:
             return "pending"
         return "pass"
@@ -320,8 +321,10 @@ class ConsistencyFilterMixin:
         """重新计算日期校验的状态。"""
         missing_date = date_check.get("missing_date_attachments") or []
         late_date = date_check.get("late_date_attachments") or []
-        if missing_date or late_date:
+        if late_date:
             return "fail"
+        if missing_date:
+            return "missing"
         original_status = str(date_check.get("status") or "").strip().lower()
         if original_status in {"missing_deadline", "not_required"}:
             return original_status
@@ -346,6 +349,14 @@ class ConsistencyFilterMixin:
             or "fail" in attachment_statuses
         ):
             return "fail"
+        if (
+            position_check.get("status") == "missing"
+            or date_check.get("status") == "missing"
+            or date_check.get("status") == "missing_date"
+            or "missing" in attachment_statuses
+            or "missing_date" in attachment_statuses
+        ):
+            return "missing"
         if (
             position_check.get("status") == "pending"
             or date_check.get("status") == "missing_deadline"

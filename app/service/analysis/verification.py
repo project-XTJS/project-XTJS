@@ -141,11 +141,11 @@ class VerificationChecker:
                 skipped_missing_attachments.append(result["title"])
                 continue
             results.append(result)
-            if result["signature_check"]["status"] == "fail":
+            if result["signature_check"]["status"] in {"fail", "missing"}:
                 missing_signatures.append(result["title"])
             if result["signature_check"]["status"] == "pending":
                 pending_signatures.append(result["title"])
-            if result["seal_check"]["status"] == "fail":
+            if result["seal_check"]["status"] in {"missing"}:
                 missing_seals.append(result["title"])
             if result["date_check"]["status"] == "missing_date":
                 missing_dates.append(result["title"])
@@ -154,10 +154,13 @@ class VerificationChecker:
 
         checked_count = len(results)
         required_count = len(required)
-        if skipped_missing_attachments:
+        has_missing = bool(skipped_missing_attachments or missing_signatures or missing_seals or missing_dates)
+        if late_dates:
             compliance_status = "fail"
+        elif has_missing:
+            compliance_status = "missing"
         elif checked_count <= 0 or deadline is None:
-            compliance_status = "pending"
+            compliance_status = "missing"
         elif any(x["status"] == "fail" for x in results):
             compliance_status = "fail"
         elif any(x["status"] == "pending" for x in results):
@@ -165,8 +168,8 @@ class VerificationChecker:
         else:
             compliance_status = "pass"
 
-        date_status = "missing_deadline" if deadline is None else ("fail" if missing_dates or late_dates else "pass")
-        position_status = "fail" if skipped_missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
+        date_status = "missing_deadline" if deadline is None else ("fail" if late_dates else ("missing" if missing_dates else "pass"))
+        position_status = "missing" if skipped_missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
         return {
             "mode": "tender_vs_bid",
             "summary": self._pair_summary(required_count, deadline, compliance_status, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
@@ -197,7 +200,8 @@ class VerificationChecker:
         signatures = self._signature_values(text)
         sign_date = self._section_date(text, self._sections(document))
         has_signature = bool(signatures or signature_bundle["detected"])
-        signature_status = "pass" if has_signature else ("pending" if seal_bundle["detected"] and sign_date else "fail")
+        signature_status = "pass" if has_signature else ("pending" if seal_bundle["detected"] and sign_date else "missing")
+        has_missing = not text or not seal_bundle["detected"] or not has_signature or not sign_date
         return {
             "mode": "single_document",
             "summary": "仅基于单文档全文做兜底扫描，未执行招投标附件级联校验。",
@@ -211,11 +215,11 @@ class VerificationChecker:
             "required_attachment_count": 0,
             "required_attachments": [],
             "attachment_results": [],
-            "position_check": {"status": signature_status if seal_bundle["detected"] or signature_status != "fail" else "fail", "missing_attachments": [], "missing_signature_attachments": [] if has_signature or signature_status == "pending" else ["全文未识别到有效签字内容或签字区域"], "pending_signature_attachments": ["全文识别到签字位或签字区域，但未回填出稳定签名文本，建议人工复核"] if signature_status == "pending" else [], "missing_seal_attachments": [] if seal_bundle["detected"] else ["全文未识别到有效盖章"]},
+            "position_check": {"status": signature_status if seal_bundle["detected"] or signature_status != "missing" else "missing", "missing_attachments": [], "missing_signature_attachments": [] if has_signature or signature_status == "pending" else ["全文未识别到有效签字内容或签字区域"], "pending_signature_attachments": ["全文识别到签字位或签字区域，但未回填出稳定签名文本，建议人工复核"] if signature_status == "pending" else [], "missing_seal_attachments": [] if seal_bundle["detected"] else ["全文未识别到有效盖章"]},
             "date_check": {"status": "pass" if sign_date else "missing_date", "deadline_date": None, "matched_deadline_text": None, "missing_date_attachments": [] if sign_date else ["全文未识别到落款日期"], "late_date_attachments": []},
             "deadline_check": {"status": "not_applicable", "deadline_date": None, "matched_deadline_text": None, "source": None},
             "seal_company_check": self._seal_company_check(self._bidder_name(document, seal_bundle["texts"]), seal_bundle["texts"]),
-            "compliance_status": "pass" if text and seal_bundle["detected"] and has_signature and sign_date else ("pending" if text and seal_bundle["detected"] and sign_date else "fail"),
+            "compliance_status": "pass" if not has_missing else ("pending" if text and seal_bundle["detected"] and sign_date else "missing"),
         }
 
     def _pair_summary(self, count: int, deadline: dict | None, status: str, missing_attachments: list[str], missing_signatures: list[str], pending_signatures: list[str], missing_seals: list[str], missing_dates: list[str], late_dates: list[str]) -> str:
@@ -955,9 +959,11 @@ class VerificationChecker:
         date_check = self._date_check(attachment, bid_section, deadline)
         signature_check = self._signature_check(attachment, bid_section, seal_check, date_check)
         if bid_section is None:
+            status = "missing"
+        elif any(x["status"] in {"fail", "late"} for x in (signature_check, seal_check, date_check)):
             status = "fail"
-        elif any(x["status"] in {"fail", "missing_date", "late"} for x in (signature_check, seal_check, date_check)):
-            status = "fail"
+        elif any(x["status"] in {"missing", "missing_date"} for x in (signature_check, seal_check, date_check)):
+            status = "missing"
         elif any(x["status"] in {"pending", "missing_deadline"} for x in (signature_check, seal_check, date_check)):
             status = "pending"
         else:
@@ -969,7 +975,7 @@ class VerificationChecker:
         if required <= 0:
             return {"status": "not_required", "required_count": 0, "filled_count": 0, "pending_count": 0, "filled_values": [], "pending_fields": [], "empty_fields": []}
         if bid_section is None:
-            return {"status": "fail", "required_count": required, "filled_count": 0, "pending_count": 0, "filled_values": [], "pending_fields": [], "empty_fields": attachment["requirements"].get("signature_field_examples") or []}
+            return {"status": "missing", "required_count": required, "filled_count": 0, "pending_count": 0, "filled_values": [], "pending_fields": [], "empty_fields": attachment["requirements"].get("signature_field_examples") or []}
 
         slots = self._collect_signature_slots(attachment, bid_section)
         filled, pending, empty = [], [], []
@@ -1028,7 +1034,7 @@ class VerificationChecker:
         if not slots and self._supports_signature_pending({"line": (attachment["requirements"].get("signature_field_examples") or ["签字位"])[0], "page": (bid_section.get("pages") or [None])[-1], "allows_seal": False}, date_check):
             pending.append({"line": (attachment["requirements"].get("signature_field_examples") or ["签字位"])[0], "page": (bid_section.get("pages") or [None])[-1], "reason": "signature_template_found_but_slot_not_stably_extracted", "allows_seal": False})
 
-        status = "pass" if len(filled) >= required else ("pending" if len(filled) + len(pending) >= required else "fail")
+        status = "pass" if len(filled) >= required else ("pending" if len(filled) + len(pending) >= required else "missing")
         return {"status": status, "required_count": required, "filled_count": len(filled), "pending_count": len(pending), "filled_values": filled[:5], "pending_fields": pending[:5], "empty_fields": empty[:5]}
 
     def _signature_value(self, line: str) -> str | None:
@@ -1329,7 +1335,7 @@ class VerificationChecker:
         if not attachment["requirements"].get("requires_seal"):
             return {"status": "not_required", "detected": False, "matched": None, "seal_texts": [], "best_match": None}
         if bid_section is None:
-            return {"status": "fail", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
+            return {"status": "missing", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
         seal_texts = list(dict.fromkeys(str(x).strip() for x in (bid_section.get("seal_texts") or []) if str(x).strip()))
         seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
         textual_seals = self._textual_seal_evidences(bid_section, bidder_name)
@@ -1359,7 +1365,7 @@ class VerificationChecker:
                     best_match = textual_best
                 matched = True
         return {
-            "status": "pass" if detected and matched else "fail",
+            "status": "pass" if detected and matched else ("fail" if detected else "missing"),
             "detected": detected,
             "matched": matched,
             "seal_texts": seal_texts,
