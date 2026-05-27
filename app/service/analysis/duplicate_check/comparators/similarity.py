@@ -25,12 +25,15 @@ def build_similarity_block_units(document: dict[str, Any]) -> list[dict[str, Any
     for block in document.get("blocks") or []:
         if str(block.get("type") or "") == "heading":
             continue
+        if _is_generic_deviation_similarity_text(block.get("text") or ""):
+            continue
         similarity_key = business_similarity_key(block.get("text") or "")
         if len(compact_raw_text(similarity_key)) < BUSINESS_SIMILARITY_MIN_KEY_LENGTH:
             continue
         units.append(
             {
                 "page": block.get("page"),
+                "bbox": block.get("bbox"),
                 "type": block.get("type"),
                 "text": str(block.get("text") or ""),
                 "exact_hash": str(block.get("exact_hash") or ""),
@@ -44,6 +47,9 @@ def build_similarity_section_units(document: dict[str, Any]) -> list[dict[str, A
     """从文档中构建用于相似度比较的区段单元。"""
     units: list[dict[str, Any]] = []
     for section in document.get("sections") or []:
+        section_text = str(section.get("text") or "")
+        if _all_deviation_similarity_rows_generic(section_text.splitlines()):
+            continue
         similarity_key = business_similarity_key(section.get("text") or "")
         if len(compact_raw_text(similarity_key)) < BUSINESS_SIMILARITY_MIN_KEY_LENGTH:
             continue
@@ -51,6 +57,7 @@ def build_similarity_section_units(document: dict[str, Any]) -> list[dict[str, A
             {
                 "title": str(section.get("title") or ""),
                 "pages": list(section.get("pages") or []),
+                "bbox": section.get("bbox"),
                 "preview": str(section.get("preview") or ""),
                 "text": str(section.get("text") or ""),
                 "exact_hash": str(section.get("exact_hash") or ""),
@@ -70,7 +77,7 @@ def build_similarity_table_units(document: dict[str, Any]) -> list[dict[str, Any
         similarity_rows = [
             business_similarity_key(row)
             for row in rows
-            if business_similarity_key(row)
+            if business_similarity_key(row) and not _is_generic_deviation_similarity_text(row)
         ]
         similarity_rows = [
             row for row in similarity_rows
@@ -81,6 +88,7 @@ def build_similarity_table_units(document: dict[str, Any]) -> list[dict[str, Any
         units.append(
             {
                 "pages": list(table.get("pages") or []),
+                "bbox": table.get("bbox"),
                 "rows": rows,
                 "exact_hash": str(table.get("exact_hash") or ""),
                 "similarity_rows": similarity_rows,
@@ -155,6 +163,8 @@ def compare_business_similarity_blocks(
                 "page": left_unit.get("page"),
                 "left_page": left_unit.get("page"),
                 "right_page": right_unit.get("page"),
+                "left_bbox": left_unit.get("bbox"),
+                "right_bbox": right_unit.get("bbox"),
                 "type": "similar_sentence",
                 "left_type": left_unit.get("type"),
                 "right_type": right_unit.get("type"),
@@ -196,6 +206,8 @@ def compare_business_similarity_sections(
                 "right_title": right_unit.get("title"),
                 "left_pages": left_unit.get("pages", []),
                 "right_pages": right_unit.get("pages", []),
+                "left_bbox": left_unit.get("bbox"),
+                "right_bbox": right_unit.get("bbox"),
                 "exact": False,
                 "similarity": round(ratio, 4),
                 "left_preview": left_unit.get("preview"),
@@ -268,6 +280,8 @@ def compare_business_similarity_tables(
             {
                 "left_pages": left_unit.get("pages", []),
                 "right_pages": right_unit.get("pages", []),
+                "left_bbox": left_unit.get("bbox"),
+                "right_bbox": right_unit.get("bbox"),
                 "exact": False,
                 "similarity": round(score, 4),
                 "left_rows": [clip(row, 200) for row in list(left_unit.get("rows") or [])],
@@ -283,7 +297,25 @@ def compare_business_similarity_tables(
     }
 
 
-def _normalize_scope_lines(values: list[Any]) -> list[str]:
+def _normalize_scope_lines(
+    values: list[Any],
+    *,
+    preserve_common_lines: bool = False,
+) -> list[str]:
     """复用 business_scope 中的轻量级规范化，避免循环依赖。"""
     from ..business_scope import _normalize_scope_lines as impl
-    return impl(values)
+    return impl(values, preserve_common_lines=preserve_common_lines)
+
+
+def _is_generic_deviation_similarity_text(value: Any) -> bool:
+    """通用偏离响应只参与精确查重，不参与相似度查重。"""
+    from ..business_scope import _is_generic_deviation_similarity_line as impl
+    return impl(str(value or ""))
+
+
+def _all_deviation_similarity_rows_generic(values: list[Any]) -> bool:
+    """判断一个区段是否仅由通用偏离响应组成。"""
+    rows = _normalize_scope_lines(values, preserve_common_lines=False)
+    if not rows:
+        return False
+    return all(_is_generic_deviation_similarity_text(row) for row in rows)

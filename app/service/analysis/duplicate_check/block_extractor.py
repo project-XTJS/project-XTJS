@@ -7,12 +7,13 @@ import re
 from html.parser import HTMLParser
 from typing import Any
 
-from app.service.analysis.compliance.template_extractor import SectionClassifier
+from app.service.analysis.location_utils import normalize_bbox
 
 from .text_utils import (
     normalize_plain_text,
     compact_raw_text,
     hash_text,
+    similarity_ratio,
     is_noise_block,
 )
 from .constants import (
@@ -128,6 +129,7 @@ def _extract_ordered_blocks(
             {
                 "type": section_type,
                 "page": page,
+                "bbox": section.get("bbox"),
                 "text": text,
                 "exact_key": exact_key,
                 "exact_hash": hash_text(exact_key),
@@ -156,6 +158,7 @@ def _layout_sections(container: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "page": item.get("page") if isinstance(item.get("page"), int) else 1,
                 "type": str(item.get("type") or "text").strip().lower() or "text",
+                "bbox": normalize_bbox(bbox),
                 "text": text,
                 "raw_text": item.get("raw_text"),
                 "_sort_y": anchor[1],
@@ -215,12 +218,18 @@ def _build_table_queues(
         if not text:
             continue
 
+        bbox = (
+            normalize_bbox(raw_item.get("bbox") or raw_item.get("bbox_ocr") or raw_item.get("box"))
+            or _resolve_table_source_bbox(raw_item, container, pages=normalized_pages, lines=lines)
+        )
+
         for page in normalized_pages or [1]:
             page_queues.setdefault(page, []).append(text)
 
         table_entries.append(
             {
                 "pages": normalized_pages or [1],
+                "bbox": bbox,
                 "text": text,
                 "rows": lines,
                 "exact_hash": hash_text(compact_raw_text(text)),
@@ -228,6 +237,99 @@ def _build_table_queues(
         )
 
     return page_queues, table_entries
+
+
+def _resolve_table_source_bbox(
+    table: dict[str, Any],
+    container: dict[str, Any],
+    *,
+    pages: list[int],
+    lines: list[str],
+) -> list[float] | None:
+    """Copy a logical table bbox from its OCR source section when available."""
+    target_page = pages[0] if pages else None
+    source_bbox = _source_index_bbox(table, container, page=target_page)
+    if source_bbox:
+        return source_bbox
+
+    source_bbox = _source_index_bbox(table, container, page=None)
+    if source_bbox:
+        return source_bbox
+
+    return _matching_table_section_bbox(container, pages=pages, lines=lines)
+
+
+def _source_index_bbox(
+    table: dict[str, Any],
+    container: dict[str, Any],
+    *,
+    page: int | None,
+) -> list[float] | None:
+    indexes = table.get("source_section_indexes") or table.get("source_indexes")
+    if not isinstance(indexes, list):
+        return None
+
+    normalized_indexes: list[int] = []
+    for value in indexes:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+        if index not in normalized_indexes:
+            normalized_indexes.append(index)
+
+    for key in ("layout_sections", "table_sections"):
+        sections = container.get(key)
+        if not isinstance(sections, list):
+            continue
+        for index in normalized_indexes:
+            if index < 0 or index >= len(sections):
+                continue
+            item = sections[index]
+            if not isinstance(item, dict):
+                continue
+            if page is not None and item.get("page") != page:
+                continue
+            bbox = normalize_bbox(item.get("bbox") or item.get("bbox_ocr") or item.get("box"))
+            if bbox:
+                return bbox
+    return None
+
+
+def _matching_table_section_bbox(
+    container: dict[str, Any],
+    *,
+    pages: list[int],
+    lines: list[str],
+) -> list[float] | None:
+    needle = compact_raw_text("\n".join(lines))
+    if len(needle) < 8:
+        return None
+
+    target_pages = set(pages or [])
+    for key in ("table_sections", "layout_sections"):
+        sections = container.get(key)
+        if not isinstance(sections, list):
+            continue
+        for item in sections:
+            if not isinstance(item, dict):
+                continue
+            if target_pages and item.get("page") not in target_pages:
+                continue
+            bbox = normalize_bbox(item.get("bbox") or item.get("bbox_ocr") or item.get("box"))
+            if not bbox:
+                continue
+            text = normalize_plain_text(item.get("text") or item.get("raw_text") or item.get("content") or "")
+            candidate = compact_raw_text(text)
+            if len(candidate) < 8:
+                continue
+            if (
+                needle[:120] in candidate
+                or candidate[:120] in needle
+                or similarity_ratio(needle[:400], candidate[:400]) >= 0.76
+            ):
+                return bbox
+    return None
 
 
 def _table_to_lines(table: dict[str, Any]) -> list[str]:

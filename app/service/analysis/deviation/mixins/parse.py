@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from app.service.analysis.location_utils import normalize_bbox
+
 
 class ParseMixin:
     """提供文档加载、页面行提取、区段处理等方法。"""
@@ -90,8 +92,13 @@ class ParseMixin:
                     text = str(page.get("text") or "")
                 else:
                     text = str(page or "")
+                page_bbox = (
+                    normalize_bbox(page.get("bbox") or page.get("bbox_ocr") or page.get("box"))
+                    if isinstance(page, dict)
+                    else None
+                )
                 for ln, line in enumerate(self._split_lines(text), start=1):
-                    out.append({"page": page_no, "line_number": ln, "text": line})
+                    out.append({"page": page_no, "line_number": ln, "text": line, "bbox": page_bbox})
 
         if not out:
             section_line_counter: dict[int | None, int] = {}
@@ -100,7 +107,7 @@ class ParseMixin:
                 for line in self._split_lines(section.get("text", "")):
                     current = section_line_counter.get(page_no, 0) + 1
                     section_line_counter[page_no] = current
-                    out.append({"page": page_no, "line_number": current, "text": line})
+                    out.append({"page": page_no, "line_number": current, "text": line, "bbox": section.get("bbox")})
 
         if out:
             return out
@@ -127,10 +134,17 @@ class ParseMixin:
                     default_type = "table" if key in ("table_sections", "logical_tables") else "text"
                     section_type = str(item.get("type") or default_type).strip().lower() or "text"
                     text = self._section_text(item)
+                    bbox = normalize_bbox(
+                        item.get("bbox")
+                        or item.get("bbox_ocr")
+                        or item.get("box")
+                        or item.get("block_bbox")
+                    )
                 else:
                     page_raw = None
                     section_type = "table" if key in ("table_sections", "logical_tables") else "text"
                     text = str(item or "").strip()
+                    bbox = None
 
                 if not text:
                     continue
@@ -150,6 +164,7 @@ class ParseMixin:
                         "page": page_no,
                         "type": section_type,
                         "text": text,
+                        "bbox": bbox,
                         "_source_order": source_idx,
                         "_item_order": item_idx,
                     }

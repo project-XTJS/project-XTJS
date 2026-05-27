@@ -63,6 +63,21 @@ class ClusterEngineMixin:
 
     def _cluster_group_signature(self, cluster: dict[str, Any]) -> str:
         """按 mode + 底层 pair 集合生成聚类收口签名。"""
+        tokens = sorted(
+            {
+                str(token).strip()
+                for token in (cluster.get("tokens") or [])
+                if str(token).strip()
+            }
+        )
+        if tokens:
+            return self.helper._project_make_stable_token(
+                "duplicate-cluster-group",
+                str(cluster.get("mode") or "exact"),
+                str(cluster.get("family") or "block"),
+                *tokens,
+            )
+
         signatures = sorted(
             {
                 str(signature).strip()
@@ -196,12 +211,10 @@ class ClusterEngineMixin:
             "exact_image_count": 0,
             "similar_image_count": 0,
         }
-        relevant_prefix = "exact_" if mode == "exact" else "similar_"
         for item in unique_items:
             item_metrics = item.get("_project_raw_metrics") or item.get("metrics") or {}
             for key in metrics:
-                if key.startswith(relevant_prefix):
-                    metrics[key] += int(item_metrics.get(key) or 0)
+                metrics[key] += int(item_metrics.get(key) or 0)
         cluster["metrics"] = metrics
 
         best_risk_level = "none"
@@ -442,7 +455,7 @@ class ClusterEngineMixin:
         for members in grouped.values():
             has_exact = any(member.get("mode") == "exact" for member in members)
             active_mode = "exact" if has_exact else "similar"
-            active_members = [member for member in members if member.get("mode") == active_mode]
+            active_members = list(members)
             if not active_members:
                 continue
 

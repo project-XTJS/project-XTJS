@@ -22,6 +22,11 @@ from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
     DOCUMENT_TYPE_TECHNICAL_BID,
 )
+from app.service.analysis.location_utils import (
+    collect_locations,
+    make_location,
+    normalize_bbox as normalize_location_bbox,
+)
 
 try:
     import language_tool_python
@@ -218,8 +223,6 @@ class BidDocumentReviewService:
         "按装": "安装",
         "部暑": "部署",
         "侯选": "候选",
-        "帐户": "账户",
-        "帐号": "账号",
         "现厂": "现场",
         "録入": "录入",
         "录相": "录像",
@@ -285,19 +288,13 @@ class BidDocumentReviewService:
             )
         return notes
 
-    # 主要服务入口：对项目文档进行审查
-    def check_project_documents(
+    def _prepare_document_groups(
         self,
         *,
-        project_identifier: str,
-        project: dict[str, Any] | None,
         document_records: list[dict[str, Any]],
         document_types: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        对项目文档执行错别字检查和人员复用分析。
-        返回按文档类型分组的结果字典。
-        """
+    ) -> tuple[list[str], dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+        """按文档类型准备可分析文档，供错别字和人员复用独立复用。"""
         requested_types = self._normalize_requested_types(document_types)
         prepared_groups: dict[str, list[dict[str, Any]]] = {
             item: [] for item in requested_types
@@ -334,14 +331,42 @@ class BidDocumentReviewService:
             prepared["document_type"] = role
             prepared_groups[role].append(prepared)
 
+        return list(requested_types), prepared_groups, skipped_groups
+
+    @staticmethod
+    def _document_summaries(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "identifier_id": item["identifier_id"],
+                "relation_id": item.get("relation_id"),
+                "file_name": item.get("file_name"),
+                "page_count": item.get("page_count", 0),
+                "layout_section_count": item.get("layout_section_count", 0),
+                "table_count": item.get("table_count", 0),
+                "personnel_entry_count": len(item.get("personnel_entries") or []),
+            }
+            for item in documents
+        ]
+
+    # 错别字服务入口：只执行错别字检查
+    def check_project_typos(
+        self,
+        *,
+        project_identifier: str,
+        project: dict[str, Any] | None,
+        document_records: list[dict[str, Any]],
+        document_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        requested_types, prepared_groups, skipped_groups = self._prepare_document_groups(
+            document_records=document_records,
+            document_types=document_types,
+        )
         groups: dict[str, Any] = {}
         total_document_count = 0
         total_skipped_document_count = 0
         total_typo_issue_count = 0
         total_shared_typo_issue_count = 0
         total_suspicious_typo_document_count = 0
-        total_personnel_count = 0
-        total_reused_name_count = 0
         language_tool, language_tool_error = self._get_language_tool_instance()
         language_tool_enabled = language_tool is not None
 
@@ -353,47 +378,33 @@ class BidDocumentReviewService:
                 language_tool=language_tool,
                 language_tool_error=language_tool_error,
             )
-            personnel_reuse_check = self._run_personnel_reuse_check(prepared_documents)
-            group_summary = {
-                "document_count": len(prepared_documents),
-                "skipped_document_count": len(skipped_documents),
-                "typo_issue_count": typo_check["issue_count"],
-                "shared_typo_issue_count": typo_check["shared_issue_count"],
-                "suspicious_typo_document_count": typo_check["suspicious_document_count"],
-                "personnel_count": personnel_reuse_check["personnel_count"],
-                "reused_name_count": personnel_reuse_check["reused_name_count"],
-                "suspicious": bool(
-                    typo_check["issue_count"] or personnel_reuse_check["reused_name_count"]
-                ),
-            }
+            group_document_count = len(prepared_documents)
+            group_skipped_count = len(skipped_documents)
+            group_typo_issue_count = int(typo_check.get("issue_count") or 0)
+            group_shared_typo_issue_count = int(typo_check.get("shared_issue_count") or 0)
+            group_suspicious_document_count = int(typo_check.get("suspicious_document_count") or 0)
+
             groups[role] = {
-                "documents": [
-                    {
-                        "identifier_id": item["identifier_id"],
-                        "relation_id": item.get("relation_id"),
-                        "file_name": item.get("file_name"),
-                        "page_count": item.get("page_count", 0),
-                        "layout_section_count": item.get("layout_section_count", 0),
-                        "table_count": item.get("table_count", 0),
-                        "personnel_entry_count": len(item.get("personnel_entries") or []),
-                    }
-                    for item in prepared_documents
-                ],
+                "documents": self._document_summaries(prepared_documents),
                 "skipped_documents": skipped_documents,
                 "typo_check": typo_check,
-                "personnel_reuse_check": personnel_reuse_check,
-                "summary": group_summary,
+                "summary": {
+                    "document_count": group_document_count,
+                    "skipped_document_count": group_skipped_count,
+                    "typo_issue_count": group_typo_issue_count,
+                    "shared_typo_issue_count": group_shared_typo_issue_count,
+                    "suspicious_typo_document_count": group_suspicious_document_count,
+                    "suspicious": bool(group_typo_issue_count),
+                },
             }
 
-            total_document_count += group_summary["document_count"]
-            total_skipped_document_count += group_summary["skipped_document_count"]
-            total_typo_issue_count += group_summary["typo_issue_count"]
-            total_shared_typo_issue_count += group_summary["shared_typo_issue_count"]
-            total_suspicious_typo_document_count += group_summary["suspicious_typo_document_count"]
-            total_personnel_count += group_summary["personnel_count"]
-            total_reused_name_count += group_summary["reused_name_count"]
+            total_document_count += group_document_count
+            total_skipped_document_count += group_skipped_count
+            total_typo_issue_count += group_typo_issue_count
+            total_shared_typo_issue_count += group_shared_typo_issue_count
+            total_suspicious_typo_document_count += group_suspicious_document_count
 
-        result = {
+        return {
             "project": project or {"identifier_id": project_identifier},
             "config": {
                 "document_types": list(requested_types),
@@ -402,7 +413,6 @@ class BidDocumentReviewService:
                 "typo_languagetool_language": settings.TYPO_LANGUAGETOOL_LANGUAGE,
                 "typo_stopword_dictionary_enabled": True,
                 "typo_known_typo_dictionary_enabled": settings.TYPO_KNOWN_DICTIONARY_ENABLED,
-                "personnel_reuse_scope": "per_document_type",
             },
             "groups": groups,
             "summary": {
@@ -412,21 +422,72 @@ class BidDocumentReviewService:
                 "typo_issue_count": total_typo_issue_count,
                 "shared_typo_issue_count": total_shared_typo_issue_count,
                 "suspicious_typo_document_count": total_suspicious_typo_document_count,
-                "personnel_count": total_personnel_count,
-                "reused_name_count": total_reused_name_count,
-                "suspicious": bool(
-                    total_typo_issue_count or total_reused_name_count
-                ),
+                "suspicious": bool(total_typo_issue_count),
             },
         }
-        # 若只请求了单一类型，则提供扁平结构方便调用
-        if len(requested_types) == 1:
-            single_group = groups[requested_types[0]]
-            result["documents"] = single_group["documents"]
-            result["skipped_documents"] = single_group["skipped_documents"]
-            result["typo_check"] = single_group["typo_check"]
-            result["personnel_reuse_check"] = single_group["personnel_reuse_check"]
-        return result
+
+    # 人员复用服务入口：只执行人员复用检查
+    def check_project_personnel_reuse(
+        self,
+        *,
+        project_identifier: str,
+        project: dict[str, Any] | None,
+        document_records: list[dict[str, Any]],
+        document_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        requested_types, prepared_groups, skipped_groups = self._prepare_document_groups(
+            document_records=document_records,
+            document_types=document_types,
+        )
+        groups: dict[str, Any] = {}
+        total_document_count = 0
+        total_skipped_document_count = 0
+        total_personnel_count = 0
+        total_reused_name_count = 0
+
+        for role in requested_types:
+            prepared_documents = prepared_groups[role]
+            skipped_documents = skipped_groups[role]
+            personnel_reuse_check = self._run_personnel_reuse_check(prepared_documents)
+            group_document_count = len(prepared_documents)
+            group_skipped_count = len(skipped_documents)
+            group_personnel_count = int(personnel_reuse_check.get("personnel_count") or 0)
+            group_reused_name_count = int(personnel_reuse_check.get("reused_name_count") or 0)
+
+            groups[role] = {
+                "documents": self._document_summaries(prepared_documents),
+                "skipped_documents": skipped_documents,
+                "personnel_reuse_check": personnel_reuse_check,
+                "summary": {
+                    "document_count": group_document_count,
+                    "skipped_document_count": group_skipped_count,
+                    "personnel_count": group_personnel_count,
+                    "reused_name_count": group_reused_name_count,
+                    "suspicious": bool(group_reused_name_count),
+                },
+            }
+
+            total_document_count += group_document_count
+            total_skipped_document_count += group_skipped_count
+            total_personnel_count += group_personnel_count
+            total_reused_name_count += group_reused_name_count
+
+        return {
+            "project": project or {"identifier_id": project_identifier},
+            "config": {
+                "document_types": list(requested_types),
+                "personnel_reuse_scope": "per_document_type",
+            },
+            "groups": groups,
+            "summary": {
+                "requested_document_types": list(requested_types),
+                "document_count": total_document_count,
+                "skipped_document_count": total_skipped_document_count,
+                "personnel_count": total_personnel_count,
+                "reused_name_count": total_reused_name_count,
+                "suspicious": bool(total_reused_name_count),
+            },
+        }
 
     # 文档预处理：提取人员信息、统计基础信息
     def _prepare_document(
@@ -491,7 +552,7 @@ class BidDocumentReviewService:
                         "relation_id": document.get("relation_id"),
                         "file_name": document.get("file_name"),
                         "issue_count": len(document_issues),
-                        "items": document_issues,
+                        "issues": document_issues,
                     }
                 )
             for issue in document_issues:
@@ -517,7 +578,8 @@ class BidDocumentReviewService:
                     "suggestion": first.get("suggestion"),
                     "document_count": len(document_ids),
                     "occurrence_count": len(items),
-                    "items": items,
+                    "locations": collect_locations(items),
+                    "occurrences": items,
                 }
             )
 
@@ -598,7 +660,8 @@ class BidDocumentReviewService:
                     "occurrence_count": len(items),
                     "roles": roles,
                     "risk_level": self._personnel_reuse_risk_level(roles, len(document_ids)),
-                    "items": items,
+                    "locations": collect_locations(items),
+                    "occurrences": items,
                 }
             )
 
@@ -623,7 +686,7 @@ class BidDocumentReviewService:
             "personnel_count": total_personnel_count,
             "reused_name_count": len(reused_names),
             "documents": document_summaries,
-            "items": reused_names,
+            "issues": reused_names,
             "notes": [
                 "同名人员跨不同技术标重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。",
             ],
@@ -665,7 +728,7 @@ class BidDocumentReviewService:
             return None
 
         rule_id = str(getattr(match, "rule_id", "") or "").strip() or "languagetool"
-        return {
+        issue = {
             "issue_type": "languagetool",
             "issue_key": rule_id,
             "matched_text": matched_text,
@@ -678,6 +741,18 @@ class BidDocumentReviewService:
             "relation_id": document.get("relation_id"),
             "file_name": document.get("file_name"),
         }
+        issue["locations"] = [
+            location for location in [
+                make_location(
+                    document_identifier_id=document["identifier_id"],
+                    file_name=document.get("file_name"),
+                    page=sentence.get("page"),
+                    bbox=sentence.get("bbox"),
+                    text=matched_text or text,
+                )
+            ] if location
+        ]
+        return issue
 
     def _find_language_tool_matches(
         self,
@@ -721,6 +796,8 @@ class BidDocumentReviewService:
                 sentence_issues.extend(self._find_known_typo_matches(sentence, document))
 
             for issue in sentence_issues:
+                if self._is_ignored_typo_issue(issue):
+                    continue
                 key = (
                     issue.get("page"),
                     issue.get("matched_text"),
@@ -739,6 +816,16 @@ class BidDocumentReviewService:
             )
         )
         return issues
+
+    def _is_ignored_typo_issue(self, issue: dict[str, Any]) -> bool:
+        """过滤业务上接受的用字差异，避免把“帐/账”当错别字。"""
+        matched_text = self._compact(issue.get("matched_text"))
+        suggestion = self._compact(issue.get("suggestion"))
+        if not matched_text or not suggestion or matched_text == suggestion:
+            return False
+        normalized_matched = matched_text.replace("帐", "账")
+        normalized_suggestion = suggestion.replace("帐", "账")
+        return normalized_matched == normalized_suggestion
 
     # 遍历文档中可用于错别字检查的句子
     def _iter_typo_sentences(self, document: dict[str, Any]) -> list[dict[str, Any]]:
@@ -801,20 +888,30 @@ class BidDocumentReviewService:
         for typo_form, suggestion in self.KNOWN_TYPO_MAP.items():
             if typo_form not in compact:
                 continue
-            issues.append(
-                {
-                    "issue_type": "known_typo",
-                    "issue_key": typo_form,
-                    "matched_text": typo_form,
-                    "suggestion": suggestion,
-                    "page": sentence.get("page"),
-                    "bbox": sentence.get("bbox"),
-                    "text": text,
-                    "document_identifier_id": document["identifier_id"],
-                    "relation_id": document.get("relation_id"),
-                    "file_name": document.get("file_name"),
-                }
-            )
+            issue = {
+                "issue_type": "known_typo",
+                "issue_key": typo_form,
+                "matched_text": typo_form,
+                "suggestion": suggestion,
+                "page": sentence.get("page"),
+                "bbox": sentence.get("bbox"),
+                "text": text,
+                "document_identifier_id": document["identifier_id"],
+                "relation_id": document.get("relation_id"),
+                "file_name": document.get("file_name"),
+            }
+            issue["locations"] = [
+                location for location in [
+                    make_location(
+                        document_identifier_id=document["identifier_id"],
+                        file_name=document.get("file_name"),
+                        page=sentence.get("page"),
+                        bbox=sentence.get("bbox"),
+                        text=typo_form,
+                    )
+                ] if location
+            ]
+            issues.append(issue)
         return issues
 
     # 人员信息提取：从表格和段落中找出人名及岗位
@@ -1076,7 +1173,7 @@ class BidDocumentReviewService:
         source_type: str,
     ) -> dict[str, Any]:
         """构造一条人员信息字典。"""
-        return {
+        entry = {
             "name": name,
             "role": role,
             "page": int(page) if isinstance(page, int) else None,
@@ -1087,6 +1184,18 @@ class BidDocumentReviewService:
             "relation_id": record.get("relation_id"),
             "file_name": record.get("file_name"),
         }
+        entry["locations"] = [
+            location for location in [
+                make_location(
+                    document_identifier_id=entry["document_identifier_id"],
+                    file_name=entry.get("file_name"),
+                    page=page,
+                    bbox=bbox,
+                    text=entry.get("text"),
+                )
+            ] if location
+        ]
+        return entry
 
     # HTML 表格行解析
     def _parse_html_table_rows(self, table: dict[str, Any]) -> list[list[str]]:
@@ -1363,7 +1472,7 @@ class BidDocumentReviewService:
                 "type": str(section.get("type") or "text").strip().lower() or "text",
                 "text": text,
             }
-            bbox = self._normalize_bbox(section.get("bbox") or section.get("box"))
+            bbox = normalize_location_bbox(section.get("bbox") or section.get("box"))
             if bbox is not None:
                 item["bbox"] = bbox
             items.append(item)
@@ -1386,7 +1495,7 @@ class BidDocumentReviewService:
                 "block_content": str(table.get("block_content") or table.get("html") or ""),
                 "text": self._normalize_text(table.get("raw_text") or table.get("text") or ""),
             }
-            bbox = self._normalize_bbox(
+            bbox = normalize_location_bbox(
                 table.get("block_bbox")
                 or table.get("bbox")
                 or table.get("box")

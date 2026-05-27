@@ -9,7 +9,7 @@ PostgreSQL 相关请求模型定义。
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentDataModel(BaseModel):
@@ -81,13 +81,27 @@ class RelationBatchDeleteRequest(BaseModel):
 
 class ProjectResultUpsertRequest(BaseModel):
     """创建或覆盖项目分析结果请求。"""
+    model_config = ConfigDict(extra="forbid")
+
     project_identifier_id: str = Field(..., description="项目 UUID 标识。")
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 
 class ProjectResultUpdateRequest(BaseModel):
     """更新项目分析结果请求。"""
+    model_config = ConfigDict(extra="forbid")
+
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
+
+
+class ProjectResultFrontendUpdateRequest(BaseModel):
+    """更新前端删减后的项目分析结果请求。"""
+    model_config = ConfigDict(extra="forbid")
+
+    result_fot_frontend: dict[str, Any] = Field(
+        ...,
+        description="前端删减后的结果 JSON。",
+    )
 
 
 class DuplicateCheckScope(str, Enum):

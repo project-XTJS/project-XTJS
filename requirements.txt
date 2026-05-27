@@ -21,6 +21,7 @@ requests
 psutil>=5.9,<8
 
 # --- 文档处理与分析 ---
+python-docx>=1.1.2
 
 # --- 工具与异步任务 ---
 language-tool-python>=3.2.2

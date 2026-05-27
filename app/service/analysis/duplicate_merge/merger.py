@@ -13,6 +13,7 @@ from .mixins.range_splitter import RangeSplitterMixin
 from .mixins.token_extractor import TokenExtractorMixin
 from .mixins.cluster_engine import ClusterEngineMixin
 from .mixins.presentation import PresentationMixin
+from app.service.analysis.location_utils import append_location, collect_locations, make_location
 
 
 class DuplicateResultMerger(
@@ -83,9 +84,10 @@ class DuplicateResultMerger(
                     },
                     "tokens": list(cluster.get("tokens") or []),
                     "occurrence_count": len(cluster.get("occurrences") or []),
-                    "pair_item_count": len(cluster.get("items") or []),
+                    "source_issue_count": len(cluster.get("items") or []),
+                    "locations": self._cluster_locations(cluster),
                     "occurrences": list(cluster.get("occurrences") or []),
-                    "items": list(cluster.get("items") or []),
+                    "source_issues": list(cluster.get("items") or []),
                 }
             )
 
@@ -115,5 +117,57 @@ class DuplicateResultMerger(
             },
             "documents": list(group.get("documents") or []),
             "skipped_documents": list(group.get("skipped_documents") or []),
-            "clusters": serialized_clusters,
+            "issues": serialized_clusters,
         }
+
+    def _cluster_locations(self, cluster: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build locations from the cluster's own occurrences, not whole pair issues."""
+        locations: list[dict[str, Any]] = []
+        for occurrence in cluster.get("occurrences") or []:
+            if not isinstance(occurrence, dict):
+                continue
+            item = occurrence.get("item") if isinstance(occurrence.get("item"), dict) else {}
+            evidence = occurrence.get("evidence") if isinstance(occurrence.get("evidence"), dict) else {}
+            docs = occurrence.get("docs") if isinstance(occurrence.get("docs"), dict) else {}
+
+            for side in ("left", "right"):
+                file_name = str(item.get(f"{side}_file_name") or "").strip()
+                if not file_name:
+                    continue
+                doc = docs.get(file_name) if isinstance(docs.get(file_name), dict) else {}
+                pages = self.helper._project_normalize_pages(
+                    doc.get("pages"),
+                    evidence.get(f"{side}_pages"),
+                    evidence.get(f"{side}_page"),
+                    evidence.get("page"),
+                )
+                text = (
+                    doc.get("preview")
+                    or evidence.get(f"{side}_text")
+                    or evidence.get(f"{side}_preview")
+                    or evidence.get(f"{side}_title")
+                    or evidence.get("text")
+                    or evidence.get("preview")
+                    or evidence.get("title")
+                    or ""
+                )
+                bbox = evidence.get(f"{side}_bbox") or evidence.get("bbox")
+                for index, page in enumerate(pages or []):
+                    append_location(
+                        locations,
+                        make_location(
+                            document_identifier_id=(
+                                item.get(f"{side}_document_identifier")
+                                or item.get(f"{side}_document_identifier_id")
+                                or item.get(f"{side}_document_id")
+                            ),
+                            file_name=file_name,
+                            page=page,
+                            bbox=bbox if index == 0 else None,
+                            text=text,
+                        ),
+                    )
+
+        if locations:
+            return locations
+        return collect_locations(cluster.get("items") or [])

@@ -7,6 +7,7 @@ from typing import Any
 
 from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
+from app.service.analysis.location_utils import normalize_bbox
 
 from .text_utils import (
     normalize_plain_text,
@@ -27,6 +28,14 @@ GENERIC_DEVIATION_RESPONSE_TOKENS = (
     "与采购文件条款相同",
     "与招标文件一致",
     "与采购文件一致",
+    "全部响应",
+    "全部满足",
+    "全部符合",
+    "全部无偏离",
+    "所有响应",
+    "所有满足",
+    "所有符合",
+    "所有无偏离",
     "无偏离",
     "未偏离",
     "没有偏离",
@@ -74,6 +83,18 @@ GENERIC_DUPLICATE_COMPARE_TOKENS = (
     "偏离",
     "详见",
 )
+
+
+def _merge_segment_bboxes(values: list[list[float] | None]) -> list[float] | None:
+    boxes = [box for box in values if isinstance(box, list) and len(box) >= 4]
+    if not boxes:
+        return None
+    return [
+        round(min(float(box[0]) for box in boxes), 2),
+        round(min(float(box[1]) for box in boxes), 2),
+        round(max(float(box[2]) for box in boxes), 2),
+        round(max(float(box[3]) for box in boxes), 2),
+    ]
 
 
 def extract_business_duplicate_segments(
@@ -148,7 +169,7 @@ def _segments_from_deviation_rows(
         for section in (deviation_sections.get("business") or []) + (deviation_sections.get("technical") or [])
         if isinstance(section, dict) and isinstance(section.get("page"), int)
     }
-    grouped: dict[tuple[str, int], list[str]] = {}
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
 
     for row in deviation_sections.get("rows") or []:
         if not isinstance(row, dict):
@@ -191,24 +212,29 @@ def _segments_from_deviation_rows(
             deviation_checker=deviation_checker,
             deviation_template_context=deviation_template_context,
         )
-        # 模板被剔掉后如果只剩“无偏离/满足”这类空洞响应，就不再参与查重。
-        if (star_matched or template_matched) and _is_generic_deviation_response_only_text(joined):
-            continue
         if len(compact_raw_text(joined)) < 6:
             continue
 
-        grouped.setdefault((title, page), []).append(joined)
+        grouped.setdefault((title, page), []).append(
+            {
+                "text": joined,
+                "bbox": normalize_bbox(row.get("bbox") or row.get("box")),
+            }
+        )
 
     segments: list[dict[str, Any]] = []
-    for (title, page), lines in grouped.items():
+    for (title, page), items in grouped.items():
         deduped_lines: list[str] = []
+        bboxes: list[list[float] | None] = []
         seen = set()
-        for line in lines:
+        for item in items:
+            line = str(item.get("text") or "")
             key = compact_raw_text(line)
             if not key or key in seen:
                 continue
             seen.add(key)
             deduped_lines.append(line)
+            bboxes.append(normalize_bbox(item.get("bbox")))
         if not deduped_lines:
             continue
         segments.append(
@@ -219,6 +245,7 @@ def _segments_from_deviation_rows(
                 "source": "deviation_table",
                 "preserve_common_lines": True,
                 "lines": deduped_lines,
+                "bbox": _merge_segment_bboxes(bboxes),
             }
         )
     return segments
@@ -311,6 +338,11 @@ def _is_deviation_status_only(text: str) -> bool:
     return not residue
 
 
+def _is_generic_deviation_similarity_line(text: str) -> bool:
+    """识别只适合精确比对、不适合相似度比对的通用偏离响应行。"""
+    return _is_generic_deviation_response_only_text(text)
+
+
 def _is_requirement_echo_duplicate_row(
     requirement: str,
     response: str,
@@ -375,6 +407,7 @@ def _segment_from_itemized_section(
         "pages": pages or [1],
         "kind": "table",
         "source": "itemized_pricing",
+        "bbox": normalize_bbox(section.get("bbox") or section.get("box")),
         "lines": lines,
     }
 
@@ -408,9 +441,9 @@ def _segment_from_deviation_section(
             deviation_checker=deviation_checker,
             deviation_template_context=deviation_template_context,
         )
-        if not compact_raw_text(line):
+        if _is_common_duplicate_scope_line(line):
             continue
-        if _is_generic_deviation_response_only_text(line):
+        if not compact_raw_text(line):
             continue
         cleaned_lines.append(line)
     lines = cleaned_lines
@@ -429,12 +462,20 @@ def _segment_from_deviation_section(
         pages.append(int(section["page"]))
 
     title = str(section.get("title") or "").strip() or "偏离表"
+    bboxes = [normalize_bbox(section.get("bbox") or section.get("box"))]
+    if isinstance(line_items, list):
+        bboxes.extend(
+            normalize_bbox(item.get("bbox") or item.get("box"))
+            for item in line_items
+            if isinstance(item, dict)
+        )
     return {
         "title": title,
         "pages": pages or [1],
         "kind": "table",
         "source": "deviation_table",
         "preserve_common_lines": True,
+        "bbox": _merge_segment_bboxes(bboxes),
         "lines": lines,
     }
 
@@ -745,6 +786,7 @@ def _is_generic_deviation_response_only_text(text: str) -> bool:
 
     normalized = re.sub(r"(?:^|[^a-z])p\d+(?:[-~]p?\d+)?", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"第\d+页", "", normalized)
+    normalized = re.sub(r"\d{1,4}", "", normalized)
     normalized = re.sub(r"[|｜/:：;；,，.。\-_\s]+", "", normalized)
     return has_generic_token and not normalized
 
@@ -830,18 +872,23 @@ def _is_deviation_response_line(text: str) -> bool:
 
 def _dedupe_scoped_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """对查重段落进行去重。"""
-    deduped: list[dict[str, Any]] = []
-    seen = set()
+    deduped_by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for segment in segments:
         joined = "\n".join(segment.get("lines") or [])
         key = compact_raw_text(
             f"{segment.get('source') or ''}\n{segment.get('title') or ''}\n{joined}"
         )
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
-        deduped.append(segment)
-    return deduped
+        existing = deduped_by_key.get(key)
+        if existing is None:
+            deduped_by_key[key] = segment
+            order.append(key)
+            continue
+        if not existing.get("bbox") and segment.get("bbox"):
+            deduped_by_key[key] = segment
+    return [deduped_by_key[key] for key in order]
 
 
 def _scoped_segment_sort_key(segment: dict[str, Any]) -> tuple[int, int, str]:

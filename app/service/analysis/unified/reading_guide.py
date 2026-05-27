@@ -206,9 +206,13 @@ class ReadingGuideMixin:
         """生成文档的简要来源信息。"""
         return {
             "role": meta.get("role"),
+            "identifier_id": meta.get("identifier_id"),
+            "document_identifier_id": meta.get("identifier_id"),
             "file_name": meta.get("file_name"),
+            "file_url": meta.get("file_path"),
             "bidder_key": meta.get("bidder_key"),
             "page_count": meta.get("page_count"),
+            "document_type": meta.get("role"),
             "purpose": purpose,
         }
 

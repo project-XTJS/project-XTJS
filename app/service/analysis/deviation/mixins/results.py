@@ -60,7 +60,16 @@ class ResultsMixin:
         for item in matches:
             dev_type = str(item.get("deviation_type") or "unclear")
             if not item.get("responded"):
-                missing_items.append({"requirement_id": item["requirement_id"], "requirement": item["requirement"]})
+                missing_items.append(
+                    {
+                        "requirement_id": item["requirement_id"],
+                        "requirement": item["requirement"],
+                        "requirement_page": item.get("requirement_page"),
+                        "requirement_bbox": item.get("requirement_bbox"),
+                        "response_page": item.get("response_page"),
+                        "response_bbox": item.get("response_bbox"),
+                    }
+                )
                 item["response_status"] = "missing"
                 item["risk_level"] = "high"
                 continue
@@ -72,6 +81,10 @@ class ResultsMixin:
                         "requirement_id": item["requirement_id"],
                         "requirement": item["requirement"],
                         "response_evidence": item.get("response_evidence", ""),
+                        "response_page": item.get("response_page"),
+                        "response_bbox": item.get("response_bbox"),
+                        "requirement_page": item.get("requirement_page"),
+                        "requirement_bbox": item.get("requirement_bbox"),
                     }
                 )
                 item["response_status"] = "negative_deviation"
@@ -94,6 +107,10 @@ class ResultsMixin:
                         "requirement_id": item["requirement_id"],
                         "requirement": item["requirement"],
                         "response_evidence": item.get("response_evidence", ""),
+                        "response_page": item.get("response_page"),
+                        "response_bbox": item.get("response_bbox"),
+                        "requirement_page": item.get("requirement_page"),
+                        "requirement_bbox": item.get("requirement_bbox"),
                     }
                 )
                 item["response_status"] = "unclear_deviation"
@@ -206,6 +223,8 @@ class ResultsMixin:
             {
                 "requirement_id": item["requirement_id"],
                 "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
                 "response_status": "technical_deviation_table_missing",
                 "response_evidence": evidence,
             }
@@ -217,6 +236,8 @@ class ResultsMixin:
                 "risk_level": "high",
                 "match_score": 0.0,
                 "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
                 "section_type": item.get("section_type"),
                 "response_page": None,
                 "deviation_type": "missing",
@@ -281,6 +302,8 @@ class ResultsMixin:
             {
                 "requirement_id": item["requirement_id"],
                 "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
                 "response_status": "bid_content_missing",
                 "response_evidence": "投标文件 OCR 内容为空，无法核验响应。",
             }
@@ -292,6 +315,8 @@ class ResultsMixin:
                 "risk_level": "high",
                 "match_score": 0.0,
                 "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
                 "section_type": item.get("section_type"),
                 "response_page": None,
                 "deviation_type": "missing",

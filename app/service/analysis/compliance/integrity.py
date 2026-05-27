@@ -503,6 +503,66 @@ class IntegrityChecker:
         }
 
     # 在区段列表中查找指定关键词的标题区段
+    def _catalog_locations(self, sections: list, toc_pages: set[int]) -> list[dict[str, Any]]:
+        locations: list[dict[str, Any]] = []
+        if not toc_pages:
+            return locations
+
+        for section in sections:
+            if not isinstance(section, dict) or section.get("page") not in toc_pages:
+                continue
+            text = str(section.get("text") or "").strip()
+            if not text:
+                continue
+            location = self._location_from_section(section)
+            if location:
+                locations.append(location)
+
+        return locations[:24]
+
+    def _template_locations_by_requirement(
+        self,
+        model_json: dict,
+        requirements: list[str],
+        attachment_mapping: dict[str, list[str]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        response_attachments = TemplateExtractor.extract_response_format_attachments(model_json)
+        attachments_by_title: dict[str, dict[str, Any]] = {}
+        attachments_by_number: dict[str, dict[str, Any]] = {}
+
+        for attachment in response_attachments:
+            if not isinstance(attachment, dict) or attachment.get("is_composite"):
+                continue
+            title = str(attachment.get("title") or "").strip()
+            compact_title = TemplateExtractor._compact(title)
+            if compact_title and compact_title not in attachments_by_title:
+                attachments_by_title[compact_title] = attachment
+            number = str(attachment.get("attachment_number") or "").strip()
+            if number and number not in attachments_by_number:
+                attachments_by_number[number] = attachment
+
+        locations_by_requirement: dict[str, list[dict[str, Any]]] = {}
+        for item in requirements:
+            item_title = str(item or "").strip()
+            if not item_title:
+                continue
+            attachment = attachments_by_title.get(TemplateExtractor._compact(item_title))
+            if attachment is None:
+                for ref in attachment_mapping.get(item_title) or []:
+                    attachment = attachments_by_number.get(str(ref).strip())
+                    if attachment is not None:
+                        break
+            if attachment is None:
+                continue
+            locations = [
+                location
+                for location in attachment.get("locations") or []
+                if isinstance(location, dict)
+            ]
+            locations_by_requirement[item_title] = locations[:1]
+
+        return locations_by_requirement
+
     def _heading_match_score(self, text: str, keyword: str) -> int:
         """标题匹配评分：优先选择更完整、更具体的附件标题。"""
         normalized_text = self._normalize_title_text(text)
@@ -792,6 +852,12 @@ class IntegrityChecker:
         data_node = test_json.get('data', test_json)
         sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
         toc_pages = self._collect_toc_pages(sections)
+        catalog_locations = self._catalog_locations(sections, toc_pages)
+        template_locations_by_item = self._template_locations_by_requirement(
+            model_json,
+            reqs,
+            attachment_mapping,
+        )
 
         all_details = {}
         for item in reqs:
@@ -815,6 +881,7 @@ class IntegrityChecker:
                 "category": cat,
                 "scored": True,
                 "locations": [self._location_from_section(match_section)] if match_section else [],
+                "template_locations": template_locations_by_item.get(item) or [],
             }
 
         scored_details = [v for v in all_details.values() if v.get("scored", True)]
@@ -828,4 +895,8 @@ class IntegrityChecker:
             "scored_item_count": total,
             "ignored_item_count": len(all_details) - total,
             "attachment_mapping": attachment_mapping,
+            "toc_pages": sorted(toc_pages),
+            "business_catalog_pages": sorted(toc_pages),
+            "business_catalog_locations": catalog_locations,
+            "template_locations_by_item": template_locations_by_item,
         }

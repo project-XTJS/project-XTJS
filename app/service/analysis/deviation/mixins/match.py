@@ -36,6 +36,7 @@ class MatchMixin:
             "section": "",
             "title": "",
             "page": None,
+            "bbox": None,
             "line_number": None,
             "hits": 0,
             "long_hit": False,
@@ -51,7 +52,7 @@ class MatchMixin:
                     iter_items = section_line_items
                 else:
                     iter_items = [
-                        {"page": sec.get("page"), "line_number": None, "text": line}
+                        {"page": sec.get("page"), "bbox": sec.get("bbox"), "line_number": None, "text": line}
                         for line in (sec.get("lines") or self._split_lines(sec.get("text", "")))
                     ]
 
@@ -79,6 +80,7 @@ class MatchMixin:
                             "section": group,
                             "title": sec.get("title", ""),
                             "page": item.get("page"),
+                            "bbox": item.get("bbox"),
                             "line_number": item.get("line_number"),
                             "hits": hits,
                             "long_hit": long_hit,
@@ -94,6 +96,7 @@ class MatchMixin:
                             "section": group,
                             "title": sec.get("title", ""),
                             "page": sec.get("page"),
+                            "bbox": sec.get("bbox"),
                             "line_number": sec.get("start_line"),
                             "hits": 1,
                             "long_hit": True,
@@ -117,6 +120,8 @@ class MatchMixin:
         return {
             "requirement_id": requirement["requirement_id"],
             "requirement": requirement["requirement"],
+            "requirement_page": requirement.get("page"),
+            "requirement_bbox": requirement.get("bbox"),
             "section_type": requirement["section_type"],
             "responded": matched,
             "explicit_response": matched,
@@ -125,6 +130,7 @@ class MatchMixin:
             "response_section": best["section"],
             "response_section_title": best["title"],
             "response_page": best["page"],
+            "response_bbox": best.get("bbox"),
             "response_line_number": best["line_number"],
             "match_score": round(float(best["score"]), 4),
             "deviation_type": dev_type,
@@ -200,6 +206,8 @@ class MatchMixin:
         return {
             "requirement_id": requirement["requirement_id"],
             "requirement": requirement["requirement"],
+            "requirement_page": requirement.get("page"),
+            "requirement_bbox": requirement.get("bbox"),
             "section_type": requirement["section_type"],
             "responded": responded,
             "explicit_response": responded,
@@ -208,6 +216,7 @@ class MatchMixin:
             "response_section": best_row.get("group", ""),
             "response_section_title": best_row.get("title", ""),
             "response_page": best_row.get("page"),
+            "response_bbox": best_row.get("bbox"),
             "response_line_number": None,
             "match_score": round(float(best_score), 4),
             "deviation_type": dev_type,

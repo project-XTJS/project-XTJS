@@ -22,6 +22,9 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -52,6 +55,7 @@ from app.schemas.postgresql import (
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
     ProjectDuplicateCheckRequest,
+    ProjectResultFrontendUpdateRequest,
     ProjectResultUpdateRequest,
     ProjectResultUpsertRequest,
     ProjectRelationUpdateRequest,
@@ -312,23 +316,41 @@ def _preview_payload_from_source(
                 raise ValueError(f"page {page} is out of range, max page is {page_count}")
             pdf_page = pdf.load_page(page - 1)
             rect = pdf_page.rect
-            # 优先用文本定位高亮
-            text_rects = _apply_pdf_text_highlights(
-                pdf_page,
-                highlight_phrases=highlight_phrases or [],
-                highlight_bbox=highlight_bbox,
-            )
+            # Prefer backend coordinates; text matching is only a fallback.
+            source_rects = []
+            seen_source_rects = set()
+            raw_source_rects = list(highlight_rects or [])
+            if highlight_bbox:
+                raw_source_rects.append(highlight_bbox)
+            for rect_values in raw_source_rects:
+                if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
+                    continue
+                try:
+                    key = tuple(round(float(rect_values[index]), 2) for index in range(4))
+                except (TypeError, ValueError):
+                    continue
+                if key in seen_source_rects:
+                    continue
+                seen_source_rects.add(key)
+                source_rects.append(list(key))
             direct_rects = []
-            if not text_rects:
-                # 文本高亮失败则用 OCR 精修后的矩形框
+            if source_rects:
+                # OCR refinement keeps a broad source box from covering too much text.
                 refined_rects = _refine_highlight_rects_via_ocr(
                     pdf_page,
-                    highlight_rects=highlight_rects or [],
+                    highlight_rects=source_rects,
                     highlight_phrases=highlight_phrases or [],
                 )
                 direct_rects = _apply_pdf_rect_highlights(
                     pdf_page,
                     highlight_rects=refined_rects,
+                )
+            text_rects = []
+            if not direct_rects:
+                text_rects = _apply_pdf_text_highlights(
+                    pdf_page,
+                    highlight_phrases=highlight_phrases or [],
+                    highlight_bbox=highlight_bbox,
                 )
             pix = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
             image_bytes = pix.tobytes("png")
@@ -469,14 +491,20 @@ def _word_matches_highlight_token(word_text: str, tokens: list[str]) -> bool:
 
 
 # 收集 PDF 页内需要高亮的矩形（基于文本词级定位）
-def _collect_pdf_highlight_rects(pdf_page, *, highlight_phrases: list[str], highlight_bbox: Optional[list[float]]):
+def _collect_pdf_highlight_rects(
+    pdf_page,
+    *,
+    highlight_phrases: list[str],
+    highlight_bbox: Optional[list[float]],
+):
     import fitz
 
     tokens = _highlight_tokens_from_phrases(highlight_phrases)
     if not tokens:
         return []
 
-    bbox_rect = fitz.Rect(highlight_bbox) if highlight_bbox else None
+    coerced_bbox = _coerce_rect_to_pdf_page_space(pdf_page, highlight_bbox) if highlight_bbox else None
+    bbox_rect = fitz.Rect(coerced_bbox) if coerced_bbox else None
 
     def iter_matches(restrict_bbox: bool):
         matched = []
@@ -844,169 +872,35 @@ def _run_project_duplicate_check(
     return duplicate_result
 
 
-# 执行投标文件整体审查并持久化结果
-def _run_project_bid_document_review(
+def _load_project_review_documents(
     *,
     identifier_id: str,
-    document_types: Optional[list[str]],
-    result_key: str,
     db_service: PostgreSQLService,
-    bid_document_review_service: BidDocumentReviewService,
-):
+) -> dict[str, Any]:
     payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
     if not payload_data:
         raise HTTPException(status_code=404, detail="项目不存在")
-
-    review_result = bid_document_review_service.check_project_documents(
-        project_identifier=identifier_id,
-        project=payload_data["project"],
-        document_records=payload_data["documents"],
-        document_types=document_types,
-    )
-    db_service.upsert_project_result_item(
-        project_identifier_id=identifier_id,
-        result_key=result_key,
-        result_value=review_result,
-    )
-    return review_result
+    return payload_data
 
 
-# 从审查结果中提取“一人多用”分析视图
-def _build_personnel_reuse_result(review_result: dict) -> dict:
-    groups = {}
-    total_document_count = 0
-    total_skipped_document_count = 0
-    total_personnel_count = 0
-    total_reused_name_count = 0
 
-    for role, group in (review_result.get("groups") or {}).items():
-        summary = group.get("summary") or {}
-        personnel_reuse_check = group.get("personnel_reuse_check") or {}
-        group_document_count = int(summary.get("document_count") or 0)
-        group_skipped_count = int(summary.get("skipped_document_count") or 0)
-        group_personnel_count = int(summary.get("personnel_count") or 0)
-        group_reused_name_count = int(summary.get("reused_name_count") or 0)
-
-        groups[role] = {
-            "documents": group.get("documents") or [],
-            "skipped_documents": group.get("skipped_documents") or [],
-            "personnel_reuse_check": personnel_reuse_check,
-            "summary": {
-                "document_count": group_document_count,
-                "skipped_document_count": group_skipped_count,
-                "personnel_count": group_personnel_count,
-                "reused_name_count": group_reused_name_count,
-                "suspicious": bool(group_reused_name_count),
-            },
-        }
-
-        total_document_count += group_document_count
-        total_skipped_document_count += group_skipped_count
-        total_personnel_count += group_personnel_count
-        total_reused_name_count += group_reused_name_count
-
-    config = review_result.get("config") or {}
-    return {
-        "project": review_result.get("project"),
-        "config": {
-            "document_types": config.get("document_types") or [],
-            "personnel_reuse_scope": config.get("personnel_reuse_scope"),
-            "personnel_table_extraction_engine": config.get("personnel_table_extraction_engine"),
-            "personnel_text_extraction_engine": config.get("personnel_text_extraction_engine"),
-            "business_bid_personnel_scope": config.get("business_bid_personnel_scope"),
-            "technical_bid_personnel_scope": config.get("technical_bid_personnel_scope"),
-        },
-        "groups": groups,
-        "summary": {
-            "requested_document_types": config.get("document_types") or [],
-            "document_count": total_document_count,
-            "skipped_document_count": total_skipped_document_count,
-            "personnel_count": total_personnel_count,
-            "reused_name_count": total_reused_name_count,
-            "suspicious": bool(total_reused_name_count),
-        },
-    }
-
-
-# 从审查结果中提取“错别字检查”分析视图
-def _build_typo_check_result(review_result: dict) -> dict:
-    groups = {}
-    total_document_count = 0
-    total_skipped_document_count = 0
-    total_typo_issue_count = 0
-    total_shared_typo_issue_count = 0
-    total_suspicious_typo_document_count = 0
-
-    for role, group in (review_result.get("groups") or {}).items():
-        summary = group.get("summary") or {}
-        typo_check = group.get("typo_check") or {}
-        group_document_count = int(summary.get("document_count") or 0)
-        group_skipped_count = int(summary.get("skipped_document_count") or 0)
-        group_typo_issue_count = int(summary.get("typo_issue_count") or 0)
-        group_shared_typo_issue_count = int(summary.get("shared_typo_issue_count") or 0)
-        group_suspicious_document_count = int(summary.get("suspicious_typo_document_count") or 0)
-
-        groups[role] = {
-            "documents": group.get("documents") or [],
-            "skipped_documents": group.get("skipped_documents") or [],
-            "typo_check": typo_check,
-            "summary": {
-                "document_count": group_document_count,
-                "skipped_document_count": group_skipped_count,
-                "typo_issue_count": group_typo_issue_count,
-                "shared_typo_issue_count": group_shared_typo_issue_count,
-                "suspicious_typo_document_count": group_suspicious_document_count,
-                "suspicious": bool(group_typo_issue_count),
-            },
-        }
-
-        total_document_count += group_document_count
-        total_skipped_document_count += group_skipped_count
-        total_typo_issue_count += group_typo_issue_count
-        total_shared_typo_issue_count += group_shared_typo_issue_count
-        total_suspicious_typo_document_count += group_suspicious_document_count
-
-    config = review_result.get("config") or {}
-    result = {
-        "project": review_result.get("project"),
-        "config": {
-            "document_types": config.get("document_types") or [],
-            "typo_detection_engine": config.get("typo_detection_engine"),
-            "typo_model_name": config.get("typo_model_name"),
-            "typo_model_threshold": config.get("typo_model_threshold"),
-            "typo_engine_statuses": config.get("typo_engine_statuses") or [],
-            "typo_model_load_error": config.get("typo_model_load_error"),
-            "typo_stopword_dictionary_enabled": config.get("typo_stopword_dictionary_enabled"),
-        },
-        "groups": groups,
-        "summary": {
-            "requested_document_types": config.get("document_types") or [],
-            "document_count": total_document_count,
-            "skipped_document_count": total_skipped_document_count,
-            "typo_issue_count": total_typo_issue_count,
-            "shared_typo_issue_count": total_shared_typo_issue_count,
-            "suspicious_typo_document_count": total_suspicious_typo_document_count,
-            "suspicious": bool(total_typo_issue_count),
-        },
-    }
-    return result
-
-
-# 项目人员复用检查（组合调用审查+构建视图）
+# 项目人员复用检查
 def _run_project_personnel_reuse_check(
     *,
     identifier_id: str,
     db_service: PostgreSQLService,
     bid_document_review_service: BidDocumentReviewService,
 ) -> dict:
-    review_result = _run_project_bid_document_review(
+    payload_data = _load_project_review_documents(
         identifier_id=identifier_id,
-        document_types=[DuplicateCheckScope.BUSINESS_BID.value],
-        result_key="bid_document_review",
         db_service=db_service,
-        bid_document_review_service=bid_document_review_service,
     )
-    personnel_result = _build_personnel_reuse_result(review_result)
+    personnel_result = bid_document_review_service.check_project_personnel_reuse(
+        project_identifier=identifier_id,
+        project=payload_data["project"],
+        document_records=payload_data["documents"],
+        document_types=[DuplicateCheckScope.BUSINESS_BID.value],
+    )
     db_service.upsert_project_result_item(
         project_identifier_id=identifier_id,
         result_key="personnel_reuse_check",
@@ -1015,7 +909,7 @@ def _run_project_personnel_reuse_check(
     return personnel_result
 
 
-# 项目错别字检查（组合调用审查+构建视图）
+# 项目错别字检查
 def _run_project_typo_check(
     *,
     identifier_id: str,
@@ -1024,14 +918,16 @@ def _run_project_typo_check(
     document_types: Optional[list[str]] = None,
 ) -> dict:
     # document_types=None 表示全量错别字；传列表则只检查指定类型。
-    review_result = _run_project_bid_document_review(
+    payload_data = _load_project_review_documents(
         identifier_id=identifier_id,
-        document_types=document_types,
-        result_key="bid_document_review",
         db_service=db_service,
-        bid_document_review_service=bid_document_review_service,
     )
-    typo_result = _build_typo_check_result(review_result)
+    typo_result = bid_document_review_service.check_project_typos(
+        project_identifier=identifier_id,
+        project=payload_data["project"],
+        document_records=payload_data["documents"],
+        document_types=document_types,
+    )
     db_service.upsert_project_result_item(
         project_identifier_id=identifier_id,
         result_key="typo_check",
@@ -1151,6 +1047,9 @@ def _build_project_visualization_payload(
         relation_items.append(relation_payload)
 
     compact_display_results = _compact_display_results_for_response(display_results)
+    frontend_results = dict(
+        (refreshed_result_record or project_result or {}).get("result_fot_frontend") or {}
+    )
     payload = {
         "project": project_detail.get("project") or {"identifier_id": identifier_id},
         "project_links": _project_api_links(identifier_id),
@@ -1159,6 +1058,8 @@ def _build_project_visualization_payload(
         "result_record_meta": _build_result_record_meta(refreshed_result_record or project_result),
         "results": compact_display_results,
         "available_result_keys": sorted(compact_display_results.keys()),
+        "result_fot_frontend": frontend_results,
+        "available_frontend_result_keys": sorted(frontend_results.keys()),
     }
     if include_result_record:
         payload["result_record"] = refreshed_result_record or project_result
@@ -1367,16 +1268,18 @@ def _build_project_display_results(
 
 
 _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
-    ("typo_check", "错别字检查"),
-    ("bid_document_review", "投标文件审查"),
-    ("personnel_reuse_check", "人员复用检查"),
-    ("business_bid_format_review", "商务标形式审查"),
     ("business_bid_duplicate_check", "商务标查重"),
     ("technical_bid_duplicate_check", "技术标查重"),
+    ("business_bid_format_review", "商务标形式审查"),
+    ("typo_check", "错别字检查"),
+    ("personnel_reuse_check", "人员复用检查"),
     ("business_bid_duplicate_clusters", "商务标查重聚类"),
     ("technical_bid_duplicate_clusters", "技术标查重聚类"),
 )
 _REPORT_RESULT_LABEL_BY_KEY = dict(_REPORT_RESULT_LABELS)
+_REPORT_ISSUE_TABLE_HEADERS = ["问题项目", "对应文件", "页码", "问题描述"]
+_REPORT_WORD_LATIN_FONT = "Times New Roman"
+_REPORT_WORD_EAST_ASIA_FONT = "宋体"
 
 
 def _report_compact_text(value: Any, *, max_length: int = 260) -> str:
@@ -1391,43 +1294,7 @@ def _report_compact_text(value: Any, *, max_length: int = 260) -> str:
             text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except TypeError:
             text = str(value)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > max_length:
-        return f"{text[:max_length].rstrip()}..."
-    return text
-
-
-def _report_md_cell(value: Any, *, max_length: int = 260) -> str:
-    text = _report_compact_text(value, max_length=max_length)
-    return text.replace("|", "\\|") or "-"
-
-
-def _report_append_table(
-    lines: list[str],
-    headers: list[str],
-    rows: list[list[Any]],
-    *,
-    empty_text: str = "无",
-) -> None:
-    if not rows:
-        lines.append(empty_text)
-        lines.append("")
-        return
-
-    lines.append("| " + " | ".join(_report_md_cell(header, max_length=80) for header in headers) + " |")
-    lines.append("| " + " | ".join("---" for _ in headers) + " |")
-    for row in rows:
-        normalized = list(row[: len(headers)])
-        if len(normalized) < len(headers):
-            normalized.extend([""] * (len(headers) - len(normalized)))
-        lines.append("| " + " | ".join(_report_md_cell(cell) for cell in normalized) + " |")
-    lines.append("")
-
-
-def _report_summary_rows(summary: Any) -> list[list[Any]]:
-    if not isinstance(summary, dict):
-        return []
-    return [[key, value] for key, value in summary.items()]
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _report_page_text(item: dict[str, Any], *, side: str | None = None) -> str:
@@ -1439,25 +1306,6 @@ def _report_page_text(item: dict[str, Any], *, side: str | None = None) -> str:
         value = item.get(key)
         if value not in (None, "", []):
             return _report_compact_text(value, max_length=120)
-    return ""
-
-
-def _report_file_url_text(item: dict[str, Any], *, side: str | None = None) -> str:
-    url_keys = []
-    if side:
-        url_keys.append(f"{side}_file_url")
-    url_keys.append("file_url")
-    for key in url_keys:
-        value = str(item.get(key) or "").strip()
-        if value.startswith(("http://", "https://", "minio://")):
-            return value
-    urls_by_file = item.get("file_urls_by_file")
-    if isinstance(urls_by_file, dict) and urls_by_file:
-        return "; ".join(
-            f"{file_name}: {url}"
-            for file_name, url in urls_by_file.items()
-            if str(url or "").strip()
-        )
     return ""
 
 
@@ -1482,11 +1330,61 @@ def _report_issue_title(issue: dict[str, Any]) -> str:
 
 
 def _report_issue_message(issue: dict[str, Any]) -> str:
-    for key in ("message", "summary", "text", "suggestion", "preview"):
+    for key in ("reason", "message", "summary", "text", "suggestion", "preview", "description", "detail"):
         value = issue.get(key)
         if value not in (None, "", []):
             return _report_compact_text(value)
     return ""
+
+
+def _report_issue_description(issue: dict[str, Any]) -> str:
+    parts: list[Any] = []
+    field_labels = (
+        ("matched_text", "命中文本"),
+        ("wrong", "疑似文本"),
+        ("suggestion", "建议"),
+        ("correct", "建议"),
+        ("context", "上下文"),
+        ("preview", "片段"),
+        ("description", "描述"),
+        ("detail", "详情"),
+        ("message", "说明"),
+        ("text", "文本"),
+    )
+    for key, label in field_labels:
+        value = issue.get(key)
+        if value not in (None, "", []):
+            parts.append(f"{label}：{_report_compact_text(value, max_length=300)}")
+    return _report_join_parts(parts, max_length=500)
+
+
+def _report_join_parts(parts: list[Any], *, max_length: int = 500) -> str:
+    texts: list[str] = []
+    for part in parts:
+        text = _report_compact_text(part, max_length=max_length).strip()
+        if text and text not in texts:
+            texts.append(text)
+    return "；".join(texts)
+
+
+def _report_file_and_page(item: dict[str, Any], *, side: str | None = None) -> tuple[str, str]:
+    file_name = _report_file_name(item, side=side)
+    page = _report_page_text(item, side=side)
+    if not side and isinstance(item.get("locations"), list):
+        location_files: list[str] = []
+        location_pages: list[str] = []
+        for location in item.get("locations") or []:
+            if not isinstance(location, dict):
+                continue
+            location_file = str(location.get("file_name") or "").strip()
+            location_page = _report_compact_text(location.get("page"), max_length=40)
+            if location_file and location_file not in location_files:
+                location_files.append(location_file)
+            if location_page and location_page not in location_pages:
+                location_pages.append(location_page)
+        file_name = file_name or "; ".join(location_files)
+        page = page or "; ".join(location_pages)
+    return file_name, page
 
 
 def _report_ranges_by_file(value: Any) -> str:
@@ -1511,116 +1409,200 @@ def _report_ranges_by_file(value: Any) -> str:
     return "; ".join(parts)
 
 
-def _render_report_overview(lines: list[str], selected_results: dict[str, Any]) -> None:
-    rows: list[list[Any]] = []
-    for key, payload in selected_results.items():
-        summary = payload.get("summary") if isinstance(payload, dict) else None
-        rows.append([
-            _REPORT_RESULT_LABEL_BY_KEY.get(key, key),
-            key,
-            _report_compact_text(summary or payload, max_length=420),
-        ])
-    lines.append("## 总览")
-    _report_append_table(lines, ["审查项", "result_key", "摘要"], rows)
+def _ordered_report_results(result_payload: dict[str, Any]) -> dict[str, Any]:
+    ordered: dict[str, Any] = {}
+    for key, _label in _REPORT_RESULT_LABELS:
+        if key in result_payload:
+            ordered[key] = result_payload[key]
+    for key, value in result_payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
 
-def _render_bid_document_review_section(lines: list[str], payload: dict[str, Any]) -> None:
-    lines.append("## 投标文件审查")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
+def _set_word_rfonts(target: Any) -> None:
+    rpr = target.get_or_add_rPr()
+    rfonts = rpr.rFonts
+    if rfonts is None:
+        rfonts = OxmlElement("w:rFonts")
+        rpr.append(rfonts)
+    rfonts.set(qn("w:ascii"), _REPORT_WORD_LATIN_FONT)
+    rfonts.set(qn("w:hAnsi"), _REPORT_WORD_LATIN_FONT)
+    rfonts.set(qn("w:cs"), _REPORT_WORD_LATIN_FONT)
+    rfonts.set(qn("w:eastAsia"), _REPORT_WORD_EAST_ASIA_FONT)
 
-    group_rows: list[list[Any]] = []
-    document_rows: list[list[Any]] = []
-    for group_key, group in (payload.get("groups") or {}).items():
-        if not isinstance(group, dict):
+
+def _set_word_run_fonts(run: Any) -> None:
+    run.font.name = _REPORT_WORD_LATIN_FONT
+    _set_word_rfonts(run._element)
+
+
+def _set_word_style_fonts(style: Any) -> None:
+    style.font.name = _REPORT_WORD_LATIN_FONT
+    _set_word_rfonts(style._element)
+
+
+def _apply_report_document_fonts(document: Document) -> None:
+    for style_name in ("Normal", "Title", "Heading 1", "Heading 2", "Heading 3", "List Bullet"):
+        try:
+            _set_word_style_fonts(document.styles[style_name])
+        except KeyError:
             continue
-        group_summary = group.get("summary") or {}
-        group_rows.append([
-            group_key,
-            group_summary.get("document_count"),
-            group_summary.get("typo_issue_count"),
-            group_summary.get("reused_name_count"),
-            group_summary.get("suspicious"),
-        ])
-        for document in group.get("documents") or []:
-            if not isinstance(document, dict):
+
+    for paragraph in document.paragraphs:
+        for run in paragraph.runs:
+            _set_word_run_fonts(run)
+    for table in document.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        _set_word_run_fonts(run)
+
+
+def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] = None) -> None:
+    paragraph = document.add_paragraph(style=style)
+    run = paragraph.add_run(text)
+    _set_word_run_fonts(run)
+
+
+def _set_word_cell_text(cell: Any, text: Any, *, bold: bool = False) -> None:
+    cell.text = ""
+    paragraph = cell.paragraphs[0]
+    run = paragraph.add_run(str(text or ""))
+    run.bold = bold
+    _set_word_run_fonts(run)
+
+
+def _add_word_table(document: Document, headers: list[str], rows: list[list[str]]) -> None:
+    if not headers:
+        return
+    table = document.add_table(rows=1, cols=len(headers))
+    try:
+        table.style = "Table Grid"
+    except KeyError:
+        pass
+    for index, header in enumerate(headers):
+        cell = table.rows[0].cells[index]
+        _set_word_cell_text(cell, header, bold=True)
+    for row in rows:
+        cells = table.add_row().cells
+        normalized = list(row[: len(headers)])
+        if len(normalized) < len(headers):
+            normalized.extend([""] * (len(headers) - len(normalized)))
+        for index, value in enumerate(normalized):
+            _set_word_cell_text(cells[index], value)
+    document.add_paragraph()
+
+
+def _report_issue_table_row(row: list[str]) -> list[str]:
+    normalized = list(row[:5])
+    if len(normalized) < 5:
+        normalized.extend([""] * (5 - len(normalized)))
+    problem, description, _reason, file_name, page = normalized
+    return [problem, file_name, page, description]
+
+
+def _add_report_issue_table(document: Document, rows: list[list[str]]) -> None:
+    _add_word_table(
+        document,
+        _REPORT_ISSUE_TABLE_HEADERS,
+        [_report_issue_table_row(row) for row in rows],
+    )
+
+
+def _report_project_name(project: Optional[dict[str, Any]]) -> str:
+    if not isinstance(project, dict):
+        return ""
+    return str(project.get("project_name") or project.get("identifier_id") or "").strip()
+
+
+def _report_bound_document_rows(project_detail: Optional[dict[str, Any]]) -> list[list[str]]:
+    field_groups = (
+        ("招标文件", "tender_identifier_id", "tender_file_name"),
+        ("商务标文件", "business_bid_identifier_id", "business_bid_file_name"),
+        ("技术标文件", "technical_bid_identifier_id", "technical_bid_file_name"),
+    )
+    rows: list[list[str]] = []
+    seen: set[tuple[str, str]] = set()
+    for relation in (project_detail or {}).get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        for label, identifier_field, file_name_field in field_groups:
+            identifier = str(relation.get(identifier_field) or "").strip()
+            file_name = str(relation.get(file_name_field) or "").strip()
+            if not identifier and not file_name:
                 continue
-            document_rows.append([
-                group_key,
-                _report_file_name(document),
-                document.get("page_count"),
-                _report_file_url_text(document),
-            ])
-    _report_append_table(
-        lines,
-        ["文档类型", "文档数", "错别字数", "复用姓名数", "是否可疑"],
-        group_rows,
-    )
-    _report_append_table(
-        lines,
-        ["文档类型", "文件", "页数", "file_url"],
-        document_rows,
-    )
+            key = (label, identifier or file_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append([label, file_name or identifier])
+    return rows
 
 
-def _render_typo_section(lines: list[str], payload: dict[str, Any]) -> None:
-    lines.append("## 错别字检查")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
+def _report_issue_row(
+    rows: list[list[str]],
+    *,
+    problem: Any,
+    reason: Any,
+    description: Any = "",
+    file_name: Any = "",
+    page: Any = "",
+) -> None:
+    problem_text = _report_compact_text(problem, max_length=260)
+    description_text = _report_compact_text(description, max_length=700)
+    reason_text = _report_compact_text(reason, max_length=500)
+    file_text = _report_compact_text(file_name, max_length=260)
+    page_text = _report_compact_text(page, max_length=120)
+    if not any((problem_text, description_text, reason_text, file_text, page_text)):
+        return
+    rows.append([
+        problem_text or "未命名问题",
+        description_text or "-",
+        reason_text or "-",
+        file_text or "-",
+        page_text or "-",
+    ])
 
-    issue_rows: list[list[Any]] = []
-    shared_rows: list[list[Any]] = []
+
+def _collect_typo_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
     groups = payload.get("groups") or {"default": payload}
-    for group_key, group in groups.items():
+    for group in groups.values():
         if not isinstance(group, dict):
             continue
         check = group.get("typo_check") if isinstance(group.get("typo_check"), dict) else group
-        for document in check.get("documents") or []:
+        document_items = check.get("documents") or []
+        if not document_items and isinstance(check.get("issues"), list):
+            document_items = [{"issues": check.get("issues")}]
+        for document in document_items:
             if not isinstance(document, dict):
                 continue
-            document_url = _report_file_url_text(document)
-            for issue in document.get("items") or []:
+            document_file, document_page = _report_file_and_page(document)
+            for issue in document.get("issues") or []:
                 if not isinstance(issue, dict):
                     continue
-                issue_rows.append([
-                    group_key,
-                    _report_file_name(issue) or _report_file_name(document),
-                    _report_page_text(issue),
-                    issue.get("matched_text"),
-                    issue.get("suggestion"),
-                    _report_issue_message(issue),
-                    _report_file_url_text(issue) or document_url,
-                ])
-        for shared in check.get("shared_issues") or []:
-            if not isinstance(shared, dict):
-                continue
-            shared_rows.append([
-                group_key,
-                shared.get("matched_text"),
-                shared.get("suggestion"),
-                shared.get("document_count"),
-                shared.get("occurrence_count"),
-            ])
-
-    lines.append("### 问题明细")
-    _report_append_table(
-        lines,
-        ["文档类型", "文件", "页码", "疑似文本", "建议", "上下文", "file_url"],
-        issue_rows,
-    )
-    lines.append("### 跨文件重复错别字")
-    _report_append_table(
-        lines,
-        ["文档类型", "疑似文本", "建议", "涉及文件数", "出现次数"],
-        shared_rows,
-    )
+                issue_file, issue_page = _report_file_and_page(issue)
+                matched = issue.get("matched_text") or issue.get("wrong") or _report_issue_title(issue)
+                suggestion = issue.get("suggestion") or issue.get("correct")
+                problem = _report_join_parts(["错别字", matched, f"建议：{suggestion}" if suggestion else ""])
+                reason = _report_issue_message(issue) or "疑似错别字"
+                _report_issue_row(
+                    rows,
+                    problem=problem,
+                    description=_report_issue_description(issue),
+                    reason=reason,
+                    file_name=issue_file or document_file,
+                    page=issue_page or document_page,
+                )
+    return rows
 
 
-def _render_personnel_section(lines: list[str], payload: dict[str, Any]) -> None:
-    lines.append("## 人员复用检查")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
-
-    rows: list[list[Any]] = []
+def _collect_personnel_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
     groups = payload.get("groups") or {"default": payload}
-    for group_key, group in groups.items():
+    for group in groups.values():
         if not isinstance(group, dict):
             continue
         check = (
@@ -1628,240 +1610,339 @@ def _render_personnel_section(lines: list[str], payload: dict[str, Any]) -> None
             if isinstance(group.get("personnel_reuse_check"), dict)
             else group
         )
-        for item in check.get("items") or []:
+        for item in check.get("issues") or []:
             if not isinstance(item, dict):
                 continue
-            evidence_items = item.get("items") or [{}]
-            for evidence in evidence_items:
+            evidence_items = item.get("occurrences") if isinstance(item.get("occurrences"), list) else [item]
+            reason = _report_issue_message(item) or _report_join_parts([
+                item.get("risk_level"),
+                item.get("roles"),
+                f"涉及文件数：{item.get('document_count')}" if item.get("document_count") else "",
+                f"出现次数：{item.get('occurrence_count')}" if item.get("occurrence_count") else "",
+            ])
+            description = _report_join_parts([
+                f"姓名：{item.get('name')}" if item.get("name") else "",
+                f"角色：{item.get('roles')}" if item.get("roles") else "",
+                f"涉及文件数：{item.get('document_count')}" if item.get("document_count") else "",
+                f"出现次数：{item.get('occurrence_count')}" if item.get("occurrence_count") else "",
+            ])
+            for evidence in evidence_items or [item]:
                 if not isinstance(evidence, dict):
                     continue
-                rows.append([
-                    group_key,
-                    item.get("name"),
-                    item.get("risk_level"),
-                    item.get("document_count"),
-                    item.get("occurrence_count"),
-                    item.get("roles"),
-                    _report_file_name(evidence),
-                    _report_page_text(evidence),
-                    _report_file_url_text(evidence),
-                ])
-    _report_append_table(
-        lines,
-        ["文档类型", "姓名", "风险", "涉及文件数", "出现次数", "角色", "文件", "页码", "file_url"],
-        rows,
-    )
+                file_name, page = _report_file_and_page(evidence)
+                _report_issue_row(
+                    rows,
+                    problem=item.get("name") or _report_issue_title(item) or "人员复用",
+                    description=description or _report_issue_description(evidence),
+                    reason=reason or "疑似一人多用",
+                    file_name=file_name or _report_file_name(item),
+                    page=page or _report_page_text(item),
+                )
+    return rows
 
 
-def _render_business_format_section(lines: list[str], payload: dict[str, Any]) -> None:
-    lines.append("## 商务标形式审查")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
+def _collect_business_format_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    frontend_items = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    if frontend_items:
+        for item in frontend_items:
+            if not isinstance(item, dict):
+                continue
+            issue = item.get("issue") if isinstance(item.get("issue"), dict) else item
+            file_name, page = _report_file_and_page(item)
+            issue_file, issue_page = _report_file_and_page(issue)
+            _report_issue_row(
+                rows,
+                problem=_report_join_parts([
+                    item.get("bidder_name"),
+                    item.get("check_name"),
+                    _report_issue_title(issue),
+                ]),
+                description=_report_issue_description(issue) or _report_issue_message(issue),
+                reason=_report_join_parts([
+                    item.get("check_code"),
+                    issue.get("severity"),
+                    issue.get("status"),
+                ]),
+                file_name=file_name or issue_file,
+                page=page or issue_page,
+            )
+        return rows
 
-    document_rows: list[list[Any]] = []
-    check_rows: list[list[Any]] = []
-    issue_rows: list[list[Any]] = []
     for bidder in payload.get("bidders") or []:
         if not isinstance(bidder, dict):
             continue
         bidder_name = bidder.get("bidder_name") or bidder.get("bidder_key")
-        for role, document in (bidder.get("documents") or {}).items():
-            if not isinstance(document, dict):
+        for status_key, issues in (bidder.get("issues") or {}).items():
+            if not isinstance(issues, list):
                 continue
-            document_rows.append([
-                bidder_name,
-                role,
-                _report_file_name(document),
-                _report_file_url_text(document),
-            ])
-        for check_code, check in (bidder.get("checks") or {}).items():
-            if not isinstance(check, dict):
-                continue
-            review = check.get("review") or {}
-            check_rows.append([
-                bidder_name,
-                check_code,
-                check.get("check_name"),
-                review.get("status") or check.get("status"),
-                review.get("summary") or check.get("summary"),
-            ])
-        for status_key in ("failed", "missing", "unclear", "passed"):
-            for issue in ((bidder.get("issues") or {}).get(status_key) or []):
+            for issue in issues:
                 if not isinstance(issue, dict):
                     continue
-                issue_rows.append([
-                    bidder_name,
-                    status_key,
-                    issue.get("severity"),
-                    issue.get("check_name") or issue.get("check_code"),
-                    _report_issue_title(issue),
-                    _report_issue_message(issue),
-                    _report_page_text(issue),
-                    _report_file_url_text(issue),
-                ])
-
-    lines.append("### 投标人文件")
-    _report_append_table(
-        lines,
-        ["投标人", "文件类型", "文件", "file_url"],
-        document_rows,
-    )
-    lines.append("### 检查结论")
-    _report_append_table(
-        lines,
-        ["投标人", "检查编码", "检查项", "状态", "摘要"],
-        check_rows,
-    )
-    lines.append("### 问题明细")
-    _report_append_table(
-        lines,
-        ["投标人", "状态", "严重程度", "检查项", "标题", "说明", "页码", "file_url"],
-        issue_rows,
-    )
+                file_name, page = _report_file_and_page(issue)
+                _report_issue_row(
+                    rows,
+                    problem=_report_join_parts([bidder_name, _report_issue_title(issue)]),
+                    description=_report_issue_description(issue),
+                    reason=_report_join_parts([status_key, issue.get("severity"), _report_issue_message(issue)]),
+                    file_name=file_name,
+                    page=page,
+                )
+    return rows
 
 
-def _render_duplicate_section(lines: list[str], title: str, payload: dict[str, Any]) -> None:
-    lines.append(f"## {title}")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
+def _collect_duplicate_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    if isinstance(payload.get("issues"), list) and not payload.get("groups"):
+        return _collect_duplicate_cluster_issue_rows(payload)
 
-    rows: list[list[Any]] = []
-    for group_key, group in (payload.get("groups") or {}).items():
+    for group in (payload.get("groups") or {}).values():
         if not isinstance(group, dict):
             continue
-        for item in group.get("items") or []:
+        for item in group.get("issues") or []:
             if not isinstance(item, dict):
                 continue
-            evidence = ""
-            blocks = item.get("duplicate_blocks") or item.get("evidence_sections") or []
-            if isinstance(blocks, list) and blocks:
-                evidence = "；".join(
-                    _report_issue_message(block)
-                    for block in blocks[:3]
-                    if isinstance(block, dict)
-                )
-            rows.append([
-                group_key,
-                item.get("risk_level"),
-                item.get("score_display") or item.get("similarity"),
-                _report_file_name(item, side="left"),
-                _report_page_text(item, side="left"),
-                _report_file_url_text(item, side="left"),
-                _report_file_name(item, side="right"),
-                _report_page_text(item, side="right"),
-                _report_file_url_text(item, side="right"),
-                evidence,
-            ])
-    _report_append_table(
-        lines,
-        [
-            "文档类型",
-            "风险",
-            "相似度",
-            "左文件",
-            "左页码",
-            "left_file_url",
-            "右文件",
-            "右页码",
-            "right_file_url",
-            "证据摘要",
-        ],
-        rows,
-    )
+            evidence_parts: list[str] = []
+            for block in (item.get("duplicate_blocks") or item.get("evidence_sections") or [])[:3]:
+                if isinstance(block, dict):
+                    evidence_parts.append(_report_issue_message(block))
+            left_file, left_page = _report_file_and_page(item, side="left")
+            right_file, right_page = _report_file_and_page(item, side="right")
+            _report_issue_row(
+                rows,
+                problem=_report_issue_title(item) or "重复内容",
+                description=_report_join_parts([
+                    _report_issue_description(item),
+                    *evidence_parts,
+                ]),
+                reason=_report_join_parts([
+                    item.get("risk_level"),
+                    item.get("score_display") or item.get("similarity"),
+                    _report_issue_message(item),
+                ]),
+                file_name=_report_join_parts([
+                    f"左：{left_file}" if left_file else "",
+                    f"右：{right_file}" if right_file else "",
+                    _report_file_name(item),
+                ]),
+                page=_report_join_parts([
+                    f"左：{left_page}" if left_page else "",
+                    f"右：{right_page}" if right_page else "",
+                    _report_page_text(item),
+                ], max_length=180),
+            )
+    return rows
 
 
-def _render_duplicate_cluster_section(lines: list[str], title: str, payload: dict[str, Any]) -> None:
-    lines.append(f"## {title}")
-    _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
-
-    rows: list[list[Any]] = []
-    for cluster in payload.get("clusters") or []:
+def _collect_duplicate_cluster_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for cluster in payload.get("issues") or []:
         if not isinstance(cluster, dict):
             continue
-        rows.append([
-            cluster.get("cluster_id"),
-            cluster.get("title"),
-            cluster.get("risk_level"),
-            cluster.get("score_display") or cluster.get("similarity"),
-            cluster.get("file_count"),
-            cluster.get("files"),
-            _report_ranges_by_file(cluster.get("doc_ranges_by_file")),
-            _report_file_url_text(cluster),
-            cluster.get("occurrence_count"),
-        ])
-    _report_append_table(
-        lines,
-        ["聚类ID", "标题", "风险", "相似度", "文件数", "文件", "页码范围", "file_urls_by_file", "出现次数"],
-        rows,
+        _report_issue_row(
+            rows,
+            problem=cluster.get("title") or cluster.get("cluster_id") or "重复聚类",
+            description=_report_join_parts([
+                f"聚类ID：{cluster.get('cluster_id')}" if cluster.get("cluster_id") else "",
+                f"文件：{cluster.get('files')}" if cluster.get("files") else "",
+                f"页码：{_report_ranges_by_file(cluster.get('doc_ranges_by_file'))}" if cluster.get("doc_ranges_by_file") else "",
+            ]),
+            reason=_report_join_parts([
+                cluster.get("risk_level"),
+                cluster.get("score_display") or cluster.get("similarity"),
+                f"文件数：{cluster.get('file_count')}" if cluster.get("file_count") else "",
+                f"出现次数：{cluster.get('occurrence_count')}" if cluster.get("occurrence_count") else "",
+            ]),
+            file_name=cluster.get("files"),
+            page=_report_ranges_by_file(cluster.get("doc_ranges_by_file")),
+        )
+    return rows
+
+
+def _collect_generic_issue_rows(section_key: str, payload: Any) -> list[list[str]]:
+    rows: list[list[str]] = []
+    label = _REPORT_RESULT_LABEL_BY_KEY.get(section_key, section_key)
+
+    def visit(value: Any, parent_key: str = "") -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item, parent_key)
+            return
+        if not isinstance(value, dict):
+            if parent_key in {"issues", "failed", "missing", "unclear"}:
+                _report_issue_row(rows, problem=label, reason=value)
+            return
+
+        has_issue_key = any(
+            key in value
+            for key in (
+                "title",
+                "check_name",
+                "matched_text",
+                "issue_type",
+                "risk_level",
+                "reason",
+                "message",
+                "suggestion",
+            )
+        )
+        has_container_key = any(
+            key in value
+            for key in ("groups", "documents", "bidders", "checks", "issues", "summary")
+        )
+        if has_issue_key and not has_container_key:
+            file_name, page = _report_file_and_page(value)
+            _report_issue_row(
+                rows,
+                problem=_report_issue_title(value) or label,
+                description=_report_issue_description(value),
+                reason=_report_issue_message(value) or label,
+                file_name=file_name,
+                page=page,
+            )
+            return
+
+        for key, child in value.items():
+            if key == "summary":
+                continue
+            visit(child, key)
+
+    visit(payload)
+    return rows
+
+
+def _collect_report_section_issue_rows(section_key: str, payload: Any) -> list[list[str]]:
+    collectors = {
+        "typo_check": _collect_typo_issue_rows,
+        "personnel_reuse_check": _collect_personnel_issue_rows,
+        "business_bid_format_review": _collect_business_format_issue_rows,
+        "business_bid_duplicate_check": _collect_duplicate_issue_rows,
+        "technical_bid_duplicate_check": _collect_duplicate_issue_rows,
+        "business_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
+        "technical_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
+    }
+    section_rows: list[list[str]] = []
+    if isinstance(payload, dict) and section_key in collectors:
+        section_rows = collectors[section_key](payload)
+    if not section_rows:
+        section_rows = _collect_generic_issue_rows(section_key, payload)
+    return section_rows
+
+
+def _dedupe_report_issue_rows(rows: list[list[str]]) -> list[list[str]]:
+    deduped: list[list[str]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for row in rows:
+        normalized = tuple(row[:5])
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(row)
+    return deduped
+
+
+def _collect_frontend_result_issue_sections(items: list[Any]) -> list[tuple[str, str, list[list[str]]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("result_key") or item.get("source_result_key") or item.get("type") or "result").strip()
+        if not key:
+            key = "result"
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(item)
+
+    sections: list[tuple[str, str, list[list[str]]]] = []
+    for key in order:
+        section_rows = _dedupe_report_issue_rows(
+            _collect_report_section_issue_rows(key, {"issues": grouped[key]})
+        )
+        if not section_rows:
+            continue
+        sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), section_rows))
+    return sections
+
+
+def _collect_report_issue_sections(result_payload: dict[str, Any]) -> list[tuple[str, str, list[list[str]]]]:
+    sections: list[tuple[str, str, list[list[str]]]] = []
+    frontend_items = result_payload.get("result") if isinstance(result_payload, dict) else None
+    if isinstance(frontend_items, list):
+        return _collect_frontend_result_issue_sections(frontend_items)
+
+    for key, payload in _ordered_report_results(result_payload).items():
+        section_rows = _dedupe_report_issue_rows(_collect_report_section_issue_rows(key, payload))
+        if not section_rows:
+            continue
+        sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), section_rows))
+    return sections
+
+
+def _flatten_report_issue_sections(
+    sections: list[tuple[str, str, list[list[str]]]],
+) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for _key, _label, section_rows in sections:
+        rows.extend(section_rows)
+    return _dedupe_report_issue_rows(rows)
+
+
+def _collect_report_issue_rows(result_payload: dict[str, Any]) -> list[list[str]]:
+    return _flatten_report_issue_sections(_collect_report_issue_sections(result_payload))
+
+
+def _render_result_word_report(
+    result_payload: dict[str, Any],
+    *,
+    project: Optional[dict[str, Any]] = None,
+    project_detail: Optional[dict[str, Any]] = None,
+    exported_at: Optional[datetime] = None,
+) -> bytes:
+    document = Document()
+    resolved_project = project or (project_detail or {}).get("project") or {}
+    issue_sections = _collect_report_issue_sections(result_payload)
+    document.add_heading("项目审查报告", level=0)
+    _add_word_table(
+        document,
+        ["项目", "内容"],
+        [
+            ["导出时间", (exported_at or datetime.now()).isoformat(timespec="seconds")],
+            ["导出项目", _report_project_name(resolved_project) or "-"],
+            ["审查项数量", str(len(issue_sections))],
+        ],
     )
 
-
-def _render_generic_result_section(lines: list[str], key: str, payload: Any) -> None:
-    lines.append(f"## {_REPORT_RESULT_LABEL_BY_KEY.get(key, key)}")
-    if isinstance(payload, dict):
-        _report_append_table(lines, ["字段", "值"], _report_summary_rows(payload.get("summary")))
-        top_level_rows = [
-            [item_key, _report_compact_text(item_value, max_length=500)]
-            for item_key, item_value in payload.items()
-        ]
-        _report_append_table(lines, ["顶层字段", "内容摘要"], top_level_rows)
+    document.add_heading("总览", level=1)
+    if issue_sections:
+        _add_word_table(
+            document,
+            ["审查项", "问题数"],
+            [[label, str(len(section_rows))] for _key, label, section_rows in issue_sections],
+        )
     else:
-        lines.append(_report_compact_text(payload, max_length=1000))
-        lines.append("")
+        _add_word_paragraph(document, "无")
 
+    document.add_heading("对应文件", level=1)
+    document_rows = _report_bound_document_rows(project_detail)
+    if document_rows:
+        _add_word_table(document, ["文件类型", "文件名称"], document_rows)
+    else:
+        _add_word_paragraph(document, "无")
 
-def _select_report_results(result_payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: result_payload[key]
-        for key, _label in _REPORT_RESULT_LABELS
-        if isinstance(result_payload.get(key), dict)
-    }
+    document.add_heading("问题清单", level=1)
+    if issue_sections:
+        for _key, label, section_rows in issue_sections:
+            document.add_heading(label, level=2)
+            _add_report_issue_table(document, section_rows)
+    else:
+        _add_word_paragraph(document, "无")
 
-
-def _report_json_block(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
-
-
-def _render_result_markdown_report(result_payload: dict[str, Any]) -> str:
-    selected_results = _select_report_results(result_payload)
-    lines: list[str] = [
-        "# 项目审查报告",
-        "",
-        f"- 生成时间：{datetime.now().isoformat(timespec='seconds')}",
-        f"- 审查项数量：{len(selected_results)}",
-        "",
-    ]
-    _render_report_overview(lines, selected_results)
-
-    for key, payload in selected_results.items():
-        if key == "bid_document_review":
-            _render_bid_document_review_section(lines, payload)
-        elif key == "typo_check":
-            _render_typo_section(lines, payload)
-        elif key == "personnel_reuse_check":
-            _render_personnel_section(lines, payload)
-        elif key == "business_bid_format_review":
-            _render_business_format_section(lines, payload)
-        elif key == "business_bid_duplicate_check":
-            _render_duplicate_section(lines, "商务标查重", payload)
-        elif key == "technical_bid_duplicate_check":
-            _render_duplicate_section(lines, "技术标查重", payload)
-        elif key == "business_bid_duplicate_clusters":
-            _render_duplicate_cluster_section(lines, "商务标查重聚类", payload)
-        elif key == "technical_bid_duplicate_clusters":
-            _render_duplicate_cluster_section(lines, "技术标查重聚类", payload)
-        else:
-            _render_generic_result_section(lines, key, payload)
-
-    lines.append("## 完整结果明细")
-    lines.append("")
-    for key, payload in selected_results.items():
-        lines.append(f"### {_REPORT_RESULT_LABEL_BY_KEY.get(key, key)} ({key})")
-        lines.append("")
-        lines.append("```json")
-        lines.append(_report_json_block(payload))
-        lines.append("```")
-        lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
+    _apply_report_document_fonts(document)
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 def _safe_report_file_name(raw_name: Optional[str]) -> str:
@@ -1871,23 +1952,104 @@ def _safe_report_file_name(raw_name: Optional[str]) -> str:
     return (name or "project_result_report")[:80]
 
 
-async def _upload_markdown_report(
+async def _upload_word_report(
     *,
-    markdown: str,
+    report_bytes: bytes,
     report_name: Optional[str],
     oss_service: MinioService,
+    object_prefix: str = "report",
 ) -> dict[str, Any]:
-    report_bytes = markdown.encode("utf-8")
     safe_name = _safe_report_file_name(report_name)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     digest = hashlib.sha1(report_bytes).hexdigest()[:8]
-    object_name = f"reports/{safe_name}_{timestamp}_{digest}.md"
+    prefix = str(object_prefix or "report").strip().strip("/") or "report"
+    object_name = f"{prefix}/{safe_name}_{timestamp}_{digest}.docx"
     return await run_in_threadpool(
         oss_service.upload_bytes,
         report_bytes,
-        filename=f"{safe_name}.md",
-        content_type="text/markdown; charset=utf-8",
+        filename=f"{safe_name}.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         object_name=object_name,
+    )
+
+
+async def _upload_frontend_result_word_report(
+    *,
+    project: dict[str, Any],
+    project_detail: Optional[dict[str, Any]] = None,
+    result_fot_frontend: dict[str, Any],
+    oss_service: MinioService,
+) -> dict[str, Any]:
+    report_name = f"{project.get('project_name') or project['identifier_id']}_最终导出报告"
+    report_bytes = _render_result_word_report(
+        result_fot_frontend,
+        project=project,
+        project_detail=project_detail,
+    )
+    upload = await _upload_word_report(
+        report_bytes=report_bytes,
+        report_name=report_name,
+        oss_service=oss_service,
+        object_prefix="report",
+    )
+    return {
+        "report_name": f"{_safe_report_file_name(report_name)}.docx",
+        "upload": upload,
+    }
+
+
+def _attach_frontend_report_to_response(
+    *,
+    response: dict[str, Any],
+    project: dict[str, Any],
+    report: dict[str, Any],
+    db_service: PostgreSQLService,
+) -> dict[str, Any]:
+    upload = dict(report.get("upload") or {})
+    report_url = str(upload.get("file_url") or "").strip()
+    updated_project = None
+    if report_url:
+        updated_project = db_service.update_project_report_url(
+            str(project["identifier_id"]),
+            report_url,
+        )
+
+    response["report_upload"] = upload
+    response["report_name"] = report.get("report_name")
+    response["report_url"] = report_url
+    if updated_project:
+        response["project"] = updated_project
+    return response
+
+
+async def _update_frontend_result_and_upload_report(
+    *,
+    project_identifier_id: str,
+    result_fot_frontend: dict[str, Any],
+    db_service: PostgreSQLService,
+    oss_service: MinioService,
+) -> dict[str, Any]:
+    project_detail = db_service.get_project_detail(project_identifier_id)
+    if not project_detail:
+        raise ValueError(f"项目不存在：{project_identifier_id}")
+    project = project_detail.get("project") or {}
+
+    result_record = db_service.update_project_result_for_frontend(
+        project_identifier_id=str(project["identifier_id"]),
+        result_fot_frontend=result_fot_frontend,
+    )
+    report = await _upload_frontend_result_word_report(
+        project=project,
+        project_detail=project_detail,
+        result_fot_frontend=result_fot_frontend,
+        oss_service=oss_service,
+    )
+    response = dict(result_record)
+    return _attach_frontend_report_to_response(
+        response=response,
+        project=project,
+        report=report,
+        db_service=db_service,
     )
 
 
@@ -2056,12 +2218,17 @@ async def get_project_results(
             else raw_results
         )
         selected_result_keys = sorted(selected_results.keys())
+        frontend_results = dict(
+            (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
+        )
         payload = {
             "project": project,
             "view": view,
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
             "results": selected_results,
             "available_result_keys": selected_result_keys,
+            "result_fot_frontend": frontend_results,
+            "available_frontend_result_keys": sorted(frontend_results.keys()),
         }
         if include_result_record:
             payload["result_record"] = refreshed_record or result_record
@@ -2098,6 +2265,9 @@ async def get_project_result_item(
         selected_results = display_results if view == "display" else raw_results
         if result_key not in selected_results:
             raise HTTPException(status_code=404, detail="result_key not found")
+        frontend_results = dict(
+            (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
+        )
 
         payload = {
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
@@ -2105,6 +2275,7 @@ async def get_project_result_item(
             "result_key": result_key,
             "view": view,
             "result": selected_results[result_key],
+            "result_fot_frontend": frontend_results.get(result_key),
             "available_result_keys": sorted(selected_results.keys()),
         }
         if include_result_record:
@@ -2194,73 +2365,6 @@ async def get_project_visualization_data(
 
 
 # 全局结果管理（不限定项目）
-@router.get("/results/export-report", summary="导出 Markdown 审查报告")
-async def export_result_markdown_report(
-    project_identifier_id: str = Query(
-        ...,
-        description="项目名称或项目 UUID；Swagger 中可直接选择项目。",
-    ),
-    report_name: Optional[str] = Query(default=None, description="报告文件名，不带 .md 也可以"),
-    db_service: PostgreSQLService = Depends(get_db_service),
-    oss_service: MinioService = Depends(get_oss_service),
-):
-    """Load a project's result object, generate a Markdown report, and upload it to MinIO."""
-    try:
-        project = db_service.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="project not found")
-
-        resolved_project_identifier = str(project["identifier_id"])
-        result_record = db_service.get_project_result(resolved_project_identifier)
-        if not result_record:
-            raise HTTPException(status_code=404, detail="project result not found")
-
-        refreshed_record, merged_results = _load_or_build_project_merged_results(
-            identifier_id=resolved_project_identifier,
-            result_record=result_record,
-            db_service=db_service,
-        )
-        result_payload = dict((refreshed_record or result_record or {}).get("result") or {})
-        selected_results = _select_report_results(result_payload)
-        if not selected_results:
-            supported_keys = ", ".join(key for key, _label in _REPORT_RESULT_LABELS)
-            raise HTTPException(
-                status_code=404,
-                detail=f"project result contains no supported result key: {supported_keys}",
-            )
-
-        default_report_name = (
-            report_name
-            or f"{project.get('project_name') or resolved_project_identifier}_review_report"
-        )
-        markdown = _render_result_markdown_report(selected_results)
-        upload = await _upload_markdown_report(
-            markdown=markdown,
-            report_name=default_report_name,
-            oss_service=oss_service,
-        )
-        return {
-            "status": "success",
-            "project": project,
-            "report_name": f"{_safe_report_file_name(default_report_name)}.md",
-            "result_keys": list(selected_results.keys()),
-            "available_result_keys": list(_select_report_results(result_payload).keys()),
-            "merged_result_keys": list(merged_results.keys()),
-            "object_name": upload["object_name"],
-            "bucket_name": upload["bucket_name"],
-            "file_url": upload["file_url"],
-            "presigned_url": upload["presigned_url"],
-            "size": upload["size"],
-            "content_type": upload.get("content_type"),
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
 @router.get("/results", summary="查询结果表列表")
 async def list_results(
     page: int = Query(default=1, ge=1),
@@ -2335,6 +2439,29 @@ async def update_result_record(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.put("/results/{project_identifier_id}/frontend", summary="更新前端删减后的项目结果")
+async def update_result_record_frontend(
+    project_identifier_id: str,
+    payload: ProjectResultFrontendUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """仅更新前端删减结果，并同步生成 Word 报告上传到 MinIO report/。"""
+    try:
+        return await _update_frontend_result_and_upload_report(
+            project_identifier_id=project_identifier_id,
+            result_fot_frontend=payload.result_fot_frontend,
+            db_service=db_service,
+            oss_service=oss_service,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
@@ -2691,27 +2818,19 @@ async def upload_personnel_reuse_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        review_result = await run_in_threadpool(
-            bid_document_review_service.check_project_documents,
+        personnel_result = await run_in_threadpool(
+            bid_document_review_service.check_project_personnel_reuse,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
             document_types=[DuplicateCheckScope.BUSINESS_BID.value],
         )
-        personnel_result = _build_personnel_reuse_result(review_result)
         result_record = await run_in_threadpool(
             _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="personnel_reuse_check",
             result_value=personnel_result,
-        )
-        await run_in_threadpool(
-            _persist_uploaded_result,
-            db_service=db_service,
-            project_identifier=resolved_project_identifier,
-            result_key="bid_document_review",
-            result_value=review_result,
         )
         return {
             "project": persisted_documents["project"],
@@ -2778,27 +2897,19 @@ async def upload_typo_check(
             db_service=db_service,
         )
         resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        review_result = await run_in_threadpool(
-            bid_document_review_service.check_project_documents,
+        typo_result = await run_in_threadpool(
+            bid_document_review_service.check_project_typos,
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
             document_types=None,
         )
-        typo_result = _build_typo_check_result(review_result)
         result_record = await run_in_threadpool(
             _persist_uploaded_result,
             db_service=db_service,
             project_identifier=resolved_project_identifier,
             result_key="typo_check",
             result_value=typo_result,
-        )
-        await run_in_threadpool(
-            _persist_uploaded_result,
-            db_service=db_service,
-            project_identifier=resolved_project_identifier,
-            result_key="bid_document_review",
-            result_value=review_result,
         )
         return {
             "project": persisted_documents["project"],
@@ -2813,63 +2924,6 @@ async def upload_typo_check(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
-
-
-@router.post("/projects/bid-document-review", summary="项目投标文件审查")
-async def project_bid_document_review(
-    identifier_id: str = Query(...),
-    document_scope: DuplicateCheckScope = Query(default=DuplicateCheckScope.ALL),
-    db_service: PostgreSQLService = Depends(get_db_service),
-    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
-):
-    """综合审查投标文件（可指定商务标/技术标范围）。"""
-    try:
-        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
-        _ensure_project_ocr_idle(project, analysis_name="投标文件审查")
-        _ensure_project_analysis_status(
-            project,
-            required_status=_required_parsing_status_for_duplicate_scope(document_scope),
-            analysis_name="投标文件审查",
-        )
-        return await run_in_threadpool(
-            _run_project_bid_document_review,
-            identifier_id=identifier_id,
-            document_types=_document_types_from_scope(document_scope),
-            result_key="bid_document_review",
-            db_service=db_service,
-            bid_document_review_service=bid_document_review_service,
-        )
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
-
-
-# 旧版兼容路由（不在 Swagger 文档中展示）
-@router.post("/projects/technical-bid-review", summary="旧版项目投标文件审查", include_in_schema=False)
-async def project_technical_bid_review_legacy(
-    identifier_id: str = Query(...),
-    document_scope: DuplicateCheckScope = Query(default=DuplicateCheckScope.ALL),
-    db_service: PostgreSQLService = Depends(get_db_service),
-    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
-):
-    project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
-    _ensure_project_ocr_idle(project, analysis_name="投标文件审查")
-    _ensure_project_analysis_status(
-        project,
-        required_status=_required_parsing_status_for_duplicate_scope(document_scope),
-        analysis_name="投标文件审查",
-    )
-    return await run_in_threadpool(
-        _run_project_bid_document_review,
-        identifier_id=identifier_id,
-        document_types=_document_types_from_scope(document_scope),
-        result_key="bid_document_review",
-        db_service=db_service,
-        bid_document_review_service=bid_document_review_service,
-    )
 
 
 @router.post("/projects/{identifier_id}/duplicate-check", summary="项目商务标/技术标查重", include_in_schema=False)

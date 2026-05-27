@@ -150,7 +150,7 @@ def _parameter_schema(parameter: dict) -> dict:
 def _mark_project_parameter(parameter: dict, choices: list[str]) -> None:
     """把参数展示成项目名下拉选择。"""
     schema = _parameter_schema(parameter)
-    schema.setdefault("title", "项目名")
+    schema["title"] = "项目名"
     parameter["description"] = (
         "请选择或输入项目名；旧 UUID 仍兼容。Swagger 下拉值会由后端解析为项目 UUID。"
     )
@@ -170,7 +170,7 @@ def _mark_project_identifier_parameter(parameter: dict, choices: list[str]) -> N
 def _mark_document_parameter(parameter: dict, choices: list[str]) -> None:
     """把参数展示成文件名下拉选择。"""
     schema = _parameter_schema(parameter)
-    schema.setdefault("title", "文件名")
+    schema["title"] = "文件名"
     parameter["description"] = (
         "请选择或输入文件名；旧 UUID 仍兼容。文件名重复时下拉值会附带 UUID。"
     )
@@ -194,12 +194,12 @@ def _inject_body_display_choices(
         for field_name, field_schema in properties.items():
             if field_name in PROJECT_FIELD_NAMES and isinstance(field_schema, dict):
                 _inject_string_choices(field_schema, project_choices)
-                field_schema.setdefault("title", "项目名")
+                field_schema["title"] = "项目名"
                 field_schema["description"] = "请选择或输入项目名；旧 UUID 仍兼容。"
             choice_key = DOCUMENT_FIELD_CHOICES.get(field_name)
             if choice_key and isinstance(field_schema, dict):
                 _inject_string_choices(field_schema, document_choices.get(choice_key, []))
-                field_schema.setdefault("title", "文件名")
+                field_schema["title"] = "文件名"
                 field_schema["description"] = "请选择或输入文件名；旧 UUID 仍兼容。"
 
 
@@ -217,11 +217,10 @@ def _inject_display_choices(openapi_schema: dict) -> dict:
     for path, path_item in paths.items():
         path_text = str(path)
         is_project_path = "/projects/{identifier_id}" in path_text
-        is_project_detail_path = path_text.endswith("/projects/{identifier_id}")
         is_document_path = "/documents/{identifier_id}" in path_text
         is_project_result_path = "/results/{project_identifier_id}" in path_text
         rewritten_path = path_text
-        if is_project_path and not is_project_detail_path:
+        if is_project_path:
             rewritten_path = rewritten_path.replace("{identifier_id}", "{project_name}")
         if is_document_path:
             rewritten_path = rewritten_path.replace("{identifier_id}", "{file_name}")
@@ -244,9 +243,6 @@ def _inject_display_choices(openapi_schema: dict) -> dict:
                     continue
 
                 if parameter_location == "path" and is_project_path and parameter_name == "identifier_id":
-                    if is_project_detail_path:
-                        _mark_project_identifier_parameter(parameter, project_identifier_choices)
-                        continue
                     parameter["name"] = "project_name"
                     _mark_project_parameter(parameter, project_choices)
                     continue

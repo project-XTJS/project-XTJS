@@ -11,6 +11,12 @@ import re
 import time
 from typing import Any, Callable
 
+from app.service.analysis.location_utils import (
+    make_location,
+    normalize_bbox as normalize_issue_bbox,
+    normalize_locations,
+)
+
 
 class HelpersMixin:
     """通用小工具 Mixin。"""
@@ -107,7 +113,182 @@ class HelpersMixin:
         }
         if evidence is not None:
             issue["evidence"] = evidence
+            locations = self._issue_locations_from_evidence(evidence)
+            page = self._issue_page_from_evidence(evidence, locations=locations)
+            bbox = self._issue_bbox_from_evidence(evidence, locations=locations)
+            if page:
+                issue["page"] = page
+                issue["source_page"] = page
+            if bbox:
+                issue["bbox"] = bbox
+            if locations:
+                issue["locations"] = locations
         return issue
+
+    def _issue_locations_from_evidence(self, evidence: Any) -> list[dict[str, Any]]:
+        """Extract frontend-friendly locations from a check's raw evidence."""
+        if not isinstance(evidence, dict):
+            return []
+
+        locations: list[dict[str, Any]] = []
+        for key in (
+            "locations",
+            "response_locations",
+            "matched_locations",
+            "catalog_locations",
+            "template_locations",
+            "tender_price_locations",
+            "tender_star_locations",
+            "deadline_locations",
+        ):
+            locations.extend(normalize_locations(evidence.get(key)))
+
+        if not locations:
+            page = self._issue_page_from_evidence(evidence, locations=[])
+            bbox = self._issue_bbox_from_evidence(evidence, locations=[])
+            synthesized = make_location(
+                page=page,
+                bbox=bbox,
+                text=(
+                    evidence.get("response_evidence")
+                    or evidence.get("matched_text")
+                    or evidence.get("preview")
+                    or evidence.get("summary")
+                ),
+            )
+            if synthesized:
+                locations.append(synthesized)
+        return locations
+
+    def _issue_page_from_evidence(
+        self,
+        evidence: Any,
+        *,
+        locations: list[dict[str, Any]] | None = None,
+    ) -> int | None:
+        """Pick the first concrete page for opening previews."""
+        if not isinstance(evidence, dict):
+            return None
+
+        for key in (
+            "response_page",
+            "matched_page",
+            "source_page",
+            "page",
+            "page_no",
+            "page_num",
+            "page_number",
+            "pdf_page",
+            "start_page",
+        ):
+            page = self._first_positive_page(evidence.get(key))
+            if page:
+                return page
+
+        for key in ("locations", "response_locations", "matched_locations"):
+            page = self._first_positive_page(evidence.get(key))
+            if page:
+                return page
+
+        for key in (
+            "pages",
+            "page_refs",
+            "section_pages",
+            "issues",
+            "recognized_total",
+            "total_candidates",
+            "extracted_items",
+            "structured_tables",
+        ):
+            page = self._first_positive_page(evidence.get(key))
+            if page:
+                return page
+
+        for key in (
+            "catalog_locations",
+            "catalog_pages",
+            "tender_price_locations",
+            "tender_star_locations",
+            "template_locations",
+            "deadline_locations",
+            "requirement_page",
+            "requirement_pages",
+        ):
+            page = self._first_positive_page(evidence.get(key))
+            if page:
+                return page
+
+        return self._first_positive_page(locations or [])
+
+    def _issue_bbox_from_evidence(
+        self,
+        evidence: Any,
+        *,
+        locations: list[dict[str, Any]] | None = None,
+    ) -> list[float] | None:
+        if isinstance(evidence, dict):
+            for key in (
+                "response_bbox",
+                "matched_bbox",
+                "bbox",
+                "bbox_ocr",
+                "box",
+                "requirement_bbox",
+            ):
+                bbox = normalize_issue_bbox(evidence.get(key))
+                if bbox:
+                    return bbox
+        for location in locations or []:
+            if isinstance(location, dict):
+                bbox = normalize_issue_bbox(location.get("bbox"))
+                if bbox:
+                    return bbox
+        return None
+
+    def _first_positive_page(self, value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, float):
+            return int(value) if value.is_integer() and value > 0 else None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.isdigit():
+                page = int(stripped)
+                return page if page > 0 else None
+            return None
+        if isinstance(value, dict):
+            for key in (
+                "response_page",
+                "matched_page",
+                "source_page",
+                "page",
+                "page_no",
+                "page_num",
+                "page_number",
+                "pdf_page",
+                "start_page",
+                "pages",
+                "page_refs",
+                "section_pages",
+                "issues",
+                "recognized_total",
+                "total_candidates",
+                "extracted_items",
+                "structured_tables",
+                "requirement_page",
+            ):
+                page = self._first_positive_page(value.get(key))
+                if page:
+                    return page
+            return None
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                page = self._first_positive_page(item)
+                if page:
+                    return page
+        return None
 
     def _empty_issue_bucket(self) -> dict[str, list[dict[str, Any]]]:
         """返回空的三类问题桶。"""

@@ -66,14 +66,48 @@ class DocumentParserMixin:
             sec_type = sec.get("type", "text")
             text = sec.get("text") or sec.get("raw_text") or ""
             if text:
-                sections.append({"page": page, "type": sec_type, "text": text})
+                section = {"page": page, "type": sec_type, "text": text}
+                bbox = sec.get("bbox") or sec.get("box")
+                if bbox is not None:
+                    section["bbox"] = bbox
+                coordinate_system = sec.get("coordinate_system")
+                if coordinate_system:
+                    section["coordinate_system"] = coordinate_system
+                line_payloads = []
+                for line in sec.get("lines") or []:
+                    if not isinstance(line, dict):
+                        continue
+                    line_text = line.get("text") or line.get("raw_text") or ""
+                    if not str(line_text).strip():
+                        continue
+                    line_payload = {
+                        "page": line.get("page") if isinstance(line.get("page"), int) else page,
+                        "text": str(line_text),
+                    }
+                    line_bbox = line.get("bbox") or line.get("box")
+                    if line_bbox is not None:
+                        line_payload["bbox"] = line_bbox
+                    line_coordinate_system = line.get("coordinate_system") or coordinate_system
+                    if line_coordinate_system:
+                        line_payload["coordinate_system"] = line_coordinate_system
+                    line_payloads.append(line_payload)
+                if line_payloads:
+                    section["lines"] = line_payloads
+                sections.append(section)
 
         parsed_table_sections = []
         for sec in table_sections:
             page = sec.get("page")
             text = sec.get("text") or sec.get("raw_text") or ""
             if text:
-                parsed_table_sections.append({"page": page, "type": "table", "text": text})
+                table_section = {"page": page, "type": "table", "text": text}
+                bbox = sec.get("bbox") or sec.get("box")
+                if bbox is not None:
+                    table_section["bbox"] = bbox
+                coordinate_system = sec.get("coordinate_system")
+                if coordinate_system:
+                    table_section["coordinate_system"] = coordinate_system
+                parsed_table_sections.append(table_section)
 
         raw_text = "\n".join(sec["text"] for sec in sections if sec["text"])
         return {

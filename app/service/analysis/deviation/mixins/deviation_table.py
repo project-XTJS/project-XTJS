@@ -4,6 +4,21 @@ import re
 from difflib import SequenceMatcher
 from typing import Any
 
+from app.service.analysis.location_utils import normalize_bbox
+
+
+def _merge_bboxes(values: list[list[float] | None]) -> list[float] | None:
+    """Merge same-page section boxes into one highlightable rectangle."""
+    boxes = [box for box in values if isinstance(box, list) and len(box) >= 4]
+    if not boxes:
+        return None
+    return [
+        round(min(float(box[0]) for box in boxes), 2),
+        round(min(float(box[1]) for box in boxes), 2),
+        round(max(float(box[2]) for box in boxes), 2),
+        round(max(float(box[3]) for box in boxes), 2),
+    ]
+
 
 class DeviationTableMixin:
     """负责从投标文件中提取商务/技术偏离表及行数据。"""
@@ -116,28 +131,38 @@ class DeviationTableMixin:
         if isinstance(logical_tables, list):
             for table in logical_tables:
                 if isinstance(table, dict):
-                    rows.extend(self._extract_rows_from_logical_table(table, section_hints=section_hints))
+                    rows.extend(
+                        self._extract_rows_from_logical_table(
+                            table,
+                            section_hints=section_hints,
+                            doc=doc,
+                        )
+                    )
 
         for section in technical_sections:
             rows.extend(self._extract_rows_from_section(section, "technical"))
         for section in business_sections:
             rows.extend(self._extract_rows_from_section(section, "business"))
 
-        out: list[dict[str, Any]] = []
-        seen = set()
+        out_by_key: dict[str, dict[str, Any]] = {}
         for row in rows:
             joined_key = self._norm(row.get("joined_text", ""))[:260]
-            if not joined_key or joined_key in seen:
+            if not joined_key:
                 continue
-            seen.add(joined_key)
-            out.append(row)
-        return out
+            existing = out_by_key.get(joined_key)
+            if existing is None:
+                out_by_key[joined_key] = row
+                continue
+            if not existing.get("bbox") and row.get("bbox"):
+                out_by_key[joined_key] = row
+        return list(out_by_key.values())
 
     def _extract_rows_from_logical_table(
         self,
         table: dict[str, Any],
         *,
         section_hints: list[dict[str, Any]] | None = None,
+        doc: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """解析一个逻辑表格，将其记录转换为偏离行结构。"""
         out: list[dict[str, Any]] = []
@@ -151,12 +176,18 @@ class DeviationTableMixin:
             except (TypeError, ValueError):
                 page_no = None
         title = self._resolve_logical_table_title(table, page_no=page_no, section_hints=section_hints)
+        table_bbox = self._resolve_logical_table_bbox(
+            table,
+            page_no=page_no,
+            section_hints=section_hints,
+            doc=doc,
+        )
 
         records = table.get("records")
         if isinstance(records, list):
             for record in records:
                 if isinstance(record, dict):
-                    row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
+                    row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title, bbox=table_bbox)
                     if row:
                         out.append(row)
         if out:
@@ -166,7 +197,7 @@ class DeviationTableMixin:
         if not isinstance(rows, list):
             native_headers, native_records = self._extract_native_table_records(table)
             for record in native_records:
-                row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+                row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title, bbox=table_bbox)
                 if row:
                     out.append(row)
             return out
@@ -178,7 +209,7 @@ class DeviationTableMixin:
             for idx, value in enumerate(values):
                 key = headers[idx] if idx < len(headers) else f"col_{idx + 1}"
                 record[str(key)] = value
-            row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title)
+            row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title, bbox=table_bbox)
             if row:
                 out.append(row)
 
@@ -187,7 +218,7 @@ class DeviationTableMixin:
 
         native_headers, native_records = self._extract_native_table_records(table)
         for record in native_records:
-            row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title)
+            row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title, bbox=table_bbox)
             if row:
                 out.append(row)
         return out
@@ -301,6 +332,127 @@ class DeviationTableMixin:
             return True
         return bool(re.fullmatch(r"(?:table_)?\d+", compact, re.IGNORECASE))
 
+    def _resolve_logical_table_bbox(
+        self,
+        table: dict[str, Any],
+        *,
+        page_no: int | None,
+        section_hints: list[dict[str, Any]] | None = None,
+        doc: dict[str, Any] | None = None,
+    ) -> list[float] | None:
+        """Resolve a best-effort PDF-space bbox for a logical deviation table."""
+        direct = normalize_bbox(
+            table.get("bbox")
+            or table.get("bbox_ocr")
+            or table.get("box")
+            or table.get("block_bbox")
+        )
+        if direct:
+            return direct
+
+        source_bbox = self._logical_table_source_bbox(table, doc, page_no=page_no)
+        if source_bbox:
+            return source_bbox
+
+        same_page_bboxes = [
+            normalize_bbox(section.get("bbox") or section.get("box"))
+            for section in section_hints or []
+            if isinstance(section, dict) and section.get("page") == page_no
+        ]
+        merged = _merge_bboxes([bbox for bbox in same_page_bboxes if bbox])
+        if merged:
+            return merged
+
+        return self._matching_table_section_bbox(table, doc, page_no=page_no)
+
+    def _logical_table_source_bbox(
+        self,
+        table: dict[str, Any],
+        doc: dict[str, Any] | None,
+        *,
+        page_no: int | None,
+    ) -> list[float] | None:
+        """Resolve bbox using source_section_indexes emitted by the table parser."""
+        if not isinstance(doc, dict):
+            return None
+        indexes = table.get("source_section_indexes") or table.get("source_indexes")
+        if not isinstance(indexes, list):
+            return None
+
+        normalized_indexes: list[int] = []
+        for value in indexes:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if index not in normalized_indexes:
+                normalized_indexes.append(index)
+
+        for target_page in (page_no, None):
+            for key in ("layout_sections", "table_sections"):
+                sections = doc.get(key)
+                if not isinstance(sections, list):
+                    continue
+                for index in normalized_indexes:
+                    if index < 0 or index >= len(sections):
+                        continue
+                    item = sections[index]
+                    if not isinstance(item, dict):
+                        continue
+                    if target_page is not None and item.get("page") != target_page:
+                        continue
+                    bbox = normalize_bbox(
+                        item.get("bbox")
+                        or item.get("bbox_ocr")
+                        or item.get("box")
+                        or item.get("block_bbox")
+                    )
+                    if bbox:
+                        return bbox
+        return None
+
+    def _matching_table_section_bbox(
+        self,
+        table: dict[str, Any],
+        doc: dict[str, Any] | None,
+        *,
+        page_no: int | None,
+    ) -> list[float] | None:
+        """Fallback to a same-page physical table section with matching text."""
+        if not isinstance(doc, dict):
+            return None
+        table_key = self._norm(self._section_text(table))[:600]
+        if len(table_key) < 8:
+            return None
+
+        for key in ("table_sections", "layout_sections"):
+            sections = doc.get(key)
+            if not isinstance(sections, list):
+                continue
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                if page_no is not None and section.get("page") != page_no:
+                    continue
+                bbox = normalize_bbox(
+                    section.get("bbox")
+                    or section.get("bbox_ocr")
+                    or section.get("box")
+                    or section.get("block_bbox")
+                )
+                if not bbox:
+                    continue
+                section_key = self._norm(self._section_text(section))[:600]
+                if len(section_key) < 8:
+                    continue
+                if (
+                    table_key[:120] in section_key
+                    or section_key[:120] in table_key
+                    or SequenceMatcher(None, table_key, section_key).ratio() >= 0.76
+                ):
+                    return bbox
+        return None
+
     def _build_row_from_record(
         self,
         record: dict[str, Any],
@@ -308,6 +460,7 @@ class DeviationTableMixin:
         headers: list[str],
         page_no: int | None,
         title: str,
+        bbox: Any = None,
     ) -> dict[str, Any] | None:
         """将表格中的一行记录转换为偏离分析所需的结构。"""
         ordered_keys = list(record.keys())
@@ -362,6 +515,7 @@ class DeviationTableMixin:
             "response_norm": self._norm(response),
             "deviation_norm": self._norm(deviation),
             "joined_norm": self._norm(joined_text),
+            "bbox": normalize_bbox(bbox),
         }
 
     def _infer_generic_row_columns(self, ordered_cells: list[tuple[str, str]]) -> tuple[str, str, str] | None:
@@ -445,6 +599,7 @@ class DeviationTableMixin:
                     "response_norm": self._norm(segment) if has_response_marker else "",
                     "deviation_norm": self._norm(segment) if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
                     "joined_norm": normalized,
+                    "bbox": normalize_bbox(section.get("bbox") or section.get("box")),
                 }
             )
         return out
@@ -555,6 +710,13 @@ class DeviationTableMixin:
             chunk = [str(chunk_item.get("text") or "") for chunk_item in chunk_items]
             text = "\n".join(chunk).strip()
             if len(self._norm(text)) >= 20:
+                bbox = _merge_bboxes(
+                    [
+                        normalize_bbox(chunk_item.get("bbox") or chunk_item.get("box"))
+                        for chunk_item in chunk_items
+                        if isinstance(chunk_item, dict)
+                    ]
+                )
                 out.append(
                     {
                         "title": anchor,
@@ -563,6 +725,7 @@ class DeviationTableMixin:
                         "lines": chunk,
                         "line_items": chunk_items,
                         "text": text,
+                        "bbox": bbox,
                     }
                 )
         return out

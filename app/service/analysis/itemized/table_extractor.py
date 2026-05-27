@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from app.service.analysis.itemized.html_parser import _TableHTMLParser
+from app.service.analysis.location_utils import normalize_bbox
 
 
 class TableExtractorMixin:
@@ -82,6 +83,7 @@ class TableExtractorMixin:
             lines = []
             pages = []
             logical_table_refs = []
+            bboxes = []
             table_started = False
 
             for follower in layout_sections[idx + 1:]:
@@ -108,6 +110,7 @@ class TableExtractorMixin:
                         lines.extend(payload["lines"])
                         pages.extend(payload["pages"])
                         logical_table_refs.extend(payload["logical_table_refs"])
+                        bboxes.extend(payload.get("bboxes") or [])
                         continue
                     if self._matches_other_anchor(section_text, anchors):
                         break
@@ -124,6 +127,7 @@ class TableExtractorMixin:
                     lines.extend(payload["lines"])
                     pages.extend(payload["pages"])
                     logical_table_refs.extend(payload["logical_table_refs"])
+                    bboxes.extend(payload.get("bboxes") or [])
                     continue
                 if self._is_layout_bridge_text(section_text):
                     continue
@@ -157,6 +161,7 @@ class TableExtractorMixin:
                     "score": len(lines),
                     "source": "layout_table_sequence",
                     "pages": deduped_pages,
+                    "bbox": self._merge_table_bboxes(bboxes),
                     "logical_table_refs": deduped_table_refs,
                     "section_id": (
                         f"layout:{matched_anchor}:{idx}:{'-'.join(str(page) for page in deduped_pages)}"
@@ -168,6 +173,19 @@ class TableExtractorMixin:
 
         sections.sort(key=lambda item: item.get("start", 0))
         return self._dedupe_sections(sections)
+
+    @staticmethod
+    def _merge_table_bboxes(values: list[Any]) -> list[float] | None:
+        bboxes = [normalize_bbox(value) for value in values]
+        bboxes = [bbox for bbox in bboxes if bbox]
+        if not bboxes:
+            return None
+        return [
+            min(float(bbox[0]) for bbox in bboxes),
+            min(float(bbox[1]) for bbox in bboxes),
+            max(float(bbox[2]) for bbox in bboxes),
+            max(float(bbox[3]) for bbox in bboxes),
+        ]
 
     def _is_layout_table_near_anchor(
         self, anchor_page: int | None, table_page: int | None
@@ -216,6 +234,7 @@ class TableExtractorMixin:
             logical_lines = []
             logical_table_refs = []
             logical_table_pages = []
+            logical_table_bboxes = [normalize_bbox(section.get("bbox") or section.get("box"))]
             for offset, logical_table in enumerate(
                 self._collect_logical_table_sequence(
                     logical_tables, logical_table_index
@@ -233,19 +252,28 @@ class TableExtractorMixin:
                 logical_table_pages.extend(
                     self._get_logical_table_pages(logical_table)
                 )
+                logical_table_bboxes.append(
+                    normalize_bbox(logical_table.get("bbox") or logical_table.get("box"))
+                )
             if logical_lines:
+                bboxes = [bbox for bbox in logical_table_bboxes if bbox]
                 return {
                     "lines": logical_lines,
                     "logical_table_refs": logical_table_refs,
                     "pages": logical_table_pages,
+                    "bboxes": bboxes,
+                    "bbox": self._merge_table_bboxes(bboxes),
                 }
 
         section_text = self._get_section_text(section)
         section_page = section.get("page")
+        bbox = normalize_bbox(section.get("bbox") or section.get("box"))
         return {
             "lines": self._split_lines(self._normalize_text(section_text)),
             "logical_table_refs": [],
             "pages": [section_page] if isinstance(section_page, int) else [],
+            "bboxes": [bbox] if bbox else [],
+            "bbox": bbox,
         }
 
     def _extract_layout_table_lines(

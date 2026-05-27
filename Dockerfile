@@ -66,6 +66,7 @@ RUN if [ "${INSTALL_HPI_DEPS}" = "true" ]; then python -m paddleocr install_hpi_
 
 COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN python -c "import docx; print('python-docx import ok')"
 RUN python -c "import fitz; print('PyMuPDF import ok')"
 RUN python -c "import language_tool_python; print('LanguageTool Python import ok')"
 

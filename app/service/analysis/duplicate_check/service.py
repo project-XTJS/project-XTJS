@@ -3,11 +3,13 @@
 文档查重服务门面（组合所有子模块，对外提供统一接口）
 """
 import json
+import re
 from itertools import combinations
 from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
 from app.service.minio_service import MinioService
+from app.service.analysis.location_utils import append_location, make_location, normalize_bbox
 from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.compliance.template_extractor import SectionClassifier
@@ -166,7 +168,7 @@ class DuplicateCheckService:
                     for item in documents
                 ],
                 "skipped_documents": skipped_groups[role],
-                "items": pair_items,
+                "issues": pair_items,
             }
 
         return {
@@ -371,6 +373,7 @@ class DuplicateCheckService:
             items.append(
                 {
                     "page": block.get("page"),
+                    "bbox": block.get("bbox"),
                     "type": block.get("type"),
                     "text": sentence_text,
                     "exact_key": exact_key,
@@ -422,9 +425,12 @@ class DuplicateCheckService:
             return None
 
         exact_key = compact_raw_text(text)
+        pages = sorted(page for page in section.get("pages", set()) if isinstance(page, int))
+        first_bbox = next((block.get("bbox") for block in blocks if block.get("bbox")), None)
         return {
             "title": section.get("title") or "document_prelude",
-            "pages": sorted(page for page in section.get("pages", set()) if isinstance(page, int)),
+            "pages": pages,
+            "bbox": first_bbox,
             "text": text,
             "preview": clip(text, 160),
             "exact_key": exact_key,
@@ -462,6 +468,7 @@ class DuplicateCheckService:
                             if isinstance(block.get("page"), int) or block.get("page") is not None
                         }
                     ),
+                    "bbox": next((block.get("bbox") for block in chunk if block.get("bbox")), None),
                     "text": text,
                     "preview": clip(text, 160),
                     "exact_key": exact_key,
@@ -497,6 +504,7 @@ class DuplicateCheckService:
                     {
                         "type": "heading",
                         "page": pages[0],
+                        "bbox": normalize_bbox(segment.get("bbox")),
                         "text": title,
                         "exact_key": heading_key,
                         "exact_hash": hash_text(heading_key),
@@ -512,6 +520,7 @@ class DuplicateCheckService:
                     {
                         "type": block_type,
                         "page": pages[0],
+                        "bbox": normalize_bbox(segment.get("bbox")),
                         "text": line,
                         "exact_key": exact_key,
                         "exact_hash": hash_text(exact_key),
@@ -523,6 +532,7 @@ class DuplicateCheckService:
                 tables.append(
                     {
                         "pages": pages,
+                        "bbox": normalize_bbox(segment.get("bbox")),
                         "text": table_text,
                         "rows": lines,
                         "exact_hash": hash_text(compact_raw_text(table_text)),
@@ -657,11 +667,135 @@ class DuplicateCheckService:
             for raw_line in section.get("lines") or []:
                 _append_line(str(raw_line or ""))
 
+        for raw_line in self._extract_deviation_template_lines(tender_payload):
+            _append_line(raw_line)
+
         return {
             "requirement_items": requirement_items,
             "line_items": line_items,
             "line_keys": seen_line_keys,
         }
+
+    def _extract_deviation_template_lines(self, tender_payload: dict[str, Any]) -> list[str]:
+        """从招标文件中抽取偏离表模板行，不要求模板表已有真实响应数据。"""
+        checker = self._deviation_checker
+        parsed = checker._coerce_payload(tender_payload)
+        doc = checker._doc_container(parsed)
+        lines: list[str] = []
+
+        def append_if_template(raw_line: Any) -> None:
+            line = normalize_plain_text(raw_line)
+            if not line:
+                return
+            if self._looks_like_deviation_template_line(line):
+                lines.append(line)
+
+        logical_tables = doc.get("logical_tables")
+        if isinstance(logical_tables, list):
+            for table in logical_tables:
+                if not isinstance(table, dict):
+                    continue
+                headers = [
+                    str(header or "").strip()
+                    for header in (table.get("headers") or [])
+                    if str(header or "").strip()
+                ]
+                if self._looks_like_deviation_template_headers(headers):
+                    append_if_template(" ".join(headers))
+                for line in checker._split_lines(checker._section_text(table)):
+                    append_if_template(line)
+
+        for key in ("layout_sections", "table_sections"):
+            sections = doc.get(key)
+            if not isinstance(sections, list):
+                continue
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                for line in checker._split_lines(checker._section_text(section)):
+                    append_if_template(line)
+
+        source_text = self._extract_payload_text_for_template(parsed)
+        for line in checker._split_lines(source_text):
+            append_if_template(line)
+
+        deduped: list[str] = []
+        seen = set()
+        for line in lines:
+            key = compact_raw_text(line)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(line)
+        return deduped
+
+    def _looks_like_deviation_template_headers(self, headers: list[str]) -> bool:
+        if len(headers) < 2:
+            return False
+        return self._looks_like_deviation_template_line(" ".join(headers))
+
+    def _looks_like_deviation_template_line(self, line: str) -> bool:
+        compact = compact_raw_text(line)
+        if not compact:
+            return False
+        if re.fullmatch(
+            r"(?:附件|附表)?[0-9一二三四五六七八九十]*"
+            r"(?:商务|技术)?(?:条款)?(?:偏离表|响应表)(?:[（(]格式[）)])?",
+            compact,
+        ):
+            return True
+
+        has_requirement_axis = any(
+            token in compact
+            for token in (
+                "招标文件",
+                "采购文件",
+                "招标需求",
+                "招标要求",
+                "指标要求",
+                "技术要求",
+                "商务要求",
+                "要求",
+                "条款",
+            )
+        )
+        has_response_axis = any(
+            token in compact
+            for token in (
+                "投标文件",
+                "投标响应",
+                "响应情况",
+                "响应内容",
+                "响应",
+                "应答",
+            )
+        )
+        has_deviation_axis = "偏离" in compact
+        header_tokens = (
+            "序号",
+            "招标文件",
+            "采购文件",
+            "要求",
+            "条款",
+            "投标文件",
+            "响应",
+            "偏离",
+            "说明",
+            "所在页",
+            "页码",
+            "备注",
+        )
+        hits = sum(1 for token in header_tokens if token in compact)
+        if has_requirement_axis and has_response_axis and has_deviation_axis and hits >= 3:
+            return True
+        if (
+            compact.startswith("注")
+            and has_response_axis
+            and has_deviation_axis
+            and ("招标文件" in compact or "采购文件" in compact)
+        ):
+            return True
+        return False
 
     def _build_itemized_template_context(self, tender_payload: dict[str, Any]) -> dict[str, Any]:
         """从招标文件提取分项报价表模板，用于剔除投标文件分项报价表模板内容。"""
@@ -669,24 +803,150 @@ class DuplicateCheckService:
         line_items: list[dict[str, Any]] = []
         seen_line_keys: set[str] = set()
 
+        def _append_line(raw_line: Any) -> None:
+            cleaned = normalize_plain_text(raw_line)
+            compact = compact_raw_text(cleaned)
+            if len(compact) < 4 or compact in seen_line_keys:
+                return
+            seen_line_keys.add(compact)
+            line_items.append(
+                {
+                    "text": cleaned,
+                    "compact": compact,
+                }
+            )
+
         for section in document.get("item_sections") or []:
             for raw_line in section.get("lines") or []:
-                cleaned = normalize_plain_text(raw_line)
-                compact = compact_raw_text(cleaned)
-                if len(compact) < 4 or compact in seen_line_keys:
-                    continue
-                seen_line_keys.add(compact)
-                line_items.append(
-                    {
-                        "text": cleaned,
-                        "compact": compact,
-                    }
-                )
+                _append_line(raw_line)
+
+        for raw_line in self._extract_itemized_template_lines(tender_payload):
+            _append_line(raw_line)
 
         return {
             "line_items": line_items,
             "line_keys": seen_line_keys,
         }
+
+    def _extract_itemized_template_lines(self, tender_payload: dict[str, Any]) -> list[str]:
+        """从招标文件中宽松抽取分项报价表模板行，不要求模板表已有真实报价数据。"""
+        checker = self._itemized_checker
+        parsed = checker._parse_payload(tender_payload) or tender_payload
+        lines: list[str] = []
+
+        def append_if_template(raw_line: Any) -> None:
+            line = normalize_plain_text(raw_line)
+            if not line:
+                return
+            if self._looks_like_itemized_template_line(line):
+                lines.append(line)
+
+        for table in checker._get_logical_tables(parsed):
+            headers = checker._get_logical_table_headers(table)
+            if self._looks_like_itemized_template_headers(headers):
+                append_if_template(" ".join(headers))
+                for line in checker._logical_table_to_lines(table, include_headers=True):
+                    append_if_template(line)
+
+        for section in checker._find_layout_table_sections(parsed, checker.ITEM_SECTION_ANCHORS):
+            for line in section.get("lines") or []:
+                append_if_template(line)
+
+        source_text = checker._normalize_text(self._extract_payload_text_for_template(parsed))
+        text_lines = checker._split_lines(source_text)
+        for section in checker._find_sections(
+            text_lines,
+            checker.ITEM_SECTION_ANCHORS,
+            require_score=False,
+        ):
+            for line in section.get("lines") or []:
+                append_if_template(line)
+
+        deduped: list[str] = []
+        seen = set()
+        for line in lines:
+            key = compact_raw_text(line)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(line)
+        return deduped
+
+    def _extract_payload_text_for_template(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+        if not isinstance(payload, dict):
+            return str(payload or "")
+        container = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        layout_sections = container.get("layout_sections")
+        if isinstance(layout_sections, list):
+            lines = [
+                str(section.get("raw_text") or section.get("text") or "").strip()
+                for section in layout_sections
+                if isinstance(section, dict)
+                and str(section.get("raw_text") or section.get("text") or "").strip()
+            ]
+            if lines:
+                return "\n".join(lines)
+        pages = container.get("pages")
+        if isinstance(pages, list):
+            lines = [
+                str(page.get("raw_text") or page.get("text") or "").strip()
+                for page in pages
+                if isinstance(page, dict)
+                and str(page.get("raw_text") or page.get("text") or "").strip()
+            ]
+            if lines:
+                return "\n".join(lines)
+        recognition = container.get("recognition")
+        if isinstance(recognition, dict):
+            for key in ("content", "raw_text", "text", "full_text"):
+                value = recognition.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value
+        for key in ("content", "raw_text", "text", "full_text"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+
+    def _looks_like_itemized_template_headers(self, headers: list[str]) -> bool:
+        if len(headers) < 3:
+            return False
+        return self._looks_like_itemized_template_line(" ".join(headers))
+
+    def _looks_like_itemized_template_line(self, line: str) -> bool:
+        compact = compact_raw_text(line)
+        if not compact:
+            return False
+        if self._itemized_checker._is_table_header_line(line):
+            return True
+        header_tokens = (
+            "设备名称",
+            "产品名称",
+            "项目名称",
+            "规格型号",
+            "型号",
+            "数量",
+            "单位",
+            "增值税税率",
+            "发票税率",
+            "含税单价",
+            "单价",
+            "含税总价",
+            "总价",
+            "合计",
+            "金额",
+            "备注",
+        )
+        hits = sum(1 for token in header_tokens if token in compact)
+        has_price_axis = any(token in compact for token in ("单价", "总价", "合计", "金额"))
+        has_quantity_axis = "数量" in compact or "单位" in compact
+        if hits >= 4 and has_price_axis and has_quantity_axis:
+            return True
+        if re.fullmatch(r"(?:附件|附表)?\d*分项报价表(?:（格式）)?", compact):
+            return True
+        return False
 
     def _compare_documents(
         self,
@@ -778,7 +1038,7 @@ class DuplicateCheckService:
         if not left["images"] or not right["images"]:
             notes.append("at_least_one_document_has_no_extractable_image_content")
 
-        return {
+        issue = {
             "left_document_identifier": left["identifier_id"],
             "right_document_identifier": right["identifier_id"],
             "left_relation_id": left.get("relation_id"),
@@ -817,6 +1077,111 @@ class DuplicateCheckService:
             "similar_tables": similar_table_metrics["items"],
             "notes": notes,
         }
+        issue["locations"] = self._build_duplicate_issue_locations(issue)
+        return issue
+
+    def _build_duplicate_issue_locations(self, item: dict[str, Any]) -> list[dict[str, Any]]:
+        locations: list[dict[str, Any]] = []
+        evidence_groups = (
+            "duplicate_blocks",
+            "duplicate_sections",
+            "duplicate_tables",
+            "duplicate_images",
+            "similar_blocks",
+            "similar_sections",
+            "similar_tables",
+        )
+        for group_key in evidence_groups:
+            for evidence in item.get(group_key) or []:
+                if not isinstance(evidence, dict):
+                    continue
+                for side in ("left", "right"):
+                    self._append_duplicate_evidence_location(
+                        locations,
+                        item=item,
+                        evidence=evidence,
+                        side=side,
+                    )
+        return locations
+
+    def _append_duplicate_evidence_location(
+        self,
+        locations: list[dict[str, Any]],
+        *,
+        item: dict[str, Any],
+        evidence: dict[str, Any],
+        side: str,
+    ) -> None:
+        pages = self._duplicate_evidence_pages(evidence, side) or [None]
+        bbox = evidence.get(f"{side}_bbox") or evidence.get("bbox")
+        text = self._duplicate_evidence_text(evidence, side)
+        for index, page in enumerate(pages):
+            append_location(
+                locations,
+                make_location(
+                    document_identifier_id=item.get(f"{side}_document_identifier"),
+                    file_name=item.get(f"{side}_file_name"),
+                    page=page,
+                    bbox=bbox if index == 0 else None,
+                    text=text,
+                ),
+            )
+
+    def _duplicate_evidence_pages(self, evidence: dict[str, Any], side: str) -> list[int]:
+        pages: list[int] = []
+
+        def collect(value: Any) -> None:
+            if value is None or isinstance(value, bool):
+                return
+            if isinstance(value, int):
+                if value > 0 and value not in pages:
+                    pages.append(value)
+                return
+            if isinstance(value, float):
+                if value.is_integer():
+                    collect(int(value))
+                return
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.isdigit():
+                    collect(int(stripped))
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    collect(item)
+
+        collect(evidence.get(f"{side}_pages"))
+        collect(evidence.get(f"{side}_page"))
+        if not pages:
+            collect(evidence.get("pages"))
+            collect(evidence.get("page"))
+        return sorted(pages)
+
+    def _duplicate_evidence_text(self, evidence: dict[str, Any], side: str) -> str:
+        for key in (
+            f"{side}_text",
+            f"{side}_preview",
+            f"{side}_title",
+            "text",
+            "preview",
+            "title",
+        ):
+            value = evidence.get(key)
+            if value not in (None, "", []):
+                return clip(str(value), 220)
+
+        for key in (
+            f"{side}_sample_rows",
+            f"{side}_rows",
+            "sample_rows",
+            "rows",
+        ):
+            rows = evidence.get(key)
+            if isinstance(rows, list) and rows:
+                return clip(" | ".join(str(row) for row in rows[:3]), 220)
+
+        image_hash = str(evidence.get("image_hash") or "").strip()
+        return f"image:{image_hash[:16]}" if image_hash else ""
 
     def _supports_similarity_matching(self, role: str) -> bool:
         """当前仅商务标支持相似度匹配，技术标只保留精确查重。"""

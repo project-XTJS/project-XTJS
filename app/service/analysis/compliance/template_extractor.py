@@ -220,6 +220,21 @@ class TemplateExtractor:
         return "\n".join(lines)
 
     @classmethod
+    def _section_location(cls, section: dict) -> dict | None:
+        text = str(section.get('text') or '').strip()
+        page = section.get('page') if isinstance(section.get('page'), int) else None
+        bbox = section.get('bbox') or section.get('box')
+        if not text and page is None and bbox is None:
+            return None
+        return {
+            "page": page,
+            "bbox": bbox,
+            "text": text[:240] if text else "",
+            "type": str(section.get('type') or "text"),
+            "coordinate_system": str(section.get('coordinate_system') or "pdf_point"),
+        }
+
+    @classmethod
     def preprocess_sections(
         cls, layout_sections: list, logical_tables: list = None, is_template: bool = False
     ) -> tuple:
@@ -528,6 +543,11 @@ class TemplateExtractor:
                         for section in chunk
                         if str(section.get('text') or '').strip()
                     ],
+                    "locations": [
+                        location
+                        for location in (cls._section_location(section) for section in chunk)
+                        if location is not None
+                    ],
                     "is_composite": any(
                         marker in compact_title
                         for marker in cls.RESPONSE_FORMAT_COMPOSITE_TITLE_MARKERS
@@ -649,6 +669,7 @@ class TemplateExtractor:
                 {
                     "title": normalized_title,
                     "content": list(attachment.get("content") or []),
+                    "locations": list(attachment.get("locations") or []),
                     "is_optional": "如有" in normalized_title,
                 }
             )

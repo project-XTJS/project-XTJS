@@ -17,6 +17,122 @@ class TenderLimitMixin:
     TENDER_LIMIT_EXCLUDE_KEYWORDS: list
     BID_TOTAL_KEYWORDS: list
 
+    def _tender_limit_location_from_source(
+        self,
+        source: Dict,
+        *,
+        text: str | None = None,
+    ) -> Dict | None:
+        page = source.get("page")
+        if not isinstance(page, int):
+            return None
+        location: Dict[str, Any] = {
+            "page": page,
+            "text": str(text or source.get("text") or "").strip()[:240],
+            "document": "tender",
+            "document_role": "tender",
+        }
+        bbox = source.get("bbox") or source.get("box")
+        if bbox is not None:
+            location["bbox"] = bbox
+        coordinate_system = source.get("coordinate_system")
+        if coordinate_system:
+            location["coordinate_system"] = coordinate_system
+        return location
+
+    def _locations_for_tender_limit_candidate(
+        self,
+        parsed: Dict,
+        *,
+        page: Any,
+        raw_amount: Any,
+        keyword: Any = None,
+        context: Any = None,
+    ) -> List[Dict]:
+        if not isinstance(page, int):
+            return []
+        amount_key = self._normalize(raw_amount)
+        keyword_key = self._normalize(keyword)
+        context_key = self._normalize(context)
+        locations: List[Dict] = []
+        seen: set[tuple] = set()
+
+        def add(source: Dict, text: str | None = None) -> None:
+            location = self._tender_limit_location_from_source(source, text=text)
+            if not location:
+                return
+            key = (
+                location.get("page"),
+                tuple(location.get("bbox") or []),
+                location.get("text"),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            locations.append(location)
+
+        page_sections = [
+            section
+            for section in (parsed.get("sections") or []) + (parsed.get("table_sections") or [])
+            if isinstance(section, dict) and section.get("page") == page
+        ]
+        for section in page_sections:
+            section_text = str(section.get("text") or "")
+            section_key = self._normalize(section_text)
+            if not section_key:
+                continue
+            section_has_amount = amount_key and amount_key in section_key
+            section_has_keyword = not keyword_key or keyword_key in section_key
+            section_has_context = bool(context_key and context_key[:40] and context_key[:40] in section_key)
+
+            for line in section.get("lines") or []:
+                if not isinstance(line, dict):
+                    continue
+                line_text = str(line.get("text") or "")
+                line_key = self._normalize(line_text)
+                if not line_key or not (amount_key and amount_key in line_key):
+                    continue
+                if keyword_key and keyword_key not in line_key and not section_has_keyword:
+                    continue
+                add(line, text=line_text)
+
+            if locations:
+                break
+            if section_has_amount and (section_has_keyword or section_has_context):
+                add(section, text=section_text)
+                break
+
+        if not locations:
+            for section in page_sections:
+                section_text = str(section.get("text") or "")
+                section_key = self._normalize(section_text)
+                if amount_key and amount_key in section_key:
+                    add(section, text=section_text)
+                    break
+
+        return locations[:3]
+
+    def _tender_limit_locations(self, tender_limit: Dict | None) -> List[Dict]:
+        if not isinstance(tender_limit, dict):
+            return []
+        locations = [
+            dict(location)
+            for location in tender_limit.get("locations") or []
+            if isinstance(location, dict)
+        ]
+        if not locations and isinstance(tender_limit.get("page"), int):
+            locations.append(
+                {
+                    "page": tender_limit.get("page"),
+                    "text": str(tender_limit.get("context") or tender_limit.get("raw_amount") or "招标限价")[:240],
+                }
+            )
+        for location in locations:
+            location.setdefault("document", "tender")
+            location.setdefault("document_role", "tender")
+            location.setdefault("label", "招标限价")
+        return locations
+
     # 金额候选提取
     def _convert_amount_to_yuan(self, value: float, unit: str) -> float:
         unit = (unit or "").strip()
@@ -295,13 +411,22 @@ class TenderLimitMixin:
                         )
                         - 15
                     )
+                    keyword = self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(page_text)
+                    context_text = local_context or page_text[:400]
                     all_candidates.append({
                         "page": page,
                         "amount_yuan": cand["amount_yuan"],
                         "raw_amount": cand["raw_amount"],
-                        "keyword": self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(page_text),
+                        "keyword": keyword,
                         "score": score,
-                        "context": local_context or page_text[:400],
+                        "context": context_text,
+                        "locations": self._locations_for_tender_limit_candidate(
+                            parsed,
+                            page=page,
+                            raw_amount=cand["raw_amount"],
+                            keyword=keyword,
+                            context=context_text,
+                        ),
                     })
 
             for idx, line in enumerate(lines):
@@ -326,13 +451,22 @@ class TenderLimitMixin:
                     score = self._score_tender_limit_candidate(
                         context, cand["raw_amount"], cand["amount_yuan"]
                     )
+                    keyword = self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(context)
+                    context_text = local_context or context
                     all_candidates.append({
                         "page": page,
                         "amount_yuan": cand["amount_yuan"],
                         "raw_amount": cand["raw_amount"],
-                        "keyword": self._pick_keyword_near_amount(line_context) or self._pick_keyword_near_amount(context),
+                        "keyword": keyword,
                         "score": score,
-                        "context": local_context or context,
+                        "context": context_text,
+                        "locations": self._locations_for_tender_limit_candidate(
+                            parsed,
+                            page=page,
+                            raw_amount=cand["raw_amount"],
+                            keyword=keyword,
+                            context=context_text,
+                        ),
                     })
 
         dedup: Dict[Tuple[Optional[int], float, str], Dict] = {}
@@ -559,6 +693,7 @@ class TenderLimitMixin:
                     ),
                 }
             tender_page = tender_limit.get("page")
+            tender_locations = self._tender_limit_locations(tender_limit)
             return {
                 "result": "失败",
                 "type": "最高限价校验",
@@ -569,6 +704,7 @@ class TenderLimitMixin:
                     if isinstance(tender_page, int)
                     else []
                 ),
+                "locations": tender_locations,
             }
 
         tender_amount = tender_limit["amount_yuan"]
@@ -586,7 +722,7 @@ class TenderLimitMixin:
         ]
 
         pages = []
-        locations = []
+        locations = self._tender_limit_locations(tender_limit)
         if isinstance(tender_page, int):
             pages.append(tender_page)
             locations.append({

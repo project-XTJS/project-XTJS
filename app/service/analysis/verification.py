@@ -133,12 +133,13 @@ class VerificationChecker:
             bid_by_no.setdefault(attachment_number, []).append(item)
         required = self._required_attachments(tender, bid_by_no, bid_sections)
 
-        results, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], []
+        results, missing_attachment_results, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], [], []
         for item in required:
             section = self._match_attachment(item, bid_by_no, bid_sections)
             result = self._evaluate_attachment(item, section, deadline, bidder_name)
             if not result["found"]:
                 skipped_missing_attachments.append(result["title"])
+                missing_attachment_results.append(result)
                 continue
             results.append(result)
             if result["signature_check"]["status"] in {"fail", "missing"}:
@@ -184,6 +185,7 @@ class VerificationChecker:
             "checked_attachment_count": checked_count,
             "required_attachments": [x["title"] for x in required],
             "skipped_missing_attachments": skipped_missing_attachments,
+            "missing_attachment_results": missing_attachment_results,
             "attachment_results": results,
             "position_check": {"status": position_status, "missing_attachments": skipped_missing_attachments, "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
             "date_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "missing_date_attachments": missing_dates, "late_date_attachments": late_dates},
@@ -275,9 +277,16 @@ class VerificationChecker:
             text = str(item.get("text") or item.get("raw_text") or "").strip()
             if text:
                 section = {"index": i, "page": item.get("page") if isinstance(item.get("page"), int) else None, "type": str(item.get("type") or "text").strip().lower() or "text", "text": text}
-                bbox = self._normalize_bbox(item.get("bbox") or item.get("box"))
-                if bbox is not None:
-                    section["bbox"] = bbox
+                coordinate_system = str(item.get("coordinate_system") or "").strip()
+                raw_bbox = item.get("bbox") or item.get("box")
+                if coordinate_system.lower() == "pdf_point":
+                    if raw_bbox is not None:
+                        section["bbox"] = raw_bbox
+                    section["coordinate_system"] = coordinate_system
+                else:
+                    bbox = self._normalize_bbox(raw_bbox)
+                    if bbox is not None:
+                        section["bbox"] = bbox
                 result.append(section)
         return result
 
@@ -451,7 +460,16 @@ class VerificationChecker:
                         local_dates = self._date_candidates(window)
                         if local_dates:
                             nearest = min(local_dates, key=lambda x: x["start"])
-                            candidates.append({"date": nearest["date"], "text": window[:72], "page": section.get("page"), "section_index": sec_index, "line_index": line_index, "distance": nearest["start"], "anchor": anchor_text})
+                            location = {
+                                "page": section.get("page"),
+                                "bbox": section.get("bbox"),
+                                "text": line or section.get("text") or window[:72],
+                                "document": "tender",
+                                "document_role": "tender",
+                            }
+                            if section.get("coordinate_system"):
+                                location["coordinate_system"] = section.get("coordinate_system")
+                            candidates.append({"date": nearest["date"], "text": window[:72], "page": section.get("page"), "section_index": sec_index, "line_index": line_index, "distance": nearest["start"], "anchor": anchor_text, "locations": [location]})
                         start = pos + len(anchor)
         if not candidates:
             return None
@@ -733,6 +751,11 @@ class VerificationChecker:
                 for section in chunk
                 if str(section.get("text") or "").strip()
             ]
+            locations = [
+                location
+                for location in (TemplateExtractor._section_location(section) for section in chunk)
+                if location is not None
+            ]
             attachments.append(
                 {
                     "attachment_number": self._attachment_number(title),
@@ -745,6 +768,7 @@ class VerificationChecker:
                             if section.get("page") is not None
                         )
                     ),
+                    "locations": locations,
                 }
             )
         return attachments
@@ -841,6 +865,7 @@ class VerificationChecker:
                     "title": title,
                     "text": text,
                     "requirements": template_req,
+                    "template_locations": list(item.get("locations") or [])[:6],
                 }
             )
         return result
@@ -968,7 +993,46 @@ class VerificationChecker:
             status = "pending"
         else:
             status = "pass"
-        return {"title": attachment["title"], "attachment_number": attachment.get("attachment_number"), "found": bid_section is not None, "matched_bid_title": bid_section["title"] if bid_section else None, "pages": bid_section["pages"] if bid_section else [], "requirements": attachment["requirements"], "signature_check": signature_check, "seal_check": seal_check, "date_check": date_check, "status": status}
+        return {
+            "title": attachment["title"],
+            "attachment_number": attachment.get("attachment_number"),
+            "found": bid_section is not None,
+            "matched_bid_title": bid_section["title"] if bid_section else None,
+            "pages": bid_section["pages"] if bid_section else [],
+            "locations": self._attachment_heading_locations(bid_section),
+            "template_locations": list(attachment.get("template_locations") or [])[:6],
+            "requirements": attachment["requirements"],
+            "signature_check": signature_check,
+            "seal_check": seal_check,
+            "date_check": date_check,
+            "status": status,
+        }
+
+    def _attachment_heading_locations(self, bid_section: dict | None) -> list[dict]:
+        if not isinstance(bid_section, dict):
+            return []
+        locations: list[dict] = []
+        title = str(bid_section.get("title") or "").strip()
+        for section in bid_section.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            text = str(section.get("text") or "").strip()
+            page = section.get("page") if isinstance(section.get("page"), int) else None
+            bbox = self._normalize_bbox(section.get("bbox") or section.get("box"))
+            if page is None or not text:
+                continue
+            locations.append(
+                {
+                    "page": page,
+                    "bbox": bbox,
+                    "text": text,
+                }
+            )
+            if title and self._attachment_titles_compatible(title, text):
+                break
+            if len(locations) >= 1:
+                break
+        return self._dedupe_locations(locations)
 
     def _signature_check(self, attachment: dict, bid_section: dict | None, seal_check: dict, date_check: dict) -> dict:
         required = int(attachment["requirements"].get("signature_field_count") or 0)

@@ -142,6 +142,11 @@ class ExtractionTablesMixin:
         for template in TemplateExtractor.extract_consistency_templates(tender_payload or {}):
             title = str(template.get("title") or "").strip() or "unnamed_template"
             content_text = "\n".join(template.get("content") or [])
+            locations = [
+                location
+                for location in template.get("locations") or []
+                if isinstance(location, dict)
+            ]
             analysis = self.consistency_checker._analyze_template_segment(title, content_text)
             anchors = analysis.get("anchors") or []
             rows.append(
@@ -159,6 +164,7 @@ class ExtractionTablesMixin:
                         "min_body_length": int(getattr(self.consistency_checker, "MIN_BODY_LENGTH", 50)),
                     },
                     status="extracted",
+                    page_refs=self._coerce_page_refs(locations),
                     expected_document_role="business",
                     evidence={
                         "content_preview": self._trim_text(
@@ -166,6 +172,7 @@ class ExtractionTablesMixin:
                             max_length=200,
                         ),
                     },
+                    locations=locations,
                 )
             )
 
@@ -665,6 +672,7 @@ class ExtractionTablesMixin:
         page_refs: list[int] | None = None,
         expected_document_role: str | None = None,
         evidence: Any | None = None,
+        locations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """构建一条标准化的抽数行。"""
         row = {
@@ -682,6 +690,8 @@ class ExtractionTablesMixin:
             row["expected_document_role"] = expected_document_role
         if evidence is not None:
             row["evidence"] = evidence
+        if locations:
+            row["locations"] = locations
         return row
 
     def _coerce_page_refs(self, *values: Any) -> list[int]:

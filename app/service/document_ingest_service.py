@@ -14,13 +14,266 @@ from fastapi import HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
-from app.core.document_types import DocumentType
+from app.core.document_types import DOCUMENT_TYPE_TENDER, DocumentType
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 from app.service.project_runtime import ProjectTaskCancelledError
 from app.utils.text_utils import cleanup_temp_file, save_temp_file
 
 logger = logging.getLogger(__name__)
+
+
+PDF_POINT_COORDINATE_SYSTEM = "pdf_point"
+
+
+def _is_tender_document_type(document_type: Any) -> bool:
+    return str(document_type or "").strip().lower() == DOCUMENT_TYPE_TENDER
+
+
+def _clean_pdf_text(value: Any) -> str:
+    return " ".join(str(value or "").replace("\x00", "").split()).strip()
+
+
+def _clean_pdf_bbox(value: Any) -> list[float] | None:
+    if value is None:
+        return None
+    if hasattr(value, "x0") and hasattr(value, "y0") and hasattr(value, "x1") and hasattr(value, "y1"):
+        value = [value.x0, value.y0, value.x1, value.y1]
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value[index]) for index in range(4)]
+    except (TypeError, ValueError):
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
+
+
+def _table_records_from_rows(rows: list[list[str]]) -> list[dict[str, str]]:
+    if len(rows) <= 1:
+        return []
+    headers = [cell or f"col_{index + 1}" for index, cell in enumerate(rows[0])]
+    records: list[dict[str, str]] = []
+    for row in rows[1:]:
+        record: dict[str, str] = {}
+        for index, cell in enumerate(row):
+            key = headers[index] if index < len(headers) else f"col_{index + 1}"
+            if key in record:
+                key = f"{key}_{index + 1}"
+            record[key] = cell
+        if any(value for value in record.values()):
+            records.append(record)
+    return records
+
+
+def _extract_pdf_page_tables(page: Any, page_no: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    find_tables = getattr(page, "find_tables", None)
+    if not callable(find_tables):
+        return [], []
+
+    try:
+        table_result = find_tables()
+    except Exception:
+        logger.debug("PyMuPDF table extraction failed page=%s", page_no, exc_info=True)
+        return [], []
+
+    table_sections: list[dict[str, Any]] = []
+    logical_tables: list[dict[str, Any]] = []
+    for table_index, table in enumerate(getattr(table_result, "tables", []) or []):
+        try:
+            raw_rows = table.extract()
+        except Exception:
+            logger.debug("PyMuPDF table rows extraction failed page=%s table=%s", page_no, table_index, exc_info=True)
+            continue
+
+        rows: list[list[str]] = []
+        for raw_row in raw_rows or []:
+            if not isinstance(raw_row, (list, tuple)):
+                continue
+            row = [_clean_pdf_text(cell) for cell in raw_row]
+            if any(row):
+                rows.append(row)
+        if not rows:
+            continue
+
+        table_text = "\n".join(" | ".join(cell for cell in row if cell) for row in rows).strip()
+        bbox = _clean_pdf_bbox(getattr(table, "bbox", None))
+        common = {
+            "page": page_no,
+            "pages": [page_no],
+            "type": "table",
+            "text": table_text,
+            "bbox": bbox,
+            "coordinate_system": PDF_POINT_COORDINATE_SYSTEM,
+            "source": "pymupdf_text_layer",
+            "table_index": table_index,
+        }
+        table_sections.append(common.copy())
+        logical_tables.append(
+            {
+                **common,
+                "headers": rows[0],
+                "rows": rows,
+                "records": _table_records_from_rows(rows),
+            }
+        )
+
+    return table_sections, logical_tables
+
+
+def _extract_pdf_text_layer_result(
+    file_path: str,
+    file_name: str,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    try:
+        import fitz
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("PyMuPDF is required for tender PDF text-layer extraction.") from exc
+
+    try:
+        pdf = fitz.open(file_path)
+    except Exception as exc:
+        raise ValueError(f"Invalid tender PDF: {file_name}") from exc
+
+    try:
+        if getattr(pdf, "needs_pass", False):
+            raise ValueError(f"Tender PDF is encrypted and cannot be opened: {file_name}")
+
+        pages: list[dict[str, Any]] = []
+        layout_sections: list[dict[str, Any]] = []
+        table_sections: list[dict[str, Any]] = []
+        logical_tables: list[dict[str, Any]] = []
+        text_page_count = 0
+
+        for page_index in range(len(pdf)):
+            if cancel_check is not None:
+                cancel_check()
+
+            page_no = page_index + 1
+            page = pdf.load_page(page_index)
+            page_rect = _clean_pdf_bbox(page.rect)
+            page_line_texts: list[str] = []
+
+            try:
+                text_dict = page.get_text("dict", sort=True) or {}
+            except TypeError:
+                text_dict = page.get_text("dict") or {}
+
+            for block_index, block in enumerate(text_dict.get("blocks") or []):
+                if not isinstance(block, dict) or int(block.get("type") or 0) != 0:
+                    continue
+                block_lines: list[str] = []
+                line_payloads: list[dict[str, Any]] = []
+                for line_index, line in enumerate(block.get("lines") or []):
+                    if not isinstance(line, dict):
+                        continue
+                    spans = line.get("spans") or []
+                    line_text = _clean_pdf_text("".join(str(span.get("text") or "") for span in spans if isinstance(span, dict)))
+                    if not line_text:
+                        continue
+                    block_lines.append(line_text)
+                    page_line_texts.append(line_text)
+                    line_payloads.append(
+                        {
+                            "text": line_text,
+                            "bbox": _clean_pdf_bbox(line.get("bbox")),
+                            "line_index": line_index,
+                            "coordinate_system": PDF_POINT_COORDINATE_SYSTEM,
+                        }
+                    )
+
+                block_text = "\n".join(block_lines).strip()
+                if not block_text:
+                    continue
+                section = {
+                    "page": page_no,
+                    "type": "text",
+                    "text": block_text,
+                    "bbox": _clean_pdf_bbox(block.get("bbox")),
+                    "coordinate_system": PDF_POINT_COORDINATE_SYSTEM,
+                    "source": "pymupdf_text_layer",
+                    "block_index": block_index,
+                }
+                if line_payloads:
+                    section["lines"] = line_payloads
+                layout_sections.append(section)
+
+            page_text = "\n".join(page_line_texts).strip()
+            if not page_text:
+                try:
+                    page_text = str(page.get_text("text", sort=True) or "").strip()
+                except TypeError:
+                    page_text = str(page.get_text("text") or "").strip()
+                if page_text:
+                    layout_sections.append(
+                        {
+                            "page": page_no,
+                            "type": "text",
+                            "text": page_text,
+                            "bbox": page_rect,
+                            "coordinate_system": PDF_POINT_COORDINATE_SYSTEM,
+                            "source": "pymupdf_text_layer",
+                            "block_index": None,
+                        }
+                    )
+
+            if page_text:
+                text_page_count += 1
+            pages.append({"page": page_no, "text": page_text, "bbox": page_rect})
+
+            page_table_sections, page_logical_tables = _extract_pdf_page_tables(page, page_no)
+            table_sections.extend(page_table_sections)
+            logical_tables.extend(page_logical_tables)
+
+        content = "\n".join(str(page.get("text") or "").strip() for page in pages if str(page.get("text") or "").strip())
+
+        return {
+            "content": content,
+            "text_length": len(content),
+            "pages": pages,
+            "page_count": len(pages),
+            "parser_engine": "PyMuPDF",
+            "source_mode": "pdf_text_layer",
+            "active_device": "cpu",
+            "ocr_engine": None,
+            "ocr_used": False,
+            "layout_used": bool(layout_sections),
+            "layout_sections": layout_sections,
+            "layout_section_count": len(layout_sections),
+            "table_sections": table_sections,
+            "table_section_count": len(table_sections),
+            "native_tables": logical_tables,
+            "native_table_count": len(logical_tables),
+            "logical_tables": logical_tables,
+            "logical_table_count": len(logical_tables),
+            "seal_detected": False,
+            "seal_count": 0,
+            "seal_texts": [],
+            "seal_locations": [],
+            "signature_detected": False,
+            "signature_count": 0,
+            "signature_texts": [],
+            "signature_locations": [],
+            "bbox_coordinate_space": PDF_POINT_COORDINATE_SYSTEM,
+            "bbox_source_coordinate_space": PDF_POINT_COORDINATE_SYSTEM,
+            "recognition_route": "pymupdf_text_layer",
+            "recognition_reason": "tender_pdf_text_layer_only",
+            "pdf_mode": "text_layer_only",
+            "pdf_text_stats": {
+                "page_count": len(pages),
+                "text_page_count": text_page_count,
+                "layout_section_count": len(layout_sections),
+                "logical_table_count": len(logical_tables),
+            },
+            "ppstructure_v3_requested": False,
+            "ppstructure_v3_enabled": False,
+            "seal_recognition_enabled": False,
+        }
+    finally:
+        pdf.close()
 
 
 # 工具函数：URL 归一化与结果精简
@@ -111,9 +364,32 @@ def _extract_recognition_content(
     file_name: str,
     analysis_service,
     cancel_check: Callable[[], None] | None = None,
+    *,
+    document_type: Any = None,
 ) -> dict:
     """对单文件执行识别，并输出用于存储的精简识别结果。"""
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
+    if _is_tender_document_type(document_type):
+        if file_extension != "pdf":
+            raise ValueError("Tender documents must be PDF files when OCR fallback is disabled.")
+        temp_file_path = save_temp_file(file_bytes, ".pdf")
+        try:
+            if cancel_check is not None:
+                cancel_check()
+            recognition_result = _extract_pdf_text_layer_result(
+                temp_file_path,
+                file_name,
+                cancel_check=cancel_check,
+            )
+            if cancel_check is not None:
+                cancel_check()
+            recognition_result.pop("content", None)
+            recognition_result.pop("pages", None)
+            recognition_result["filename"] = file_name
+            return recognition_result
+        finally:
+            cleanup_temp_file(temp_file_path)
+
     allowed_extensions = set(analysis_service.get_supported_extensions())
     if file_extension not in allowed_extensions:
         raise ValueError(
@@ -172,12 +448,35 @@ def _extract_recognition_content(
     file_name: str,
     analysis_service,
     cancel_check: Callable[[], None] | None = None,
+    *,
+    document_type: Any = None,
 ) -> dict:
     """
     对单文件执行 OCR 提取，返回精简的识别结果字典。
     已移除 content、pages 等大字段，避免直接存入数据库主表。
     """
     file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
+    if _is_tender_document_type(document_type):
+        if file_extension != "pdf":
+            raise ValueError("Tender documents must be PDF files when OCR fallback is disabled.")
+        temp_file_path = save_temp_file(file_bytes, ".pdf")
+        try:
+            if cancel_check is not None:
+                cancel_check()
+            recognition_result = _extract_pdf_text_layer_result(
+                temp_file_path,
+                file_name,
+                cancel_check=cancel_check,
+            )
+            if cancel_check is not None:
+                cancel_check()
+            recognition_result.pop("content", None)
+            recognition_result.pop("pages", None)
+            recognition_result["filename"] = file_name
+            return recognition_result
+        finally:
+            cleanup_temp_file(temp_file_path)
+
     allowed_extensions = set(analysis_service.get_supported_extensions())
     if file_extension not in allowed_extensions:
         raise ValueError(
@@ -250,6 +549,7 @@ async def upload_extract_and_create_document(
             file_bytes,
             (file.filename or resolved_file_name),
             analysis_service,
+            document_type=document_type,
         )
 
         # 步骤3：写入数据库
@@ -400,6 +700,7 @@ async def recognize_existing_document(
             str(document.get("file_name") or document_identifier),
             analysis_service,
             cancel_check,
+            document_type=document.get("document_type"),
         )
         if cancel_check is not None:
             cancel_check()

@@ -25,6 +25,12 @@ from app.core.document_types import (
     TECHNICAL_BID_COMPATIBLE_TYPES,
     get_document_type_label,
 )
+from app.service.analysis.location_utils import (
+    append_location,
+    collect_locations,
+    make_location,
+    normalize_locations,
+)
 from app.service.minio_service import MinioService
 
 logger = logging.getLogger(__name__)
@@ -165,6 +171,8 @@ class PostgreSQLService:
         if not project:
             return project
         decorated = dict(project)
+        if decorated.get("report_url") is None:
+            decorated["report_url"] = ""
         # 对所有项目查询结果补充状态标签，避免路由层重复拼装。
         normalized = cls._normalize_parsing_status(decorated.get("parsing_status"))
         decorated["parsing_status"] = normalized
@@ -250,7 +258,7 @@ class PostgreSQLService:
         resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
         cursor.execute(
             """
-            SELECT identifier_id, project_name, parsing_status
+            SELECT identifier_id, project_name, parsing_status, report_url
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
             """,
@@ -311,14 +319,14 @@ class PostgreSQLService:
             query = """
                 INSERT INTO xtjs_projects (identifier_id, project_name, parsing_status)
                 VALUES (%s, %s, %s)
-                RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
             """
             values = (normalized_identifier, normalized_project_name, self.PARSING_STATUS_UPLOADED)
         else:
             query = """
                 INSERT INTO xtjs_projects (project_name, parsing_status)
                 VALUES (%s, %s)
-                RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
             """
             values = (normalized_project_name, self.PARSING_STATUS_UPLOADED)
         with self._get_connection() as conn:
@@ -330,7 +338,7 @@ class PostgreSQLService:
         """根据项目名称获取未删除项目。"""
         normalized_project_name = self._normalize_project_name(project_name)
         query = """
-            SELECT identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            SELECT identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE project_name = %s AND deleted = FALSE
         """
@@ -374,6 +382,7 @@ class PostgreSQLService:
                         p.identifier_id,
                         p.project_name,
                         p.parsing_status,
+                        p.report_url,
                         p.deleted,
                         p.create_time,
                         p.update_time,
@@ -521,7 +530,7 @@ class PostgreSQLService:
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取项目记录。"""
         query = """
-            SELECT identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            SELECT identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
@@ -550,12 +559,32 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET {", ".join(updates)}, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
                 cursor.execute(query, tuple(values + [resolved_identifier]))
+                updated = cursor.fetchone()
+                return self._decorate_project_record(dict(updated)) if updated else None
+
+    def update_project_report_url(
+        self,
+        identifier_id: str,
+        report_url: str,
+    ) -> Optional[Dict[str, Any]]:
+        """更新项目关联的前端 Word 报告地址。"""
+        normalized_report_url = str(report_url or "").strip()
+        query = """
+            UPDATE xtjs_projects
+            SET report_url = %s, update_time = CURRENT_TIMESTAMP
+            WHERE identifier_id = %s AND deleted = FALSE
+            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute(query, (normalized_report_url, resolved_identifier))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
@@ -570,7 +599,7 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET parsing_status = %s, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -1541,28 +1570,24 @@ class PostgreSQLService:
 
     @staticmethod
     def _first_page_number(*values: Any) -> Optional[int]:
-        pages: list[int] = []
-
-        def collect(value: Any) -> None:
+        def first(value: Any) -> Optional[int]:
             if value is None or isinstance(value, bool):
-                return
+                return None
             if isinstance(value, int):
-                if value > 0:
-                    pages.append(value)
-                return
+                return value if value > 0 else None
             if isinstance(value, float):
-                if value.is_integer() and value > 0:
-                    pages.append(int(value))
-                return
+                return int(value) if value.is_integer() and value > 0 else None
             if isinstance(value, str):
                 stripped = value.strip()
                 if stripped.isdigit() and int(stripped) > 0:
-                    pages.append(int(stripped))
-                return
+                    return int(stripped)
+                return None
             if isinstance(value, (list, tuple, set)):
                 for item in value:
-                    collect(item)
-                return
+                    page = first(item)
+                    if page:
+                        return page
+                return None
             if isinstance(value, dict):
                 for key in (
                     "source_page",
@@ -1574,11 +1599,16 @@ class PostgreSQLService:
                     "requirement_page",
                     "start_page",
                 ):
-                    collect(value.get(key))
+                    page = first(value.get(key))
+                    if page:
+                        return page
+            return None
 
         for raw_value in values:
-            collect(raw_value)
-        return min(pages) if pages else None
+            page = first(raw_value)
+            if page:
+                return page
+        return None
 
     @classmethod
     def _register_document_source_ref(
@@ -1957,7 +1987,212 @@ class PostgreSQLService:
             if has_explicit_prefix or page is not None:
                 cls._append_prefixed_source_fields(enriched, prefix, ref, page)
 
+        cls._attach_standard_locations(enriched, value, index, local_context, single_ref)
         return enriched
+
+    @classmethod
+    def _attach_standard_locations(
+        cls,
+        enriched: dict[str, Any],
+        original: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+        context: dict[str, dict[str, Any]],
+        single_ref: Optional[dict[str, Any]],
+    ) -> None:
+        defaults = cls._location_defaults_for_node(
+            enriched,
+            original,
+            index,
+            context,
+            single_ref,
+        )
+        locations: list[dict[str, Any]] = []
+        raw_locations = enriched.get("locations")
+        if isinstance(raw_locations, dict):
+            raw_location_items = [raw_locations]
+        elif isinstance(raw_locations, list):
+            raw_location_items = raw_locations
+        else:
+            raw_location_items = []
+        for raw_location in raw_location_items:
+            if not isinstance(raw_location, dict):
+                continue
+            location_defaults = cls._location_defaults_for_location(
+                defaults,
+                raw_location,
+                context,
+            )
+            for location in normalize_locations(raw_location, defaults=location_defaults):
+                append_location(locations, location)
+        for raw_location in collect_locations(original.get("evidence")):
+            location_defaults = cls._location_defaults_for_location(
+                defaults,
+                raw_location,
+                context,
+            )
+            for location in normalize_locations(raw_location, defaults=location_defaults):
+                append_location(locations, location)
+        if not locations and cls._is_location_issue_node(original):
+            append_location(
+                locations,
+                make_location(
+                    document_identifier_id=defaults.get("document_identifier_id"),
+                    file_name=defaults.get("file_name"),
+                    page=defaults.get("page"),
+                    bbox=defaults.get("bbox"),
+                    text=defaults.get("text"),
+                ),
+            )
+        if locations:
+            enriched["locations"] = locations
+
+    @classmethod
+    def _location_defaults_for_node(
+        cls,
+        enriched: dict[str, Any],
+        original: dict[str, Any],
+        index: dict[str, dict[str, dict[str, Any]]],
+        context: dict[str, dict[str, Any]],
+        single_ref: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ref = (
+            single_ref
+            or cls._resolve_document_source_ref(enriched, index)
+            or cls._default_location_context_ref(context)
+        )
+        document_identifier = (
+            enriched.get("document_identifier_id")
+            or enriched.get("document_id")
+            or enriched.get("identifier_id")
+            or original.get("document_identifier_id")
+            or original.get("document_id")
+            or original.get("identifier_id")
+            or ((ref or {}).get("identifier_id"))
+        )
+        file_name = (
+            enriched.get("file_name")
+            or enriched.get("document_file_name")
+            or original.get("file_name")
+            or original.get("document_file_name")
+            or ((ref or {}).get("file_name"))
+        )
+        return {
+            "document_identifier_id": document_identifier,
+            "file_name": file_name,
+            "page": cls._node_page_number(enriched) or cls._node_page_number(original),
+            "bbox": (
+                enriched.get("bbox")
+                or enriched.get("bbox_ocr")
+                or enriched.get("box")
+                or original.get("bbox")
+                or original.get("bbox_ocr")
+                or original.get("box")
+            ),
+            "text": cls._location_text_from_node(enriched) or cls._location_text_from_node(original),
+        }
+
+    @classmethod
+    def _location_defaults_for_location(
+        cls,
+        defaults: dict[str, Any],
+        location: dict[str, Any],
+        context: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        ref = cls._context_ref_for_location(location, context)
+        if not ref:
+            return defaults
+        merged = dict(defaults)
+        merged["document_identifier_id"] = ref.get("identifier_id") or merged.get("document_identifier_id")
+        merged["file_name"] = ref.get("file_name") or merged.get("file_name")
+        return merged
+
+    @classmethod
+    def _context_ref_for_location(
+        cls,
+        location: dict[str, Any],
+        context: dict[str, dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        raw_role = str(
+            location.get("document")
+            or location.get("role")
+            or location.get("document_role")
+            or location.get("document_type")
+            or ""
+        ).strip().lower()
+        if not raw_role:
+            return None
+        if "tender" in raw_role:
+            return context.get("tender")
+        if "technical" in raw_role:
+            return context.get("technical") or context.get("technical_bid")
+        if "business" in raw_role or "bidder" in raw_role:
+            return context.get("business") or context.get("business_bid")
+        return None
+
+    @classmethod
+    def _default_location_context_ref(
+        cls,
+        context: dict[str, dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        for key in ("default", "business", "business_bid", "technical", "technical_bid", "tender"):
+            ref = context.get(key)
+            if ref:
+                return ref
+        return None
+
+    @classmethod
+    def _location_text_from_node(cls, node: dict[str, Any]) -> str:
+        for key in (
+            "matched_text",
+            "wrong",
+            "text",
+            "preview",
+            "message",
+            "title",
+            "reason",
+            "description",
+        ):
+            value = node.get(key)
+            if value not in (None, "", []):
+                return str(value).strip()
+        return ""
+
+    @classmethod
+    def _is_location_issue_node(cls, node: dict[str, Any]) -> bool:
+        if not isinstance(node, dict):
+            return False
+        has_issue_signal = any(
+            key in node
+            for key in (
+                "status",
+                "severity",
+                "title",
+                "message",
+                "matched_text",
+                "suggestion",
+                "reason",
+                "issue_type",
+                "risk_level",
+                "check_name",
+            )
+        )
+        has_location_signal = any(
+            key in node
+            for key in (
+                "document_identifier_id",
+                "document_id",
+                "identifier_id",
+                "file_name",
+                "document_file_name",
+                "source_page",
+                "page",
+                "pages",
+                "bbox",
+                "bbox_ocr",
+                "box",
+            )
+        )
+        return has_issue_signal and has_location_signal
 
     @classmethod
     def _strip_legacy_project_file_urls(cls, value: Any) -> Any:
@@ -1976,6 +2211,8 @@ class PostgreSQLService:
         payload = dict(record)
         if "result" in payload:
             payload["result"] = cls._strip_legacy_project_file_urls(payload.get("result"))
+        if payload.get("result_fot_frontend") is None:
+            payload["result_fot_frontend"] = {}
         return payload
 
     def _prepare_project_result_for_persistence(
@@ -2068,8 +2305,10 @@ class PostgreSQLService:
         """获取项目分析结果记录。"""
         query = """
             SELECT
+                id,
                 project_identifier_id,
                 result,
+                result_fot_frontend,
                 create_time,
                 update_time
             FROM xtjs_result
@@ -2115,6 +2354,7 @@ class PostgreSQLService:
                 r.project_identifier_id,
                 p.project_name,
                 r.result,
+                r.result_fot_frontend,
                 r.create_time,
                 r.update_time
             FROM xtjs_result r
@@ -2165,8 +2405,10 @@ class PostgreSQLService:
                 result = EXCLUDED.result,
                 update_time = CURRENT_TIMESTAMP
             RETURNING
+                id,
                 project_identifier_id,
                 result,
+                result_fot_frontend,
                 create_time,
                 update_time
         """
@@ -2179,7 +2421,7 @@ class PostgreSQLService:
                         Json(jsonable_encoder(persisted_result)),
                     ),
                 )
-                return dict(cursor.fetchone())
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
         """删除项目分析结果记录。"""
@@ -2214,6 +2456,47 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
+    def update_project_result_for_frontend(
+        self,
+        project_identifier_id: str,
+        result_fot_frontend: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """单独更新前端删减后的项目结果，不改动原始分析 result。"""
+        if not isinstance(result_fot_frontend, dict):
+            raise ValueError("result_fot_frontend must be a JSON object")
+
+        project = self.get_project_by_identifier(project_identifier_id)
+        if not project:
+            raise ValueError(f"项目不存在：{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
+
+        query = """
+            INSERT INTO xtjs_result (project_identifier_id, result, result_fot_frontend)
+            VALUES (%s, '{}'::jsonb, %s)
+            ON CONFLICT (project_identifier_id)
+            DO UPDATE
+            SET
+                result_fot_frontend = EXCLUDED.result_fot_frontend,
+                update_time = CURRENT_TIMESTAMP
+            RETURNING
+                id,
+                project_identifier_id,
+                result,
+                result_fot_frontend,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(jsonable_encoder(result_fot_frontend)),
+                    ),
+                )
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+
     def upsert_project_result_item(
         self,
         project_identifier_id: str,
@@ -2243,8 +2526,10 @@ class PostgreSQLService:
                 result = (COALESCE(xtjs_result.result, '{}'::jsonb) - 'project_file_urls') || EXCLUDED.result,
                 update_time = CURRENT_TIMESTAMP
             RETURNING
+                id,
                 project_identifier_id,
                 result,
+                result_fot_frontend,
                 create_time,
                 update_time
         """
@@ -2257,4 +2542,4 @@ class PostgreSQLService:
                         Json(jsonable_encoder(payload)),
                     ),
                 )
-                return dict(cursor.fetchone())
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))

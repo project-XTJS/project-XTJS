@@ -60,6 +60,7 @@ class StarExtractMixin:
                         "requirement": req,
                         "section_type": entry["section_type"],
                         "page": entry["page"],
+                        "bbox": entry.get("bbox"),
                         "line_number": entry["line_number"],
                         "normalized_requirement": req_norm,
                         "fragments": self._fragments(req),
@@ -179,6 +180,7 @@ class StarExtractMixin:
                         "line_number": current["line_number"],
                         "section_type": current["section_type"],
                         "chapter_title": current["chapter_title"],
+                        "bbox": current.get("bbox"),
                     }
                 )
             current = None
@@ -206,6 +208,7 @@ class StarExtractMixin:
                         "line_number": item["line_number"],
                         "section_type": self._infer_section(lines, idx),
                         "chapter_title": chapter_title,
+                        "bbox": item.get("bbox"),
                         "parts": [segment],
                     }
                 continue
@@ -221,6 +224,7 @@ class StarExtractMixin:
                     "line_number": item["line_number"],
                     "section_type": self._infer_section(lines, idx),
                     "chapter_title": chapter_title,
+                    "bbox": item.get("bbox"),
                     "parts": [line],
                 }
 

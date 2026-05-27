@@ -1244,7 +1244,6 @@ async def resume_project_ocr(
 async def run_project_tender_ocr(
     identifier_id: str,
     parallelism: int = Form(default=1, ge=1, le=16),
-    analysis_service=Depends(get_text_analysis_service),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
@@ -1262,7 +1261,7 @@ async def run_project_tender_ocr(
         endpoint_name=f"/api/postgresql/projects/{project_identifier}/run-tender-ocr",
         db_service=db_service,
         oss_service=oss_service,
-        analysis_service=analysis_service,
+        analysis_service=None,
     )
 
 

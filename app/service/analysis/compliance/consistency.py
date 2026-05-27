@@ -119,6 +119,12 @@ class ConsistencyChecker:
         ("招标公告", "投标邀请书"),
         ("投标邀请书", "招标公告"),
     )
+    OPTIONAL_TABLE_HEADER_ANCHORS = {"备注"}
+    NON_REQUIRED_HINT_MARKERS = (
+        "有专业职称人数及职称情况",
+        "其中有执业资格人数及职称情况",
+        "其他人员情况等简介",
+    )
     # 表格型附件只校验表头和固定说明，不把数据行数值带入一致性比较。
     TABLE_HEADER_GROUPS = (
         (
@@ -171,7 +177,17 @@ class ConsistencyChecker:
         "我方同意根据采购人进一步要求出示有关资料予以证实",
         "如为联合体",
         "此附件联合体各方均应提供",
+        "本表后应附合同复印件或影印件",
+        "类似程度分为",
+        "成功案例以合同签订日期为准",
+        "同一单位一次招标三年沿用期内续签",
+        "但同一单位2",
+        "次经程序招标项目可按照2",
+        "已承揽尚在履约期合同",
+        "须提供合同首页",
+        "目内容页和签字盖章页",
     )
+    SHORT_INSTRUCTIONAL_LINE_MARKERS = {"个计算"}
 
     def __init__(self):
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
@@ -457,6 +473,14 @@ class ConsistencyChecker:
                 best_fields = present_fields
         return " ".join(best_fields)
 
+    def _non_required_hint_projection(self, text: str, normalized_text: str) -> str | None:
+        """把模板里的括号说明视为提示，不作为必须逐字保留的正文。"""
+        if not any(marker in normalized_text for marker in self.NON_REQUIRED_HINT_MARKERS):
+            return None
+        if "专业人员分类及人数" in normalized_text:
+            return "专业人员分类及人数"
+        return ""
+
     def _should_preserve_underlined_text(self, content: str) -> bool:
         """仅在下划线内容明显属于固定句子骨架时保留，避免把纯填写值带入一致性比较。"""
         plain = self._plain_text(content)
@@ -495,10 +519,13 @@ class ConsistencyChecker:
             return ""
         if self._is_non_comparable_slot_line(text):
             return ""
+        normalized_text = self._normalize(text)
+        hint_projection = self._non_required_hint_projection(text, normalized_text)
+        if hint_projection is not None:
+            return hint_projection
         table_header_projection = self._table_header_projection(text)
         if table_header_projection:
             return table_header_projection
-        normalized_text = self._normalize(text)
         compact_text = self._compact_text(text)
         if "已签字" in compact_text and any(
             marker in compact_text for marker in ("法定代表人", "委托代理人", "项目经理", "投标人")
@@ -510,7 +537,10 @@ class ConsistencyChecker:
             or self.PLACEHOLDER_SPAN_RE.search(compact_text)
         )
         # 招标模板里的说明性提示不是正文，避免与投标文件填写内容混在一起误判。
-        if any(marker in normalized_text for marker in self.INSTRUCTIONAL_LINE_MARKERS):
+        if (
+            normalized_text in self.SHORT_INSTRUCTIONAL_LINE_MARKERS
+            or any(marker in normalized_text for marker in self.INSTRUCTIONAL_LINE_MARKERS)
+        ):
             return ""
         # 报价金额句属于填写项，模板和投标文件的书写方式差异较大，不纳入固定正文一致性比较。
         if any(marker in normalized_text for marker in self.AMOUNT_LINE_MARKERS):
@@ -651,6 +681,42 @@ class ConsistencyChecker:
                 }
             )
         return locations
+
+    def _template_locations_for_missing_anchors(
+        self,
+        locations: List[Dict],
+        anchors: List[str],
+    ) -> List[Dict]:
+        if not anchors:
+            return locations
+        anchor_keys = [
+            key
+            for anchor in anchors
+            if (key := self._normalize(str(anchor or "")))
+        ]
+        if not anchor_keys:
+            return locations
+
+        matched: List[Dict] = []
+        seen: set[tuple] = set()
+        for location in locations or []:
+            if not isinstance(location, dict):
+                continue
+            text_key = self._normalize(str(location.get("text") or ""))
+            if not text_key:
+                continue
+            if not any(anchor_key in text_key for anchor_key in anchor_keys):
+                continue
+            key = (
+                location.get("page"),
+                tuple(location.get("bbox") or location.get("box") or []),
+                location.get("text"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            matched.append(location)
+        return matched or locations
 
     def _plain_text(self, text: str) -> str:
         value = str(text or "").replace("\u3000", " ").replace("\xa0", " ")
@@ -1152,14 +1218,66 @@ class ConsistencyChecker:
             anchor_is_declaration and has_authorization
         )
 
+    def _contextual_anchor_present(
+        self,
+        anchor: str,
+        normalized_bid_body: str,
+        *,
+        title: str = "",
+    ) -> bool:
+        title_key = self._normalize(title)
+        anchor_key = self._normalize(anchor)
+        if not anchor_key:
+            return True
+
+        if "报价一览表" in title_key and anchor_key in {"产品", "设备名称"}:
+            return "报价项" in normalized_bid_body
+
+        if anchor_key in {self._normalize(item) for item in self.OPTIONAL_TABLE_HEADER_ANCHORS}:
+            if any(marker in title_key for marker in ("报价表", "报价一览表", "分项报价表")):
+                core_headers = ("含税总价", "增值税税率")
+                return all(header in normalized_bid_body for header in core_headers)
+
+        if "商务条款偏离表" in title_key and anchor_key == self._normalize("响应文件的商务条款"):
+            return (
+                "采购文件商务" in normalized_bid_body
+                and "偏离" in normalized_bid_body
+                and "说明" in normalized_bid_body
+                and ("无偏离" in normalized_bid_body or "P" in normalized_bid_body)
+            )
+
+        if "参选人基本情况表" in title_key and anchor_key == self._normalize("成立日期或注册日期"):
+            return "注册日期" in normalized_bid_body or "成立日期" in normalized_bid_body
+
+        return False
+
     def _anchor_present_in_bid(
-        self, anchor: str, normalized_bid_body: str, *, title: str = ""
+        self,
+        anchor: str,
+        normalized_bid_body: str,
+        *,
+        title: str = "",
+        normalized_raw_bid_body: str = "",
     ) -> bool:
         if not anchor:
             return True
         if anchor in normalized_bid_body:
             return True
+        if normalized_raw_bid_body and anchor in normalized_raw_bid_body:
+            return True
         if any(variant in normalized_bid_body for variant in self._anchor_variants(anchor)):
+            return True
+        if normalized_raw_bid_body and any(
+            variant in normalized_raw_bid_body for variant in self._anchor_variants(anchor)
+        ):
+            return True
+        if self._contextual_anchor_present(anchor, normalized_bid_body, title=title):
+            return True
+        if normalized_raw_bid_body and self._contextual_anchor_present(
+            anchor,
+            normalized_raw_bid_body,
+            title=title,
+        ):
             return True
         return self._manufacturer_either_or_anchor_present(
             title, anchor, normalized_bid_body
@@ -1180,6 +1298,7 @@ class ConsistencyChecker:
             {
                 "title": t["title"],
                 "text": "\n".join(t.get("content") or []),
+                "template_locations": list(t.get("locations") or []),
                 "is_optional": bool(t.get("is_optional")),
             }
             for t in temps
@@ -1203,6 +1322,7 @@ class ConsistencyChecker:
         for index, m_seg in enumerate(model_segments):
             m_txt = m_seg["text"]
             title = m_seg["title"]
+            template_locations = list(m_seg.get("template_locations") or [])
             is_optional = bool(m_seg.get("is_optional"))
             is_self_defined_format = self._is_self_defined_format_template(title, m_txt)
             self_defined_integrity_reason = (
@@ -1221,6 +1341,7 @@ class ConsistencyChecker:
                         "unfilled_fields": [],
                         "pages": [],
                         "locations": [],
+                        "template_locations": template_locations,
                         "skip_reason": integrity_skip_reason,
                     }
                 )
@@ -1241,6 +1362,7 @@ class ConsistencyChecker:
                             "unfilled_fields": [],
                             "pages": [],
                             "locations": [],
+                            "template_locations": template_locations,
                             "skip_reason": self._self_defined_skip_reason(
                                 self_defined_integrity_reason,
                                 source="integrity",
@@ -1256,6 +1378,7 @@ class ConsistencyChecker:
                         "unfilled_fields": [],
                         "pages": [],
                         "locations": [],
+                        "template_locations": template_locations,
                         "skip_reason": (
                             {"type": "optional_attachment_not_provided"}
                             if is_optional
@@ -1280,6 +1403,7 @@ class ConsistencyChecker:
                         "unfilled_fields": [],
                         "pages": matched_pages,
                         "locations": matched_locations,
+                        "template_locations": template_locations,
                         "skip_reason": self._self_defined_skip_reason(
                             self_defined_integrity_reason,
                             source="attachment",
@@ -1300,6 +1424,7 @@ class ConsistencyChecker:
                         "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
                         "pages": matched_pages,
                         "locations": matched_locations,
+                        "template_locations": template_locations,
                         "skip_reason": {
                             "type": "body_too_short",
                             "body_length": int(template_analysis.get("fixed_body_length") or 0),
@@ -1315,6 +1440,7 @@ class ConsistencyChecker:
             fixed_bid_body = self._build_fixed_body(t_body)
 
             norm_t = self._normalize(fixed_bid_body)
+            norm_raw_t = self._normalize(t_body)
             anchors = template_analysis["anchors"]
             normalized_title = self._normalize(title)
             has_equivalent_final_quote = (
@@ -1328,7 +1454,12 @@ class ConsistencyChecker:
             missing = [
                 a
                 for a in anchors
-                if not self._anchor_present_in_bid(a, norm_t, title=title)
+                if not self._anchor_present_in_bid(
+                    a,
+                    norm_t,
+                    title=title,
+                    normalized_raw_bid_body=norm_raw_t,
+                )
                 and not (has_equivalent_final_quote and a in {"投标总价", "报价总价", "总报价", "小写"})
             ]
             dynamic_missing = self._evaluate_dynamic_slot_specs(
@@ -1358,6 +1489,10 @@ class ConsistencyChecker:
                     combined_missing.append(anchor)
                 missing = combined_missing
 
+            problem_template_locations = self._template_locations_for_missing_anchors(
+                template_locations,
+                missing,
+            )
             results.append(
                 {
                     "name": title,
@@ -1369,6 +1504,7 @@ class ConsistencyChecker:
                     "bid_body_length": len(self._normalize(fixed_bid_body)),
                     "pages": matched_pages,
                     "locations": matched_locations,
+                    "template_locations": problem_template_locations,
                 }
             )
         return results

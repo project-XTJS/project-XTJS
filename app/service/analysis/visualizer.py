@@ -2130,13 +2130,42 @@ class ReportVisualizer:
         document_key = self._project_locator_document_key(entry, str(label))
         if not document_key:
             return f"<span>{html.escape(str(label))}</span>"
+        normalized_bbox = self._normalize_bbox(bbox)
+        bbox_attr = ",".join(str(value) for value in normalized_bbox) if normalized_bbox else ""
+        highlight_phrases_payload = [
+            str(value).strip()
+            for value in (highlight_phrases or [])
+            if str(value).strip()
+        ][:10]
+        highlight_rects_payload = []
+        for rect in highlight_rects or []:
+            normalized_rect = self._normalize_bbox(rect)
+            if normalized_rect:
+                highlight_rects_payload.append(normalized_rect)
+        if normalized_bbox and normalized_bbox not in highlight_rects_payload:
+            highlight_rects_payload.insert(0, normalized_bbox)
+        highlight_rects_payload = highlight_rects_payload[:24]
+        highlight_phrases_attr = html.escape(
+            json.dumps(highlight_phrases_payload, ensure_ascii=False),
+            quote=True,
+        )
+        highlight_rects_attr = html.escape(
+            json.dumps(highlight_rects_payload, ensure_ascii=False),
+            quote=True,
+        )
+        highlight_html_attr = html.escape(str(highlight_html or ""), quote=True)
+        highlight_title_attr = html.escape(str(highlight_title or "命中内容"), quote=True)
         return (
             f"<button type='button' class='issue-link issue-page-link issue-link-button locator-open' "
             f"data-document='{html.escape(document_key)}' "
             f"data-page='{page}' "
             f"data-page-end='{page_end if isinstance(page_end, int) and page_end >= page else page}' "
-            f"data-bbox='' "
-            f"data-label='{html.escape(str(label))}'>"
+            f"data-bbox='{html.escape(bbox_attr)}' "
+            f"data-highlight-phrases='{highlight_phrases_attr}' "
+            f"data-highlight-rects='{highlight_rects_attr}' "
+            f"data-highlight-html='{highlight_html_attr}' "
+            f"data-highlight-title='{highlight_title_attr}' "
+            f"data-label='{html.escape(str(label), quote=True)}'>"
             f"{html.escape(str(label))}</button>"
         )
 
@@ -2452,7 +2481,7 @@ class ReportVisualizer:
 
     def _project_build_personnel_item_locator_targets(self, item, *, source_lookup):
         grouped_targets = {}
-        for entry in item.get("items") or []:
+        for entry in item.get("occurrences") or []:
             file_name = str(entry.get("file_name") or "").strip()
             if not file_name:
                 continue
@@ -2564,7 +2593,7 @@ class ReportVisualizer:
     def _project_personnel_issue_anchor(self, role, item):
         occurrence_keys = [
             f"{entry.get('file_name')}:{entry.get('page')}:{entry.get('name')}"
-            for entry in (item.get("items") or [])
+            for entry in (item.get("occurrences") or [])
         ]
         return "personnel-" + self._project_make_stable_token(
             role,
@@ -2607,7 +2636,7 @@ class ReportVisualizer:
         group = ((result.get("groups") or {}).get(doc_type) or {})
         items = [
             item
-            for item in (group.get("items") or [])
+            for item in (group.get("issues") or [])
             if self._project_is_duplicate_issue(item)
         ]
         if not current_files:
@@ -2716,7 +2745,7 @@ class ReportVisualizer:
                 file_name = str(document.get("file_name") or "")
                 if current_files and file_name not in current_files:
                     continue
-                for item in document.get("items") or []:
+                for item in document.get("issues") or []:
                     rows.append((str(role), file_name, item))
         return rows
 
@@ -2724,10 +2753,10 @@ class ReportVisualizer:
         rows = []
         for role, group in (result.get("groups") or {}).items():
             reuse = group.get("personnel_reuse_check") or {}
-            for item in (reuse.get("items") or reuse.get("reused_names") or []):
+            for item in (reuse.get("issues") or []):
                 related_files = {
                     str(entry.get("file_name") or "")
-                    for entry in (item.get("items") or [])
+                    for entry in (item.get("occurrences") or [])
                 }
                 if current_files and not (related_files & current_files):
                     continue
@@ -2842,7 +2871,7 @@ class ReportVisualizer:
         for role, item in items:
             detail_anchor = self._project_personnel_issue_anchor(role, item)
             detail_href = self._project_issue_page_href(detail_page, detail_anchor)
-            occurrences = list(item.get("items") or [])
+            occurrences = list(item.get("occurrences") or [])
             occurrence_html = "".join(
                 self._project_build_source_doc_cell_exact_html(
                     source_lookup,
@@ -2879,6 +2908,15 @@ class ReportVisualizer:
         similar_tables = item.get("similar_tables") or []
         parts = []
 
+        def build_actions(evidence):
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+
         if sections:
             entries = []
             for section in sections:
@@ -2890,6 +2928,7 @@ class ReportVisualizer:
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"{build_actions(section)}"
                     "</li>"
                 )
             parts.append(
@@ -2907,6 +2946,7 @@ class ReportVisualizer:
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    f"{build_actions(block)}"
                     "</li>"
                 )
             parts.append(
@@ -2929,6 +2969,7 @@ class ReportVisualizer:
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    f"{build_actions(table)}"
                     "</li>"
                 )
             parts.append(
@@ -2949,6 +2990,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(section)}"
                     "</li>"
                 )
             parts.append(
@@ -2969,6 +3011,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(block)}"
                     "</li>"
                 )
             parts.append(
@@ -2991,6 +3034,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(table)}"
                     "</li>"
                 )
             parts.append(
@@ -3860,7 +3904,7 @@ class ReportVisualizer:
                     label="并排预览这组文件",
                 )
                 occurrences = []
-                for entry in item.get("items") or []:
+                for entry in item.get("occurrences") or []:
                     file_name = str(entry.get("file_name") or "")
                     occurrences.append(
                         "<li>"
@@ -3983,12 +4027,12 @@ class ReportVisualizer:
             ),
             "typos": self._project_build_typo_issue_detail_html(
                 project_identifier=project_identifier,
-                result=project_results.get("bid_document_review") or {},
+                result=project_results.get("typo_check") or {},
                 source_lookup=source_lookup,
             ),
             "personnel": self._project_build_personnel_issue_detail_html(
                 project_identifier=project_identifier,
-                result=project_results.get("bid_document_review") or {},
+                result=project_results.get("personnel_reuse_check") or {},
                 source_lookup=source_lookup,
             ),
         }
@@ -4025,8 +4069,10 @@ class ReportVisualizer:
         options = self._project_resolve_display_options(display_options)
         business_duplicate = project_results.get("business_duplicate_check") or {}
         technical_duplicate = project_results.get("technical_duplicate_check") or {}
-        bid_review = project_results.get("bid_document_review") or {}
-        bid_summary = bid_review.get("summary") or {}
+        typo_result = project_results.get("typo_check") or {}
+        personnel_result = project_results.get("personnel_reuse_check") or {}
+        typo_summary = typo_result.get("summary") or {}
+        personnel_summary = personnel_result.get("summary") or {}
         business_summary = business_duplicate.get("summary") or {}
         technical_summary = technical_duplicate.get("summary") or {}
         current_files = {current_business_file} if current_business_file else None
@@ -4049,14 +4095,14 @@ class ReportVisualizer:
             summary_cards.append(
                 (
                     "错别字候选",
-                    bid_summary.get("typo_issue_count") or 0,
+                    typo_summary.get("typo_issue_count") or 0,
                 )
             )
         if options["show_personnel_reuse"]:
             summary_cards.append(
                 (
                     "一人多用姓名",
-                    bid_summary.get("reused_name_count") or 0,
+                    personnel_summary.get("reused_name_count") or 0,
                 )
             )
 
@@ -4117,7 +4163,7 @@ class ReportVisualizer:
             <thead>
               <tr><th>文档类型</th><th>姓名</th><th>风险</th><th>涉及文件数</th><th>文件与页码</th><th>详情</th></tr>
             </thead>
-            <tbody>{self._project_render_personnel_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
+            <tbody>{self._project_render_personnel_rows(personnel_result, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
           </table>
                 """
             )
@@ -4129,7 +4175,7 @@ class ReportVisualizer:
             <thead>
               <tr><th>文档类型</th><th>文件</th><th>页码</th><th>疑似词</th><th>建议词</th><th>上下文</th><th>详情</th></tr>
             </thead>
-            <tbody>{self._project_render_typo_rows(bid_review, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
+            <tbody>{self._project_render_typo_rows(typo_result, source_lookup=source_lookup, issue_pages=issue_pages, current_files=current_files)}</tbody>
           </table>
                 """
             )
@@ -4394,6 +4440,43 @@ class ReportVisualizer:
             f"{html.escape(str(label))}</button>"
         )
 
+    def _project_duplicate_evidence_locator_ranges(self, evidence, side, pages):
+        normalized_pages = self._project_normalize_pages(pages)
+        if not normalized_pages:
+            normalized_pages = self._project_evidence_pages(evidence, side)
+        bbox = self._normalize_bbox(evidence.get(f"{side}_bbox") or evidence.get("bbox"))
+        evidence_text = self._project_trim_text(self._project_evidence_text(evidence, side), 180)
+        highlight_phrases = [evidence_text] if evidence_text else []
+        if not highlight_phrases:
+            rows = (
+                evidence.get(f"{side}_rows")
+                or evidence.get(f"{side}_sample_rows")
+                or evidence.get("sample_rows")
+                or []
+            )
+            if not isinstance(rows, (list, tuple)):
+                rows = [rows]
+            highlight_phrases = [
+                self._project_trim_text(str(row), 180)
+                for row in rows[:3]
+                if str(row).strip()
+            ]
+        highlight_rects = [bbox] if bbox else []
+        ranges = []
+        for start_page, end_page in self._coalesce_page_ranges(normalized_pages):
+            ranges.append(
+                {
+                    "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
+                    "page": start_page,
+                    "pageEnd": end_page,
+                    "bbox": bbox,
+                    "highlightPhrases": highlight_phrases,
+                    "highlightRects": highlight_rects,
+                    "highlightTitle": "重复证据命中",
+                }
+            )
+        return ranges
+
     def _project_build_duplicate_item_locator_targets(self, item, *, source_lookup, evidence=None):
         targets = []
         left_file = str(item.get("left_file_name") or "").strip()
@@ -4414,18 +4497,10 @@ class ReportVisualizer:
             if not source_url and not preview_template:
                 continue
             normalized_pages = self._project_normalize_pages(pages)
-            ranges = [
-                {
-                    "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
-                    "page": start_page,
-                    "pageEnd": end_page,
-                }
-                for start_page, end_page in self._coalesce_page_ranges(normalized_pages)
-            ]
-            if not normalized_pages and evidence:
-                fallback_page = evidence.get(f"{side}_page") or evidence.get("page")
-                normalized_pages = self._project_normalize_pages(fallback_page)
-                ranges = [
+            ranges = (
+                self._project_duplicate_evidence_locator_ranges(evidence, side, normalized_pages)
+                if evidence
+                else [
                     {
                         "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
                         "page": start_page,
@@ -4433,6 +4508,11 @@ class ReportVisualizer:
                     }
                     for start_page, end_page in self._coalesce_page_ranges(normalized_pages)
                 ]
+            )
+            if not normalized_pages and evidence:
+                fallback_page = evidence.get(f"{side}_page") or evidence.get("page")
+                normalized_pages = self._project_normalize_pages(fallback_page)
+                ranges = self._project_duplicate_evidence_locator_ranges(evidence, side, normalized_pages)
             targets.append(
                 {
                     "document": document_key,
@@ -4441,6 +4521,7 @@ class ReportVisualizer:
                     "default_page": normalized_pages[0] if normalized_pages else None,
                     "pages": normalized_pages,
                     "ranges": ranges,
+                    "bbox": ranges[0].get("bbox") if ranges else None,
                 }
             )
         return targets
@@ -4782,10 +4863,17 @@ class ReportVisualizer:
             }
             .locator-box,
             .locator-multi-box {
-                display: none !important;
+                position: absolute;
+                display: none;
+                pointer-events: none;
+                border: 2px solid rgba(245, 158, 11, 0.95);
+                background: rgba(245, 158, 11, 0.18);
+                box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85), 0 0 18px rgba(245, 158, 11, 0.32);
+                border-radius: 3px;
+                z-index: 2;
             }
             .locator-box.visible,
-            .locator-multi-box.visible { display: none !important; }
+            .locator-multi-box.visible { display: block; }
             .locator-note {
                 margin-top: 12px;
                 color: var(--text-regular);
@@ -4793,7 +4881,7 @@ class ReportVisualizer:
             }
             .locator-highlight,
             .locator-multi-highlight {
-                display: none !important;
+                display: none;
             }
             .locator-multi-wrap {
                 display: grid;
@@ -5136,10 +5224,22 @@ class ReportVisualizer:
                     return `${{base}}#page=${{page}}`;
                 }}
 
-                async function loadRemotePagePreview(docConfig, page) {{
+                async function loadRemotePagePreview(docConfig, page, options = {{}}) {{
                     const baseRequestUrl = resolveRemotePreviewUrl(docConfig, page);
                     if (!baseRequestUrl) return null;
                     const requestUrl = new URL(baseRequestUrl, window.location.href);
+                    const highlightPhrases = normalizeHighlightPhrases(options.highlightPhrases || []);
+                    const highlightRects = normalizeHighlightRects(options.highlightRects || []);
+                    const highlightBBox = parseBbox(options.highlightBBox || options.bbox || '');
+                    highlightPhrases.forEach((phrase) => {{
+                        requestUrl.searchParams.append('highlight', phrase);
+                    }});
+                    if (highlightBBox) {{
+                        requestUrl.searchParams.set('highlight_bbox', highlightBBox.join(','));
+                    }}
+                    if (highlightRects.length) {{
+                        requestUrl.searchParams.set('highlight_rects', JSON.stringify(highlightRects));
+                    }}
                     const requestKey = requestUrl.toString();
                     if (remotePageCache.has(requestKey)) {{
                         return remotePageCache.get(requestKey);
@@ -5210,9 +5310,26 @@ class ReportVisualizer:
                 }}
 
                 function renderBoxForImage(boxElement, imageElement, bbox, pageConfig) {{
-                    if (boxElement) {{
-                        boxElement.classList.remove('visible');
-                    }}
+                    if (!boxElement) return;
+                    boxElement.classList.remove('visible');
+                    if (!bbox || !imageElement || !pageConfig) return;
+                    const naturalWidth = Number(pageConfig.width) || imageElement.naturalWidth || imageElement.width;
+                    const naturalHeight = Number(pageConfig.height) || imageElement.naturalHeight || imageElement.height;
+                    const renderedWidth = imageElement.clientWidth || imageElement.width;
+                    const renderedHeight = imageElement.clientHeight || imageElement.height;
+                    if (!naturalWidth || !naturalHeight || !renderedWidth || !renderedHeight) return;
+                    const scaleX = renderedWidth / naturalWidth;
+                    const scaleY = renderedHeight / naturalHeight;
+                    const left = imageElement.offsetLeft + Math.max(0, bbox[0] * scaleX);
+                    const top = imageElement.offsetTop + Math.max(0, bbox[1] * scaleY);
+                    const width = Math.max((bbox[2] - bbox[0]) * scaleX, 6);
+                    const height = Math.max((bbox[3] - bbox[1]) * scaleY, 6);
+                    if (!Number.isFinite(left + top + width + height) || width <= 0 || height <= 0) return;
+                    boxElement.style.left = left + 'px';
+                    boxElement.style.top = top + 'px';
+                    boxElement.style.width = width + 'px';
+                    boxElement.style.height = height + 'px';
+                    boxElement.classList.add('visible');
                 }}
 
                 function renderBox(bbox, pageConfig) {{
@@ -5220,7 +5337,11 @@ class ReportVisualizer:
                 }}
 
                 function shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects) {{
-                    return false;
+                    return Boolean(
+                        pageConfig
+                        && pageConfig.highlight_applied
+                        && (highlightPhrases.length || highlightRects.length)
+                    );
                 }}
 
                 async function loadSinglePreview(docConfig, page, bbox, options = {{}}) {{
@@ -5254,7 +5375,11 @@ class ReportVisualizer:
                     emptyNode.style.display = 'flex';
                     emptyNode.textContent = 'Loading source preview...';
                     try {{
-                        const pageConfig = await loadRemotePagePreview(docConfig, page);
+                        const pageConfig = await loadRemotePagePreview(docConfig, page, {{
+                            highlightPhrases,
+                            highlightRects,
+                            highlightBBox: bbox,
+                        }});
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
@@ -5416,7 +5541,11 @@ class ReportVisualizer:
                         const resolved = resolvePagePreview(target.document, page);
                         const pageConfig = resolved
                             ? resolved.pageConfig
-                            : await loadRemotePagePreview(docConfig, page);
+                            : await loadRemotePagePreview(docConfig, page, {{
+                                highlightPhrases,
+                                highlightRects,
+                                highlightBBox: bbox,
+                            }});
                         if (!pageConfig || !(pageConfig.image_data_url || pageConfig.image_url)) {{
                             throw new Error('preview data is empty');
                         }}
@@ -5424,7 +5553,7 @@ class ReportVisualizer:
                         cardRefs.empty.style.display = 'none';
                         cardRefs.wrap.style.display = 'flex';
                         cardRefs.image.onload = function() {{
-                            if (highlightPhrases.length || highlightRects.length) {{
+                            if (shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects)) {{
                                 cardRefs.box.classList.remove('visible');
                             }} else {{
                                 renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
@@ -5432,7 +5561,7 @@ class ReportVisualizer:
                         }};
                         cardRefs.image.src = imageUrl;
                         if (cardRefs.image.complete) {{
-                            if (highlightPhrases.length || highlightRects.length) {{
+                            if (shouldPreferHighlightedPreview(pageConfig, highlightPhrases, highlightRects)) {{
                                 cardRefs.box.classList.remove('visible');
                             }} else {{
                                 renderBoxForImage(cardRefs.box, cardRefs.image, bbox, pageConfig);
@@ -5971,6 +6100,15 @@ class ReportVisualizer:
         similar_tables = item.get("similar_tables") or []
         parts = []
 
+        def build_actions(evidence):
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+
         if sections:
             entries = []
             for section in sections:
@@ -5982,6 +6120,7 @@ class ReportVisualizer:
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
+                    f"{build_actions(section)}"
                     "</li>"
                 )
             parts.append(
@@ -5999,6 +6138,7 @@ class ReportVisualizer:
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
+                    f"{build_actions(block)}"
                     "</li>"
                 )
             parts.append(
@@ -6021,6 +6161,7 @@ class ReportVisualizer:
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
+                    f"{build_actions(table)}"
                     "</li>"
                 )
             parts.append(
@@ -6041,6 +6182,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(section)}"
                     "</li>"
                 )
             parts.append(
@@ -6061,6 +6203,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(block)}"
                     "</li>"
                 )
             parts.append(
@@ -6083,6 +6226,7 @@ class ReportVisualizer:
                     f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
                     f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
                     f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
+                    f"{build_actions(table)}"
                     "</li>"
                 )
             parts.append(
