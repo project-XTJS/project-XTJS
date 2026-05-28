@@ -526,6 +526,7 @@ class IntegrityChecker:
         requirements: list[str],
         attachment_mapping: dict[str, list[str]],
     ) -> dict[str, list[dict[str, Any]]]:
+        requirement_locations = TemplateExtractor.extract_requirement_locations(model_json)
         response_attachments = TemplateExtractor.extract_response_format_attachments(model_json)
         attachments_by_title: dict[str, dict[str, Any]] = {}
         attachments_by_number: dict[str, dict[str, Any]] = {}
@@ -542,9 +543,24 @@ class IntegrityChecker:
                 attachments_by_number[number] = attachment
 
         locations_by_requirement: dict[str, list[dict[str, Any]]] = {}
+
+        def source_locations_for(item_title: str) -> list[dict[str, Any]]:
+            direct = requirement_locations.get(item_title)
+            if direct:
+                return [location for location in direct if isinstance(location, dict)]
+            compact_item = TemplateExtractor._compact(item_title)
+            for title, locations in requirement_locations.items():
+                if TemplateExtractor._compact(title) == compact_item:
+                    return [location for location in locations if isinstance(location, dict)]
+            return []
+
         for item in requirements:
             item_title = str(item or "").strip()
             if not item_title:
+                continue
+            source_locations = source_locations_for(item_title)
+            if source_locations:
+                locations_by_requirement[item_title] = source_locations[:1]
                 continue
             attachment = attachments_by_title.get(TemplateExtractor._compact(item_title))
             if attachment is None:

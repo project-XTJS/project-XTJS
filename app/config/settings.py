@@ -75,9 +75,12 @@ class Settings(BaseSettings):
     OCR_POSTPROCESS_MAX_WORKERS: int = 0
     OCR_SIGNATURE_PLACEHOLDER_TEXT: str = "已签字"
 
-    TYPO_LANGUAGETOOL_ENABLED: bool = True
-    TYPO_LANGUAGETOOL_LANGUAGE: str = "zh-CN"
-    TYPO_KNOWN_DICTIONARY_ENABLED: bool = True
+    TYPO_ERNIE_CSC_MODEL_NAME: str = "ernie-csc"
+    TYPO_ERNIE_CSC_DEVICE: str = "gpu:0"
+    TYPO_ERNIE_CSC_MAX_SEQ_LEN: int = 128
+    TYPO_ERNIE_CSC_BATCH_SIZE: int = 32
+    TYPO_ERNIE_CSC_TASK_PATH: str | None = None
+    TYPO_CHECK_VISIBLE: bool = True
 
     PROJECT_BATCH_MIN_BID_GROUPS: int = 1
     PROJECT_BATCH_MAX_BID_GROUPS: int = 0

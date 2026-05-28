@@ -13,7 +13,10 @@ class ResultsMixin:
     _collect_table_coverage: Any
     _match_one_star: Any
     _match_patterns: Any
+    _norm: Any
+    _clip: Any
     _coerce_payload: Any
+    _extract_text: Any
     _extract_pair: Any
 
     def check_technical_deviation(self, tender_document: Any, bid_document: Any | None = None) -> dict:
@@ -35,16 +38,25 @@ class ResultsMixin:
     def _run_check(self, tender_payload: dict, bid_payload: dict) -> dict:
         """核心检查逻辑。"""
         star_requirements = self._extract_star_requirements(tender_payload)
+        tender_template_requirements = self._technical_deviation_template_requirements(tender_payload)
         sections = self._extract_bid_deviation_sections(bid_payload)
         global_stmt = self._detect_global_no_deviation(sections["combined_text"])
         table_coverage = self._collect_table_coverage(sections)
 
-        if not sections.get("technical"):
-            return self._build_missing_technical_deviation_table_result(star_requirements, sections, table_coverage)
+        if not star_requirements and not tender_template_requirements:
+            return self._build_empty_star_result(sections, global_stmt, table_coverage)
+        if not star_requirements and not sections.get("technical"):
+            return self._build_missing_technical_deviation_table_result(
+                tender_template_requirements,
+                sections,
+                table_coverage,
+            )
         if not star_requirements:
             return self._build_empty_star_result(sections, global_stmt, table_coverage)
-        if not str(sections.get("combined_text") or "").strip():
+        if not str(self._extract_text(bid_payload) or "").strip():
             return self._build_missing_bid_content_result(star_requirements, sections, table_coverage)
+        if not sections.get("business") and not sections.get("technical"):
+            return self._build_missing_deviation_table_result(star_requirements, sections, table_coverage)
 
         requirements = star_requirements
         matches = [self._match_one_star(item, sections) for item in requirements]
@@ -68,6 +80,7 @@ class ResultsMixin:
                         "requirement_bbox": item.get("requirement_bbox"),
                         "response_page": item.get("response_page"),
                         "response_bbox": item.get("response_bbox"),
+                        "response_status": "missing",
                     }
                 )
                 item["response_status"] = "missing"
@@ -140,6 +153,8 @@ class ResultsMixin:
                 "business_section_count": len(sections["business"]),
                 "technical_section_count": len(sections["technical"]),
             },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
             "table_coverage": table_coverage,
             "global_response_statement": global_stmt,
             "star_requirements": requirements,
@@ -162,6 +177,33 @@ class ResultsMixin:
             "key_findings": findings,
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
+
+    def _technical_deviation_template_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
+        """Extract tender-side technical deviation table templates as auditable requirements."""
+        sections = self._extract_bid_deviation_sections(tender_payload)
+        requirements: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for section in sections.get("technical") or []:
+            title = str(section.get("title") or "技术偏离表").strip()
+            text = str(section.get("text") or "").strip()
+            key = self._norm(f"{title}|{section.get('page')}|{text[:120]}")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            requirements.append(
+                {
+                    "requirement_id": f"TECH-DEVIATION-TABLE-{len(requirements)+1:03d}",
+                    "requirement": "招标文件要求提供技术偏离表",
+                    "source_type": "technical_deviation_table_template",
+                    "section_type": "technical_deviation_table_template",
+                    "template_title": title,
+                    "template_text": self._clip(text, 240),
+                    "page": section.get("page"),
+                    "bbox": section.get("bbox"),
+                    "line_number": section.get("start_line"),
+                }
+            )
+        return requirements
 
     def _single_doc_result(self, payload: dict) -> dict:
         """单文档输入时生成提示结果。"""
@@ -186,6 +228,8 @@ class ResultsMixin:
                 "business_section_count": len(sections["business"]),
                 "technical_section_count": len(sections["technical"]),
             },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
             "table_coverage": table_coverage,
             "global_response_statement": global_stmt,
             "star_requirements": [],
@@ -212,19 +256,18 @@ class ResultsMixin:
     def _build_missing_technical_deviation_table_result(self, requirements, sections, table_coverage):
         """商务标未提供技术偏离表时，按内容缺失判定为 missing。"""
         evidence = "商务标文件中未识别到技术偏离表，无法核验技术响应。"
-        issue_requirements = requirements or [
-            {
-                "requirement_id": "technical_deviation_table",
-                "requirement": "商务标文件应提供技术偏离表",
-                "section_type": None,
-            }
-        ]
+        issue_requirements = list(requirements or [])
         missing_items = [
             {
                 "requirement_id": item["requirement_id"],
                 "requirement": item["requirement"],
+                "source_type": item.get("source_type"),
+                "section_type": item.get("section_type"),
+                "template_title": item.get("template_title"),
+                "template_text": item.get("template_text"),
                 "requirement_page": item.get("page"),
                 "requirement_bbox": item.get("bbox"),
+                "requirement_line_number": item.get("line_number"),
                 "response_status": "technical_deviation_table_missing",
                 "response_evidence": evidence,
             }
@@ -236,9 +279,13 @@ class ResultsMixin:
                 "risk_level": "high",
                 "match_score": 0.0,
                 "requirement": item["requirement"],
+                "source_type": item.get("source_type"),
                 "requirement_page": item.get("page"),
                 "requirement_bbox": item.get("bbox"),
+                "requirement_line_number": item.get("line_number"),
                 "section_type": item.get("section_type"),
+                "template_title": item.get("template_title"),
+                "template_text": item.get("template_text"),
                 "response_page": None,
                 "deviation_type": "missing",
                 "requirement_id": item["requirement_id"],
@@ -251,25 +298,34 @@ class ResultsMixin:
             }
             for item in issue_requirements
         ]
-        total = len(requirements)
+        total = len(issue_requirements)
+        star_total = sum(
+            1
+            for item in issue_requirements
+            if item.get("source_type") != "technical_deviation_table_template"
+        )
         missing_count = len(issue_requirements)
         summary = "商务标文件中未识别到技术偏离表，无法完成偏离比对。"
-        if total:
-            summary = f"共发现 {total} 条带 ★ 的强制性要求，但{summary}"
+        if star_total:
+            summary = f"共发现 {star_total} 条带 ★ 的强制性要求，但{summary}"
+        elif total:
+            summary = f"招标文件包含技术偏离表格式，但{summary}"
         return {
             "mode": "tender_technical_bid_json",
             "summary": summary,
             "compliance_status": "missing",
             "deviation_status": "technical_deviation_table_missing",
-            "requirement_extraction_mode": "star",
+            "requirement_extraction_mode": "star" if star_total else "technical_deviation_table_template",
             "core_requirements_count": total,
-            "core_star_requirements_count": total,
+            "core_star_requirements_count": star_total,
             "deviation_tables": {
                 "business_found": bool(sections["business"]),
                 "technical_found": False,
                 "business_section_count": len(sections["business"]),
                 "technical_section_count": 0,
             },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
             "table_coverage": table_coverage,
             "global_response_statement": None,
             "star_requirements": requirements,
@@ -290,8 +346,92 @@ class ResultsMixin:
                 "covered_by_deviation_table_count": 0,
             },
             "key_findings": [
-                f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
+                (
+                    f"在招标文件中检测到 {star_total} 条带 ★ 的强制性要求。"
+                    if star_total
+                    else "在招标文件中检测到技术偏离表格式/模板。"
+                ),
                 "商务标文件中未识别到技术偏离表，按未提供必需响应表归类为缺失。",
+            ],
+            "extracted_parameters": [x["requirement"] for x in requirements],
+        }
+
+    def _build_missing_deviation_table_result(self, requirements, sections, table_coverage):
+        """商务标未识别到商务/技术偏离表时，按缺少偏离表返回。"""
+        evidence = "商务标文件中未识别到商务偏离表或技术偏离表，无法核验偏离响应。"
+        missing_items = [
+            {
+                "requirement_id": item["requirement_id"],
+                "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
+                "response_page": None,
+                "response_bbox": None,
+                "response_status": "deviation_table_missing",
+                "response_evidence": evidence,
+            }
+            for item in requirements
+        ]
+        matches = [
+            {
+                "responded": False,
+                "risk_level": "high",
+                "match_score": 0.0,
+                "requirement": item["requirement"],
+                "requirement_page": item.get("page"),
+                "requirement_bbox": item.get("bbox"),
+                "section_type": item.get("section_type"),
+                "response_page": None,
+                "deviation_type": "missing",
+                "requirement_id": item["requirement_id"],
+                "response_status": "deviation_table_missing",
+                "response_section": "",
+                "explicit_response": False,
+                "response_evidence": evidence,
+                "response_line_number": None,
+                "response_section_title": "",
+            }
+            for item in requirements
+        ]
+        total = len(requirements)
+        return {
+            "mode": "tender_technical_bid_json",
+            "summary": f"共发现 {total} 条带 ★ 的强制性要求，但商务标文件中未识别到商务偏离表或技术偏离表。",
+            "compliance_status": "missing",
+            "deviation_status": "deviation_table_missing",
+            "requirement_extraction_mode": "star",
+            "core_requirements_count": total,
+            "core_star_requirements_count": total,
+            "deviation_tables": {
+                "business_found": False,
+                "technical_found": False,
+                "business_section_count": 0,
+                "technical_section_count": 0,
+            },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
+            "table_coverage": table_coverage,
+            "global_response_statement": None,
+            "star_requirements": requirements,
+            "match_results": matches,
+            "missing_response_items": missing_items,
+            "negative_deviation_items": [],
+            "unclear_response_items": [],
+            "stats": {
+                "responded_count": 0,
+                "missing_count": total,
+                "negative_deviation_count": 0,
+                "positive_deviation_count": 0,
+                "no_deviation_count": 0,
+                "listed_response_count": 0,
+                "unclear_deviation_count": 0,
+                "explicit_response_count": 0,
+                "covered_by_global_statement_count": 0,
+                "covered_by_deviation_table_count": 0,
+            },
+            "key_findings": [
+                f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
+                "商务标文件中未识别到商务偏离表或技术偏离表，按缺少偏离表处理。",
             ],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
@@ -345,6 +485,8 @@ class ResultsMixin:
                 "business_section_count": len(sections["business"]),
                 "technical_section_count": len(sections["technical"]),
             },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
             "table_coverage": table_coverage,
             "global_response_statement": None,
             "star_requirements": requirements,

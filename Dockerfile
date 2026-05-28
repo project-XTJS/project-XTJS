@@ -5,6 +5,8 @@ ARG PADDLE_TRUSTED_HOST=www.paddlepaddle.org.cn
 ARG PADDLE_OCR_PACKAGE_VERSION=3.4.0
 ARG PADDLE_OCR_DEPENDENCY_GROUP=doc-parser
 ARG INSTALL_HPI_DEPS=false
+ARG TYPO_MACBERT_MODEL_NAME=shibing624/macbert4csc-base-chinese
+ARG TYPO_MACBERT_DEVICE=cuda
 FROM ${PADDLE_BASE_IMAGE}
 ARG PADDLE_VERSION
 ARG PADDLE_INDEX_URL
@@ -12,6 +14,8 @@ ARG PADDLE_TRUSTED_HOST
 ARG PADDLE_OCR_PACKAGE_VERSION
 ARG PADDLE_OCR_DEPENDENCY_GROUP
 ARG INSTALL_HPI_DEPS
+ARG TYPO_MACBERT_MODEL_NAME
+ARG TYPO_MACBERT_DEVICE
 LABEL authors="Stan1ey"
 
 WORKDIR /app
@@ -23,6 +27,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV UV_LINK_MODE=copy
 ENV PADDLE_PDX_MODEL_SOURCE=BOS
+ENV TYPO_MACBERT_MODEL_NAME=${TYPO_MACBERT_MODEL_NAME}
+ENV TYPO_MACBERT_DEVICE=${TYPO_MACBERT_DEVICE}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -31,12 +37,10 @@ RUN apt-get update \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
-        openjdk-17-jre-headless \
         python3 \
         python3-pip \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
-RUN java -version
 
 COPY wheels/ /tmp/wheels/
 
@@ -68,7 +72,8 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 RUN python -c "import docx; print('python-docx import ok')"
 RUN python -c "import fitz; print('PyMuPDF import ok')"
-RUN python -c "import language_tool_python; print('LanguageTool Python import ok')"
+RUN python -c "import pycorrector; print('pycorrector import ok')"
+RUN python -c "import os; from pycorrector import MacBertCorrector; model_name = os.environ.get('TYPO_MACBERT_MODEL_NAME', 'shibing624/macbert4csc-base-chinese'); MacBertCorrector(model_name); print(f'MacBERT model load ok: {model_name}')"
 
 COPY . .
 

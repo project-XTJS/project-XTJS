@@ -18,18 +18,18 @@ class PresentationMixin:
                 raw = evidence.get("left_preview") or evidence.get("left_title") or evidence.get("preview") or "-"
             else:
                 raw = evidence.get("right_preview") or evidence.get("right_title") or evidence.get("preview") or "-"
-            return self.helper._project_trim_text(str(raw), 220)
+            return self.helper._project_trim_text(str(raw), 200)
         if kind == "block":
-            return self.helper._project_trim_text(str(evidence.get("text") or "-"), 220)
+            return self.helper._project_trim_text(str(evidence.get("text") or "-"), 200)
         if kind == "similar_block":
             raw = evidence.get(f"{side}_text") or evidence.get("text") or "-"
-            return self.helper._project_trim_text(str(raw), 220)
+            return self.helper._project_trim_text(str(raw), 200)
         if kind == "table":
             rows = evidence.get("sample_rows") or []
-            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 220) if rows else "-"
+            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 200) if rows else "-"
         if kind == "similar_table":
             rows = evidence.get(f"{side}_sample_rows") or evidence.get("sample_rows") or []
-            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 220) if rows else "-"
+            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 200) if rows else "-"
         if kind == "image":
             width = evidence.get(f"{side}_width")
             height = evidence.get(f"{side}_height")
@@ -75,7 +75,13 @@ class PresentationMixin:
                 preview_text = str(values[0]).strip()
                 if preview_text:
                     break
-        preview_text = self.helper._project_trim_text(preview_text, 42).strip(" -") if preview_text else ""
+        if preview_text:
+            if family == "table":
+                preview_text = self.helper._project_trim_text(preview_text, 200).strip(" -")
+            else:
+                preview_text = self.helper._project_trim_text(preview_text, 42).strip(" -")
+        else:
+            preview_text = ""
         return f"{prefix}：{preview_text}" if preview_text else prefix
 
     def _cluster_id(self, doc_type: str, cluster: dict[str, Any]) -> str:

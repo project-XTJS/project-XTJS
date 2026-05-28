@@ -1098,6 +1098,7 @@ async def ingest_and_recognize_project_documents(
             "run_tender_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/run-tender-ocr",
             "run_business_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/run-business-ocr",
             "run_technical_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/continue-technical-ocr",
+            "run_full_ocr_endpoint": f"/api/postgresql/projects/{project['identifier_id']}/run-full-ocr",
             "parsing_status": project.get("parsing_status"),
             "parsing_status_label": project.get("parsing_status_label"),
         },
@@ -1311,6 +1312,32 @@ async def continue_project_technical_ocr(
         target_stage=_OCR_STAGE_TECHNICAL,
         ocr_type="技术标",
         endpoint_name=f"/api/postgresql/projects/{project_identifier}/continue-technical-ocr",
+        db_service=db_service,
+        oss_service=oss_service,
+        analysis_service=analysis_service,
+    )
+
+
+@router.post("/projects/{identifier_id}/run-full-ocr", summary="异步执行项目全量 OCR")
+async def run_project_full_ocr(
+    identifier_id: str,
+    parallelism: int = Form(default=1, ge=1, le=16),
+    analysis_service=Depends(get_text_analysis_service),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """手动触发全量 OCR，接口会立即返回，后台补齐到技术标 OCR 完成。"""
+    _ = parallelism
+    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    project_identifier = _project_identifier_from_payload(payload, identifier_id)
+    return await _build_async_ocr_response(
+        identifier_id=project_identifier,
+        payload=payload,
+        target_stage=_OCR_STAGE_TECHNICAL,
+        ocr_type="全量",
+        endpoint_name=f"/api/postgresql/projects/{project_identifier}/run-full-ocr",
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,

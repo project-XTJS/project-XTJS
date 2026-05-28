@@ -54,6 +54,16 @@ class DocumentUpdateRequest(BaseModel):
     )
 
 
+class DocumentPreviewRequest(BaseModel):
+    """POST preview payload for long highlight parameters."""
+    model_config = ConfigDict(extra="ignore")
+
+    highlight: Optional[list[str] | str] = Field(default=None)
+    highlight_bbox: Optional[list[float] | str] = Field(default=None)
+    highlight_rects: Optional[list[list[float]] | str] = Field(default=None)
+    highlight_coordinate_space: Optional[str] = Field(default="auto")
+
+
 class ProjectRelationUpdateRequest(BaseModel):
     """更新项目文档绑定关系请求。"""
     tender_document_identifier: str

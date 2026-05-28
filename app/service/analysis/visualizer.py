@@ -43,7 +43,7 @@ class ReportVisualizer:
                 --missing-border: #dcdfe6;
             }
             
-            body { font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; padding: 30px 20px; color: var(--text-main); font-size: 14px; background: var(--bg-color); line-height: 1.6; }
+            body { font-family: "Times New Roman", SimSun, "宋体", serif; margin: 0; padding: 30px 20px; color: var(--text-main); font-size: 14px; background: var(--bg-color); line-height: 1.6; }
             .container { max-width: 1200px; margin: 0 auto; }
             
             .file-switcher {
@@ -135,7 +135,7 @@ class ReportVisualizer:
             
             .header-card { border-top: 4px solid var(--primary-color); display: flex; justify-content: space-between; align-items: center; }
             h1 { font-size: 24px; margin: 0; font-weight: 600; color: #1f2d3d; letter-spacing: 1px; }
-            .score-value { font-size: 36px; color: var(--success-color); font-weight: bold; line-height: 1; font-family: 'Arial', sans-serif; }
+            .score-value { font-size: 36px; color: var(--success-color); font-weight: bold; line-height: 1; font-family: "Times New Roman", SimSun, "宋体", serif; }
             
             h2 { font-size: 18px; margin: 0 0 20px 0; padding-bottom: 12px; border-bottom: 2px solid var(--border-color); font-weight: 600; color: #1f2d3d; }
             
@@ -438,10 +438,16 @@ class ReportVisualizer:
             info_map[attachment_num] = {
                 'title': title,
                 'missing': rec.get('missing_anchors', []),
+                'missing_anchor_locations': list(rec.get('missing_anchor_locations') or []),
                 'bidder_text': test_dict.get(title, ""),
                 'idx': idx,
                 'pages': list(rec.get('pages') or []),
                 'locations': list(rec.get('locations') or []),
+                'template_locations': list(
+                    rec.get('tender_highlight_locations')
+                    or rec.get('template_locations')
+                    or []
+                ),
             }
         return info_map
 
@@ -508,7 +514,15 @@ class ReportVisualizer:
                 or location.get("section_anchor")
                 or ""
             ).strip()
-            document = str(location.get("document") or default_document or "bidder").strip() or "bidder"
+            raw_document = str(
+                location.get("document")
+                or location.get("document_role")
+                or default_document
+                or "bidder"
+            ).strip() or "bidder"
+            document = raw_document
+            if document in {"business", "business_bid", "technical", "technical_bid"}:
+                document = "bidder"
             label = f"P{page}" if page is not None else "P?"
             if bbox_text:
                 label = f"{label} {bbox_text}"
@@ -532,6 +546,9 @@ class ReportVisualizer:
                     "page_end": page,
                     "bbox": bbox if isinstance(bbox, (list, tuple)) else None,
                     "document": document,
+                    "text": str(location.get("text") or "").strip(),
+                    "highlight_phrases": list(location.get("highlight_phrases") or []),
+                    "highlight_rects": list(location.get("highlight_rects") or []),
                 }
             )
         remaining_pages = [
@@ -561,9 +578,30 @@ class ReportVisualizer:
             page = entry.get("page")
             page_end = entry.get("page_end")
             document = html.escape(str(entry.get("document") or default_document or "bidder"))
+            bbox = entry.get("bbox") if entry.get("document") == "tender" else None
+            bbox_attr = ",".join(str(value) for value in bbox) if bbox else ""
+            highlight_phrases = []
+            highlight_rects = []
+            if entry.get("document") == "tender":
+                highlight_phrases = [
+                    str(value).strip()
+                    for value in (entry.get("highlight_phrases") or [])
+                    if str(value).strip()
+                ]
+                text = str(entry.get("text") or "").strip()
+                if text and text not in highlight_phrases:
+                    highlight_phrases.insert(0, text)
+                for rect in entry.get("highlight_rects") or []:
+                    normalized_rect = self._normalize_bbox(rect)
+                    if normalized_rect and normalized_rect not in highlight_rects:
+                        highlight_rects.append(normalized_rect)
+                if bbox and bbox not in highlight_rects:
+                    highlight_rects.append(bbox)
+            highlight_phrases_attr = html.escape(json.dumps(highlight_phrases[:6], ensure_ascii=False), quote=True)
+            highlight_rects_attr = html.escape(json.dumps(highlight_rects[:12], ensure_ascii=False), quote=True)
             if page is not None:
                 chips.append(
-                    f"<button type='button' class='locator-chip locator-open' data-document='{document}' data-page='{page}' data-page-end='{page_end if isinstance(page_end, int) else page}' data-bbox='' data-label='{label}'>{label}</button>"
+                    f"<button type='button' class='locator-chip locator-open' data-document='{document}' data-page='{page}' data-page-end='{page_end if isinstance(page_end, int) else page}' data-bbox='{html.escape(bbox_attr)}' data-highlight-phrases='{highlight_phrases_attr}' data-highlight-rects='{highlight_rects_attr}' data-label='{label}'>{label}</button>"
                 )
             else:
                 chips.append(f"<div class='locator-chip'>{label}</div>")
@@ -862,9 +900,11 @@ class ReportVisualizer:
                         return remotePageCache.get(requestUrl);
                     }}
                     const response = await fetch(requestUrl, {{
-                        method: 'GET',
+                        method: 'POST',
                         mode: 'cors',
                         credentials: 'omit',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{}}),
                     }});
                     if (!response.ok) {{
                         throw new Error(`preview request failed: ${{response.status}}`);
@@ -1046,13 +1086,38 @@ class ReportVisualizer:
         </script>
         """
 
-    def _generate_detail_card(self, title, missing, bidder_text, model_text, checker, pages=None, locations=None):
+    def _generate_detail_card(
+        self,
+        title,
+        missing,
+        bidder_text,
+        model_text,
+        checker,
+        pages=None,
+        locations=None,
+        template_locations=None,
+    ):
         location_html = self._render_location_summary(locations=locations, pages=pages)
+        template_location_html = (
+            self._render_location_summary(
+                locations=template_locations,
+                pages=None,
+                default_document="tender",
+            )
+            if template_locations
+            else ""
+        )
+        template_location_block = (
+            f"<div style='margin-bottom: 12px;'><strong style='font-size:13px; color: var(--text-regular);'>招标模板定位：</strong>{template_location_html}</div>"
+            if template_location_html
+            else ""
+        )
         if not bidder_text:
             return f"""
                 <div class="card">
                     <h2 style="color: var(--primary-color); border: none; margin-bottom: 15px;">■ {title}</h2>
                     <div style='margin-bottom: 12px;'><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
+                    {template_location_block}
                     <div class='empty-text'>[ ⚠️ 投标文件中未检测到该部分内容，请重点核实 ]</div>
                 </div>
             """
@@ -1083,6 +1148,7 @@ class ReportVisualizer:
                 {status_badge}
             </div>
             <div style='margin-bottom: 12px;'><strong style='font-size:13px; color: var(--text-regular);'>定位：</strong>{location_html}</div>
+            {template_location_block}
             <div class="content-box {collapse_class}" id="content-{uid}">
                 {highlighted}
             </div>
@@ -1108,6 +1174,7 @@ class ReportVisualizer:
                 checker,
                 pages=info.get("pages"),
                 locations=info.get("locations"),
+                template_locations=info.get("template_locations"),
             )
             detail_cards.append(card)
 
@@ -1925,6 +1992,7 @@ class ReportVisualizer:
             for attachment_info in infos:
                 main_pages.extend(attachment_info.get("pages") or [])
                 main_locations.extend(attachment_info.get("locations") or [])
+                main_locations.extend(attachment_info.get("template_locations") or [])
             location_html = self._render_location_summary(locations=main_locations, pages=main_pages)
 
             # 主项行
@@ -1966,6 +2034,7 @@ class ReportVisualizer:
                 for attachment_info in c_infos:
                     c_pages.extend(attachment_info.get("pages") or [])
                     c_locations.extend(attachment_info.get("locations") or [])
+                    c_locations.extend(attachment_info.get("template_locations") or [])
                 c_location_html = self._render_location_summary(locations=c_locations, pages=c_pages)
 
                 main_html += f"""
@@ -1993,6 +2062,7 @@ class ReportVisualizer:
                 checker,
                 pages=rec.get("pages"),
                 locations=rec.get("locations"),
+                template_locations=rec.get("template_locations"),
             )
             detail_html = f"""
             <!DOCTYPE html>
@@ -2415,14 +2485,19 @@ class ReportVisualizer:
         parts.append("</div></div>")
         return "".join(parts)
 
-    def _project_trim_text(self, value, limit=140):
+    def _project_trim_text(self, value, limit=200):
         text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if limit <= 0:
+            return ""
         if len(text) <= limit:
             return text
-        return text[: limit - 1].rstrip() + "…"
+        return text[:limit] + "..."
 
-    def _project_highlight_text_html(self, text, needle):
-        raw_text = str(text or "-")
+    def _project_window_text_around(self, text, needle, *, limit=200):
+        return self._project_trim_text(text, limit)
+
+    def _project_highlight_text_html(self, text, needle, limit=200):
+        raw_text = self._project_window_text_around(text or "-", needle, limit=limit)
         keyword = str(needle or "").strip()
         if not keyword:
             return html.escape(raw_text)
@@ -2434,15 +2509,31 @@ class ReportVisualizer:
         after = raw_text[index + len(keyword):]
         return f"{html.escape(before)}<mark>{html.escape(matched)}</mark>{html.escape(after)}"
 
+    def _project_typo_display_text(self, item):
+        return str(
+            item.get("display_text")
+            or item.get("highlight_text")
+            or item.get("matched_text")
+            or ""
+        ).strip()
+
+    def _project_typo_highlight_text(self, item):
+        return str(
+            item.get("highlight_text")
+            or item.get("display_text")
+            or item.get("matched_text")
+            or ""
+        ).strip()
+
     def _project_build_typo_locator_ranges(self, item):
         page = item.get("page")
         if not isinstance(page, int) or page <= 0:
             return []
         bbox = self._normalize_bbox(item.get("bbox"))
-        matched_text = str(item.get("matched_text") or "").strip()
+        highlight_text = self._project_typo_highlight_text(item)
         source_text = str(item.get("text") or "-")
         highlight_rects = [list(bbox[:4])] if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else []
-        highlight_phrases = [matched_text] if matched_text else []
+        highlight_phrases = [highlight_text] if highlight_text else []
         return [
             {
                 "page": page,
@@ -2450,7 +2541,7 @@ class ReportVisualizer:
                 "bbox": bbox,
                 "highlightPhrases": highlight_phrases,
                 "highlightRects": highlight_rects,
-                "highlightHtml": self._project_highlight_text_html(source_text, matched_text),
+                "highlightHtml": self._project_highlight_text_html(source_text, highlight_text),
                 "highlightTitle": "错别字命中",
             }
         ]
@@ -2841,14 +2932,17 @@ class ReportVisualizer:
             locator_ranges = self._project_build_typo_locator_ranges(item)
             detail_anchor = self._project_typo_issue_anchor(role, file_name, item)
             detail_href = self._project_issue_page_href(detail_page, detail_anchor)
+            display_text = self._project_trim_text(self._project_typo_display_text(item) or "-", 200)
+            highlight_text = self._project_typo_highlight_text(item)
+            suggestion = self._project_trim_text(str(item.get("suggestion") or "-"), 200)
             rows.append(
                 f"<tr class='{self._project_severity_css_class('warning')}'>"
                 f"<td>{html.escape(self._project_role_label(role))}</td>"
                 f"<td>{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, locator_ranges)}</td>"
                 f"<td>{self._project_build_exact_range_links_html(source_lookup, file_name, locator_ranges)}</td>"
-                f"<td><mark>{html.escape(str(item.get('matched_text') or '-'))}</mark></td>"
-                f"<td>{html.escape(str(item.get('suggestion') or '-'))}</td>"
-                f"<td>{self._project_highlight_text_html(str(item.get('text') or '-'), str(item.get('matched_text') or ''))}</td>"
+                f"<td><mark>{html.escape(display_text)}</mark></td>"
+                f"<td>{html.escape(suggestion)}</td>"
+                f"<td>{self._project_highlight_text_html(str(item.get('text') or '-'), highlight_text)}</td>"
                 f"<td>{self._project_build_issue_detail_link(detail_href, '查看问题页')}</td>"
                 "</tr>"
             )
@@ -2962,7 +3056,7 @@ class ReportVisualizer:
                 sample_rows = table.get("sample_rows") or []
                 sample_text = self._project_trim_text(
                     json.dumps(sample_rows, ensure_ascii=False),
-                    220,
+                    200,
                 ) if sample_rows else "-"
                 entries.append(
                     "<li>"
@@ -3025,8 +3119,8 @@ class ReportVisualizer:
                 left_pages = self._project_normalize_pages(table.get("left_pages"))
                 right_pages = self._project_normalize_pages(table.get("right_pages"))
                 similarity = html.escape(str(table.get("similarity") or 0))
-                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
-                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 200)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 200)
                 entries.append(
                     "<li>"
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
@@ -3088,6 +3182,250 @@ class ReportVisualizer:
                           <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
                         </div>
                       </div>
+                      {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
+                      {''.join(pair_sections)}
+                    </article>
+                    """
+                )
+            body = "".join(cards)
+        return self._project_build_issue_page_shell(
+            project_identifier=project_identifier,
+            title=title,
+            body=body,
+            source_lookup=source_lookup,
+        )
+
+    def _project_duplicate_pair_order_key(self, item):
+        left_pages = self._project_collect_duplicate_pages(item, "left")
+        right_pages = self._project_collect_duplicate_pages(item, "right")
+        return (
+            left_pages[0] if left_pages else 10**9,
+            right_pages[0] if right_pages else 10**9,
+            str(item.get("left_file_name") or ""),
+            str(item.get("right_file_name") or ""),
+        )
+
+    def _project_duplicate_evidence_order_key(self, evidence, rank, order):
+        left_pages = self._project_evidence_pages(evidence, "left")
+        right_pages = self._project_evidence_pages(evidence, "right")
+        sequence = evidence.get("left_start_index")
+        try:
+            sequence_value = int(sequence)
+        except (TypeError, ValueError):
+            sequence_value = order
+        return (
+            left_pages[0] if left_pages else 10**9,
+            sequence_value,
+            right_pages[0] if right_pages else 10**9,
+            rank,
+            order,
+        )
+
+    def _project_duplicate_evidence_rows_text(self, evidence, side):
+        rows = (
+            evidence.get(f"{side}_sample_rows")
+            or evidence.get(f"{side}_rows")
+            or evidence.get("sample_rows")
+            or evidence.get("rows")
+            or []
+        )
+        if not isinstance(rows, (list, tuple)):
+            rows = [rows]
+        return json.dumps([str(row) for row in rows], ensure_ascii=False) if rows else ""
+
+    def _project_duplicate_evidence_display_text(self, evidence, side, kind):
+        if kind in {"table", "similar_table"}:
+            return self._project_duplicate_evidence_rows_text(evidence, side) or "-"
+        if kind == "image":
+            width = evidence.get(f"{side}_width")
+            height = evidence.get(f"{side}_height")
+            image_hash = str(evidence.get("image_hash") or "").strip()
+            parts = []
+            if width and height:
+                parts.append(f"{width}x{height}")
+            if image_hash:
+                parts.append(f"hash:{image_hash[:16]}")
+            return " / ".join(parts) or "相同图片"
+        return (
+            evidence.get(f"{side}_text")
+            or evidence.get(f"{side}_preview")
+            or evidence.get(f"{side}_title")
+            or evidence.get("text")
+            or evidence.get("preview")
+            or evidence.get("title")
+            or "-"
+        )
+
+    def _project_duplicate_evidence_label(self, evidence, kind):
+        if kind == "section":
+            return "重复段落"
+        if kind == "block":
+            try:
+                count = int(evidence.get("sentence_count") or 1)
+            except (TypeError, ValueError):
+                count = 1
+            return f"重复句（连续{count}句）" if count > 1 else "重复句"
+        if kind == "table":
+            return "重复表格"
+        if kind == "image":
+            return "重复图片"
+        if kind == "similar_section":
+            return "相似段落"
+        if kind == "similar_block":
+            return "相似句"
+        if kind == "similar_table":
+            return "相似表格"
+        return "重复证据"
+
+    def _project_duplicate_evidence_items(self, item):
+        specs = (
+            ("section", "duplicate_sections", 0),
+            ("block", "duplicate_blocks", 1),
+            ("table", "duplicate_tables", 2),
+            ("image", "duplicate_images", 3),
+            ("similar_section", "similar_sections", 4),
+            ("similar_block", "similar_blocks", 5),
+            ("similar_table", "similar_tables", 6),
+        )
+        items = []
+        order = 0
+        for kind, key, rank in specs:
+            for evidence in item.get(key) or []:
+                if not isinstance(evidence, dict):
+                    continue
+                items.append(
+                    {
+                        "kind": kind,
+                        "rank": rank,
+                        "order": order,
+                        "evidence": evidence,
+                        "sort_key": self._project_duplicate_evidence_order_key(evidence, rank, order),
+                    }
+                )
+                order += 1
+        items.sort(key=lambda current: current["sort_key"])
+        return items
+
+    def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
+        item = self._project_filter_duplicate_item_evidence(item)
+        left_file = str(item.get("left_file_name") or "")
+        right_file = str(item.get("right_file_name") or "")
+        evidence_items = self._project_duplicate_evidence_items(item)
+        if not evidence_items:
+            return "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+
+        entries = []
+        for display_index, evidence_item in enumerate(evidence_items, start=1):
+            evidence = evidence_item["evidence"]
+            kind = evidence_item["kind"]
+            label = self._project_duplicate_evidence_label(evidence, kind)
+            left_pages = self._project_evidence_pages(evidence, "left")
+            right_pages = self._project_evidence_pages(evidence, "right")
+            left_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "left", kind),
+                200,
+            )
+            right_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "right", kind),
+                200,
+            )
+            similarity = evidence.get("similarity")
+            description_parts = ["按原文顺序展示该处命中的重复证据。"]
+            if similarity not in (None, "", []):
+                description_parts.append(f"相似度：{similarity}")
+            preview_button = self._project_build_duplicate_evidence_preview_button_html(
+                item,
+                evidence,
+                source_lookup=source_lookup,
+                label="并排预览",
+            )
+            entries.append(
+                "<li>"
+                f"<div class='issue-description'>"
+                f"<strong>问题 {display_index}：{html.escape(label)}</strong>"
+                f"<div class='issue-muted'>{html.escape(self._project_trim_text(' '.join(description_parts), 200))}</div>"
+                f"</div>"
+                f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(left_text)}</div>"
+                f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(right_text)}</div>"
+                f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+                "</li>"
+            )
+
+        return (
+            f"<details open><summary>问题证据（{len(evidence_items)}）</summary>"
+            f"<ol class='issue-evidence-list issue-evidence-ordered'>{''.join(entries)}</ol></details>"
+        )
+
+    def _project_build_duplicate_issue_detail_html(
+        self,
+        *,
+        project_identifier,
+        title,
+        result,
+        doc_type,
+        source_lookup,
+    ):
+        items = list(self._project_iter_duplicate_items(result, doc_type))
+        if not items:
+            body = "<p class='issue-empty'>未发现相关可疑对。</p>"
+        else:
+            cards = []
+            for issue_index, cluster in enumerate(self._project_duplicate_cluster_items(items), start=1):
+                metrics = self._project_duplicate_cluster_metrics(cluster)
+                risk_level = self._project_duplicate_cluster_risk(cluster)
+                preview_button = self._project_build_duplicate_cluster_preview_button_html(
+                    cluster,
+                    source_lookup=source_lookup,
+                    label="并排预览这组文件",
+                )
+                pair_sections = []
+                sorted_pairs = sorted(
+                    cluster.get("items") or [],
+                    key=self._project_duplicate_pair_order_key,
+                )
+                for pair_index, raw_item in enumerate(sorted_pairs, start=1):
+                    item = self._project_filter_duplicate_item_evidence(raw_item)
+                    pair_metrics = item.get("metrics") or {}
+                    left_file = str(item.get("left_file_name") or "")
+                    right_file = str(item.get("right_file_name") or "")
+                    summary = self._project_trim_text(
+                        f"文件“{left_file}”与“{right_file}”存在重复或相似内容，证据按原文页码顺序展示。",
+                        200,
+                    )
+                    pair_sections.append(
+                        f"""
+                        <details open>
+                          <summary>关联对 {pair_index}：{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          <div class="issue-description"><strong>问题描述</strong><div>{html.escape(summary)}</div></div>
+                          {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
+                        </details>
+                        """
+                    )
+                files_text = self._project_trim_text(" / ".join(cluster.get("files") or []), 200)
+                issue_description = self._project_trim_text(
+                    f"该组文件存在查重风险，涉及文件 {len(cluster.get('files') or [])} 个，所有小问题按证据原文顺序列出。",
+                    200,
+                )
+                cards.append(
+                    f"""
+                    <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
+                      <div class="issue-card-header">
+                        <div>
+                          <h2>问题 {issue_index}：{html.escape(files_text)}</h2>
+                          <p class="issue-meta">风险：{html.escape(risk_level)} | 最高分：{html.escape(self._project_duplicate_cluster_score(cluster))} | 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
+                        </div>
+                        <div class="issue-card-tools">
+                          <div class="issue-metrics">
+                            <span>重复段 {html.escape(self._project_metric_display(metrics, 'exact_section_count', 'similar_section_count'))}</span>
+                            <span>重复句 {html.escape(self._project_metric_display(metrics, 'exact_block_count', 'similar_block_count'))}</span>
+                            <span>重复表 {html.escape(self._project_metric_display(metrics, 'exact_table_count', 'similar_table_count'))}</span>
+                          </div>
+                          <div class="issue-card-actions">{preview_button}</div>
+                        </div>
+                      </div>
+                      <div class="issue-description"><strong>问题描述</strong><div>{html.escape(issue_description)}</div></div>
                       {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
                       {''.join(pair_sections)}
                     </article>
@@ -3207,7 +3545,7 @@ class ReportVisualizer:
                 left_pages = self._project_normalize_pages(table.get("left_pages"))
                 right_pages = self._project_normalize_pages(table.get("right_pages"))
                 sample_rows = table.get("sample_rows") or []
-                sample_text = self._project_trim_text(json.dumps(sample_rows, ensure_ascii=False), 220) if sample_rows else "-"
+                sample_text = self._project_trim_text(json.dumps(sample_rows, ensure_ascii=False), 200) if sample_rows else "-"
                 entries.append(
                     "<li>"
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
@@ -3290,8 +3628,8 @@ class ReportVisualizer:
                 left_pages = self._project_normalize_pages(table.get("left_pages"))
                 right_pages = self._project_normalize_pages(table.get("right_pages"))
                 similarity = html.escape(str(table.get("similarity") or 0))
-                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
-                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 200)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 200)
                 entries.append(
                     "<li>"
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
@@ -3409,153 +3747,155 @@ class ReportVisualizer:
             )
         return "\n".join(rows)
 
+    def _project_duplicate_evidence_order_key(self, evidence, rank, order):
+        left_pages = self._project_evidence_pages(evidence, "left")
+        right_pages = self._project_evidence_pages(evidence, "right")
+        sequence = evidence.get("left_start_index")
+        try:
+            sequence_value = int(sequence)
+        except (TypeError, ValueError):
+            sequence_value = order
+        return (
+            left_pages[0] if left_pages else 10**9,
+            sequence_value,
+            right_pages[0] if right_pages else 10**9,
+            rank,
+            order,
+        )
+
+    def _project_duplicate_evidence_rows_text(self, evidence, side):
+        rows = (
+            evidence.get(f"{side}_sample_rows")
+            or evidence.get(f"{side}_rows")
+            or evidence.get("sample_rows")
+            or evidence.get("rows")
+            or []
+        )
+        if not isinstance(rows, (list, tuple)):
+            rows = [rows]
+        return json.dumps([str(row) for row in rows], ensure_ascii=False) if rows else ""
+
+    def _project_duplicate_evidence_display_text(self, evidence, side, kind):
+        if kind in {"table", "similar_table"}:
+            return self._project_duplicate_evidence_rows_text(evidence, side) or "-"
+        if kind == "image":
+            width = evidence.get(f"{side}_width")
+            height = evidence.get(f"{side}_height")
+            image_hash = str(evidence.get("image_hash") or "").strip()
+            parts = []
+            if width and height:
+                parts.append(f"{width}x{height}")
+            if image_hash:
+                parts.append(f"hash:{image_hash[:16]}")
+            return " / ".join(parts) or "相同图片"
+        return (
+            evidence.get(f"{side}_text")
+            or evidence.get(f"{side}_preview")
+            or evidence.get(f"{side}_title")
+            or evidence.get("text")
+            or evidence.get("preview")
+            or evidence.get("title")
+            or "-"
+        )
+
+    def _project_duplicate_evidence_label(self, evidence, kind):
+        if kind == "section":
+            return "重复段落"
+        if kind == "block":
+            count = int(evidence.get("sentence_count") or 1)
+            return f"重复句（连续{count}句）" if count > 1 else "重复句"
+        if kind == "table":
+            return "重复表格"
+        if kind == "image":
+            return "重复图片"
+        if kind == "similar_section":
+            return "相似段落"
+        if kind == "similar_block":
+            return "相似句"
+        if kind == "similar_table":
+            return "相似表格"
+        return "重复证据"
+
+    def _project_duplicate_evidence_items(self, item):
+        specs = (
+            ("section", "duplicate_sections", 0),
+            ("block", "duplicate_blocks", 1),
+            ("table", "duplicate_tables", 2),
+            ("image", "duplicate_images", 3),
+            ("similar_section", "similar_sections", 4),
+            ("similar_block", "similar_blocks", 5),
+            ("similar_table", "similar_tables", 6),
+        )
+        items = []
+        order = 0
+        for kind, key, rank in specs:
+            for evidence in item.get(key) or []:
+                if not isinstance(evidence, dict):
+                    continue
+                items.append(
+                    {
+                        "kind": kind,
+                        "rank": rank,
+                        "order": order,
+                        "evidence": evidence,
+                        "sort_key": self._project_duplicate_evidence_order_key(evidence, rank, order),
+                    }
+                )
+                order += 1
+        items.sort(key=lambda current: current["sort_key"])
+        return items
+
     def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
         item = self._project_filter_duplicate_item_evidence(item)
         left_file = str(item.get("left_file_name") or "")
         right_file = str(item.get("right_file_name") or "")
-        blocks = item.get("duplicate_blocks") or []
-        sections = item.get("duplicate_sections") or []
-        tables = item.get("duplicate_tables") or []
-        similar_blocks = item.get("similar_blocks") or []
-        similar_sections = item.get("similar_sections") or []
-        similar_tables = item.get("similar_tables") or []
-        parts = []
+        evidence_items = self._project_duplicate_evidence_items(item)
+        if not evidence_items:
+            return "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
 
-        def build_actions(evidence):
+        entries = []
+        for display_index, evidence_item in enumerate(evidence_items, start=1):
+            evidence = evidence_item["evidence"]
+            kind = evidence_item["kind"]
+            label = self._project_duplicate_evidence_label(evidence, kind)
+            left_pages = self._project_evidence_pages(evidence, "left")
+            right_pages = self._project_evidence_pages(evidence, "right")
+            left_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "left", kind),
+                200,
+            )
+            right_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "right", kind),
+                200,
+            )
+            similarity = evidence.get("similarity")
+            description_parts = ["按原文顺序展示该处命中的重复证据。"]
+            if similarity not in (None, "", []):
+                description_parts.append(f"相似度：{similarity}")
             preview_button = self._project_build_duplicate_evidence_preview_button_html(
                 item,
                 evidence,
                 source_lookup=source_lookup,
                 label="并排预览",
             )
-            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
-
-        if sections:
-            entries = []
-            for section in sections:
-                left_pages = self._project_normalize_pages(section.get("left_pages"))
-                right_pages = self._project_normalize_pages(section.get("right_pages"))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
-                    f"{build_actions(section)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复段落证据（{len(sections)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            entries.append(
+                "<li>"
+                f"<div class='issue-description'>"
+                f"<strong>问题 {display_index}：{html.escape(label)}</strong>"
+                f"<div class='issue-muted'>{html.escape(self._project_trim_text(' '.join(description_parts), 200))}</div>"
+                f"</div>"
+                f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(left_text)}</div>"
+                f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(right_text)}</div>"
+                f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+                "</li>"
             )
 
-        if blocks:
-            entries = []
-            for block in blocks:
-                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
-                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
-                    f"{build_actions(block)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复句证据（{len(blocks)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if tables:
-            entries = []
-            for table in tables:
-                left_pages = self._project_normalize_pages(table.get("left_pages"))
-                right_pages = self._project_normalize_pages(table.get("right_pages"))
-                sample_rows = table.get("sample_rows") or []
-                sample_text = self._project_trim_text(
-                    json.dumps(sample_rows, ensure_ascii=False),
-                    220,
-                ) if sample_rows else "-"
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
-                    f"{build_actions(table)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复表格证据（{len(tables)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_sections:
-            entries = []
-            for section in similar_sections:
-                left_pages = self._project_normalize_pages(section.get("left_pages"))
-                right_pages = self._project_normalize_pages(section.get("right_pages"))
-                similarity = html.escape(str(section.get("similarity") or 0))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(section)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_blocks:
-            entries = []
-            for block in similar_blocks:
-                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
-                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
-                similarity = html.escape(str(block.get("similarity") or 0))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(block)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_tables:
-            entries = []
-            for table in similar_tables:
-                left_pages = self._project_normalize_pages(table.get("left_pages"))
-                right_pages = self._project_normalize_pages(table.get("right_pages"))
-                similarity = html.escape(str(table.get("similarity") or 0))
-                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
-                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(table)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+        return (
+            f"<details open><summary>问题证据（{len(evidence_items)}）</summary>"
+            f"<ol class='issue-evidence-list issue-evidence-ordered'>{''.join(entries)}</ol></details>"
+        )
 
     def _project_build_duplicate_issue_detail_html(
         self,
@@ -3726,7 +4066,7 @@ class ReportVisualizer:
                 sample_rows = table.get("sample_rows") or []
                 sample_text = self._project_trim_text(
                     json.dumps(sample_rows, ensure_ascii=False),
-                    220,
+                    200,
                 ) if sample_rows else "-"
                 entries.append(
                     "<li>"
@@ -3789,8 +4129,8 @@ class ReportVisualizer:
                 left_pages = self._project_normalize_pages(table.get("left_pages"))
                 right_pages = self._project_normalize_pages(table.get("right_pages"))
                 similarity = html.escape(str(table.get("similarity") or 0))
-                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
-                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
+                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 200)
+                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 200)
                 entries.append(
                     "<li>"
                     f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
@@ -3867,19 +4207,27 @@ class ReportVisualizer:
             body = "<p class='issue-empty'>未发现错别字候选。</p>"
         else:
             cards = []
-            for role, file_name, item in items:
+            for issue_index, (role, file_name, item) in enumerate(items, start=1):
                 locator_ranges = self._project_build_typo_locator_ranges(item)
+                display_text = self._project_trim_text(self._project_typo_display_text(item) or "-", 200)
+                highlight_text = self._project_typo_highlight_text(item)
+                suggestion = self._project_trim_text(str(item.get("suggestion") or "-"), 200)
+                issue_description = self._project_trim_text(
+                    f"疑似错别字“{display_text}”，建议改为“{suggestion}”。",
+                    200,
+                )
                 cards.append(
                     f"""
                     <article id="{html.escape(self._project_typo_issue_anchor(role, file_name, item))}" class="issue-card issue-row issue-severity-medium">
                       <div class="issue-card-header">
                         <div>
-                          <h2><mark>{html.escape(str(item.get("matched_text") or "-"))}</mark> -&gt; {html.escape(str(item.get("suggestion") or "-"))}</h2>
+                          <h2>问题 {issue_index}：<mark>{html.escape(display_text)}</mark> -&gt; {html.escape(suggestion)}</h2>
                           <p class="issue-meta">{html.escape(self._project_role_label(role))}</p>
                         </div>
                       </div>
+                      <div class="issue-description"><strong>问题描述</strong><div>{html.escape(issue_description)}</div></div>
                       <div>{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, locator_ranges)}</div>
-                      <div class="issue-preview issue-block">{self._project_highlight_text_html(str(item.get("text") or "-"), str(item.get("matched_text") or ""))}</div>
+                      <div class="issue-preview issue-block">{self._project_highlight_text_html(str(item.get("text") or "-"), highlight_text)}</div>
                     </article>
                     """
                 )
@@ -3897,33 +4245,40 @@ class ReportVisualizer:
             body = "<p class='issue-empty'>未发现一人多用。</p>"
         else:
             cards = []
-            for role, item in items:
+            for issue_index, (role, item) in enumerate(items, start=1):
                 preview_button = self._project_build_personnel_item_preview_button_html(
                     item,
                     source_lookup=source_lookup,
                     label="并排预览这组文件",
                 )
                 occurrences = []
-                for entry in item.get("occurrences") or []:
+                for occurrence_index, entry in enumerate(item.get("occurrences") or [], start=1):
                     file_name = str(entry.get("file_name") or "")
                     occurrences.append(
                         "<li>"
+                        f"<div class='issue-description'><strong>证据 {occurrence_index}</strong></div>"
                         f"{self._project_build_source_doc_cell_exact_html(source_lookup, file_name, self._project_build_personnel_locator_ranges(entry))}"
                         f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(entry.get('text') or '-')))}</div>"
                         "</li>"
                     )
+                name = self._project_trim_text(str(item.get("name") or "-"), 200)
+                issue_description = self._project_trim_text(
+                    f"姓名“{name}”在多个文件中重复出现，涉及文件 {item.get('document_count') or 0} 个。",
+                    200,
+                )
                 cards.append(
                     f"""
                     <article id="{html.escape(self._project_personnel_issue_anchor(role, item))}" class="issue-card {self._project_severity_css_class(str(item.get('risk_level') or 'warning'))}">
                       <div class="issue-card-header">
                         <div>
-                          <h2><mark>{html.escape(str(item.get("name") or "-"))}</mark></h2>
+                          <h2>问题 {issue_index}：<mark>{html.escape(name)}</mark></h2>
                           <p class="issue-meta">{html.escape(self._project_role_label(role))} ｜ 风险：{html.escape(str(item.get("risk_level") or "-"))} ｜ 涉及文件：{html.escape(str(item.get("document_count") or 0))}</p>
                         </div>
                         <div class="issue-card-tools">
                           <div class="issue-card-actions">{preview_button}</div>
                         </div>
                       </div>
+                      <div class="issue-description"><strong>问题描述</strong><div>{html.escape(issue_description)}</div></div>
                       <ul class="issue-evidence-list">{''.join(occurrences)}</ul>
                     </article>
                     """
@@ -3945,7 +4300,7 @@ class ReportVisualizer:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(str(title))}</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f4; color: #1c1c1c; }}
+    body {{ margin: 0; font-family: "Times New Roman", SimSun, "宋体", serif; background: #f6f7f4; color: #1c1c1c; }}
     main {{ max-width: 1320px; margin: 0 auto; padding: 28px 32px 40px; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
     .meta {{ color: #5f6862; margin-bottom: 18px; }}
@@ -3971,6 +4326,9 @@ class ReportVisualizer:
     .issue-page-links {{ display: inline-flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
     .issue-evidence-list {{ margin: 12px 0 0; padding-left: 18px; }}
     .issue-evidence-list li + li {{ margin-top: 12px; }}
+    .issue-evidence-ordered {{ padding-left: 22px; }}
+    .issue-description {{ margin-top: 10px; line-height: 1.6; color: #2b332d; }}
+    .issue-description strong {{ display: block; margin-bottom: 4px; }}
     .issue-preview {{ margin-top: 8px; line-height: 1.6; }}
     .issue-block {{ background: #fff7dd; border-radius: 8px; padding: 10px 12px; }}
     .issue-metrics {{ display: flex; flex-wrap: wrap; gap: 10px; color: #5f6862; font-size: 13px; }}
@@ -4363,7 +4721,7 @@ class ReportVisualizer:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>项目审查总览</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f4; color: #1c1c1c; }}
+    body {{ margin: 0; font-family: "Times New Roman", SimSun, "宋体", serif; background: #f7f7f4; color: #1c1c1c; }}
     main {{ padding: 28px 36px 40px; max-width: 1320px; margin: 0 auto; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
     .meta {{ color: #5f6862; margin-bottom: 18px; }}
@@ -4663,7 +5021,7 @@ class ReportVisualizer:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html.escape(str(title))}</title>
   <style>
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f4; color: #1c1c1c; }}
+    body {{ margin: 0; font-family: "Times New Roman", SimSun, "宋体", serif; background: #f6f7f4; color: #1c1c1c; }}
     main {{ max-width: 1320px; margin: 0 auto; padding: 28px 32px 40px; }}
     h1 {{ margin: 0 0 8px; font-size: 28px; }}
     .meta {{ color: #5f6862; margin-bottom: 18px; }}
@@ -4697,6 +5055,9 @@ class ReportVisualizer:
     .issue-page-links {{ display: inline-flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
     .issue-evidence-list {{ margin: 12px 0 0; padding-left: 18px; }}
     .issue-evidence-list li + li {{ margin-top: 12px; }}
+    .issue-evidence-ordered {{ padding-left: 22px; }}
+    .issue-description {{ margin-top: 10px; line-height: 1.6; color: #2b332d; }}
+    .issue-description strong {{ display: block; margin-bottom: 4px; }}
     .issue-preview {{ margin-top: 8px; line-height: 1.6; }}
     .issue-block {{ background: #fff7dd; border-radius: 8px; padding: 10px 12px; }}
     .issue-metrics {{ display: flex; flex-wrap: wrap; gap: 10px; color: #5f6862; font-size: 13px; }}
@@ -5231,23 +5592,26 @@ class ReportVisualizer:
                     const highlightPhrases = normalizeHighlightPhrases(options.highlightPhrases || []);
                     const highlightRects = normalizeHighlightRects(options.highlightRects || []);
                     const highlightBBox = parseBbox(options.highlightBBox || options.bbox || '');
-                    highlightPhrases.forEach((phrase) => {{
-                        requestUrl.searchParams.append('highlight', phrase);
-                    }});
+                    const requestBody = {{}};
+                    if (highlightPhrases.length) {{
+                        requestBody.highlight = highlightPhrases;
+                    }}
                     if (highlightBBox) {{
-                        requestUrl.searchParams.set('highlight_bbox', highlightBBox.join(','));
+                        requestBody.highlight_bbox = highlightBBox;
                     }}
                     if (highlightRects.length) {{
-                        requestUrl.searchParams.set('highlight_rects', JSON.stringify(highlightRects));
+                        requestBody.highlight_rects = highlightRects;
                     }}
-                    const requestKey = requestUrl.toString();
+                    const requestKey = `${{requestUrl.toString()}}::${{JSON.stringify(requestBody)}}`;
                     if (remotePageCache.has(requestKey)) {{
                         return remotePageCache.get(requestKey);
                     }}
                     const response = await fetch(requestUrl, {{
-                        method: 'GET',
+                        method: 'POST',
                         mode: 'cors',
                         credentials: 'omit',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify(requestBody),
                     }});
                     if (!response.ok) {{
                         throw new Error(`preview request failed: ${{response.status}}`);
@@ -6059,7 +6423,11 @@ class ReportVisualizer:
         filtered["similar_tables"] = similar_tables
 
         metrics = dict(item.get("metrics") or {})
-        metrics["exact_block_count"] = len(duplicate_blocks)
+        metrics["exact_block_count"] = sum(
+            max(1, int(block.get("sentence_count") or 1))
+            for block in duplicate_blocks
+            if isinstance(block, dict)
+        )
         metrics["exact_section_count"] = len(duplicate_sections)
         metrics["exact_table_count"] = len(duplicate_tables)
         metrics["exact_image_count"] = len(filtered["duplicate_images"])
@@ -6088,153 +6456,168 @@ class ReportVisualizer:
                 totals[key] += int(metrics.get(key) or 0)
         return totals
 
+    def _project_duplicate_pair_order_key(self, item):
+        left_pages = self._project_collect_duplicate_pages(item, "left")
+        right_pages = self._project_collect_duplicate_pages(item, "right")
+        return (
+            left_pages[0] if left_pages else 10**9,
+            right_pages[0] if right_pages else 10**9,
+            str(item.get("left_file_name") or ""),
+            str(item.get("right_file_name") or ""),
+        )
+
+    def _project_duplicate_evidence_order_key(self, evidence, rank, order):
+        left_pages = self._project_evidence_pages(evidence, "left")
+        right_pages = self._project_evidence_pages(evidence, "right")
+        sequence = evidence.get("left_start_index")
+        try:
+            sequence_value = int(sequence)
+        except (TypeError, ValueError):
+            sequence_value = order
+        return (
+            left_pages[0] if left_pages else 10**9,
+            sequence_value,
+            right_pages[0] if right_pages else 10**9,
+            rank,
+            order,
+        )
+
+    def _project_duplicate_evidence_rows_text(self, evidence, side):
+        rows = (
+            evidence.get(f"{side}_sample_rows")
+            or evidence.get(f"{side}_rows")
+            or evidence.get("sample_rows")
+            or evidence.get("rows")
+            or []
+        )
+        if not isinstance(rows, (list, tuple)):
+            rows = [rows]
+        return json.dumps([str(row) for row in rows], ensure_ascii=False) if rows else ""
+
+    def _project_duplicate_evidence_display_text(self, evidence, side, kind):
+        if kind in {"table", "similar_table"}:
+            return self._project_duplicate_evidence_rows_text(evidence, side) or "-"
+        if kind == "image":
+            width = evidence.get(f"{side}_width")
+            height = evidence.get(f"{side}_height")
+            image_hash = str(evidence.get("image_hash") or "").strip()
+            parts = []
+            if width and height:
+                parts.append(f"{width}x{height}")
+            if image_hash:
+                parts.append(f"hash:{image_hash[:16]}")
+            return " / ".join(parts) or "相同图片"
+        return (
+            evidence.get(f"{side}_text")
+            or evidence.get(f"{side}_preview")
+            or evidence.get(f"{side}_title")
+            or evidence.get("text")
+            or evidence.get("preview")
+            or evidence.get("title")
+            or "-"
+        )
+
+    def _project_duplicate_evidence_label(self, evidence, kind):
+        if kind == "section":
+            return "重复段落"
+        if kind == "block":
+            try:
+                count = int(evidence.get("sentence_count") or 1)
+            except (TypeError, ValueError):
+                count = 1
+            return f"重复句（连续{count}句）" if count > 1 else "重复句"
+        if kind == "table":
+            return "重复表格"
+        if kind == "image":
+            return "重复图片"
+        if kind == "similar_section":
+            return "相似段落"
+        if kind == "similar_block":
+            return "相似句"
+        if kind == "similar_table":
+            return "相似表格"
+        return "重复证据"
+
+    def _project_duplicate_evidence_items(self, item):
+        specs = (
+            ("section", "duplicate_sections", 0),
+            ("block", "duplicate_blocks", 1),
+            ("table", "duplicate_tables", 2),
+            ("image", "duplicate_images", 3),
+            ("similar_section", "similar_sections", 4),
+            ("similar_block", "similar_blocks", 5),
+            ("similar_table", "similar_tables", 6),
+        )
+        items = []
+        order = 0
+        for kind, key, rank in specs:
+            for evidence in item.get(key) or []:
+                if not isinstance(evidence, dict):
+                    continue
+                items.append(
+                    {
+                        "kind": kind,
+                        "rank": rank,
+                        "order": order,
+                        "evidence": evidence,
+                        "sort_key": self._project_duplicate_evidence_order_key(evidence, rank, order),
+                    }
+                )
+                order += 1
+        items.sort(key=lambda current: current["sort_key"])
+        return items
+
     def _project_render_duplicate_evidence_sections(self, item, *, source_lookup):
         item = self._project_filter_duplicate_item_evidence(item)
         left_file = str(item.get("left_file_name") or "")
         right_file = str(item.get("right_file_name") or "")
-        blocks = item.get("duplicate_blocks") or []
-        sections = item.get("duplicate_sections") or []
-        tables = item.get("duplicate_tables") or []
-        similar_blocks = item.get("similar_blocks") or []
-        similar_sections = item.get("similar_sections") or []
-        similar_tables = item.get("similar_tables") or []
-        parts = []
+        evidence_items = self._project_duplicate_evidence_items(item)
+        if not evidence_items:
+            return "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
 
-        def build_actions(evidence):
+        entries = []
+        for display_index, evidence_item in enumerate(evidence_items, start=1):
+            evidence = evidence_item["evidence"]
+            kind = evidence_item["kind"]
+            label = self._project_duplicate_evidence_label(evidence, kind)
+            left_pages = self._project_evidence_pages(evidence, "left")
+            right_pages = self._project_evidence_pages(evidence, "right")
+            left_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "left", kind),
+                200,
+            )
+            right_text = self._project_trim_text(
+                self._project_duplicate_evidence_display_text(evidence, "right", kind),
+                200,
+            )
+            similarity = evidence.get("similarity")
+            description_parts = ["按原文顺序展示该处命中的重复证据。"]
+            if similarity not in (None, "", []):
+                description_parts.append(f"相似度：{similarity}")
             preview_button = self._project_build_duplicate_evidence_preview_button_html(
                 item,
                 evidence,
                 source_lookup=source_lookup,
                 label="并排预览",
             )
-            return f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
-
-        if sections:
-            entries = []
-            for section in sections:
-                left_pages = self._project_normalize_pages(section.get("left_pages"))
-                right_pages = self._project_normalize_pages(section.get("right_pages"))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
-                    f"{build_actions(section)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复段落证据（{len(sections)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
+            entries.append(
+                "<li>"
+                f"<div class='issue-description'>"
+                f"<strong>问题 {display_index}：{html.escape(label)}</strong>"
+                f"<div class='issue-muted'>{html.escape(self._project_trim_text(' '.join(description_parts), 200))}</div>"
+                f"</div>"
+                f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(left_text)}</div>"
+                f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
+                f"<div class='issue-preview'>{html.escape(right_text)}</div>"
+                f"<div class='issue-action-stack issue-evidence-actions'>{preview_button}</div>"
+                "</li>"
             )
 
-        if blocks:
-            entries = []
-            for block in blocks:
-                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
-                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'><mark>{html.escape(self._project_trim_text(str(block.get('text') or '-')))}</mark></div>"
-                    f"{build_actions(block)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复句证据（{len(blocks)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if tables:
-            entries = []
-            for table in tables:
-                left_pages = self._project_normalize_pages(table.get("left_pages"))
-                right_pages = self._project_normalize_pages(table.get("right_pages"))
-                sample_rows = table.get("sample_rows") or []
-                sample_text = self._project_trim_text(
-                    json.dumps(sample_rows, ensure_ascii=False),
-                    220,
-                ) if sample_rows else "-"
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(sample_text)}</div>"
-                    f"{build_actions(table)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>重复表格证据（{len(tables)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_sections:
-            entries = []
-            for section in similar_sections:
-                left_pages = self._project_normalize_pages(section.get("left_pages"))
-                right_pages = self._project_normalize_pages(section.get("right_pages"))
-                similarity = html.escape(str(section.get("similarity") or 0))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('left_preview') or section.get('left_title') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(section.get('right_preview') or section.get('right_title') or '-')))}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(section)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似段落证据（{len(similar_sections)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_blocks:
-            entries = []
-            for block in similar_blocks:
-                left_pages = self._project_normalize_pages(block.get("left_page"), block.get("page"))
-                right_pages = self._project_normalize_pages(block.get("right_page"), block.get("page"))
-                similarity = html.escape(str(block.get("similarity") or 0))
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('left_text') or '-')))}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(self._project_trim_text(str(block.get('right_text') or '-')))}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(block)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似句证据（{len(similar_blocks)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        if similar_tables:
-            entries = []
-            for table in similar_tables:
-                left_pages = self._project_normalize_pages(table.get("left_pages"))
-                right_pages = self._project_normalize_pages(table.get("right_pages"))
-                similarity = html.escape(str(table.get("similarity") or 0))
-                left_rows = self._project_trim_text(json.dumps(table.get("left_sample_rows") or [], ensure_ascii=False), 220)
-                right_rows = self._project_trim_text(json.dumps(table.get("right_sample_rows") or [], ensure_ascii=False), 220)
-                entries.append(
-                    "<li>"
-                    f"<div><strong>文件A：</strong>{self._project_build_source_page_links_html(source_lookup, left_file, left_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(left_rows)}</div>"
-                    f"<div><strong>文件B：</strong>{self._project_build_source_page_links_html(source_lookup, right_file, right_pages)}</div>"
-                    f"<div class='issue-preview'>{html.escape(right_rows)}</div>"
-                    f"<div class='issue-preview issue-muted'>相似度：{similarity}</div>"
-                    f"{build_actions(table)}"
-                    "</li>"
-                )
-            parts.append(
-                f"<details open><summary>相似表格证据（{len(similar_tables)}）</summary>"
-                f"<ul class='issue-evidence-list'>{''.join(entries)}</ul></details>"
-            )
-
-        return "".join(parts) or "<p class='issue-muted'>当前未返回更细的重复证据。</p>"
+        return (
+            f"<details open><summary>问题证据（{len(evidence_items)}）</summary>"
+            f"<ol class='issue-evidence-list issue-evidence-ordered'>{''.join(entries)}</ol></details>"
+        )
 
     def _project_build_duplicate_issue_detail_html(
         self,
@@ -6250,7 +6633,7 @@ class ReportVisualizer:
             body = "<p class='issue-empty'>未发现相关可疑对。</p>"
         else:
             cards = []
-            for cluster in self._project_duplicate_cluster_items(items):
+            for issue_index, cluster in enumerate(self._project_duplicate_cluster_items(items), start=1):
                 metrics = self._project_duplicate_cluster_metrics(cluster)
                 risk_level = self._project_duplicate_cluster_risk(cluster)
                 preview_button = self._project_build_duplicate_cluster_preview_button_html(
@@ -6259,25 +6642,39 @@ class ReportVisualizer:
                     label="并排预览这组文件",
                 )
                 pair_sections = []
-                for raw_item in cluster.get("items") or []:
+                sorted_pairs = sorted(
+                    cluster.get("items") or [],
+                    key=self._project_duplicate_pair_order_key,
+                )
+                for pair_index, raw_item in enumerate(sorted_pairs, start=1):
                     item = self._project_filter_duplicate_item_evidence(raw_item)
                     pair_metrics = item.get("metrics") or {}
                     left_file = str(item.get("left_file_name") or "")
                     right_file = str(item.get("right_file_name") or "")
+                    summary = self._project_trim_text(
+                        f"文件“{left_file}”与“{right_file}”存在重复或相似内容，证据按原文页码顺序展示。",
+                        200,
+                    )
                     pair_sections.append(
                         f"""
                         <details open>
-                          <summary>{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          <summary>关联对 {pair_index}：{html.escape(left_file)} &lt;&gt; {html.escape(right_file)} | 分数：{html.escape(self._project_duplicate_score(item))} | 重复段 {html.escape(self._project_metric_display(pair_metrics, 'exact_section_count', 'similar_section_count'))} | 重复句 {html.escape(self._project_metric_display(pair_metrics, 'exact_block_count', 'similar_block_count'))} | 重复表 {html.escape(self._project_metric_display(pair_metrics, 'exact_table_count', 'similar_table_count'))}</summary>
+                          <div class="issue-description"><strong>问题描述</strong><div>{html.escape(summary)}</div></div>
                           {self._project_render_duplicate_evidence_sections(item, source_lookup=source_lookup)}
                         </details>
                         """
                     )
+                files_text = self._project_trim_text(" / ".join(cluster.get("files") or []), 200)
+                issue_description = self._project_trim_text(
+                    f"该组文件存在查重风险，涉及文件 {len(cluster.get('files') or [])} 个，所有小问题按证据原文顺序列出。",
+                    200,
+                )
                 cards.append(
                     f"""
                     <article id="{html.escape(self._project_duplicate_cluster_anchor(doc_type, cluster))}" class="issue-card {self._project_severity_css_class(risk_level)}">
                       <div class="issue-card-header">
                         <div>
-                          <h2>{html.escape(' / '.join(cluster.get('files') or []))}</h2>
+                          <h2>问题 {issue_index}：{html.escape(files_text)}</h2>
                           <p class="issue-meta">风险：{html.escape(risk_level)} | 最高分：{html.escape(self._project_duplicate_cluster_score(cluster))} | 涉及文件：{html.escape(str(len(cluster.get('files') or [])))}</p>
                         </div>
                         <div class="issue-card-tools">
@@ -6289,6 +6686,7 @@ class ReportVisualizer:
                           <div class="issue-card-actions">{preview_button}</div>
                         </div>
                       </div>
+                      <div class="issue-description"><strong>问题描述</strong><div>{html.escape(issue_description)}</div></div>
                       {self._project_build_duplicate_cluster_doc_list_html(cluster, source_lookup=source_lookup)}
                       {''.join(pair_sections)}
                     </article>

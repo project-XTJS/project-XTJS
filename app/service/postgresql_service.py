@@ -2143,6 +2143,8 @@ class PostgreSQLService:
     @classmethod
     def _location_text_from_node(cls, node: dict[str, Any]) -> str:
         for key in (
+            "display_text",
+            "highlight_text",
             "matched_text",
             "wrong",
             "text",

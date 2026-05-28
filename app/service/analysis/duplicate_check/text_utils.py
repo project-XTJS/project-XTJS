@@ -43,9 +43,11 @@ def hash_text(text: str) -> str:
 
 def clip(text: str, max_chars: int) -> str:
     """将文本截断到指定长度，超长部分用省略号表示。"""
+    if max_chars <= 0:
+        return ""
     if len(text) <= max_chars:
         return text
-    return f"{text[:max_chars].rstrip()}..."
+    return f"{text[:max_chars]}..."
 
 
 def split_sentences(text: str) -> list[str]:

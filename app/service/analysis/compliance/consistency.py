@@ -718,6 +718,111 @@ class ConsistencyChecker:
             matched.append(location)
         return matched or locations
 
+    def _location_key(self, location: Dict) -> tuple:
+        return (
+            location.get("page"),
+            tuple(location.get("bbox") or location.get("box") or []),
+            location.get("text"),
+        )
+
+    def _dedupe_locations(self, locations: List[Dict]) -> List[Dict]:
+        deduped: List[Dict] = []
+        seen: set[tuple] = set()
+        for location in locations or []:
+            if not isinstance(location, dict):
+                continue
+            key = self._location_key(location)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(location)
+        return deduped
+
+    def _locations_for_missing_anchor(self, locations: List[Dict], anchor: str) -> List[Dict]:
+        anchor_key = self._normalize(str(anchor or ""))
+        if not anchor_key:
+            return []
+
+        candidates = [
+            location
+            for location in locations or []
+            if isinstance(location, dict)
+            and self._normalize(str(location.get("text") or ""))
+        ]
+        if not candidates:
+            return []
+
+        direct = [
+            location
+            for location in candidates
+            if anchor_key in self._normalize(str(location.get("text") or ""))
+        ]
+        if direct:
+            return self._dedupe_locations(direct)
+
+        max_window = 5
+        for start in range(len(candidates)):
+            page = candidates[start].get("page")
+            combined = ""
+            window: List[Dict] = []
+            for end in range(start, min(start + max_window, len(candidates))):
+                location = candidates[end]
+                if page is not None and location.get("page") not in (None, page):
+                    break
+                text_key = self._normalize(str(location.get("text") or ""))
+                if not text_key:
+                    continue
+                combined += text_key
+                window.append(location)
+                if anchor_key in combined:
+                    return self._dedupe_locations(window)
+
+        return []
+
+    def _missing_anchor_location_details(
+        self,
+        locations: List[Dict],
+        anchors: List[str],
+    ) -> List[Dict]:
+        details: List[Dict] = []
+        for anchor in anchors or []:
+            anchor_text = str(anchor or "").strip()
+            if not anchor_text:
+                continue
+            matched_locations = self._locations_for_missing_anchor(locations, anchor_text)
+            details.append(
+                {
+                    "anchor": anchor_text,
+                    "locations": matched_locations,
+                }
+            )
+        return details
+
+    def _flatten_missing_anchor_locations(self, details: List[Dict]) -> List[Dict]:
+        flattened: List[Dict] = []
+        for detail in details or []:
+            if not isinstance(detail, dict):
+                continue
+            anchor = str(detail.get("anchor") or "").strip()
+            for location in detail.get("locations") or []:
+                if not isinstance(location, dict):
+                    continue
+                next_location = dict(location)
+                if anchor:
+                    next_location.setdefault("matched_anchor", anchor)
+                    phrases = list(next_location.get("highlight_phrases") or [])
+                    line_text = str(next_location.get("text") or "").strip()
+                    for phrase in (line_text, anchor):
+                        if phrase and phrase not in phrases:
+                            phrases.append(phrase)
+                    if phrases:
+                        next_location["highlight_phrases"] = phrases[:4]
+                bbox = next_location.get("bbox") or next_location.get("box")
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    next_location.setdefault("highlight_rects", [list(bbox[:4])])
+                flattened.append(next_location)
+        return self._dedupe_locations(flattened)
+
     def _plain_text(self, text: str) -> str:
         value = str(text or "").replace("\u3000", " ").replace("\xa0", " ")
         value = value.replace("\r\n", "\n").replace("\r", "\n")
@@ -1489,15 +1594,24 @@ class ConsistencyChecker:
                     combined_missing.append(anchor)
                 missing = combined_missing
 
-            problem_template_locations = self._template_locations_for_missing_anchors(
+            missing_anchor_location_details = self._missing_anchor_location_details(
                 template_locations,
                 missing,
             )
+            problem_template_locations = self._flatten_missing_anchor_locations(
+                missing_anchor_location_details
+            )
+            if not problem_template_locations:
+                problem_template_locations = self._template_locations_for_missing_anchors(
+                    template_locations,
+                    missing,
+                )
             results.append(
                 {
                     "name": title,
                     "is_passed": len(missing) == 0,
                     "missing_anchors": missing,
+                    "missing_anchor_locations": missing_anchor_location_details,
                     "unfilled_fields": [],
                     "fillable_field_count": 0,
                     "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
@@ -1505,6 +1619,7 @@ class ConsistencyChecker:
                     "pages": matched_pages,
                     "locations": matched_locations,
                     "template_locations": problem_template_locations,
+                    "tender_highlight_locations": problem_template_locations,
                 }
             )
         return results

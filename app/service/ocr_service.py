@@ -23,6 +23,8 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
         self.preferred_device = str(preferred_device or "").strip() or None
         self.active_device = "cpu"
         self._predictor_lock = threading.Lock()
+        self._fine_text_pipeline = None
+        self._fine_text_pipeline_lock = threading.Lock()
         
         # 引擎相关的静态初始化工作交给主线程池执行，确保后期的 run_in_threadpool 能回到同一上下文。
         self._engine_thread_id: int | None = None
@@ -33,6 +35,198 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
         self._prepare_runtime_dirs()
         self._prepare_runtime_env()
         self._run_on_engine_thread(self._init_engine)
+
+    def _fine_text_pipeline_kwargs(self, device: str) -> dict[str, Any]:
+        """构建预览精细高亮专用的轻量文本 OCR pipeline 参数。"""
+        return {
+            "device": device,
+            "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
+            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
+            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
+            "use_layout_detection": False,
+            "use_chart_recognition": False,
+            "use_seal_recognition": False,
+            "use_signature_recognition": False,
+            "use_ocr_for_image_block": True,
+            "format_block_content": False,
+            "merge_layout_blocks": False,
+            "use_queues": settings.PADDLE_VL_USE_QUEUES,
+        }
+
+    def _get_fine_text_pipeline(self):
+        """懒加载不带版面识别的文本 OCR pipeline，避免影响主 OCR pipeline。"""
+        if self._fine_text_pipeline is not None:
+            return self._fine_text_pipeline
+
+        with self._fine_text_pipeline_lock:
+            if self._fine_text_pipeline is not None:
+                return self._fine_text_pipeline
+
+            try:
+                from paddleocr import PaddleOCRVL
+            except Exception as exc:
+                raise RuntimeError(f"fine text OCR bootstrap failed: {exc}") from exc
+
+            device = self.active_device or self.preferred_device or settings.PADDLE_OCR_DEVICE
+            pipeline, disabled_args = self._instantiate_pipeline_with_kwargs(
+                PaddleOCRVL,
+                device,
+                self._fine_text_pipeline_kwargs(device),
+            )
+            self._fine_text_pipeline = pipeline
+            if disabled_args:
+                print(
+                    "OCRService: fine text OCR loaded with compatibility fallback "
+                    f"(device={device}, disabled_args={disabled_args})",
+                    flush=True,
+                )
+            return self._fine_text_pipeline
+
+    def _normalize_text_box_bbox(self, value: Any) -> list[float] | None:
+        bbox = self._normalize_bbox(value)
+        if bbox is None:
+            return None
+        if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and all(isinstance(item, (int, float)) for item in bbox[:4]):
+            x0, y0, third, fourth = [float(item) for item in bbox[:4]]
+            if third <= x0 or fourth <= y0:
+                if third <= 0 or fourth <= 0:
+                    return None
+                x1 = x0 + third
+                y1 = y0 + fourth
+            else:
+                x1 = third
+                y1 = fourth
+            if x1 <= x0 or y1 <= y0:
+                return None
+            return [x0, y0, x1, y1]
+        if isinstance(bbox, (list, tuple)) and bbox and all(
+            isinstance(item, (list, tuple))
+            and len(item) >= 2
+            and isinstance(item[0], (int, float))
+            and isinstance(item[1], (int, float))
+            for item in bbox
+        ):
+            xs = [float(item[0]) for item in bbox]
+            ys = [float(item[1]) for item in bbox]
+            return [min(xs), min(ys), max(xs), max(ys)]
+        return None
+
+    def _collect_text_boxes_from_payload(self, value: Any) -> list[dict[str, Any]]:
+        boxes: list[dict[str, Any]] = []
+
+        def collect(item: Any) -> None:
+            built_item = self._to_builtin(item)
+            if isinstance(built_item, list):
+                for child in built_item:
+                    collect(child)
+                return
+            if not isinstance(built_item, dict):
+                return
+
+            rec_texts = built_item.get("rec_texts")
+            rec_boxes = (
+                built_item.get("rec_boxes")
+                or built_item.get("rec_polys")
+                or built_item.get("dt_polys")
+                or built_item.get("boxes")
+            )
+            if isinstance(rec_texts, list) and isinstance(rec_boxes, list):
+                for text_value, box_value in zip(rec_texts, rec_boxes):
+                    text = self._normalize_section_text(str(text_value or ""))
+                    bbox = self._normalize_text_box_bbox(box_value)
+                    if text and bbox:
+                        boxes.append({
+                            "text": text,
+                            "bbox": bbox,
+                        })
+
+            text = self._extract_text_value(built_item)
+            bbox = self._normalize_text_box_bbox(
+                built_item.get("bbox")
+                or built_item.get("block_bbox")
+                or built_item.get("box")
+                or built_item.get("poly")
+                or built_item.get("points")
+                or built_item.get("dt_polys")
+            )
+            if text and bbox:
+                boxes.append({
+                    "text": text,
+                    "bbox": bbox,
+                    "score": built_item.get("score") or built_item.get("confidence"),
+                })
+
+            for key in (
+                "parsing_res_list",
+                "rec_texts",
+                "rec_boxes",
+                "boxes",
+                "lines",
+                "words",
+                "results",
+                "items",
+                "data",
+            ):
+                child = built_item.get(key)
+                if child is not None:
+                    collect(child)
+
+        collect(value)
+        seen = set()
+        unique_boxes: list[dict[str, Any]] = []
+        for box in boxes:
+            key = (
+                str(box.get("text") or ""),
+                tuple(round(float(value), 2) for value in (box.get("bbox") or [])[:4]),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_boxes.append(box)
+        return unique_boxes
+
+    def extract_text_boxes_without_layout(
+        self,
+        image_path: str,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """对裁剪图片执行不带版面识别的轻量 OCR，返回文本框。"""
+        if not self._is_engine_thread():
+            return self._run_on_engine_thread(
+                self.extract_text_boxes_without_layout,
+                image_path,
+                cancel_check=cancel_check,
+            )
+        if not self.available:
+            raise RuntimeError("PaddleOCR-VL-1.5 is unavailable.")
+        if cancel_check is not None:
+            cancel_check()
+
+        pipeline = self._get_fine_text_pipeline()
+        input_path, staged_path = self._stage_input_for_pipeline(image_path)
+        try:
+            with self._predictor_lock:
+                raw_results = []
+                for item in pipeline.predict_iter(input_path):
+                    if cancel_check is not None:
+                        cancel_check()
+                    raw_results.append(item)
+
+            boxes = []
+            for result in raw_results:
+                boxes.extend(self._collect_text_boxes_from_payload(result))
+            return {
+                "engine": "PaddleOCR-VL-1.5",
+                "layout_detection": False,
+                "items": boxes,
+            }
+        finally:
+            if staged_path is not None:
+                try:
+                    shutil.rmtree(staged_path, ignore_errors=True) if staged_path.is_dir() else staged_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _postprocess_page_payload(
         self,

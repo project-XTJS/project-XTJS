@@ -169,7 +169,9 @@ def normalize_locations(
             ),
             bbox=item.get("bbox") or item.get("bbox_ocr") or item.get("box") or defaults.get("bbox"),
             text=(
-                item.get("text")
+                item.get("display_text")
+                or item.get("highlight_text")
+                or item.get("text")
                 or item.get("matched_text")
                 or item.get("preview")
                 or item.get("label")
@@ -177,6 +179,21 @@ def normalize_locations(
             ),
             coordinate_system=str(item.get("coordinate_system") or defaults.get("coordinate_system") or COORDINATE_SYSTEM),
         )
+        if location:
+            for source_key, target_key in (
+                ("document", "document"),
+                ("matched_anchor", "matched_anchor"),
+                ("anchor", "anchor"),
+                ("type", "type"),
+                ("section_type", "section_type"),
+                ("highlight_phrases", "highlight_phrases"),
+                ("highlightPhrases", "highlight_phrases"),
+                ("highlight_rects", "highlight_rects"),
+                ("highlightRects", "highlight_rects"),
+            ):
+                value = item.get(source_key)
+                if value not in (None, "", []):
+                    location[target_key] = value
         append_location(normalized, location)
     return normalized
 
@@ -211,7 +228,9 @@ def collect_locations(*values: Any) -> list[dict[str, Any]]:
             page=value.get("source_page") or value.get("page") or value.get("pages"),
             bbox=value.get("bbox") or value.get("bbox_ocr") or value.get("box"),
             text=(
-                value.get("matched_text")
+                value.get("display_text")
+                or value.get("highlight_text")
+                or value.get("matched_text")
                 or value.get("text")
                 or value.get("preview")
                 or value.get("label")
@@ -219,6 +238,21 @@ def collect_locations(*values: Any) -> list[dict[str, Any]]:
                 or value.get("right_preview")
             ),
         )
+        if direct:
+            for source_key, target_key in (
+                ("document", "document"),
+                ("matched_anchor", "matched_anchor"),
+                ("anchor", "anchor"),
+                ("type", "type"),
+                ("section_type", "section_type"),
+                ("highlight_phrases", "highlight_phrases"),
+                ("highlightPhrases", "highlight_phrases"),
+                ("highlight_rects", "highlight_rects"),
+                ("highlightRects", "highlight_rects"),
+            ):
+                extra = value.get(source_key)
+                if extra not in (None, "", []):
+                    direct[target_key] = extra
         append_location(collected, direct)
 
     for raw in values:

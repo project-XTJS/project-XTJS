@@ -125,6 +125,30 @@ class ClusterEngineMixin:
         target["tokens"].extend(source.get("tokens") or [])
         return target
 
+    def _coalesce_cluster_ranges(
+        self,
+        ranges: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        """Merge adjacent page ranges so connected evidence is shown as one span."""
+        normalized = sorted(
+            {
+                (min(int(start), int(end)), max(int(start), int(end)))
+                for start, end in ranges
+            }
+        )
+        if not normalized:
+            return []
+        coalesced: list[tuple[int, int]] = []
+        current_start, current_end = normalized[0]
+        for start, end in normalized[1:]:
+            if start <= current_end + 1:
+                current_end = max(current_end, end)
+                continue
+            coalesced.append((current_start, current_end))
+            current_start, current_end = start, end
+        coalesced.append((current_start, current_end))
+        return coalesced
+
     def _finalize_cluster(self, cluster: dict[str, Any]) -> dict[str, Any]:
         """对 cluster 做去重和派生字段重算，避免同一 pair 被拆成重复组。"""
         files: list[str] = []
@@ -147,7 +171,7 @@ class ClusterEngineMixin:
                 if normalized_pair not in normalized_ranges:
                     normalized_ranges.append(normalized_pair)
             if normalized_ranges:
-                doc_ranges_by_file[str(file_name)] = sorted(normalized_ranges)
+                doc_ranges_by_file[str(file_name)] = self._coalesce_cluster_ranges(normalized_ranges)
         cluster["doc_ranges_by_file"] = doc_ranges_by_file
 
         doc_previews_by_file: dict[str, list[str]] = {}
@@ -277,6 +301,7 @@ class ClusterEngineMixin:
             self._merge_cluster_into(target, finalized)
 
         consolidated = [self._finalize_cluster(grouped[key]) for key in ordered_keys]
+        consolidated = self._merge_adjacent_text_clusters(consolidated)
         return sorted(
             consolidated,
             key=lambda cluster: (
@@ -286,6 +311,85 @@ class ClusterEngineMixin:
                 "/".join(cluster.get("files") or []),
             ),
         )
+
+    def _ranges_are_near(
+        self,
+        left_ranges: list[tuple[int, int]],
+        right_ranges: list[tuple[int, int]],
+        *,
+        max_gap: int = 1,
+    ) -> bool:
+        """Return true when every right range touches or nearly touches a left range."""
+        if not left_ranges or not right_ranges:
+            return False
+        for right_start, right_end in right_ranges:
+            matched = False
+            for left_start, left_end in left_ranges:
+                if right_start <= left_end + max_gap and left_start <= right_end + max_gap:
+                    matched = True
+                    break
+            if not matched:
+                return False
+        return True
+
+    def _clusters_are_adjacent_text_evidence(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+    ) -> bool:
+        """Merge same-pair textual clusters when their page ranges are continuous."""
+        if str(left.get("mode") or "") != str(right.get("mode") or ""):
+            return False
+        left_family = str(left.get("family") or "")
+        right_family = str(right.get("family") or "")
+        if left_family != right_family or left_family not in {"section", "block"}:
+            return False
+
+        left_files = {str(file_name) for file_name in (left.get("files") or []) if str(file_name)}
+        right_files = {str(file_name) for file_name in (right.get("files") or []) if str(file_name)}
+        if len(left_files) < 2 or left_files != right_files:
+            return False
+
+        left_signatures = {
+            str(signature)
+            for signature in (left.get("item_signatures") or [])
+            if str(signature)
+        }
+        right_signatures = {
+            str(signature)
+            for signature in (right.get("item_signatures") or [])
+            if str(signature)
+        }
+        if left_signatures and right_signatures and not (left_signatures & right_signatures):
+            return False
+
+        left_ranges_by_file = left.get("doc_ranges_by_file") or {}
+        right_ranges_by_file = right.get("doc_ranges_by_file") or {}
+        for file_name in left_files:
+            if not self._ranges_are_near(
+                left_ranges_by_file.get(file_name) or [],
+                right_ranges_by_file.get(file_name) or [],
+            ):
+                return False
+        return True
+
+    def _merge_adjacent_text_clusters(
+        self,
+        clusters: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Collapse continuous same-pair text clusters into fewer display groups."""
+        merged: list[dict[str, Any]] = []
+        for cluster in clusters:
+            placed = False
+            for target in merged:
+                if not self._clusters_are_adjacent_text_evidence(target, cluster):
+                    continue
+                self._merge_cluster_into(target, cluster)
+                placed = True
+                break
+            if not placed:
+                merged.append(cluster)
+        return [self._finalize_cluster(cluster) for cluster in merged]
 
     def _ranges_cover(
         self,

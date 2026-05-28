@@ -2,7 +2,7 @@
 """
 投标文件审查服务。
 
-提供基于规则的错别字检测、人员信息提取及跨文档人员复用分析功能，
+提供基于百度飞桨 ERNIE-CSC 的错别字检测、人员信息提取及跨文档人员复用分析功能，
 主要用于商务标/技术标的自动化审查。
 """
 
@@ -12,7 +12,7 @@ import html
 import json
 import logging
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from html.parser import HTMLParser
 from threading import Lock
 from typing import Any
@@ -28,18 +28,72 @@ from app.service.analysis.location_utils import (
     normalize_bbox as normalize_location_bbox,
 )
 
-try:
-    import language_tool_python
-except ImportError:  # pragma: no cover - optional dependency fallback
-    language_tool_python = None
-
-
 logger = logging.getLogger(__name__)
-_LANGUAGE_TOOL_INSTANCE: Any | None = None
-_LANGUAGE_TOOL_INIT_ATTEMPTED = False
-_LANGUAGE_TOOL_INIT_ERROR: str | None = None
-_LANGUAGE_TOOL_INIT_LOCK = Lock()
-_LANGUAGE_TOOL_CHECK_LOCK = Lock()
+_ERNIE_CSC_CORRECTOR: Any | None = None
+_ERNIE_CSC_ACTIVE_DEVICE: str | None = None
+_ERNIE_CSC_SIGNATURE: tuple[Any, ...] | None = None
+_ERNIE_CSC_INIT_LOCK = Lock()
+_ERNIE_CSC_CHECK_LOCK = Lock()
+
+
+class _PaddleNlpErnieCscCorrector:
+    """PaddleNLP ERNIE-CSC 动态图纠错封装，避开 Taskflow 静态导出兼容问题。"""
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        paddle_device: str,
+        device_id: int,
+        batch_size: int,
+        max_seq_len: int,
+        task_path: str | None = None,
+    ) -> None:
+        import paddle
+        from paddlenlp.taskflow.text_correction import CSCTask
+
+        self._paddle = paddle
+        self._paddle.set_device(paddle_device)
+
+        kwargs: dict[str, Any] = {
+            "device_id": device_id,
+            "batch_size": batch_size,
+            "max_seq_len": max_seq_len,
+        }
+        if task_path:
+            kwargs["task_path"] = task_path
+
+        original_get_inference_model = CSCTask._get_inference_model
+        try:
+            CSCTask._get_inference_model = lambda task_self: None
+            self._task = CSCTask("text_correction", model_name, **kwargs)
+        finally:
+            CSCTask._get_inference_model = original_get_inference_model
+
+        self._task._construct_model(model_name)
+
+    def __call__(self, texts: list[str]) -> list[dict[str, Any]]:
+        inputs = self._task._preprocess(texts)
+        batch_results: list[list[tuple[Any, Any, Any]]] = []
+
+        with self._paddle.no_grad():
+            for examples in inputs["batch_examples"]:
+                token_ids, _token_type_ids, pinyin_ids, lengths = self._task._batchify_fn(examples)
+                det_preds, char_preds = self._task._model(
+                    self._paddle.to_tensor(token_ids, dtype="int64"),
+                    self._paddle.to_tensor(pinyin_ids, dtype="int64"),
+                )
+                det_preds = det_preds.numpy()
+                char_preds = char_preds.numpy()
+                batch_results.append(
+                    [
+                        (det_preds[index], char_preds[index], lengths[index])
+                        for index in range(len(lengths))
+                    ]
+                )
+
+        inputs["batch_results"] = batch_results
+        return self._task._postprocess(inputs)
 
 
 class _TableHTMLParser(HTMLParser):
@@ -105,8 +159,94 @@ class BidDocumentReviewService:
         DOCUMENT_TYPE_TECHNICAL_BID,
     )
 
-    # 分句正则
     SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？；;.!?])|[\r\n]+")
+    TYPO_CELL_SPLIT_PATTERN = re.compile(r"\t+| {2,}|[|｜]")
+    TYPO_SKIP_SECTION_TYPES = {"seal", "signature"}
+    TYPO_MAX_UNIT_LENGTH = 96
+    TYPO_MIN_CHINESE_CHARS = 4
+    TYPO_ACCOUNT_CONTEXT_TERMS = (
+        "帐号",
+        "账号",
+        "帐户",
+        "账户",
+        "开户",
+        "银行",
+        "户名",
+        "付款",
+        "收款",
+        "汇款",
+        "转账",
+        "保证金",
+        "发票",
+        "开票",
+    )
+    TYPO_IDENTIFIER_CONTEXT_TERMS = (
+        "身份证",
+        "统一社会信用代码",
+        "纳税人识别号",
+        "税号",
+        "证书编号",
+        "证书号",
+        "项目编号",
+        "合同编号",
+        "招标编号",
+        "投标编号",
+        "型号",
+        "规格",
+        "电话",
+        "传真",
+        "手机",
+        "邮箱",
+        "邮政编码",
+        "邮编",
+        "金额",
+        "报价",
+        "单价",
+        "总价",
+    )
+    TYPO_FORM_FIELD_CONTEXT_TERMS = TYPO_ACCOUNT_CONTEXT_TERMS + TYPO_IDENTIFIER_CONTEXT_TERMS + (
+        "地址",
+        "名称",
+        "单位名称",
+        "公司名称",
+        "联系人",
+        "法定代表人",
+        "委托代理人",
+    )
+    TYPO_SENTENCE_DISPLAY_TERMS = {
+        "并",
+        "且",
+        "和",
+        "或",
+        "及",
+        "与",
+        "但",
+        "而",
+        "则",
+        "若",
+        "如",
+        "在",
+        "由",
+        "对",
+        "向",
+        "于",
+        "以",
+        "为",
+        "的",
+        "地",
+        "得",
+        "了",
+        "着",
+        "过",
+        "以及",
+        "并且",
+        "或者",
+        "如果",
+    }
+    TYPO_SOURCE_WHITELIST_TERMS = {
+        "租赁",
+    }
+
     # 人名标题匹配（如 "1. 张三"）
     NUMBERED_NAME_HEADING_PATTERN = re.compile(r"^\s*\d+\s*[.、]?\s*([\u4e00-\u9fa5A-Za-z]{2,20})\s*$")
     # 人员字段正则（如 "姓名：张三"）
@@ -129,6 +269,7 @@ class BidDocumentReviewService:
     )
     PERSONNEL_SOURCE_PRIORITY = {
         "personnel_certificate": 100,
+        "personnel_self_declaration": 98,
         "personnel_authorizer": 95,
         "personnel_authorized_agent": 95,
         "personnel_key_value_table": 90,
@@ -136,7 +277,27 @@ class BidDocumentReviewService:
         "personnel_reverse_role": 70,
         "personnel_line": 65,
         "personnel_inline_role": 60,
+        "personnel_public_credit_table": 30,
     }
+    PERSONNEL_DISPLAY_SOURCE_PRIORITY = {
+        "personnel_table": 110,
+        "personnel_certificate": 100,
+        "personnel_self_declaration": 98,
+        "personnel_authorizer": 95,
+        "personnel_authorized_agent": 95,
+        "personnel_key_value_table": 85,
+        "personnel_reverse_role": 75,
+        "personnel_line": 70,
+        "personnel_inline_role": 65,
+        "personnel_public_credit_table": 20,
+    }
+    PUBLIC_CREDIT_PERSONNEL_HINTS = (
+        "统一社会信用代码",
+        "信用信息概要",
+        "报告生成日期",
+        "报告出具单位",
+        "国家公共信用信息中心",
+    )
 
     # 人员相关章节标题关键词
     PERSONNEL_SECTION_HINTS = (
@@ -175,35 +336,6 @@ class BidDocumentReviewService:
         "法定代表人",
     )
 
-    # 错别字检查停用词（含这些词的句子才检查，避免大量无关内容）
-    TYPO_STOPWORDS = {
-        "项目",
-        "服务",
-        "系统",
-        "平台",
-        "技术",
-        "管理",
-        "方案",
-        "支持",
-        "实施",
-        "运维",
-        "团队",
-        "人员",
-        "有限公司",
-        "公司",
-        "电话",
-        "邮箱",
-        "身份证",
-        "社会保险",
-        "缴费人名称",
-        "工作内容",
-        "项目经历",
-        "学历",
-        "年龄",
-        "岗位",
-        "职位",
-        "姓名",
-    }
     # 人名占位符（非真实姓名）
     PERSON_NAME_PLACEHOLDERS = {
         "已签字",
@@ -216,77 +348,111 @@ class BidDocumentReviewService:
         "签名",
         "已签",
     }
-    # 已知常见错别字映射
-    KNOWN_TYPO_MAP = {
-        "釆用": "采用",
-        "釆购": "采购",
-        "按装": "安装",
-        "部暑": "部署",
-        "侯选": "候选",
-        "现厂": "现场",
-        "録入": "录入",
-        "录相": "录像",
-        "迳行": "径行",
-        "拚装": "拼装",
-        "优於": "优于",
-        "缐上": "线上",
-        "萤幕": "屏幕",
-    }
     SKIP_REASON_MISSING_CONTENT = "missing_or_unusable_ocr_content"
 
     @classmethod
-    def _get_language_tool_instance(cls) -> tuple[Any | None, str | None]:
-        """延迟初始化 LanguageTool，失败时回退到词典模式。"""
-        global _LANGUAGE_TOOL_INSTANCE, _LANGUAGE_TOOL_INIT_ATTEMPTED, _LANGUAGE_TOOL_INIT_ERROR
-
-        if not settings.TYPO_LANGUAGETOOL_ENABLED:
-            return None, "disabled_by_setting"
-        if language_tool_python is None:
-            return None, "package_not_installed"
-        if _LANGUAGE_TOOL_INSTANCE is not None:
-            return _LANGUAGE_TOOL_INSTANCE, None
-        if _LANGUAGE_TOOL_INIT_ATTEMPTED:
-            return None, _LANGUAGE_TOOL_INIT_ERROR or "initialization_failed"
-
-        with _LANGUAGE_TOOL_INIT_LOCK:
-            if _LANGUAGE_TOOL_INSTANCE is not None:
-                return _LANGUAGE_TOOL_INSTANCE, None
-            if _LANGUAGE_TOOL_INIT_ATTEMPTED:
-                return None, _LANGUAGE_TOOL_INIT_ERROR or "initialization_failed"
+    def _resolve_ernie_csc_device(cls) -> tuple[int, str, str]:
+        requested = str(settings.TYPO_ERNIE_CSC_DEVICE or "auto").strip().lower()
+        aliases = {
+            "": "auto",
+            "cuda": "gpu:0",
+            "cuda:0": "gpu:0",
+            "gpu": "gpu:0",
+        }
+        requested = aliases.get(requested, requested)
+        if requested == "cpu":
+            return -1, "cpu", "cpu"
+        if requested == "auto":
             try:
-                _LANGUAGE_TOOL_INSTANCE = language_tool_python.LanguageTool(
-                    settings.TYPO_LANGUAGETOOL_LANGUAGE
+                import paddle
+
+                active_device = str(paddle.get_device())
+            except Exception:
+                active_device = "cpu"
+            match = re.fullmatch(r".+:(\d+)", active_device)
+            device_id = int(match.group(1)) if match else -1
+            return device_id, active_device, "auto"
+
+        match = re.fullmatch(r"(?:gpu|xpu|npu|mlu|gcu|intel_hpu):(\d+)", requested)
+        if not match:
+            raise RuntimeError(
+                "TYPO_ERNIE_CSC_DEVICE must be 'auto', 'cpu', or a Paddle device like 'gpu:0'"
+            )
+        return int(match.group(1)), requested, requested
+
+    @classmethod
+    def _active_ernie_csc_device(cls) -> str:
+        return _ERNIE_CSC_ACTIVE_DEVICE or str(settings.TYPO_ERNIE_CSC_DEVICE or "auto")
+
+    @classmethod
+    def _typo_corrector_engine(cls) -> str:
+        return "ernie-csc"
+
+    @classmethod
+    def _typo_corrector_model_name(cls) -> str:
+        return str(settings.TYPO_ERNIE_CSC_MODEL_NAME or "ernie-csc")
+
+    @classmethod
+    def _get_ernie_csc_corrector(cls) -> Any:
+        """延迟初始化 PaddleNLP ERNIE-CSC 文本纠错模型。"""
+        global _ERNIE_CSC_CORRECTOR, _ERNIE_CSC_ACTIVE_DEVICE, _ERNIE_CSC_SIGNATURE
+
+        model_name = cls._typo_corrector_model_name()
+        device_id, paddle_device, requested_device = cls._resolve_ernie_csc_device()
+        task_path = str(settings.TYPO_ERNIE_CSC_TASK_PATH or "").strip()
+        signature = (
+            model_name,
+            paddle_device,
+            int(settings.TYPO_ERNIE_CSC_BATCH_SIZE),
+            int(settings.TYPO_ERNIE_CSC_MAX_SEQ_LEN),
+            task_path,
+        )
+
+        if _ERNIE_CSC_CORRECTOR is not None and _ERNIE_CSC_SIGNATURE == signature:
+            return _ERNIE_CSC_CORRECTOR
+
+        with _ERNIE_CSC_INIT_LOCK:
+            if _ERNIE_CSC_CORRECTOR is not None and _ERNIE_CSC_SIGNATURE == signature:
+                return _ERNIE_CSC_CORRECTOR
+
+            try:
+                kwargs: dict[str, Any] = {
+                    "model_name": model_name,
+                    "paddle_device": paddle_device,
+                    "device_id": device_id,
+                    "batch_size": int(settings.TYPO_ERNIE_CSC_BATCH_SIZE),
+                    "max_seq_len": int(settings.TYPO_ERNIE_CSC_MAX_SEQ_LEN),
+                    "task_path": task_path or None,
+                }
+                logger.info(
+                    "Initializing ERNIE-CSC typo model %s on Paddle device %s",
+                    model_name,
+                    paddle_device,
                 )
-                _LANGUAGE_TOOL_INIT_ERROR = None
-            except Exception as exc:  # pragma: no cover - environment dependent
-                _LANGUAGE_TOOL_INIT_ERROR = f"{type(exc).__name__}: {exc}"
-                logger.warning("LanguageTool init failed, fallback to dictionary mode: %s", exc)
-            finally:
-                _LANGUAGE_TOOL_INIT_ATTEMPTED = True
+                _ERNIE_CSC_CORRECTOR = _PaddleNlpErnieCscCorrector(**kwargs)
+                try:
+                    import paddle
 
-        return _LANGUAGE_TOOL_INSTANCE, _LANGUAGE_TOOL_INIT_ERROR
+                    _ERNIE_CSC_ACTIVE_DEVICE = str(paddle.get_device())
+                except Exception:
+                    _ERNIE_CSC_ACTIVE_DEVICE = paddle_device
+                _ERNIE_CSC_SIGNATURE = signature
+                logger.info("ERNIE-CSC typo model active device: %s", _ERNIE_CSC_ACTIVE_DEVICE)
+            except Exception as exc:  # pragma: no cover - model download/runtime dependent
+                raise RuntimeError(f"ERNIE-CSC typo model init failed: {exc}") from exc
 
-    @staticmethod
-    def _typo_engine_name(language_tool_enabled: bool) -> str:
-        return "languagetool_hybrid" if language_tool_enabled else "rule_based"
+        return _ERNIE_CSC_CORRECTOR
 
-    def _build_typo_check_notes(
-        self,
-        *,
-        language_tool_enabled: bool,
-        language_tool_error: str | None,
-    ) -> list[str]:
-        notes: list[str] = []
-        if language_tool_enabled:
-            notes.append(
-                f"已默认启用 LanguageTool（{settings.TYPO_LANGUAGETOOL_LANGUAGE}），并结合内置错别字词典补充识别。"
+    def _build_typo_check_notes(self) -> list[str]:
+        return [
+            (
+                f"已启用百度飞桨 ERNIE-CSC 中文纠错模型"
+                f"（{self._typo_corrector_model_name()}，"
+                f"device={self._active_ernie_csc_device()}）。"
+                "已启用高精度过滤：签章、人员页、编号、账户和表格噪声会先跳过，"
+                "模型候选还会经过位置和业务上下文复核。"
             )
-        else:
-            reason = language_tool_error or "unknown_reason"
-            notes.append(
-                f"LanguageTool 当前不可用（{reason}），本次回退为内置错别字词典识别。"
-            )
-        return notes
+        ]
 
     def _prepare_document_groups(
         self,
@@ -334,19 +500,34 @@ class BidDocumentReviewService:
         return list(requested_types), prepared_groups, skipped_groups
 
     @staticmethod
-    def _document_summaries(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {
+    def _document_summaries(
+        documents: list[dict[str, Any]],
+        *,
+        include_personnel_details: bool = False,
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        for item in documents:
+            entries = list(item.get("personnel_entries") or [])
+            summary = {
                 "identifier_id": item["identifier_id"],
                 "relation_id": item.get("relation_id"),
                 "file_name": item.get("file_name"),
                 "page_count": item.get("page_count", 0),
                 "layout_section_count": item.get("layout_section_count", 0),
                 "table_count": item.get("table_count", 0),
-                "personnel_entry_count": len(item.get("personnel_entries") or []),
+                "personnel_entry_count": len(entries),
             }
-            for item in documents
-        ]
+            if include_personnel_details:
+                summary["names"] = sorted(
+                    {
+                        str(entry.get("name") or "").strip()
+                        for entry in entries
+                        if str(entry.get("name") or "").strip()
+                    }
+                )
+                summary["personnel_entries"] = entries
+            summaries.append(summary)
+        return summaries
 
     # 错别字服务入口：只执行错别字检查
     def check_project_typos(
@@ -367,16 +548,14 @@ class BidDocumentReviewService:
         total_typo_issue_count = 0
         total_shared_typo_issue_count = 0
         total_suspicious_typo_document_count = 0
-        language_tool, language_tool_error = self._get_language_tool_instance()
-        language_tool_enabled = language_tool is not None
+        ernie_csc_corrector = self._get_ernie_csc_corrector()
 
         for role in requested_types:
             prepared_documents = prepared_groups[role]
             skipped_documents = skipped_groups[role]
             typo_check = self._run_typo_check(
                 prepared_documents,
-                language_tool=language_tool,
-                language_tool_error=language_tool_error,
+                ernie_csc_corrector=ernie_csc_corrector,
             )
             group_document_count = len(prepared_documents)
             group_skipped_count = len(skipped_documents)
@@ -408,11 +587,14 @@ class BidDocumentReviewService:
             "project": project or {"identifier_id": project_identifier},
             "config": {
                 "document_types": list(requested_types),
-                "typo_detection_engine": self._typo_engine_name(language_tool_enabled),
-                "typo_languagetool_enabled": language_tool_enabled,
-                "typo_languagetool_language": settings.TYPO_LANGUAGETOOL_LANGUAGE,
-                "typo_stopword_dictionary_enabled": True,
-                "typo_known_typo_dictionary_enabled": settings.TYPO_KNOWN_DICTIONARY_ENABLED,
+                "typo_detection_engine": self._typo_corrector_engine(),
+                "typo_model_name": self._typo_corrector_model_name(),
+                "typo_ernie_csc_model_name": settings.TYPO_ERNIE_CSC_MODEL_NAME,
+                "typo_ernie_csc_device": settings.TYPO_ERNIE_CSC_DEVICE,
+                "typo_ernie_csc_active_device": self._active_ernie_csc_device(),
+                "typo_ernie_csc_max_seq_len": settings.TYPO_ERNIE_CSC_MAX_SEQ_LEN,
+                "typo_ernie_csc_batch_size": settings.TYPO_ERNIE_CSC_BATCH_SIZE,
+                "typo_filtering_enabled": True,
             },
             "groups": groups,
             "summary": {
@@ -455,7 +637,10 @@ class BidDocumentReviewService:
             group_reused_name_count = int(personnel_reuse_check.get("reused_name_count") or 0)
 
             groups[role] = {
-                "documents": self._document_summaries(prepared_documents),
+                "documents": self._document_summaries(
+                    prepared_documents,
+                    include_personnel_details=True,
+                ),
                 "skipped_documents": skipped_documents,
                 "personnel_reuse_check": personnel_reuse_check,
                 "summary": {
@@ -526,24 +711,31 @@ class BidDocumentReviewService:
             "personnel_pages": personnel_pages,
         }, None
 
-    # 错别字检查：基于内置词典扫描文档内容
+    # 错别字检查：基于 PaddleNLP ERNIE-CSC 扫描文档内容
     def _run_typo_check(
         self,
         documents: list[dict[str, Any]],
         *,
-        language_tool: Any | None = None,
-        language_tool_error: str | None = None,
+        ernie_csc_corrector: Any,
     ) -> dict[str, Any]:
         issue_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         document_issue_items: list[dict[str, Any]] = []
         total_issue_count = 0
-        language_tool_enabled = language_tool is not None
+        total_candidate_issue_count = 0
+        total_ignored_issue_count = 0
+        ignored_reason_counts: Counter[str] = Counter()
 
         for document in documents:
-            document_issues = self._extract_document_typo_issues(
+            document_result = self._extract_document_typo_result(
                 document,
-                language_tool=language_tool,
+                ernie_csc_corrector=ernie_csc_corrector,
             )
+            document_issues = document_result["issues"]
+            document_candidate_count = int(document_result.get("candidate_issue_count") or 0)
+            document_ignored_count = int(document_result.get("ignored_issue_count") or 0)
+            total_candidate_issue_count += document_candidate_count
+            total_ignored_issue_count += document_ignored_count
+            ignored_reason_counts.update(document_result.get("ignored_reason_counts") or {})
             total_issue_count += len(document_issues)
             if document_issues:
                 document_issue_items.append(
@@ -552,6 +744,8 @@ class BidDocumentReviewService:
                         "relation_id": document.get("relation_id"),
                         "file_name": document.get("file_name"),
                         "issue_count": len(document_issues),
+                        "candidate_issue_count": document_candidate_count,
+                        "ignored_issue_count": document_ignored_count,
                         "issues": document_issues,
                     }
                 )
@@ -602,15 +796,18 @@ class BidDocumentReviewService:
         return {
             "document_count": len(documents),
             "issue_count": total_issue_count,
+            "candidate_issue_count": total_candidate_issue_count,
+            "ignored_issue_count": total_ignored_issue_count,
+            "ignored_reason_counts": dict(sorted(ignored_reason_counts.items())),
             "shared_issue_count": len(shared_issues),
             "suspicious_document_count": len(document_issue_items),
-            "engine": self._typo_engine_name(language_tool_enabled),
+            "engine": self._typo_corrector_engine(),
+            "model_name": self._typo_corrector_model_name(),
+            "device": settings.TYPO_ERNIE_CSC_DEVICE,
+            "active_device": self._active_ernie_csc_device(),
             "documents": document_issue_items,
             "shared_issues": shared_issues,
-            "notes": self._build_typo_check_notes(
-                language_tool_enabled=language_tool_enabled,
-                language_tool_error=language_tool_error,
-            ),
+            "notes": self._build_typo_check_notes(),
         }
 
     # 人员复用分析：聚合同名人员信息
@@ -618,16 +815,27 @@ class BidDocumentReviewService:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         total_personnel_count = 0
         document_summaries: list[dict[str, Any]] = []
+        all_entries: list[dict[str, Any]] = []
 
         for document in documents:
             entries = list(document.get("personnel_entries") or [])
             total_personnel_count += len(entries)
+            all_entries.extend(entries)
+            names = sorted(
+                {
+                    str(entry.get("name") or "").strip()
+                    for entry in entries
+                    if str(entry.get("name") or "").strip()
+                }
+            )
             document_summaries.append(
                 {
                     "identifier_id": document["identifier_id"],
                     "relation_id": document.get("relation_id"),
                     "file_name": document.get("file_name"),
                     "personnel_count": len(entries),
+                    "names": names,
+                    "personnel_entries": entries,
                 }
             )
             for entry in entries:
@@ -685,6 +893,14 @@ class BidDocumentReviewService:
             "document_count": len(documents),
             "personnel_count": total_personnel_count,
             "reused_name_count": len(reused_names),
+            "names": sorted(
+                {
+                    str(entry.get("name") or "").strip()
+                    for entry in all_entries
+                    if str(entry.get("name") or "").strip()
+                }
+            ),
+            "personnel_entries": all_entries,
             "documents": document_summaries,
             "issues": reused_names,
             "notes": [
@@ -692,51 +908,84 @@ class BidDocumentReviewService:
             ],
         }
 
-    def _check_language_tool_sentence(self, language_tool: Any, text: str) -> list[Any]:
-        """串行调用共享的 LanguageTool 实例，避免并发冲突。"""
-        try:
-            with _LANGUAGE_TOOL_CHECK_LOCK:
-                return list(language_tool.check(text))
-        except Exception as exc:  # pragma: no cover - runtime/environment dependent
-            logger.warning("LanguageTool sentence check failed: %s", exc)
-            return []
-
-    def _build_language_tool_issue(
+    def _correct_ernie_csc_batch(
         self,
         *,
-        match: Any,
+        ernie_csc_corrector: Any,
+        texts: list[str],
+    ) -> list[dict[str, Any]]:
+        """串行调用共享纠错模型，避免并发推理互相抢占资源。"""
+        if not texts:
+            return []
+        with _ERNIE_CSC_CHECK_LOCK:
+            results = ernie_csc_corrector(texts)
+        return [item if isinstance(item, dict) else {} for item in list(results or [])]
+
+    def _build_ernie_csc_issue(
+        self,
+        *,
+        error: Any,
+        correction: dict[str, Any],
         sentence: dict[str, Any],
         document: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """将 LanguageTool 的 Match 转成项目内统一的错别字条目。"""
-        issue_type = str(getattr(match, "rule_issue_type", "") or "").strip().lower()
-        if issue_type not in {"misspelling", "typographical"}:
+        """将 ERNIE-CSC 返回的 correction 结果转成项目内统一的错别字条目。"""
+        matched_text = ""
+        suggestion = ""
+        raw_position: Any = None
+        position: int | None = None
+
+        if isinstance(error, dict):
+            correction_map = error.get("correction")
+            if isinstance(correction_map, dict) and correction_map:
+                matched_text, suggestion = next(iter(correction_map.items()))
+                matched_text = str(matched_text or "").strip()
+                suggestion = str(suggestion or "").strip()
+            raw_position = (
+                error["position"]
+                if "position" in error
+                else error["pos"]
+                if "pos" in error
+                else error.get("index")
+            )
+        else:
             return None
 
         text = str(sentence.get("text") or "")
-        matched_text = str(getattr(match, "matched_text", "") or "").strip()
-        if not matched_text:
-            offset = int(getattr(match, "offset", 0) or 0)
-            error_length = int(getattr(match, "error_length", 0) or 0)
-            matched_text = text[offset: offset + error_length].strip()
-        if not matched_text:
+        try:
+            position = int(raw_position)
+        except (TypeError, ValueError):
+            position = None
+
+        if not matched_text and position is not None and position >= 0:
+            matched_text = text[position:position + 1].strip()
+        if not matched_text or not suggestion:
+            return None
+        if self._compact(suggestion) == self._compact(matched_text):
             return None
 
-        replacements = list(getattr(match, "replacements", []) or [])
-        suggestion = str(replacements[0]).strip() if replacements else ""
-        if not suggestion or self._compact(suggestion) == self._compact(matched_text):
-            return None
-
-        rule_id = str(getattr(match, "rule_id", "") or "").strip() or "languagetool"
+        issue_key = f"{matched_text}->{suggestion}"
+        context = self._normalize_text(text)
+        display = self._typo_display_span(
+            text=text,
+            matched_text=matched_text,
+            position=position,
+        )
         issue = {
-            "issue_type": "languagetool",
-            "issue_key": rule_id,
+            "issue_type": "ernie_csc",
+            "issue_key": issue_key,
             "matched_text": matched_text,
+            "display_text": display["text"],
+            "highlight_text": display["highlight_text"],
+            "display_mode": display["mode"],
             "suggestion": suggestion,
             "page": sentence.get("page"),
             "bbox": sentence.get("bbox"),
             "text": text,
-            "message": str(getattr(match, "message", "") or "").strip(),
+            "context": context,
+            "target_text": correction.get("target"),
+            "position": position,
+            "source_type": sentence.get("source_type"),
             "document_identifier_id": document["identifier_id"],
             "relation_id": document.get("relation_id"),
             "file_name": document.get("file_name"),
@@ -748,65 +997,148 @@ class BidDocumentReviewService:
                     file_name=document.get("file_name"),
                     page=sentence.get("page"),
                     bbox=sentence.get("bbox"),
-                    text=matched_text or text,
+                    text=display["text"] or matched_text or text,
                 )
             ] if location
         ]
+        for location in issue["locations"]:
+            highlight_text = display["highlight_text"] or display["text"] or matched_text
+            if highlight_text:
+                location["highlight_phrases"] = [highlight_text]
         return issue
 
-    def _find_language_tool_matches(
+    def _typo_display_span(
         self,
-        sentence: dict[str, Any],
+        *,
+        text: str,
+        matched_text: str,
+        position: int | None,
+    ) -> dict[str, str]:
+        raw_sentence = str(text or "")
+        sentence = self._normalize_text(raw_sentence)
+        matched = str(matched_text or "").strip()
+        if not sentence or not matched:
+            return {"text": matched, "highlight_text": matched, "mode": "matched"}
+        if not isinstance(position, int) or position < 0:
+            return {"text": matched, "highlight_text": matched, "mode": "matched"}
+
+        index_source = raw_sentence
+        if index_source[position:position + len(matched)] != matched:
+            index_source = sentence
+            if index_source[position:position + len(matched)] != matched:
+                return {"text": matched, "highlight_text": matched, "mode": "matched"}
+
+        word = self._typo_segmented_word(index_source, matched, position)
+        if word:
+            return {"text": word, "highlight_text": word, "mode": "word"}
+
+        if self._typo_should_show_sentence(matched):
+            return {"text": sentence, "highlight_text": sentence, "mode": "sentence"}
+        if len(matched) >= 2:
+            return {"text": matched, "highlight_text": matched, "mode": "matched"}
+        return {"text": sentence, "highlight_text": sentence, "mode": "sentence"}
+
+    def _typo_segmented_word(self, sentence: str, matched: str, position: int) -> str:
+        try:
+            import jieba
+
+            if hasattr(jieba, "setLogLevel"):
+                jieba.setLogLevel(logging.WARNING)
+            tokens = list(jieba.tokenize(sentence))
+        except Exception:
+            tokens = []
+
+        matched_end = position + len(matched)
+        for token in tokens:
+            if not isinstance(token, (list, tuple)) or len(token) < 3:
+                continue
+            word, start, end = str(token[0] or "").strip(), token[1], token[2]
+            if not isinstance(start, int) or not isinstance(end, int):
+                continue
+            if start <= position and matched_end <= end:
+                if word and word != matched and not self._typo_should_show_sentence(word):
+                    return word
+                return ""
+
+        ascii_match = re.match(r"[A-Za-z0-9_]+", sentence[position:])
+        if ascii_match:
+            start = position
+            while start > 0 and re.match(r"[A-Za-z0-9_]", sentence[start - 1]):
+                start -= 1
+            end = position + len(ascii_match.group(0))
+            return sentence[start:end] if end > start + len(matched) else ""
+        return ""
+
+    def _typo_should_show_sentence(self, value: str) -> bool:
+        compact = self._compact(value)
+        return bool(compact and compact in self.TYPO_SENTENCE_DISPLAY_TERMS)
+
+    def _find_ernie_csc_matches(
+        self,
+        sentences: list[dict[str, Any]],
         document: dict[str, Any],
-        language_tool: Any,
+        ernie_csc_corrector: Any,
     ) -> list[dict[str, Any]]:
-        """在句子中提取 LanguageTool 返回的拼写/笔误问题。"""
-        text = str(sentence.get("text") or "").strip()
-        if not text:
-            return []
+        """在文本区段中提取 ERNIE-CSC 返回的拼写纠错问题。"""
+        texts = [str(sentence.get("text") or "") for sentence in sentences]
+        corrections = self._correct_ernie_csc_batch(
+            ernie_csc_corrector=ernie_csc_corrector,
+            texts=texts,
+        )
 
         issues: list[dict[str, Any]] = []
-        for match in self._check_language_tool_sentence(language_tool, text):
-            issue = self._build_language_tool_issue(
-                match=match,
-                sentence=sentence,
-                document=document,
-            )
-            if issue:
-                issues.append(issue)
+        for sentence, correction in zip(sentences, corrections):
+            for error in correction.get("errors") or []:
+                issue = self._build_ernie_csc_issue(
+                    error=error,
+                    correction=correction,
+                    sentence=sentence,
+                    document=document,
+                )
+                if issue:
+                    issues.append(issue)
         return issues
 
-    # 错别字问题提取：对单个文档逐句扫描已知错误词
-    def _extract_document_typo_issues(
+    # 错别字问题提取：对单个文档的 OCR 文本区段进行 ERNIE-CSC 检查并过滤低价值候选
+    def _extract_document_typo_result(
         self,
         document: dict[str, Any],
         *,
-        language_tool: Any | None = None,
-    ) -> list[dict[str, Any]]:
+        ernie_csc_corrector: Any,
+    ) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []
         seen_keys: set[tuple[Any, ...]] = set()
+        ignored_reason_counts: Counter[str] = Counter()
+        sentences = self._iter_typo_sentences(document)
+        candidate_issues = self._find_ernie_csc_matches(sentences, document, ernie_csc_corrector)
 
-        for sentence in self._iter_typo_sentences(document):
-            sentence_issues: list[dict[str, Any]] = []
-            if language_tool is not None:
-                sentence_issues.extend(
-                    self._find_language_tool_matches(sentence, document, language_tool)
-                )
-            if settings.TYPO_KNOWN_DICTIONARY_ENABLED:
-                sentence_issues.extend(self._find_known_typo_matches(sentence, document))
-
-            for issue in sentence_issues:
-                if self._is_ignored_typo_issue(issue):
-                    continue
-                key = (
-                    issue.get("page"),
-                    issue.get("matched_text"),
-                    issue.get("suggestion"),
-                )
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                issues.append(issue)
+        for issue in candidate_issues:
+            filter_reasons = self._typo_issue_filter_reasons(issue)
+            if filter_reasons:
+                ignored_reason_counts.update(filter_reasons)
+                continue
+            raw_matched_text = str(issue.get("matched_text") or "").strip()
+            key = (
+                issue.get("page"),
+                raw_matched_text,
+                issue.get("suggestion"),
+                issue.get("position"),
+            )
+            if key in seen_keys:
+                ignored_reason_counts.update(["duplicate_candidate"])
+                continue
+            seen_keys.add(key)
+            display_text = str(issue.get("display_text") or issue.get("highlight_text") or raw_matched_text).strip()
+            if raw_matched_text:
+                issue["raw_matched_text"] = raw_matched_text
+                issue["model_matched_text"] = raw_matched_text
+            if display_text:
+                issue["matched_text"] = display_text
+                issue["display_text"] = display_text
+            issue["reason"] = "疑似错别字，建议结合上下文人工复核。"
+            issue["context"] = self._normalize_text(issue.get("context") or issue.get("text"))
+            issue["filter_reasons"] = []
+            issues.append(issue)
 
         issues.sort(
             key=lambda item: (
@@ -815,104 +1147,283 @@ class BidDocumentReviewService:
                 str(item.get("matched_text") or ""),
             )
         )
-        return issues
+        ignored_issue_count = len(candidate_issues) - len(issues)
+        return {
+            "issues": issues,
+            "candidate_issue_count": len(candidate_issues),
+            "ignored_issue_count": ignored_issue_count,
+            "ignored_reason_counts": dict(sorted(ignored_reason_counts.items())),
+        }
 
-    def _is_ignored_typo_issue(self, issue: dict[str, Any]) -> bool:
-        """过滤业务上接受的用字差异，避免把“帐/账”当错别字。"""
-        matched_text = self._compact(issue.get("matched_text"))
+    def _extract_document_typo_issues(
+        self,
+        document: dict[str, Any],
+        *,
+        ernie_csc_corrector: Any,
+    ) -> list[dict[str, Any]]:
+        return self._extract_document_typo_result(
+            document,
+            ernie_csc_corrector=ernie_csc_corrector,
+        )["issues"]
+
+    def _typo_issue_filter_reasons(self, issue: dict[str, Any]) -> list[str]:
+        """过滤模型直出的低价值候选，优先保证业务结果少报准报。"""
+        reasons: list[str] = []
+        text = str(issue.get("text") or "")
+        matched_text = str(issue.get("matched_text") or "").strip()
+        suggestion = str(issue.get("suggestion") or "").strip()
+
+        if not text or not matched_text or not suggestion:
+            return ["missing_issue_fields"]
+        if self._is_typo_length_mismatch(issue):
+            reasons.append("length_mismatch")
+        if self._is_typo_whitelisted_source_term(issue):
+            reasons.append("whitelisted_source_term")
+        if self._is_case_only_letter_change(matched_text, suggestion):
+            reasons.append("case_only_letter_change")
+        elif self._is_non_chinese_typo_candidate(matched_text, suggestion):
+            reasons.append("non_chinese_candidate")
+        if self._is_identifier_or_contact_context(text):
+            reasons.append("identifier_or_contact_context")
+        if self._is_form_field_typo_context(text, source_type=str(issue.get("source_type") or "")):
+            reasons.append("form_field_context")
+
+        position = issue.get("position")
+        if not isinstance(position, int) or position < 0:
+            reasons.append("invalid_position")
+        elif text[position:position + len(matched_text)] != matched_text:
+            reasons.append("invalid_position")
+
+        target_text = self._normalize_text(issue.get("target_text"))
+        if target_text and isinstance(position, int) and position >= 0:
+            replaced = text[:position] + suggestion + text[position + len(matched_text):]
+            if not self._ernie_csc_target_is_consistent(
+                original=text,
+                replaced=replaced,
+                target=target_text,
+                position=position,
+                matched_text=matched_text,
+                suggestion=suggestion,
+            ):
+                reasons.append("target_mismatch")
+        return reasons
+
+    def _is_typo_length_mismatch(self, issue: dict[str, Any]) -> bool:
         suggestion = self._compact(issue.get("suggestion"))
-        if not matched_text or not suggestion or matched_text == suggestion:
+        if not suggestion:
             return False
-        normalized_matched = matched_text.replace("帐", "账")
-        normalized_suggestion = suggestion.replace("帐", "账")
-        return normalized_matched == normalized_suggestion
+
+        source_values = (
+            issue.get("matched_text"),
+            issue.get("display_text"),
+            issue.get("highlight_text"),
+        )
+        return any(
+            bool(source := self._compact(value)) and len(source) != len(suggestion)
+            for value in source_values
+        )
+
+    def _is_typo_whitelisted_source_term(self, issue: dict[str, Any]) -> bool:
+        whitelist = {self._compact(term) for term in self.TYPO_SOURCE_WHITELIST_TERMS}
+        whitelist.discard("")
+        if not whitelist:
+            return False
+
+        source_values = (
+            issue.get("display_text"),
+            issue.get("highlight_text"),
+            issue.get("matched_text"),
+        )
+        return any(self._compact(value) in whitelist for value in source_values)
+
+    def _normalize_typo_equivalence(self, value: Any) -> str:
+        return self._compact(value)
+
+    def _is_case_only_letter_change(self, matched_text: str, suggestion: str) -> bool:
+        matched = str(matched_text or "").strip()
+        corrected = str(suggestion or "").strip()
+        return bool(matched and corrected and matched != corrected and matched.lower() == corrected.lower())
+
+    def _is_non_chinese_typo_candidate(self, matched_text: str, suggestion: str) -> bool:
+        matched = self._compact(matched_text)
+        corrected = self._compact(suggestion)
+        return bool(
+            matched
+            and corrected
+            and (not self._is_cjk_text(matched) or not self._is_cjk_text(corrected))
+        )
+
+    def _is_cjk_text(self, value: str) -> bool:
+        text = str(value or "")
+        return bool(text and all("\u4e00" <= char <= "\u9fff" for char in text))
+
+    def _ernie_csc_target_is_consistent(
+        self,
+        *,
+        original: str,
+        replaced: str,
+        target: str,
+        position: int,
+        matched_text: str,
+        suggestion: str,
+    ) -> bool:
+        if self._compact(replaced) == self._compact(target):
+            return True
+        if (
+            len(target) == len(original)
+            and 0 <= position < len(target)
+            and target[position:position + len(suggestion)] == suggestion
+        ):
+            return True
+        start = max(0, position - 8)
+        end = min(len(original), position + len(matched_text) + 8)
+        expected_window = original[start:position] + suggestion + original[position + len(matched_text):end]
+        return bool(expected_window and self._compact(expected_window) in self._compact(target))
 
     # 遍历文档中可用于错别字检查的句子
     def _iter_typo_sentences(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
+        seen_keys: set[tuple[Any, ...]] = set()
         personnel_pages = set(document.get("personnel_pages") or set())
+
+        def append_text_item(source: dict[str, Any], text: Any, source_type: str) -> None:
+            page = source.get("page")
+            bbox = source.get("bbox")
+            for normalized in self._split_typo_text_units(text):
+                if self._should_skip_typo_sentence(normalized, source_type=source_type):
+                    continue
+                key = (source_type, page, tuple(bbox or ()), normalized)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                items.append(
+                    {
+                        "page": page,
+                        "bbox": bbox,
+                        "text": normalized,
+                        "source_type": source_type,
+                    }
+                )
 
         for section in document.get("sections") or []:
             section_type = str(section.get("type") or "").strip().lower()
-            if section_type in {"seal", "signature"}:
+            if section_type in self.TYPO_SKIP_SECTION_TYPES:
                 continue
             page = section.get("page")
             if isinstance(page, int) and page in personnel_pages:
                 continue
+            append_text_item(section, section.get("text"), "section")
 
-            raw_text = str(section.get("text") or "").strip()
-            if not raw_text:
-                continue
-
-            for sentence in self.SENTENCE_SPLIT_PATTERN.split(raw_text):
-                normalized = self._normalize_text(sentence)
-                compact = self._compact(normalized)
-                if len(compact) < 10 or self._should_skip_typo_sentence(normalized):
-                    continue
-                items.append(
-                    {
-                        "page": page,
-                        "bbox": section.get("bbox"),
-                        "text": normalized,
-                    }
-                )
+        for table in document.get("tables") or []:
+            for table_text in self._iter_table_typo_texts(table):
+                append_text_item(table, table_text, "table")
         return items
 
-    def _should_skip_typo_sentence(self, text: str) -> bool:
-        """判断句子是否应跳过错别字检查（过短、无中文、主要是数字/URL等）。"""
+    def _iter_table_typo_texts(self, table: dict[str, Any]) -> list[str]:
+        rows = self._parse_html_table_rows(table)
+        if rows:
+            return [cell for row in rows for cell in row if str(cell or "").strip()]
+        text = self._normalize_text(table.get("text") or table.get("raw_text") or "")
+        if not text:
+            return []
+        values: list[str] = []
+        for line in text.splitlines() or [text]:
+            parts = [part.strip() for part in self.TYPO_CELL_SPLIT_PATTERN.split(line) if part.strip()]
+            values.extend(parts or [line])
+        return values
+
+    def _split_typo_text_units(self, text: Any) -> list[str]:
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return []
+        units: list[str] = []
+        for part in self.SENTENCE_SPLIT_PATTERN.split(normalized):
+            part = self._normalize_text(part)
+            if not part:
+                continue
+            units.extend(self._chunk_typo_text_unit(part))
+        return units
+
+    def _chunk_typo_text_unit(self, text: str) -> list[str]:
+        if len(text) <= self.TYPO_MAX_UNIT_LENGTH:
+            return [text]
+        chunks: list[str] = []
+        remaining = text
+        while len(remaining) > self.TYPO_MAX_UNIT_LENGTH:
+            cut = self.TYPO_MAX_UNIT_LENGTH
+            for delimiter in ("。", "；", "，", "、", " "):
+                index = remaining.rfind(delimiter, 0, self.TYPO_MAX_UNIT_LENGTH)
+                if index >= 24:
+                    cut = index + 1
+                    break
+            chunks.append(self._normalize_text(remaining[:cut]))
+            remaining = self._normalize_text(remaining[cut:])
+        if remaining:
+            chunks.append(remaining)
+        return [chunk for chunk in chunks if chunk]
+
+    def _should_skip_typo_sentence(self, text: str, *, source_type: str) -> bool:
         compact = self._compact(text)
         if not compact:
             return True
-        if len(re.findall(r"[\u4e00-\u9fa5]", compact)) < 4:
+        chinese_count = len(re.findall(r"[\u4e00-\u9fa5]", compact))
+        if chinese_count < self.TYPO_MIN_CHINESE_CHARS:
             return True
-        if any(token in compact for token in self.TYPO_STOPWORDS):
-            return False
+        if "\ufffd" in compact or re.search(r"[\ue000-\uf8ff]", compact):
+            return True
+        if self._contains_url_or_email(compact):
+            return True
+        if re.fullmatch(r"[A-Za-z0-9\-_/.:：,，()（）#]+", compact):
+            return True
         digit_count = sum(ch.isdigit() for ch in compact)
         if digit_count >= max(6, len(compact) // 2):
             return True
-        if re.search(r"(https?://|www\.|@[A-Za-z0-9_]+)", compact):
+        if self._is_identifier_or_contact_context(compact):
             return True
-        if re.fullmatch(r"[A-Za-z0-9\-_/.:]+", compact):
+        if source_type == "table" and (
+            self._is_financial_context(compact)
+            or self._is_form_field_typo_context(compact, source_type=source_type)
+        ):
             return True
         return False
 
-    def _find_known_typo_matches(
-        self,
-        sentence: dict[str, Any],
-        document: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        """在句子中查找已知错别字并生成问题条目。"""
-        issues: list[dict[str, Any]] = []
-        text = str(sentence.get("text") or "")
+    def _contains_url_or_email(self, text: str) -> bool:
+        return bool(re.search(r"(https?://|www\.|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", text))
+
+    def _is_financial_context(self, text: Any) -> bool:
         compact = self._compact(text)
-        for typo_form, suggestion in self.KNOWN_TYPO_MAP.items():
-            if typo_form not in compact:
-                continue
-            issue = {
-                "issue_type": "known_typo",
-                "issue_key": typo_form,
-                "matched_text": typo_form,
-                "suggestion": suggestion,
-                "page": sentence.get("page"),
-                "bbox": sentence.get("bbox"),
-                "text": text,
-                "document_identifier_id": document["identifier_id"],
-                "relation_id": document.get("relation_id"),
-                "file_name": document.get("file_name"),
-            }
-            issue["locations"] = [
-                location for location in [
-                    make_location(
-                        document_identifier_id=document["identifier_id"],
-                        file_name=document.get("file_name"),
-                        page=sentence.get("page"),
-                        bbox=sentence.get("bbox"),
-                        text=typo_form,
-                    )
-                ] if location
-            ]
-            issues.append(issue)
-        return issues
+        return any(token in compact for token in self.TYPO_ACCOUNT_CONTEXT_TERMS)
+
+    def _is_identifier_or_contact_context(self, text: Any) -> bool:
+        compact = self._compact(text)
+        if not compact:
+            return False
+        if self._contains_url_or_email(compact):
+            return True
+        digit_count = sum(ch.isdigit() for ch in compact)
+        if digit_count >= max(8, len(compact) // 3):
+            return True
+        if any(token in compact for token in self.TYPO_IDENTIFIER_CONTEXT_TERMS):
+            return True
+        if re.search(r"\d{4}[-年/]\d{1,2}[-月/]\d{1,2}日?", compact):
+            return True
+        if re.search(r"\d+(?:\.\d+)?(?:元|万元|%|％)", compact):
+            return True
+        return False
+
+    def _is_form_field_typo_context(self, text: Any, *, source_type: str) -> bool:
+        compact = self._compact(text)
+        if not compact:
+            return False
+        if "：" in compact or ":" in compact:
+            label = re.split(r"[:：]", compact, maxsplit=1)[0]
+            if len(label) <= 18 and any(token in label for token in self.TYPO_FORM_FIELD_CONTEXT_TERMS):
+                return True
+        if source_type == "table" and any(token in compact for token in self.TYPO_FORM_FIELD_CONTEXT_TERMS):
+            return True
+        if compact.endswith("有限公司") and len(compact) <= 24:
+            return True
+        return False
 
     # 人员信息提取：从表格和段落中找出人名及岗位
     def _extract_personnel_entries(
@@ -953,6 +1464,7 @@ class BidDocumentReviewService:
 
         deduped.sort(
             key=lambda item: (
+                -self._personnel_entry_display_priority(item),
                 str(item.get("name") or ""),
                 int(item.get("page") or 0),
                 str(item.get("role") or ""),
@@ -1042,6 +1554,34 @@ class BidDocumentReviewService:
             )
 
         for match in re.finditer(
+            r"我\s*(?:[（(]\s*姓名\s*[）)]\s*)?(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})\s*(?:[（(]\s*姓名\s*[）)]\s*)?\s*(?:系|为)[^。\n]{0,120}?法定代表人",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role="法定代表人",
+                evidence_text=evidence_text,
+                source_type="personnel_self_declaration",
+            )
+
+        for match in re.finditer(
+            r"现授权委托(?:本单位在职职工)?\s*(?P<name>[A-Za-z\u4e00-\u9fa5]{2,20})\s*(?:[（(]\s*姓名\s*[）)]\s*)?\s*(?:为|作为)全权代表",
+            evidence_text,
+        ):
+            self._append_personnel_match_entry(
+                entries=entries,
+                record=record,
+                section=section,
+                name=match.group("name"),
+                role="授权委托人",
+                evidence_text=evidence_text,
+                source_type="personnel_authorized_agent",
+            )
+
+        for match in re.finditer(
             r"(?:^|[\s（(：:])(?P<name>[\u4e00-\u9fa5]{2,4})\s+(?P<role>法定代表人|授权代表|授权委托人|委托代理人|被授权人)(?=$|[\s，,。；;、])",
             evidence_text,
         ):
@@ -1117,6 +1657,7 @@ class BidDocumentReviewService:
                 if not name:
                     continue
                 evidence_text = " | ".join(cell for cell in row if cell)
+                source_type = self._personnel_key_value_source_type(row, evidence_text)
                 entries.append(
                     self._build_personnel_entry(
                         record=record,
@@ -1125,7 +1666,7 @@ class BidDocumentReviewService:
                         page=table.get("page"),
                         bbox=table.get("bbox"),
                         evidence_text=evidence_text,
-                        source_type="personnel_key_value_table",
+                        source_type=source_type,
                     )
                 )
         return entries
@@ -1320,6 +1861,16 @@ class BidDocumentReviewService:
         source_type = str(entry.get("source_type") or "").strip()
         return int(self.PERSONNEL_SOURCE_PRIORITY.get(source_type, 0))
 
+    def _personnel_entry_display_priority(self, entry: dict[str, Any]) -> int:
+        source_type = str(entry.get("source_type") or "").strip()
+        return int(self.PERSONNEL_DISPLAY_SOURCE_PRIORITY.get(source_type, 0))
+
+    def _personnel_key_value_source_type(self, row: list[str], evidence_text: str) -> str:
+        compact = self._compact(evidence_text or " ".join(str(cell or "") for cell in row))
+        if compact and any(token in compact for token in self.PUBLIC_CREDIT_PERSONNEL_HINTS):
+            return "personnel_public_credit_table"
+        return "personnel_key_value_table"
+
     def _clean_person_name(self, value: Any) -> str | None:
         """清洗人名，过滤掉占位符及明显非人名的字符串。"""
         text = self._normalize_text(value)
@@ -1334,6 +1885,19 @@ class BidDocumentReviewService:
             return None
 
         blocked = (
+            "银行",
+            "分行",
+            "开户银行",
+            "年月日",
+            "公章",
+            "用章",
+            "联系",
+            "联系人",
+            "联系电话",
+            "联系电",
+            "销售",
+            "无偏离",
+            "代表人",
             "公司",
             "项目",
             "经理",

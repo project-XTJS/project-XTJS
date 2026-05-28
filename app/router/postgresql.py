@@ -28,8 +28,11 @@ from docx.oxml.ns import qn
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
+from app.config.settings import settings
 from app.core.document_types import (
+    BID_DOCUMENT_TYPES,
     DOCUMENT_TYPE_BUSINESS_BID,
+    DOCUMENT_TYPE_TENDER,
     DOCUMENT_TYPE_TECHNICAL_BID,
     DocumentType,
 )
@@ -50,6 +53,7 @@ from app.router.uploaded_json_support import (
 )
 from app.schemas.postgresql import (
     DuplicateCheckScope,
+    DocumentPreviewRequest,
     DocumentUpdateRequest,
     IdentifierBatchDeleteRequest,
     ProjectBindDocumentsRequest,
@@ -86,8 +90,23 @@ _PREVIEW_CACHE_MAX_ITEMS = max(8, min(int(os.getenv("XTJS_PREVIEW_CACHE_MAX_ITEM
 _PREVIEW_CACHE_TTL_SECONDS = max(30, int(os.getenv("XTJS_PREVIEW_CACHE_TTL_SECONDS", "900")))
 _DOCUMENT_PREVIEW_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, dict]]" = OrderedDict()
 _DOCUMENT_PREVIEW_CACHE_LOCK = Lock()
+_FINE_OCR_PREVIEW_STRATEGY_VERSION = "fine-ocr-v1"
 # 用于从高亮短语中提取有效 token 的正则
 _HIGHLIGHT_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]+")
+
+
+def _is_result_key_visible(result_key: str) -> bool:
+    if result_key == "typo_check":
+        return bool(settings.TYPO_CHECK_VISIBLE)
+    return True
+
+
+def _filter_visible_result_keys(results: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in dict(results or {}).items()
+        if _is_result_key_visible(str(key))
+    }
 
 
 # 将查重范围枚举转换为文档类型列表
@@ -293,6 +312,79 @@ def _preview_cache_set(document: dict, page: int, payload: dict, variant: str = 
             _DOCUMENT_PREVIEW_CACHE.popitem(last=False)
 
 
+def _coerce_document_content(document: Optional[dict]) -> dict[str, Any]:
+    raw_content = (document or {}).get("content")
+    if isinstance(raw_content, dict):
+        return raw_content
+    if isinstance(raw_content, str):
+        try:
+            parsed = json.loads(raw_content)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _normalize_preview_coordinate_space(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"pdf_point", "pdf-points", "pdf_points", "pymupdf", "fitz"}:
+        return "pdf_point"
+    if text in {"pdf", "pdf_page", "pdf-page"}:
+        return "pdf"
+    if text in {"ocr", "ocr_image", "image", "image_pixel", "pixel", "pixels"}:
+        return "ocr_image"
+    return "auto"
+
+
+def _document_preview_coordinate_space(document: Optional[dict], explicit: Any = None) -> str:
+    explicit_space = _normalize_preview_coordinate_space(explicit)
+    if explicit_space != "auto":
+        return explicit_space
+    content = _coerce_document_content(document)
+    for key in ("bbox_coordinate_space", "bbox_source_coordinate_space", "coordinate_system"):
+        coordinate_space = _normalize_preview_coordinate_space(content.get(key))
+        if coordinate_space != "auto":
+            return coordinate_space
+    return "auto"
+
+
+def _document_preview_kind(document: Optional[dict]) -> str:
+    document_type = str((document or {}).get("document_type") or "").strip().lower()
+    if document_type == DOCUMENT_TYPE_TENDER:
+        return "tender"
+    if document_type in BID_DOCUMENT_TYPES:
+        return "bid"
+    return "generic"
+
+
+def _collect_preview_source_rects(
+    *,
+    highlight_bbox: Optional[list[float]],
+    highlight_rects: Optional[list[list[float]]],
+) -> list[list[float]]:
+    source_rects: list[list[float]] = []
+    seen_source_rects = set()
+    raw_source_rects = list(highlight_rects or [])
+    if highlight_bbox:
+        raw_source_rects.append(highlight_bbox)
+    for rect_values in raw_source_rects:
+        if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
+            continue
+        try:
+            key = tuple(round(float(rect_values[index]), 2) for index in range(4))
+        except (TypeError, ValueError):
+            continue
+        if key in seen_source_rects:
+            continue
+        seen_source_rects.add(key)
+        source_rects.append(list(key))
+    return source_rects
+
+
+def _render_png_data_url(image_bytes: bytes) -> str:
+    return "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+
 # 将 PDF/图片的字节渲染为带 base64 的预览数据（支持高亮）
 def _preview_payload_from_source(
     *,
@@ -302,9 +394,22 @@ def _preview_payload_from_source(
     highlight_phrases: Optional[list[str]] = None,
     highlight_bbox: Optional[list[float]] = None,
     highlight_rects: Optional[list[list[float]]] = None,
+    document: Optional[dict] = None,
+    highlight_coordinate_space: str = "auto",
 ) -> dict:
     if page <= 0:
         raise ValueError("page must be greater than 0")
+
+    document_kind = _document_preview_kind(document)
+    coordinate_space = _document_preview_coordinate_space(document, highlight_coordinate_space)
+    source_rects = _collect_preview_source_rects(
+        highlight_bbox=highlight_bbox,
+        highlight_rects=highlight_rects,
+    )
+    explicit_source_rects = _collect_preview_source_rects(
+        highlight_bbox=None,
+        highlight_rects=highlight_rects,
+    )
 
     if source_kind == "pdf":
         import fitz
@@ -316,42 +421,86 @@ def _preview_payload_from_source(
                 raise ValueError(f"page {page} is out of range, max page is {page_count}")
             pdf_page = pdf.load_page(page - 1)
             rect = pdf_page.rect
-            # Prefer backend coordinates; text matching is only a fallback.
-            source_rects = []
-            seen_source_rects = set()
-            raw_source_rects = list(highlight_rects or [])
-            if highlight_bbox:
-                raw_source_rects.append(highlight_bbox)
-            for rect_values in raw_source_rects:
-                if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
-                    continue
-                try:
-                    key = tuple(round(float(rect_values[index]), 2) for index in range(4))
-                except (TypeError, ValueError):
-                    continue
-                if key in seen_source_rects:
-                    continue
-                seen_source_rects.add(key)
-                source_rects.append(list(key))
+
             direct_rects = []
-            if source_rects:
-                # OCR refinement keeps a broad source box from covering too much text.
-                refined_rects = _refine_highlight_rects_via_ocr(
-                    pdf_page,
-                    highlight_rects=source_rects,
-                    highlight_phrases=highlight_phrases or [],
-                )
-                direct_rects = _apply_pdf_rect_highlights(
-                    pdf_page,
-                    highlight_rects=refined_rects,
-                )
             text_rects = []
-            if not direct_rects:
+            highlight_strategy = "none"
+            highlight_refined = False
+            highlight_fallback_reason: str | None = None
+            if source_rects:
+                if document_kind == "tender":
+                    tender_phrases = _normalize_preview_highlight_phrases(highlight_phrases or [])
+                    if tender_phrases:
+                        direct_rects = _apply_pdf_text_highlights(
+                            pdf_page,
+                            highlight_phrases=tender_phrases,
+                            highlight_bbox=source_rects[0],
+                        )
+                        if not direct_rects:
+                            direct_rects = _apply_pdf_text_highlights(
+                                pdf_page,
+                                highlight_phrases=tender_phrases,
+                                highlight_bbox=None,
+                            )
+                        if direct_rects:
+                            highlight_strategy = "tender_pdf_text"
+                            highlight_refined = True
+                        else:
+                            highlight_strategy = "tender_text_not_found"
+                            highlight_fallback_reason = "tender_text_match_failed"
+                    else:
+                        refined_rects = source_rects
+                        highlight_strategy = "tender_pdf_rect"
+                        highlight_fallback_reason = None
+                        direct_rects = _apply_pdf_rect_highlights(
+                            pdf_page,
+                            highlight_rects=refined_rects,
+                            coordinate_space="pdf_point",
+                        )
+                elif document_kind == "bid":
+                    refined_rects, highlight_fallback_reason = _refine_bid_pdf_highlights_via_fine_ocr(
+                        pdf_page,
+                        highlight_rects=source_rects,
+                        highlight_phrases=highlight_phrases or [],
+                        coordinate_space=coordinate_space,
+                    )
+                    highlight_refined = bool(refined_rects)
+                    if refined_rects:
+                        highlight_strategy = "bid_fine_ocr"
+                        draw_coordinate_space = "pdf_point"
+                    else:
+                        refined_rects = source_rects
+                        highlight_strategy = "bid_region_fallback"
+                        highlight_fallback_reason = highlight_fallback_reason or "fine_ocr_no_match"
+                        draw_coordinate_space = coordinate_space
+                    direct_rects = _apply_pdf_rect_highlights(
+                        pdf_page,
+                        highlight_rects=refined_rects,
+                        coordinate_space=draw_coordinate_space,
+                    )
+                else:
+                    refined_rects = source_rects
+                    highlight_strategy = "pdf_rect"
+                    direct_rects = _apply_pdf_rect_highlights(
+                        pdf_page,
+                        highlight_rects=refined_rects,
+                        coordinate_space=coordinate_space,
+                    )
+                if not direct_rects and source_rects:
+                    highlight_fallback_reason = highlight_fallback_reason or "rects_out_of_page"
+
+            if not direct_rects and document_kind != "bid":
                 text_rects = _apply_pdf_text_highlights(
                     pdf_page,
                     highlight_phrases=highlight_phrases or [],
                     highlight_bbox=highlight_bbox,
                 )
+                if text_rects:
+                    highlight_strategy = "pdf_text"
+            elif document_kind == "bid" and not source_rects:
+                highlight_strategy = "bid_no_region"
+                highlight_fallback_reason = "missing_candidate_region"
+
             pix = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
             image_bytes = pix.tobytes("png")
             return {
@@ -359,13 +508,14 @@ def _preview_payload_from_source(
                 "page_count": page_count,
                 "width": float(rect.width),
                 "height": float(rect.height),
-                "image_data_url": (
-                    "data:image/png;base64,"
-                    + base64.b64encode(image_bytes).decode("ascii")
-                ),
+                "image_data_url": _render_png_data_url(image_bytes),
                 "source_kind": "pdf",
                 "highlight_rect_count": len(text_rects) + len(direct_rects),
                 "highlight_applied": bool(text_rects or direct_rects),
+                "highlight_coordinate_space": coordinate_space,
+                "highlight_strategy": highlight_strategy,
+                "highlight_refined": highlight_refined,
+                "highlight_fallback_reason": highlight_fallback_reason,
             }
         finally:
             pdf.close()
@@ -377,6 +527,32 @@ def _preview_payload_from_source(
 
         with Image.open(io.BytesIO(file_bytes)) as image:
             rgb = image.convert("RGB")
+            direct_rects = []
+            highlight_strategy = "none"
+            highlight_refined = False
+            highlight_fallback_reason: str | None = None
+            if source_rects:
+                if document_kind == "bid":
+                    refined_rects, highlight_fallback_reason = _refine_bid_image_highlights_via_fine_ocr(
+                        rgb,
+                        highlight_rects=source_rects,
+                        highlight_phrases=highlight_phrases or [],
+                    )
+                    highlight_refined = bool(refined_rects)
+                    if refined_rects:
+                        highlight_strategy = "bid_fine_ocr"
+                    else:
+                        refined_rects = source_rects
+                        highlight_strategy = "bid_region_fallback"
+                        highlight_fallback_reason = highlight_fallback_reason or "fine_ocr_no_match"
+                else:
+                    refined_rects = source_rects
+                    highlight_strategy = "image_rect"
+                direct_rects = _apply_image_rect_highlights(rgb, refined_rects)
+            elif document_kind == "bid":
+                highlight_strategy = "bid_no_region"
+                highlight_fallback_reason = "missing_candidate_region"
+
             buffer = io.BytesIO()
             rgb.save(buffer, format="PNG")
             return {
@@ -384,20 +560,29 @@ def _preview_payload_from_source(
                 "page_count": 1,
                 "width": int(rgb.width),
                 "height": int(rgb.height),
-                "image_data_url": (
-                    "data:image/png;base64,"
-                    + base64.b64encode(buffer.getvalue()).decode("ascii")
-                ),
+                "image_data_url": _render_png_data_url(buffer.getvalue()),
                 "source_kind": "image",
+                "highlight_rect_count": len(direct_rects),
+                "highlight_applied": bool(direct_rects),
+                "highlight_coordinate_space": coordinate_space,
+                "highlight_strategy": highlight_strategy,
+                "highlight_refined": highlight_refined,
+                "highlight_fallback_reason": highlight_fallback_reason,
             }
 
     raise ValueError("document source kind does not support preview")
 
 
 # 归一化高亮关键词列表（去噪、去重、限制长度）
-def _normalize_preview_highlight_phrases(raw_values: Optional[list[str]]) -> list[str]:
+def _normalize_preview_highlight_phrases(raw_values: Any) -> list[str]:
+    if raw_values is None:
+        values = []
+    elif isinstance(raw_values, str):
+        values = [raw_values]
+    else:
+        values = raw_values
     normalized: list[str] = []
-    for value in raw_values or []:
+    for value in values or []:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         if not text:
             continue
@@ -414,10 +599,13 @@ def _normalize_preview_highlight_phrases(raw_values: Optional[list[str]]) -> lis
 
 
 # 归一化单个高亮边界框（逗号分隔的四个数字）
-def _normalize_preview_highlight_bbox(raw_bbox: Optional[str]) -> Optional[list[float]]:
+def _normalize_preview_highlight_bbox(raw_bbox: Any) -> Optional[list[float]]:
     if not raw_bbox:
         return None
-    parts = [segment.strip() for segment in str(raw_bbox).split(",")]
+    if isinstance(raw_bbox, (list, tuple)):
+        parts = list(raw_bbox)
+    else:
+        parts = [segment.strip() for segment in str(raw_bbox).split(",")]
     values: list[float] = []
     for part in parts[:4]:
         try:
@@ -437,10 +625,15 @@ def _preview_variant_signature(
     highlight_phrases: Optional[list[str]],
     highlight_bbox: Optional[list[float]],
     highlight_rects: Optional[list[list[float]]] = None,
+    *,
+    highlight_coordinate_space: str = "auto",
+    document_type: str = "",
+    strategy_version: str = _FINE_OCR_PREVIEW_STRATEGY_VERSION,
 ) -> str:
     phrases = _normalize_preview_highlight_phrases(highlight_phrases)
     bbox = highlight_bbox or []
     rects = highlight_rects or []
+    coordinate_space = _normalize_preview_coordinate_space(highlight_coordinate_space)
     if not phrases and not bbox and not rects:
         return ""
     payload = json.dumps(
@@ -452,6 +645,9 @@ def _preview_variant_signature(
                 for rect in rects
                 if isinstance(rect, (list, tuple)) and len(rect) >= 4
             ],
+            "coordinate_space": coordinate_space,
+            "document_type": str(document_type or "").strip().lower(),
+            "strategy_version": strategy_version,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -491,6 +687,40 @@ def _word_matches_highlight_token(word_text: str, tokens: list[str]) -> bool:
 
 
 # 收集 PDF 页内需要高亮的矩形（基于文本词级定位）
+def _normalized_pdf_highlight_text(text: Any) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(text or ""), flags=re.UNICODE).lower()
+
+
+def _pdf_dict_line_text(line: dict) -> str:
+    spans = line.get("spans") or []
+    return "".join(str(span.get("text") or "") for span in spans if isinstance(span, dict))
+
+
+def _pdf_dict_line_rect(line: dict):
+    import fitz
+
+    bbox = line.get("bbox")
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        try:
+            return fitz.Rect([float(value) for value in bbox[:4]])
+        except (TypeError, ValueError):
+            pass
+
+    rect = None
+    for span in line.get("spans") or []:
+        if not isinstance(span, dict):
+            continue
+        span_bbox = span.get("bbox")
+        if not isinstance(span_bbox, (list, tuple)) or len(span_bbox) < 4:
+            continue
+        try:
+            span_rect = fitz.Rect([float(value) for value in span_bbox[:4]])
+        except (TypeError, ValueError):
+            continue
+        rect = span_rect if rect is None else rect | span_rect
+    return rect
+
+
 def _collect_pdf_highlight_rects(
     pdf_page,
     *,
@@ -505,6 +735,62 @@ def _collect_pdf_highlight_rects(
 
     coerced_bbox = _coerce_rect_to_pdf_page_space(pdf_page, highlight_bbox) if highlight_bbox else None
     bbox_rect = fitz.Rect(coerced_bbox) if coerced_bbox else None
+    phrase_keys = [
+        key
+        for phrase in highlight_phrases or []
+        if (key := _normalized_pdf_highlight_text(phrase))
+    ]
+
+    def line_matches(line_text: str, *, restrict_bbox: bool) -> bool:
+        line_key = _normalized_pdf_highlight_text(line_text)
+        if len(line_key) < 2:
+            return False
+        if any(phrase_key in line_key for phrase_key in phrase_keys):
+            return True
+        if restrict_bbox:
+            return any(
+                token in line_key or (len(line_key) >= 4 and line_key in token)
+                for token in tokens
+            )
+        return False
+
+    def iter_line_matches(restrict_bbox: bool):
+        try:
+            text_dict = pdf_page.get_text("dict", sort=True) or {}
+        except TypeError:
+            text_dict = pdf_page.get_text("dict") or {}
+        matched = []
+        for block in text_dict.get("blocks") or []:
+            if not isinstance(block, dict) or int(block.get("type") or 0) != 0:
+                continue
+            for line in block.get("lines") or []:
+                if not isinstance(line, dict):
+                    continue
+                rect = _pdf_dict_line_rect(line)
+                if rect is None or rect.is_empty:
+                    continue
+                if restrict_bbox and bbox_rect is not None:
+                    overlap = rect & bbox_rect
+                    if overlap.is_empty or overlap.get_area() <= 0:
+                        continue
+                if not line_matches(_pdf_dict_line_text(line), restrict_bbox=restrict_bbox):
+                    continue
+                matched.append(rect)
+        return matched
+
+    line_rects = iter_line_matches(restrict_bbox=True)
+    if not line_rects and bbox_rect is not None:
+        line_rects = iter_line_matches(restrict_bbox=False)
+    if line_rects:
+        deduped_line_rects = []
+        seen_line_rects = set()
+        for rect in line_rects:
+            key = tuple(round(float(value), 2) for value in (rect.x0, rect.y0, rect.x1, rect.y1))
+            if key in seen_line_rects:
+                continue
+            seen_line_rects.add(key)
+            deduped_line_rects.append(rect)
+        return deduped_line_rects
 
     def iter_matches(restrict_bbox: bool):
         matched = []
@@ -591,13 +877,16 @@ def _apply_pdf_text_highlights(pdf_page, *, highlight_phrases: list[str], highli
 
 
 # 归一化 JSON 格式的高亮矩形数组
-def _normalize_preview_highlight_rects(raw_value: Optional[str]) -> list[list[float]]:
+def _normalize_preview_highlight_rects(raw_value: Any) -> list[list[float]]:
     if not raw_value:
         return []
-    try:
-        parsed = json.loads(str(raw_value))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return []
+    if isinstance(raw_value, (list, tuple)):
+        parsed = raw_value
+    else:
+        try:
+            parsed = json.loads(str(raw_value))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
     rects: list[list[float]] = []
     for item in parsed if isinstance(parsed, list) else []:
         if not isinstance(item, (list, tuple)) or len(item) < 4:
@@ -615,7 +904,11 @@ def _normalize_preview_highlight_rects(raw_value: Optional[str]) -> list[list[fl
 
 
 # 将外部传来的矩形坐标转换到 PDF 页面坐标系（处理缩放）
-def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Optional[list[float]]:
+def _coerce_rect_to_pdf_page_space(
+    pdf_page,
+    rect_values: list[float],
+    coordinate_space: str = "auto",
+) -> Optional[list[float]]:
     import fitz
 
     if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
@@ -631,16 +924,19 @@ def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Option
     page_width = max(float(page_rect.width), 1.0)
     page_height = max(float(page_rect.height), 1.0)
 
-    # 自动猜测缩放比例
+    normalized_coordinate_space = _normalize_preview_coordinate_space(coordinate_space)
+
+    # pdf_point/pdf 已经是 PyMuPDF 页面坐标，避免自动缩放造成二次偏移。
     scale = 1.0
-    max_ratio = max(x1 / page_width, y1 / page_height)
-    if max_ratio > 1.05:
-        for candidate in (1.5, 2.0, 3.0, 4.0):
-            if (x1 / candidate) <= page_width * 1.05 and (y1 / candidate) <= page_height * 1.05:
-                scale = candidate
-                break
-        else:
-            scale = max_ratio
+    if normalized_coordinate_space not in {"pdf_point", "pdf"}:
+        max_ratio = max(x1 / page_width, y1 / page_height)
+        if max_ratio > 1.05:
+            for candidate in (1.5, 2.0, 3.0, 4.0):
+                if (x1 / candidate) <= page_width * 1.05 and (y1 / candidate) <= page_height * 1.05:
+                    scale = candidate
+                    break
+            else:
+                scale = max_ratio
 
     x0 /= scale
     y0 /= scale
@@ -658,13 +954,260 @@ def _coerce_rect_to_pdf_page_space(pdf_page, rect_values: list[float]) -> Option
     return [x0, y0, x1, y1]
 
 
+def _coerce_rect_to_image_space(image, rect_values: list[float]) -> Optional[list[float]]:
+    if not isinstance(rect_values, (list, tuple)) or len(rect_values) < 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(rect_values[index]) for index in range(4)]
+    except (TypeError, ValueError):
+        return None
+    if x1 <= x0 or y1 <= y0:
+        return None
+    width = max(float(getattr(image, "width", 0) or 0), 1.0)
+    height = max(float(getattr(image, "height", 0) or 0), 1.0)
+    x0 = min(max(x0, 0.0), width)
+    y0 = min(max(y0, 0.0), height)
+    x1 = min(max(x1, 0.0), width)
+    y1 = min(max(y1, 0.0), height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return [x0, y0, x1, y1]
+
+
+def _expand_pdf_clip(pdf_page, rect_values: list[float], padding: float = 2.0):
+    import fitz
+
+    rect = fitz.Rect(rect_values)
+    clip = fitz.Rect(rect)
+    clip.x0 = max(0, clip.x0 - padding)
+    clip.y0 = max(0, clip.y0 - padding)
+    clip.x1 = min(float(pdf_page.rect.width), clip.x1 + padding)
+    clip.y1 = min(float(pdf_page.rect.height), clip.y1 + padding)
+    return clip if clip.x1 > clip.x0 and clip.y1 > clip.y0 else None
+
+
+def _expand_image_clip(image, rect_values: list[float], padding: float = 4.0) -> Optional[tuple[int, int, int, int]]:
+    x0, y0, x1, y1 = rect_values[:4]
+    width = int(getattr(image, "width", 0) or 0)
+    height = int(getattr(image, "height", 0) or 0)
+    left = max(0, int(round(float(x0) - padding)))
+    top = max(0, int(round(float(y0) - padding)))
+    right = min(width, int(round(float(x1) + padding)))
+    bottom = min(height, int(round(float(y1) + padding)))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _map_fine_ocr_boxes_to_pdf_rects(
+    *,
+    items: list[dict[str, Any]],
+    clip,
+    scale: float,
+    highlight_phrases: list[str],
+) -> list[list[float]]:
+    rects: list[list[float]] = []
+    for item in items or []:
+        section_text = str(item.get("text") or item.get("raw_text") or "").strip()
+        bbox = item.get("bbox")
+        if not section_text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        local_bbox = [float(bbox[index]) for index in range(4)]
+        for local_rect in _section_subrects_for_phrases(section_text, local_bbox, highlight_phrases):
+            rects.append(
+                [
+                    clip.x0 + (local_rect[0] / scale),
+                    clip.y0 + (local_rect[1] / scale),
+                    clip.x0 + (local_rect[2] / scale),
+                    clip.y0 + (local_rect[3] / scale),
+                ]
+            )
+    return rects
+
+
+def _map_fine_ocr_boxes_to_image_rects(
+    *,
+    items: list[dict[str, Any]],
+    clip: tuple[int, int, int, int],
+    highlight_phrases: list[str],
+) -> list[list[float]]:
+    rects: list[list[float]] = []
+    left, top, _right, _bottom = clip
+    for item in items or []:
+        section_text = str(item.get("text") or item.get("raw_text") or "").strip()
+        bbox = item.get("bbox")
+        if not section_text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        local_bbox = [float(bbox[index]) for index in range(4)]
+        for local_rect in _section_subrects_for_phrases(section_text, local_bbox, highlight_phrases):
+            rects.append(
+                [
+                    left + local_rect[0],
+                    top + local_rect[1],
+                    left + local_rect[2],
+                    top + local_rect[3],
+                ]
+            )
+    return rects
+
+
+def _run_fine_text_ocr_on_png(png_bytes: bytes) -> tuple[list[dict[str, Any]], str | None]:
+    ocr_service = _get_preview_ocr_service()
+    if ocr_service is None:
+        return [], "fine_ocr_unavailable"
+    if not hasattr(ocr_service, "extract_text_boxes_without_layout"):
+        return [], "fine_ocr_method_unavailable"
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
+        temp_file.write(png_bytes)
+        temp_path = temp_file.name
+    try:
+        payload = ocr_service.extract_text_boxes_without_layout(temp_path)
+    except Exception as exc:
+        return [], f"fine_ocr_failed:{exc}"
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+    if not isinstance(payload, dict):
+        return [], "fine_ocr_empty_payload"
+    return [item for item in payload.get("items") or [] if isinstance(item, dict)], None
+
+
+def _refine_bid_pdf_highlights_via_fine_ocr(
+    pdf_page,
+    *,
+    highlight_rects: list[list[float]],
+    highlight_phrases: list[str],
+    coordinate_space: str,
+) -> tuple[list[list[float]], str | None]:
+    import fitz
+
+    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
+    if not phrases:
+        return [], "missing_highlight_phrase"
+    if not highlight_rects:
+        return [], "missing_candidate_region"
+
+    scale = 2.0
+    refined: list[list[float]] = []
+    fallback_reason: str | None = None
+    for rect_values in highlight_rects[:4]:
+        coerced = _coerce_rect_to_pdf_page_space(pdf_page, rect_values, coordinate_space)
+        if not coerced:
+            fallback_reason = "candidate_region_out_of_page"
+            continue
+        clip = _expand_pdf_clip(pdf_page, coerced)
+        if clip is None:
+            fallback_reason = "candidate_region_out_of_page"
+            continue
+        try:
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+            pix_bytes = pix.tobytes("png")
+        except Exception as exc:
+            fallback_reason = f"clip_render_failed:{exc}"
+            continue
+
+        items, reason = _run_fine_text_ocr_on_png(pix_bytes)
+        if reason:
+            fallback_reason = reason
+            continue
+        refined.extend(
+            _map_fine_ocr_boxes_to_pdf_rects(
+                items=items,
+                clip=clip,
+                scale=scale,
+                highlight_phrases=phrases,
+            )
+        )
+
+    return refined, None if refined else (fallback_reason or "fine_ocr_no_match")
+
+
+def _refine_bid_image_highlights_via_fine_ocr(
+    image,
+    *,
+    highlight_rects: list[list[float]],
+    highlight_phrases: list[str],
+) -> tuple[list[list[float]], str | None]:
+    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
+    if not phrases:
+        return [], "missing_highlight_phrase"
+    if not highlight_rects:
+        return [], "missing_candidate_region"
+
+    refined: list[list[float]] = []
+    fallback_reason: str | None = None
+    for rect_values in highlight_rects[:4]:
+        coerced = _coerce_rect_to_image_space(image, rect_values)
+        if not coerced:
+            fallback_reason = "candidate_region_out_of_page"
+            continue
+        clip = _expand_image_clip(image, coerced)
+        if clip is None:
+            fallback_reason = "candidate_region_out_of_page"
+            continue
+        try:
+            crop = image.crop(clip)
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG")
+            pix_bytes = buffer.getvalue()
+        except Exception as exc:
+            fallback_reason = f"clip_render_failed:{exc}"
+            continue
+
+        items, reason = _run_fine_text_ocr_on_png(pix_bytes)
+        if reason:
+            fallback_reason = reason
+            continue
+        refined.extend(
+            _map_fine_ocr_boxes_to_image_rects(
+                items=items,
+                clip=clip,
+                highlight_phrases=phrases,
+            )
+        )
+
+    return refined, None if refined else (fallback_reason or "fine_ocr_no_match")
+
+
+def _apply_image_rect_highlights(image, rects: list[list[float]]) -> list[list[float]]:
+    from PIL import Image, ImageDraw
+
+    applied = []
+    if not rects:
+        return applied
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for rect_values in rects:
+        coerced = _coerce_rect_to_image_space(image, rect_values)
+        if not coerced:
+            continue
+        applied.append(coerced)
+        draw.rectangle(coerced, fill=(255, 237, 77, 70), outline=(245, 158, 11, 180), width=2)
+    if applied:
+        composite = Image.alpha_composite(image.convert("RGBA"), overlay)
+        if image.mode == "RGBA":
+            image.paste(composite)
+        else:
+            image.paste(composite.convert("RGB"))
+    return applied
+
+
 # 在 PDF 页面上绘制用户指定的矩形高亮
-def _apply_pdf_rect_highlights(pdf_page, *, highlight_rects: list[list[float]]):
+def _apply_pdf_rect_highlights(
+    pdf_page,
+    *,
+    highlight_rects: list[list[float]],
+    coordinate_space: str = "auto",
+):
     import fitz
 
     rects = []
     for item in highlight_rects or []:
-        coerced = _coerce_rect_to_pdf_page_space(pdf_page, item)
+        coerced = _coerce_rect_to_pdf_page_space(pdf_page, item, coordinate_space)
         if not coerced:
             continue
         rect = fitz.Rect(coerced)
@@ -998,7 +1541,7 @@ def _compact_display_results_for_response(display_results: dict[str, Any]) -> di
     compact_results.pop("duplicate_check", None)
     for merged_key in MERGED_RESULT_KEY_BY_DOC_TYPE.values():
         compact_results.pop(merged_key, None)
-    return compact_results
+    return _filter_visible_result_keys(compact_results)
 
 
 # 组装项目可视化数据（前端大屏用）
@@ -1050,6 +1593,7 @@ def _build_project_visualization_payload(
     frontend_results = dict(
         (refreshed_result_record or project_result or {}).get("result_fot_frontend") or {}
     )
+    frontend_results = _filter_visible_result_keys(frontend_results)
     payload = {
         "project": project_detail.get("project") or {"identifier_id": identifier_id},
         "project_links": _project_api_links(identifier_id),
@@ -1322,7 +1866,7 @@ def _report_file_name(item: dict[str, Any], *, side: str | None = None) -> str:
 
 
 def _report_issue_title(issue: dict[str, Any]) -> str:
-    for key in ("title", "check_name", "matched_text", "name", "issue_type", "risk_level"):
+    for key in ("title", "check_name", "display_text", "highlight_text", "matched_text", "name", "issue_type", "risk_level"):
         value = str(issue.get(key) or "").strip()
         if value:
             return value
@@ -1340,6 +1884,9 @@ def _report_issue_message(issue: dict[str, Any]) -> str:
 def _report_issue_description(issue: dict[str, Any]) -> str:
     parts: list[Any] = []
     field_labels = (
+        ("display_text", "展示文本"),
+        ("raw_matched_text", "原始命中"),
+        ("model_matched_text", "模型命中"),
         ("matched_text", "命中文本"),
         ("wrong", "疑似文本"),
         ("suggestion", "建议"),
@@ -1412,10 +1959,10 @@ def _report_ranges_by_file(value: Any) -> str:
 def _ordered_report_results(result_payload: dict[str, Any]) -> dict[str, Any]:
     ordered: dict[str, Any] = {}
     for key, _label in _REPORT_RESULT_LABELS:
-        if key in result_payload:
+        if key in result_payload and _is_result_key_visible(key):
             ordered[key] = result_payload[key]
     for key, value in result_payload.items():
-        if key not in ordered:
+        if key not in ordered and _is_result_key_visible(key):
             ordered[key] = value
     return ordered
 
@@ -1584,7 +2131,13 @@ def _collect_typo_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
                 if not isinstance(issue, dict):
                     continue
                 issue_file, issue_page = _report_file_and_page(issue)
-                matched = issue.get("matched_text") or issue.get("wrong") or _report_issue_title(issue)
+                matched = (
+                    issue.get("display_text")
+                    or issue.get("highlight_text")
+                    or issue.get("matched_text")
+                    or issue.get("wrong")
+                    or _report_issue_title(issue)
+                )
                 suggestion = issue.get("suggestion") or issue.get("correct")
                 problem = _report_join_parts(["错别字", matched, f"建议：{suggestion}" if suggestion else ""])
                 reason = _report_issue_message(issue) or "疑似错别字"
@@ -1850,6 +2403,8 @@ def _collect_frontend_result_issue_sections(items: list[Any]) -> list[tuple[str,
         key = str(item.get("result_key") or item.get("source_result_key") or item.get("type") or "result").strip()
         if not key:
             key = "result"
+        if not _is_result_key_visible(key):
+            continue
         if key not in grouped:
             grouped[key] = []
             order.append(key)
@@ -2221,6 +2776,7 @@ async def get_project_results(
         frontend_results = dict(
             (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
         )
+        frontend_results = _filter_visible_result_keys(frontend_results)
         payload = {
             "project": project,
             "view": view,
@@ -2263,11 +2819,14 @@ async def get_project_result_item(
             db_service=db_service,
         )
         selected_results = display_results if view == "display" else raw_results
+        if view == "display":
+            selected_results = _filter_visible_result_keys(selected_results)
         if result_key not in selected_results:
             raise HTTPException(status_code=404, detail="result_key not found")
         frontend_results = dict(
             (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
         )
+        frontend_results = _filter_visible_result_keys(frontend_results)
 
         payload = {
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
@@ -2464,6 +3023,27 @@ async def update_result_record_frontend(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/documents/{identifier_id}/preview/pages/{page}", summary="POST document page preview")
+async def post_document_page_preview(
+    identifier_id: str,
+    page: int,
+    payload: DocumentPreviewRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """Use request body for preview and highlight parameters."""
+    return await _build_document_page_preview_response(
+        identifier_id=identifier_id,
+        page=page,
+        highlight=payload.highlight,
+        highlight_bbox=payload.highlight_bbox,
+        highlight_rects=payload.highlight_rects,
+        highlight_coordinate_space=payload.highlight_coordinate_space or "auto",
+        db_service=db_service,
+        oss_service=oss_service,
+    )
 
 
 @router.delete("/results/{project_identifier_id}", summary="删除单个项目结果")
@@ -2847,7 +3427,11 @@ async def upload_personnel_reuse_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post("/projects/typo-check", summary="项目错别字检查")
+@router.post(
+    "/projects/typo-check",
+    summary="项目错别字检查",
+    include_in_schema=settings.TYPO_CHECK_VISIBLE,
+)
 async def project_typo_check(
     identifier_id: str = Query(...),
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -2873,7 +3457,11 @@ async def project_typo_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post("/projects/typo-check/upload-json", summary="上传 OCR JSON 并执行错别字检查")
+@router.post(
+    "/projects/typo-check/upload-json",
+    summary="上传 OCR JSON 并执行错别字检查",
+    include_in_schema=settings.TYPO_CHECK_VISIBLE,
+)
 async def upload_typo_check(
     tender_json_file: UploadFile = File(...),
     business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
@@ -3246,13 +3834,13 @@ async def get_document_source(
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
-@router.get("/documents/{identifier_id}/preview/pages/{page}", summary="获取文档页面预览")
-async def get_document_page_preview(
+async def _build_document_page_preview_response(
     identifier_id: str,
     page: int,
     highlight: Optional[list[str]] = Query(default=None, description="需要高亮的关键词，可传多个"),
     highlight_bbox: Optional[str] = Query(default=None, description="单个高亮框，格式为逗号分隔四个数字"),
     highlight_rects: Optional[str] = Query(default=None, description="多个高亮框的 JSON 数组字符串"),
+    highlight_coordinate_space: str = Query(default="auto", description="高亮坐标系：auto/pdf_point/pdf/ocr_image"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
@@ -3265,15 +3853,27 @@ async def get_document_page_preview(
         normalized_highlight_phrases = _normalize_preview_highlight_phrases(highlight)
         normalized_highlight_bbox = _normalize_preview_highlight_bbox(highlight_bbox)
         normalized_highlight_rects = _normalize_preview_highlight_rects(highlight_rects)
+        resolved_coordinate_space = _document_preview_coordinate_space(
+            document,
+            highlight_coordinate_space,
+        )
+        has_highlight_payload = bool(
+            normalized_highlight_phrases or
+            normalized_highlight_bbox or
+            normalized_highlight_rects
+        )
         preview_variant = _preview_variant_signature(
             normalized_highlight_phrases,
             normalized_highlight_bbox,
             normalized_highlight_rects,
+            highlight_coordinate_space=resolved_coordinate_space,
+            document_type=str(document.get("document_type") or ""),
         )
 
-        cached_payload = _preview_cache_get(document, page, preview_variant)
-        if cached_payload is not None:
-            return JSONResponse(cached_payload)
+        if not has_highlight_payload:
+            cached_payload = _preview_cache_get(document, page, preview_variant)
+            if cached_payload is not None:
+                return JSONResponse(cached_payload)
 
         source_kind = _document_source_kind(document)
         file_bytes, _content_type, _object_name = _load_document_source_bytes(
@@ -3288,6 +3888,8 @@ async def get_document_page_preview(
                 highlight_phrases=normalized_highlight_phrases,
                 highlight_bbox=normalized_highlight_bbox,
                 highlight_rects=normalized_highlight_rects,
+                document=document,
+                highlight_coordinate_space=resolved_coordinate_space,
             )
         except Exception:
             # 高亮渲染失败时回退到无高亮预览
@@ -3298,13 +3900,16 @@ async def get_document_page_preview(
                 highlight_phrases=[],
                 highlight_bbox=None,
                 highlight_rects=[],
+                document=document,
+                highlight_coordinate_space=resolved_coordinate_space,
             )
             payload["highlight_applied"] = False
             payload["highlight_fallback"] = True
         payload["document_identifier"] = identifier_id
         payload["file_name"] = str(document.get("file_name") or "")
         payload["source_url"] = f"/api/postgresql/documents/{identifier_id}/source"
-        _preview_cache_set(document, page, payload, preview_variant)
+        if not has_highlight_payload:
+            _preview_cache_set(document, page, payload, preview_variant)
         return JSONResponse(payload)
     except HTTPException:
         raise

@@ -32,7 +32,28 @@ class ResultNormalizerMixin:
                 continue
             next_location = dict(location)
             next_location.setdefault("document_role", role)
+            if role == "tender":
+                next_location.setdefault("document", "tender")
             tagged.append(next_location)
+        return tagged
+
+    def _missing_anchor_locations_with_document_role(
+        self,
+        details: Any,
+        role: str,
+    ) -> list[dict[str, Any]]:
+        tagged: list[dict[str, Any]] = []
+        if not isinstance(details, list):
+            return tagged
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            next_detail = dict(detail)
+            next_detail["locations"] = self._locations_with_document_role(
+                detail.get("locations") or [],
+                role,
+            )
+            tagged.append(next_detail)
         return tagged
 
     @staticmethod
@@ -59,8 +80,20 @@ class ResultNormalizerMixin:
             return []
         return [location]
 
-    def _deviation_issue_evidence(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _deviation_issue_evidence(self, item: dict[str, Any], raw: dict[str, Any] | None = None) -> dict[str, Any]:
         evidence = dict(item)
+        raw = raw or {}
+        response_status = str(evidence.get("response_status") or "")
+        deviation_status = str(raw.get("deviation_status") or "")
+        table_missing = "deviation_table_missing" in response_status or "deviation_table_missing" in deviation_status
+        if table_missing:
+            evidence["deviation_table_missing"] = True
+            evidence["deviation_status"] = deviation_status or response_status
+            evidence["catalog_pages"] = raw.get("business_catalog_pages") or raw.get("catalog_pages") or []
+            evidence["catalog_locations"] = self._locations_with_document_role(
+                raw.get("business_catalog_locations") or raw.get("catalog_locations") or [],
+                "business_bid",
+            )
         if not evidence.get("tender_star_locations"):
             tender_locations = self._single_tender_location(
                 page=item.get("requirement_page"),
@@ -70,6 +103,16 @@ class ResultNormalizerMixin:
             if tender_locations:
                 evidence["tender_star_locations"] = tender_locations
         return evidence
+
+    @staticmethod
+    def _is_deviation_table_missing_evidence(evidence: dict[str, Any]) -> bool:
+        if evidence.get("deviation_table_missing"):
+            return True
+        status_values = (
+            evidence.get("response_status"),
+            evidence.get("deviation_status"),
+        )
+        return any("deviation_table_missing" in str(value or "") for value in status_values)
 
     def _normalize_integrity(self, raw: dict[str, Any]) -> dict[str, Any]:
         """标准化完整性审查原始结果。"""
@@ -198,8 +241,20 @@ class ResultNormalizerMixin:
             title = str(segment.get("name") or "未命名模板段")
             missing = segment.get("missing_anchors") or []
             unfilled_fields = segment.get("unfilled_fields") or []
+            template_locations = self._locations_with_document_role(
+                segment.get("template_locations") or [],
+                "tender",
+            )
+            tender_highlight_locations = self._locations_with_document_role(
+                segment.get("tender_highlight_locations") or segment.get("template_locations") or [],
+                "tender",
+            )
             evidence = {
                 "missing_anchors": missing,
+                "missing_anchor_locations": self._missing_anchor_locations_with_document_role(
+                    segment.get("missing_anchor_locations") or [],
+                    "tender",
+                ),
                 "unfilled_fields": unfilled_fields,
                 "template_body_length": segment.get("template_body_length"),
                 "bid_body_length": segment.get("bid_body_length"),
@@ -207,10 +262,8 @@ class ResultNormalizerMixin:
                     segment.get("locations") or [],
                     "business_bid",
                 ),
-                "template_locations": self._locations_with_document_role(
-                    segment.get("template_locations") or [],
-                    "tender",
-                ),
+                "template_locations": template_locations,
+                "tender_highlight_locations": tender_highlight_locations,
             }
             if segment.get("is_passed"):
                 passed.append(
@@ -600,17 +653,17 @@ class ResultNormalizerMixin:
             )
 
         for item in missing_items:
-            evidence = self._deviation_issue_evidence(item)
+            evidence = self._deviation_issue_evidence(item, raw)
             missing.append(
                 self._issue(
                     status="missing",
                     title=item.get("requirement") or "缺失响应条款",
-                    message="未找到对应响应内容。",
+                    message="缺少偏离表。" if self._is_deviation_table_missing_evidence(evidence) else "未找到对应响应内容。",
                     evidence=evidence,
                 )
             )
         for item in negative_items:
-            evidence = self._deviation_issue_evidence(item)
+            evidence = self._deviation_issue_evidence(item, raw)
             failed.append(
                 self._issue(
                     status="fail",
@@ -620,7 +673,7 @@ class ResultNormalizerMixin:
                 )
             )
         for item in unclear_items:
-            evidence = self._deviation_issue_evidence(item)
+            evidence = self._deviation_issue_evidence(item, raw)
             unclear.append(
                 self._issue(
                     status="unclear",

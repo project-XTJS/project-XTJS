@@ -264,7 +264,9 @@ class DuplicateCheckService:
         full_text = "\n".join(block["text"] for block in ordered_blocks if block.get("text"))
         exact_key = compact_raw_text(full_text)
         image_entries = self._get_document_images(record, role=role)
-        exact_block_map = self._build_sentence_unit_map(ordered_blocks)
+        exact_block_units, exact_block_map, exact_block_occurrence_map = self._build_sentence_unit_index(
+            ordered_blocks
+        )
         exact_section_map = {
             section["exact_hash"]: section
             for section in sections
@@ -297,8 +299,10 @@ class DuplicateCheckService:
             "exact_key": exact_key,
             "exact_hash": hash_text(exact_hash_source),
             "blocks": ordered_blocks,
-            "exact_block_hashes": set(exact_block_map.keys()),
+            "exact_block_units": exact_block_units,
+            "exact_block_hashes": set(exact_block_occurrence_map.keys()),
             "exact_block_map": exact_block_map,
+            "exact_block_occurrence_map": exact_block_occurrence_map,
             "sections": sections,
             "section_count": len(sections),
             "exact_section_hashes": set(exact_section_map.keys()),
@@ -350,13 +354,28 @@ class DuplicateCheckService:
         ordered_blocks: list[dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
         """将区块划分为句子并建立精确哈希映射。"""
+        return self._build_sentence_unit_index(ordered_blocks)[1]
+
+    def _build_sentence_unit_index(
+        self,
+        ordered_blocks: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        """将区块划分为有序句子，并同时建立首条映射与全量出现映射。"""
+        sentence_units: list[dict[str, Any]] = []
         sentence_map: dict[str, dict[str, Any]] = {}
-        for block in ordered_blocks:
+        occurrence_map: dict[str, list[dict[str, Any]]] = {}
+        for block_index, block in enumerate(ordered_blocks):
             if block.get("type") == "heading":
                 continue
-            for sentence in self._sentence_units_from_block(block):
-                sentence_map.setdefault(sentence["exact_hash"], sentence)
-        return sentence_map
+            for sentence_index, sentence in enumerate(self._sentence_units_from_block(block)):
+                normalized = dict(sentence)
+                normalized["sequence"] = len(sentence_units)
+                normalized["block_index"] = block_index
+                normalized["sentence_index"] = sentence_index
+                sentence_units.append(normalized)
+                sentence_map.setdefault(normalized["exact_hash"], normalized)
+                occurrence_map.setdefault(normalized["exact_hash"], []).append(normalized)
+        return sentence_units, sentence_map, occurrence_map
 
     def _sentence_units_from_block(self, block: dict[str, Any]) -> list[dict[str, Any]]:
         """从文本块中拆分句子并计算哈希。"""
@@ -389,10 +408,11 @@ class DuplicateCheckService:
 
         for block in blocks:
             is_heading = block["type"] == "heading" or SectionClassifier.is_heading(block["text"])
-            if is_heading and current["blocks"]:
-                finalized = self._finalize_section(current)
-                if finalized is not None:
-                    sections.append(finalized)
+            if is_heading:
+                if current["blocks"]:
+                    finalized = self._finalize_section(current)
+                    if finalized is not None:
+                        sections.append(finalized)
                 current = self._new_section(block["text"])
                 current["pages"].add(int(block.get("page") or 1))
                 continue
@@ -1168,7 +1188,7 @@ class DuplicateCheckService:
         ):
             value = evidence.get(key)
             if value not in (None, "", []):
-                return clip(str(value), 220)
+                return clip(str(value), 200)
 
         for key in (
             f"{side}_sample_rows",
@@ -1178,7 +1198,7 @@ class DuplicateCheckService:
         ):
             rows = evidence.get(key)
             if isinstance(rows, list) and rows:
-                return clip(" | ".join(str(row) for row in rows[:3]), 220)
+                return clip(" | ".join(str(row) for row in rows[:3]), 200)
 
         image_hash = str(evidence.get("image_hash") or "").strip()
         return f"image:{image_hash[:16]}" if image_hash else ""

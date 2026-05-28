@@ -182,9 +182,14 @@ class OCREngineMixin:
         match = re.search(r"Unknown argument:\s*([A-Za-z0-9_]+)", str(exc or ""))
         return match.group(1) if match else None
 
-    def _instantiate_pipeline(self, pipeline_cls: Any, device: str) -> tuple[Any, list[str]]:
+    def _instantiate_pipeline_with_kwargs(
+        self,
+        pipeline_cls: Any,
+        device: str,
+        kwargs: dict[str, Any],
+    ) -> tuple[Any, list[str]]:
         """带有参数降级兼容机制的 Pipeline 实例化逻辑。"""
-        kwargs = dict(self._build_pipeline_kwargs(device))
+        kwargs = dict(kwargs)
         disabled_args = []
         while True:
             try: return pipeline_cls(**kwargs), disabled_args
@@ -194,6 +199,13 @@ class OCREngineMixin:
                 kwargs.pop(unknown_arg, None)
                 disabled_args.append(unknown_arg)
                 print(f"OCRService: retrying model load without unsupported argument {unknown_arg!r} (device={device})", flush=True)
+
+    def _instantiate_pipeline(self, pipeline_cls: Any, device: str) -> tuple[Any, list[str]]:
+        return self._instantiate_pipeline_with_kwargs(
+            pipeline_cls,
+            device,
+            self._build_pipeline_kwargs(device),
+        )
 
     def _init_engine(self) -> None:
         """核心初始化函数，按优先级轮询设备并加载模型。"""

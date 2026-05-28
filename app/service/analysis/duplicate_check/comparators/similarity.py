@@ -284,10 +284,10 @@ def compare_business_similarity_tables(
                 "right_bbox": right_unit.get("bbox"),
                 "exact": False,
                 "similarity": round(score, 4),
-                "left_rows": [clip(row, 200) for row in list(left_unit.get("rows") or [])],
-                "right_rows": [clip(row, 200) for row in list(right_unit.get("rows") or [])],
-                "left_sample_rows": [clip(row, 160) for row in list(left_unit.get("rows") or [])[:3]],
-                "right_sample_rows": [clip(row, 160) for row in list(right_unit.get("rows") or [])[:3]],
+                "left_rows": [str(row) for row in list(left_unit.get("rows") or [])],
+                "right_rows": [str(row) for row in list(right_unit.get("rows") or [])],
+                "left_sample_rows": [str(row) for row in list(left_unit.get("rows") or [])],
+                "right_sample_rows": [str(row) for row in list(right_unit.get("rows") or [])],
             }
         )
     return {

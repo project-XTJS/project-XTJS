@@ -235,6 +235,50 @@ class TemplateExtractor:
         }
 
     @classmethod
+    def _section_locations(cls, section: dict) -> list[dict]:
+        if not isinstance(section, dict):
+            return []
+
+        page = section.get('page') if isinstance(section.get('page'), int) else None
+        section_type = str(section.get('type') or "text")
+        coordinate_system = str(section.get('coordinate_system') or "pdf_point")
+        block_index = section.get('block_index')
+        locations: list[dict] = []
+        seen: set[tuple] = set()
+
+        for line in section.get('lines') or []:
+            if not isinstance(line, dict):
+                continue
+            text = str(line.get('text') or '').strip()
+            line_page = line.get('page') if isinstance(line.get('page'), int) else page
+            bbox = line.get('bbox') or line.get('box')
+            if not text and line_page is None and bbox is None:
+                continue
+            key = (line_page, tuple(bbox or []), text)
+            if key in seen:
+                continue
+            seen.add(key)
+            location = {
+                "page": line_page,
+                "bbox": bbox,
+                "text": text[:240] if text else "",
+                "type": "line",
+                "section_type": section_type,
+                "coordinate_system": str(line.get('coordinate_system') or coordinate_system),
+            }
+            if block_index is not None:
+                location["block_index"] = block_index
+            if line.get('line_index') is not None:
+                location["line_index"] = line.get('line_index')
+            locations.append(location)
+
+        if locations:
+            return locations
+
+        fallback = cls._section_location(section)
+        return [fallback] if fallback is not None else []
+
+    @classmethod
     def preprocess_sections(
         cls, layout_sections: list, logical_tables: list = None, is_template: bool = False
     ) -> tuple:
@@ -545,8 +589,8 @@ class TemplateExtractor:
                     ],
                     "locations": [
                         location
-                        for location in (cls._section_location(section) for section in chunk)
-                        if location is not None
+                        for section in chunk
+                        for location in cls._section_locations(section)
                     ],
                     "is_composite": any(
                         marker in compact_title
@@ -621,6 +665,49 @@ class TemplateExtractor:
                 push_requirement(title, [attachment_number] if attachment_number else None)
 
         return ordered_list, attachment_mapping
+
+    @classmethod
+    def extract_requirement_locations(cls, model_raw_json: dict) -> dict[str, list[dict]]:
+        """Return tender-side source locations for business integrity requirements."""
+        business_scope = cls.extract_business_attachment_scope(model_raw_json)
+        response_attachments, _scoped = cls.filter_business_response_attachments(model_raw_json)
+
+        attachments_by_number: dict[str, dict] = {}
+        for attachment in response_attachments:
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            if attachment_number and attachment_number not in attachments_by_number:
+                attachments_by_number[attachment_number] = attachment
+
+        locations_by_title: dict[str, list[dict]] = {}
+
+        def add_locations(title: str, locations: list[dict] | None) -> None:
+            normalized_title = str(title or "").strip()
+            if not normalized_title or not locations:
+                return
+            clean_locations = [location for location in locations if isinstance(location, dict)]
+            if not clean_locations:
+                return
+            locations_by_title.setdefault(normalized_title, clean_locations)
+
+        for entry in business_scope.get("item_entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_locations = [dict(location) for location in entry.get("locations") or [] if isinstance(location, dict)]
+            if not entry_locations:
+                continue
+            numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
+            matched_any = False
+            for number in numbers:
+                attachment = attachments_by_number.get(number)
+                title = str((attachment or {}).get("title") or "").strip()
+                if not title:
+                    continue
+                add_locations(title, entry_locations)
+                matched_any = True
+            if not matched_any:
+                add_locations(str(entry.get("content") or "").strip(), entry_locations)
+
+        return locations_by_title
 
     @classmethod
     def extract_consistency_templates(cls, model_raw_json: dict) -> list:
@@ -778,6 +865,17 @@ class TemplateExtractor:
             if stage != 2:
                 continue
 
+            def requirement_locations(requirement_text: str) -> list[dict]:
+                locations = []
+                for location in cls._section_locations(sec):
+                    if not isinstance(location, dict):
+                        continue
+                    next_location = dict(location)
+                    if requirement_text:
+                        next_location["text"] = requirement_text
+                    locations.append(next_location)
+                return locations[:1]
+
             parsed_any = False
             for part in cls._split_requirement_parts(text):
                 seq, content = cls._parse_requirement_item(part)
@@ -797,6 +895,7 @@ class TemplateExtractor:
                         "content": cleaned,
                         "attachment_numbers": attach_numbers,
                         "title_core": cls._requirement_core_title(cleaned),
+                        "locations": requirement_locations(cleaned),
                     }
                 )
                 if attach_numbers:
@@ -819,6 +918,7 @@ class TemplateExtractor:
                             "content": cleaned,
                             "attachment_numbers": [],
                             "title_core": cls._requirement_core_title(cleaned),
+                            "locations": requirement_locations(cleaned),
                         }
                     )
 

@@ -67,7 +67,63 @@ class DeviationTableMixin:
         technical = self._dedupe_sections(technical)
         rows = self._extract_deviation_rows(bid_payload, business, technical)
         combined = "\n\n".join(x["text"] for x in business + technical if x.get("text"))
-        return {"business": business, "technical": technical, "combined_text": combined, "rows": rows}
+        catalog = self._collect_catalog_locations(line_items)
+        return {
+            "business": business,
+            "technical": technical,
+            "combined_text": combined,
+            "rows": rows,
+            "catalog_pages": catalog["pages"],
+            "catalog_locations": catalog["locations"],
+        }
+
+    def _collect_catalog_locations(self, line_items: list[dict[str, Any]]) -> dict[str, Any]:
+        """收集投标文件目录页，用于缺少偏离表时的人工复核定位。"""
+        page_hits: dict[int, dict[str, Any]] = {}
+        toc_like_count_by_page: dict[int, int] = {}
+        first_toc_line_by_page: dict[int, dict[str, Any]] = {}
+
+        for item in line_items:
+            page = item.get("page")
+            if not isinstance(page, int):
+                continue
+            line = str(item.get("text") or "").strip()
+            if not line:
+                continue
+
+            compact = re.sub(r"\s+", "", line)
+            is_catalog_heading = compact == "目录" or (compact.startswith("目录") and len(compact) <= 8)
+            is_toc_line = self._is_catalog_like_line(line) and not is_catalog_heading
+
+            if is_catalog_heading and page not in page_hits:
+                page_hits[page] = {
+                    "document_role": "business_bid",
+                    "page": page,
+                    "bbox": normalize_bbox(item.get("bbox") or item.get("box")),
+                    "text": line[:120],
+                    "coordinate_system": "pdf_point",
+                }
+                continue
+
+            if is_toc_line:
+                toc_like_count_by_page[page] = toc_like_count_by_page.get(page, 0) + 1
+                first_toc_line_by_page.setdefault(page, item)
+
+        for page, count in toc_like_count_by_page.items():
+            if count < 2 or page in page_hits:
+                continue
+            item = first_toc_line_by_page.get(page) or {}
+            line = str(item.get("text") or "").strip()
+            page_hits[page] = {
+                "document_role": "business_bid",
+                "page": page,
+                "bbox": normalize_bbox(item.get("bbox") or item.get("box")),
+                "text": line[:120] or "目录",
+                "coordinate_system": "pdf_point",
+            }
+
+        pages = sorted(page_hits)
+        return {"pages": pages, "locations": [page_hits[page] for page in pages[:24]]}
 
     def _collect_table_coverage(self, sections: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """统计商务/技术偏离表的覆盖情况。"""
