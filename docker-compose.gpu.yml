@@ -29,3 +29,4 @@ services:
       - OCR_STORAGE_ROOT=/app/.ocr_runtime
       - PADDLE_PDX_CACHE_HOME=/app/.ocr_runtime/paddlex-cache
       - OCR_RUNTIME_TEMP_DIR=/app/.ocr_runtime/runtime-tmp
+      - CONSISTENCY_EMBEDDING_DEVICE=${CONSISTENCY_EMBEDDING_DEVICE:-cuda:0}

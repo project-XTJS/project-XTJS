@@ -18,18 +18,18 @@ class PresentationMixin:
                 raw = evidence.get("left_preview") or evidence.get("left_title") or evidence.get("preview") or "-"
             else:
                 raw = evidence.get("right_preview") or evidence.get("right_title") or evidence.get("preview") or "-"
-            return self.helper._project_trim_text(str(raw), 200)
+            return self.helper._project_trim_text(str(raw), 4000)
         if kind == "block":
-            return self.helper._project_trim_text(str(evidence.get("text") or "-"), 200)
+            return self.helper._project_trim_text(str(evidence.get("text") or "-"), 4000)
         if kind == "similar_block":
             raw = evidence.get(f"{side}_text") or evidence.get("text") or "-"
-            return self.helper._project_trim_text(str(raw), 200)
+            return self.helper._project_trim_text(str(raw), 4000)
         if kind == "table":
             rows = evidence.get("sample_rows") or []
-            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 200) if rows else "-"
+            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 4000) if rows else "-"
         if kind == "similar_table":
             rows = evidence.get(f"{side}_sample_rows") or evidence.get("sample_rows") or []
-            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 200) if rows else "-"
+            return self.helper._project_trim_text(json.dumps(rows, ensure_ascii=False), 4000) if rows else "-"
         if kind == "image":
             width = evidence.get(f"{side}_width")
             height = evidence.get(f"{side}_height")

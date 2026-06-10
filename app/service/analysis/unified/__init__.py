@@ -18,6 +18,7 @@ from app.service.analysis.compliance.integrity import IntegrityChecker
 from app.service.analysis.itemized import ItemizedPricingChecker
 from app.service.analysis.reasonableness import ReasonablenessChecker
 from app.service.analysis.verification import VerificationChecker
+from app.service.analysis.project_input_loader import ProjectAnalysisInputLoader
 from app.service.postgresql_service import PostgreSQLService
 
 from .constants import (
@@ -216,6 +217,22 @@ class UnifiedBusinessReviewService(
             payload_data=payload_data,
         )
 
+    def review_project_deviation_documents(
+        self,
+        *,
+        project_identifier: str,
+    ) -> dict[str, Any]:
+        """从数据库中读取招标、商务标、技术标并执行独立偏离表检查。"""
+        payload_data = ProjectAnalysisInputLoader(self.db_service).load(
+            project_identifier
+        )
+        if not payload_data:
+            raise ValueError(f"project not found: {project_identifier}")
+        return self._review_project_deviation_documents(
+            project_identifier=project_identifier,
+            payload_data=payload_data,
+        )
+
     def persist_project_business_review(
         self,
         *,
@@ -228,6 +245,31 @@ class UnifiedBusinessReviewService(
             raise ValueError(f"project not found: {project_identifier}")
 
         review = self.review_project_business_documents(project_identifier=project_identifier)
+        result_record = self.db_service.upsert_project_result_item(
+            project_identifier,
+            result_key,
+            review,
+        )
+        return {
+            "project": project,
+            "result_key": result_key,
+            "overview": self._build_response_overview(review),
+            "review": review,
+            "result_record": result_record,
+        }
+
+    def persist_project_deviation_review(
+        self,
+        *,
+        project_identifier: str,
+        result_key: str = "deviation_check",
+    ) -> dict[str, Any]:
+        """执行项目偏离表检查并持久化结果。"""
+        project = self.db_service.get_project_by_identifier(project_identifier)
+        if not project:
+            raise ValueError(f"project not found: {project_identifier}")
+
+        review = self.review_project_deviation_documents(project_identifier=project_identifier)
         result_record = self.db_service.upsert_project_result_item(
             project_identifier,
             result_key,

@@ -7,10 +7,11 @@
 """
 
 import asyncio
+import json
 import logging
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -22,6 +23,7 @@ from app.core.document_types import (
 )
 from app.router.dependencies import (
     get_db_service,
+    get_cache_service,
     get_oss_service,
     get_text_analysis_service,
 )
@@ -33,6 +35,7 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service.cache_service import CacheUnavailableError, RedisCacheService, invalidate_project_cache
 from app.service.analysis.duplicate_merge import build_duplicate_merge_results
 from app.service.document_ingest_service import (
     upload_and_create_document_without_ocr,
@@ -46,6 +49,11 @@ from app.service.project_runtime import (
     ensure_project_cancel_event,
     register_project_task,
     unregister_project_task,
+)
+from app.service.workflow_scope import (
+    build_excluded_bidders_from_technical_ids,
+    filter_document_records,
+    normalize_workflow_scope,
 )
 
 router = APIRouter()
@@ -94,6 +102,48 @@ PROJECT_BATCH_MAX_BID_GROUPS = int(
 )
 
 
+def _set_cache_header(response: Response | None, status: str) -> None:
+    if response is not None:
+        response.headers["X-XTJS-Cache"] = status
+
+
+def _cache_get_or_set_payload(
+    *,
+    cache_service: RedisCacheService,
+    cache_key: str,
+    ttl_seconds: int,
+    response: Response | None,
+    factory,
+):
+    if not settings.XTJS_CACHE_ENABLED:
+        _set_cache_header(response, "disabled")
+        return factory()
+    try:
+        payload, cache_status = cache_service.get_or_set_json(cache_key, ttl_seconds, factory)
+        _set_cache_header(response, cache_status)
+        return payload
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _invalidate_project_cache_or_error(identifier_id: str | None = None) -> None:
+    if not settings.XTJS_CACHE_ENABLED:
+        return
+    try:
+        invalidate_project_cache(identifier_id)
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _invalidate_project_cache_for_task(identifier_id: str) -> None:
+    if not settings.XTJS_CACHE_ENABLED:
+        return
+    try:
+        invalidate_project_cache(identifier_id)
+    except CacheUnavailableError:
+        logger.exception("project cache invalidation failed identifier=%s", identifier_id)
+
+
 def _get_ocr_task_lock() -> asyncio.Lock:
     """返回全局 OCR 串行锁，避免多个异步任务同时压到同一个 OCR 运行时。"""
     global _OCR_TASK_LOCK
@@ -114,7 +164,8 @@ def _collect_tender_documents(payload: dict) -> list[dict]:
     """从项目关系中收集唯一的招标文件列表。"""
     documents: list[dict] = []
     seen: set[str] = set()
-    for record in payload.get("documents") or []:
+    records = list(payload.get("documents") or [])
+    for record in records:
         identifier = str(record.get("tender_identifier_id") or "").strip()
         if not identifier or identifier in seen:
             continue
@@ -150,11 +201,21 @@ def _collect_business_documents(payload: dict) -> list[dict]:
     return documents
 
 
-def _collect_technical_documents(payload: dict) -> list[dict]:
+def _payload_workflow_scope(payload: dict) -> dict:
+    return normalize_workflow_scope(
+        payload.get("workflow_scope")
+        or {}
+    )
+
+
+def _collect_technical_documents(payload: dict, *, include_excluded: bool = False) -> list[dict]:
     """从项目关系中收集唯一的技术标文件列表。"""
     documents: list[dict] = []
     seen: set[str] = set()
-    for record in payload.get("documents") or []:
+    records = list(payload.get("documents") or [])
+    if not include_excluded:
+        records = filter_document_records(records, _payload_workflow_scope(payload))
+    for record in records:
         if str(record.get("relation_role") or "").strip() != DOCUMENT_TYPE_TECHNICAL_BID:
             continue
         identifier = str(record.get("identifier_id") or "").strip()
@@ -169,6 +230,60 @@ def _collect_technical_documents(payload: dict) -> list[dict]:
             }
         )
     return documents
+
+
+def _parse_identifier_array_json(raw_value: Optional[str], *, field_name: str) -> list[str]:
+    """解析前端传来的文档标识数组。"""
+    if raw_value is None or not str(raw_value).strip():
+        return []
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"{field_name} 必须是合法的 JSON 数组。") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail=f"{field_name} 必须是 JSON 数组。")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        identifier = str(item or "").strip()
+        if not identifier or identifier in seen:
+            continue
+        seen.add(identifier)
+        normalized.append(identifier)
+    return normalized
+
+
+def _validate_technical_ocr_exclusions(payload: dict, excluded_identifiers: list[str]) -> tuple[list[str], int]:
+    """校验技术标剔除列表，确保本次 OCR 至少保留一份技术标。"""
+    if not excluded_identifiers:
+        return [], 0
+
+    technical_documents = _collect_technical_documents(payload, include_excluded=True)
+    technical_identifier_set = {
+        str(document.get("identifier_id") or "").strip()
+        for document in technical_documents
+        if str(document.get("identifier_id") or "").strip()
+    }
+    matched = [
+        identifier
+        for identifier in excluded_identifiers
+        if identifier in technical_identifier_set
+    ]
+    if not matched:
+        return [], 0
+
+    remaining = [
+        document
+        for document in technical_documents
+        if str(document.get("identifier_id") or "").strip() not in set(matched)
+    ]
+    if not remaining:
+        raise HTTPException(
+            status_code=400,
+            detail="剔除后至少需要保留一份技术标文件用于 OCR。",
+        )
+    return matched, len(matched)
 
 
 def _collect_documents_by_stage(payload: dict, stage: str) -> list[dict]:
@@ -263,6 +378,21 @@ def _ocr_stage_progress(payload: dict) -> list[dict]:
     progress: list[dict] = []
     for stage in _OCR_STAGE_SEQUENCE:
         documents = _collect_documents_by_stage(payload, stage)
+        all_documents = (
+            _collect_technical_documents(payload, include_excluded=True)
+            if stage == _OCR_STAGE_TECHNICAL
+            else documents
+        )
+        active_ids = {
+            str(document.get("identifier_id") or "").strip()
+            for document in documents
+            if str(document.get("identifier_id") or "").strip()
+        }
+        skipped = [
+            document
+            for document in all_documents
+            if str(document.get("identifier_id") or "").strip() not in active_ids
+        ]
         pending = _pending_documents(documents)
         completed = [item for item in documents if item.get("extracted")]
         progress.append(
@@ -273,8 +403,10 @@ def _ocr_stage_progress(payload: dict) -> list[dict]:
                 "total_count": len(documents),
                 "completed_count": len(completed),
                 "pending_count": len(pending),
+                "skipped_count": len(skipped),
                 "completed_documents": completed,
                 "pending_documents": pending,
+                "skipped_documents": skipped,
             }
         )
     return progress
@@ -284,10 +416,12 @@ def _ocr_progress_totals(stage_progress: list[dict]) -> dict:
     total_count = sum(int(item.get("total_count") or 0) for item in stage_progress)
     completed_count = sum(int(item.get("completed_count") or 0) for item in stage_progress)
     pending_count = sum(int(item.get("pending_count") or 0) for item in stage_progress)
+    skipped_count = sum(int(item.get("skipped_count") or 0) for item in stage_progress)
     return {
         "total_count": total_count,
         "completed_count": completed_count,
         "pending_count": pending_count,
+        "skipped_count": skipped_count,
     }
 
 
@@ -334,6 +468,7 @@ async def _run_project_ocr_task(
             db_service.refresh_project_parsing_status,
             identifier_id,
         )
+        await run_in_threadpool(_invalidate_project_cache_for_task, identifier_id)
         logger.info(
             "project ocr task finished identifier=%s ocr_type=%s success=%s failed=%s parsing_status=%s",
             identifier_id,
@@ -630,8 +765,10 @@ async def _build_async_ocr_response(
     db_service: PostgreSQLService,
     oss_service: MinioService,
     analysis_service,
+    extra_response: Optional[dict] = None,
 ) -> dict:
     """统一处理单类文档 OCR 的排队响应。"""
+    _invalidate_project_cache_or_error(identifier_id)
     refreshed_project = await run_in_threadpool(
         db_service.refresh_project_parsing_status,
         identifier_id,
@@ -661,6 +798,7 @@ async def _build_async_ocr_response(
                 "totals": _ocr_progress_totals(stage_progress),
                 "stages": stage_progress,
             },
+            **(extra_response or {}),
         }
 
     await _enqueue_project_ocr_pipeline(
@@ -688,6 +826,7 @@ async def _build_async_ocr_response(
             "totals": _ocr_progress_totals(stage_progress),
             "stages": stage_progress,
         },
+        **(extra_response or {}),
     }
 
 
@@ -778,11 +917,13 @@ def _persist_result_item(
     result_value: dict,
 ) -> dict:
     """将单个分析结果写入项目结果存储。"""
-    return db_service.upsert_project_result_item(
+    result = db_service.upsert_project_result_item(
         project_identifier_id=project_identifier,
         result_key=result_key,
         result_value=result_value,
     )
+    _invalidate_project_cache_or_error(project_identifier)
+    return result
 
 
 def _persist_merge_result_items(
@@ -803,6 +944,7 @@ def _persist_merge_result_items(
             result_key=result_key,
             result_value=result_value,
         )
+    _invalidate_project_cache_or_error(project_identifier)
     return merged_results
 
 
@@ -1070,6 +1212,7 @@ async def ingest_and_recognize_project_documents(
     else:
         batch_status = "failed"
 
+    _invalidate_project_cache_or_error(str(project["identifier_id"]))
     return {
         "status": batch_status,
         "project": project,
@@ -1187,26 +1330,31 @@ def _build_project_ocr_status_response(
 @router.get("/projects/{identifier_id}/ocr-status", summary="查询项目 OCR 断点状态")
 async def get_project_ocr_status(
     identifier_id: str,
+    response: Response,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """查询项目下各阶段文档 OCR 完成/待处理数量。"""
-    refreshed_project = await run_in_threadpool(
-        db_service.refresh_project_parsing_status,
-        identifier_id,
-    )
-    if not refreshed_project:
-        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+    def _load_status():
+        refreshed_project = db_service.refresh_project_parsing_status(identifier_id)
+        if not refreshed_project:
+            raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
 
-    project_identifier = str(refreshed_project["identifier_id"])
-    payload = await run_in_threadpool(
-        db_service.get_project_documents_for_duplicate_check,
-        project_identifier,
-    )
-    if not payload:
-        raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
-    return _build_project_ocr_status_response(
-        payload=payload,
-        project_identifier=project_identifier,
+        project_identifier = str(refreshed_project["identifier_id"])
+        payload = db_service.get_project_documents_for_duplicate_check(project_identifier)
+        if not payload:
+            raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+        return _build_project_ocr_status_response(
+            payload=payload,
+            project_identifier=project_identifier,
+        )
+
+    return _cache_get_or_set_payload(
+        cache_service=cache_service,
+        cache_key=cache_service.project_ocr_status_key(identifier_id),
+        ttl_seconds=settings.XTJS_CACHE_OCR_STATUS_TTL_SECONDS,
+        response=response,
+        factory=_load_status,
     )
 
 
@@ -1296,6 +1444,10 @@ async def run_project_business_ocr(
 async def continue_project_technical_ocr(
     identifier_id: str,
     parallelism: int = Form(default=1, ge=1, le=16),
+    excluded_technical_document_identifiers_json: Optional[str] = Form(
+        default=None,
+        description="人工认定不合适、需从本次技术标 OCR 中剔除的技术标文档 UUID JSON 数组。",
+    ),
     analysis_service=Depends(get_text_analysis_service),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
@@ -1306,6 +1458,32 @@ async def continue_project_technical_ocr(
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)
+    excluded_identifiers = _parse_identifier_array_json(
+        excluded_technical_document_identifiers_json,
+        field_name="excluded_technical_document_identifiers_json",
+    )
+    matched_excluded_identifiers, excluded_count = _validate_technical_ocr_exclusions(
+        payload,
+        excluded_identifiers,
+    )
+    if matched_excluded_identifiers:
+        workflow_scope = build_excluded_bidders_from_technical_ids(
+            payload,
+            matched_excluded_identifiers,
+            existing_scope=_payload_workflow_scope(payload),
+            reason="technical_ocr_excluded",
+            source_result_key="business_bid_format_review",
+        )
+        await run_in_threadpool(
+            db_service.update_project_manual_review_workflow_scope,
+            project_identifier_id=project_identifier,
+            workflow_scope=workflow_scope,
+        )
+        await run_in_threadpool(db_service.refresh_project_parsing_status, project_identifier)
+        payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, project_identifier)
+        if not payload:
+            raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+
     return await _build_async_ocr_response(
         identifier_id=project_identifier,
         payload=payload,
@@ -1315,6 +1493,10 @@ async def continue_project_technical_ocr(
         db_service=db_service,
         oss_service=oss_service,
         analysis_service=analysis_service,
+        extra_response={
+            "excluded_technical_document_count": excluded_count,
+            "excluded_technical_document_identifiers": matched_excluded_identifiers,
+        },
     )
 
 

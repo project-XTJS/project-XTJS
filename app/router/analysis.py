@@ -28,6 +28,7 @@ from app.router.postgresql import (
     _ensure_project_analysis_status,
     _refresh_project_or_404,
     _resolve_project_typo_document_types,
+    _run_project_deviation_check,
     _run_project_duplicate_check,
     _run_project_personnel_reuse_check,
     _run_project_typo_check,
@@ -57,7 +58,10 @@ _RUN_ANALYSIS_OPENAPI_EXAMPLES = {
             "project_identifier": "服务器设备",
             "services": [
                 "business_bid_format_review",
+                "deviation_check",
                 "business_bid_duplicate_check",
+                "business_itemized_duplicate_check",
+                "bid_response_duplicate_check",
                 "technical_bid_duplicate_check",
                 "personnel_reuse_check",
                 "typo_check",
@@ -403,7 +407,10 @@ def _build_save_result(
 # 项目级分析服务编排
 _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+    "deviation_check": "deviation_check",
     "business_bid_duplicate_check": "business_bid_duplicate_check",
+    "business_itemized_duplicate_check": "business_itemized_duplicate_check",
+    "bid_response_duplicate_check": "bid_response_duplicate_check",
     "technical_bid_duplicate_check": "technical_bid_duplicate_check",
     "personnel_reuse_check": "personnel_reuse_check",
     "typo_check": "typo_check",
@@ -503,6 +510,7 @@ async def _run_selected_project_services(
     selected_services: list[str],
     max_evidence_sections: int,
     max_pairs_per_type: int,
+    confirmed_personnel_names: list[Any] | None = None,
     db_service: PostgreSQLService,
     duplicate_check_service: Any,
     bid_document_review_service: Any,
@@ -545,6 +553,17 @@ async def _run_selected_project_services(
         try:
             if service_name == "business_bid_format_review":
                 result = await _ensure_business_review_response()
+            elif service_name == "deviation_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                    analysis_name="偏离表检查",
+                )
+                result = await run_in_threadpool(
+                    _run_project_deviation_check,
+                    identifier_id=identifier_id,
+                    db_service=db_service,
+                )
             elif service_name == "business_bid_duplicate_check":
                 _ensure_project_analysis_status(
                     project,
@@ -560,6 +579,40 @@ async def _run_selected_project_services(
                     result_key="business_bid_duplicate_check",
                     db_service=db_service,
                     duplicate_check_service=duplicate_check_service,
+                )
+            elif service_name == "business_itemized_duplicate_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                    analysis_name="business itemized duplicate check",
+                )
+                result = await run_in_threadpool(
+                    _run_project_duplicate_check,
+                    identifier_id=identifier_id,
+                    document_types=["business_bid"],
+                    max_evidence_sections=max_evidence_sections,
+                    max_pairs_per_type=max_pairs_per_type,
+                    result_key="business_itemized_duplicate_check",
+                    db_service=db_service,
+                    duplicate_check_service=duplicate_check_service,
+                    duplicate_scope="itemized_pricing",
+                )
+            elif service_name == "bid_response_duplicate_check":
+                _ensure_project_analysis_status(
+                    project,
+                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                    analysis_name="bid response duplicate check",
+                )
+                result = await run_in_threadpool(
+                    _run_project_duplicate_check,
+                    identifier_id=identifier_id,
+                    document_types=["business_bid", "technical_bid"],
+                    max_evidence_sections=max_evidence_sections,
+                    max_pairs_per_type=max_pairs_per_type,
+                    result_key="bid_response_duplicate_check",
+                    db_service=db_service,
+                    duplicate_check_service=duplicate_check_service,
+                    duplicate_scope="bid_response",
                 )
             elif service_name == "technical_bid_duplicate_check":
                 _ensure_project_analysis_status(
@@ -580,7 +633,7 @@ async def _run_selected_project_services(
             elif service_name == "personnel_reuse_check":
                 _ensure_project_analysis_status(
                     project,
-                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
                     analysis_name="一人多用检查",
                 )
                 result = await run_in_threadpool(
@@ -588,6 +641,7 @@ async def _run_selected_project_services(
                     identifier_id=identifier_id,
                     db_service=db_service,
                     bid_document_review_service=bid_document_review_service,
+                    confirmed_names=confirmed_personnel_names,
                 )
             elif service_name == "typo_check":
                 # 错别字范围依赖当前 OCR 阶段，按需延迟计算即可。
@@ -877,6 +931,7 @@ async def run_text_analysis(
             selected_services=selected_services,
             max_evidence_sections=payload.max_evidence_sections,
             max_pairs_per_type=payload.max_pairs_per_type,
+            confirmed_personnel_names=payload.confirmed_personnel_names,
             db_service=db_service,
             duplicate_check_service=duplicate_check_service,
             bid_document_review_service=bid_document_review_service,

@@ -27,6 +27,10 @@ from app.service.analysis.location_utils import (
     make_location,
     normalize_bbox as normalize_location_bbox,
 )
+from app.service.manual_review.working_copy import (
+    MANUAL_EXTRACTIONS_KEY,
+    PERSONNEL_REUSE_CHECK_KEY,
+)
 
 logger = logging.getLogger(__name__)
 _ERNIE_CSC_CORRECTOR: Any | None = None
@@ -608,6 +612,38 @@ class BidDocumentReviewService:
             },
         }
 
+    def check_text_snippets_for_typos(
+        self,
+        snippets: list[dict[str, Any]],
+        *,
+        ernie_csc_corrector: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run the typo checker on duplicate evidence snippets."""
+        if not snippets:
+            return []
+        corrector = ernie_csc_corrector or self._get_ernie_csc_corrector()
+        document = {
+            "identifier_id": "duplicate-evidence",
+            "relation_id": None,
+            "file_name": "duplicate-evidence",
+            "sections": [
+                {
+                    "type": "text",
+                    "page": snippet.get("page"),
+                    "bbox": snippet.get("bbox"),
+                    "text": snippet.get("text") or "",
+                }
+                for snippet in snippets
+                if str(snippet.get("text") or "").strip()
+            ],
+            "tables": [],
+            "personnel_pages": set(),
+        }
+        return self._extract_document_typo_issues(
+            document,
+            ernie_csc_corrector=corrector,
+        )
+
     # 人员复用服务入口：只执行人员复用检查
     def check_project_personnel_reuse(
         self,
@@ -616,19 +652,29 @@ class BidDocumentReviewService:
         project: dict[str, Any] | None,
         document_records: list[dict[str, Any]],
         document_types: list[str] | None = None,
+        confirmed_names: list[Any] | None = None,
     ) -> dict[str, Any]:
         requested_types, prepared_groups, skipped_groups = self._prepare_document_groups(
             document_records=document_records,
             document_types=document_types,
         )
+        normalized_confirmed_names = self._normalize_confirmed_personnel_names(confirmed_names)
+        if normalized_confirmed_names is not None:
+            for documents in prepared_groups.values():
+                self._apply_confirmed_personnel_names(
+                    documents,
+                    confirmed_names=normalized_confirmed_names,
+                )
         groups: dict[str, Any] = {}
         total_document_count = 0
         total_skipped_document_count = 0
         total_personnel_count = 0
         total_reused_name_count = 0
+        all_prepared_documents: list[dict[str, Any]] = []
 
         for role in requested_types:
             prepared_documents = prepared_groups[role]
+            all_prepared_documents.extend(prepared_documents)
             skipped_documents = skipped_groups[role]
             personnel_reuse_check = self._run_personnel_reuse_check(prepared_documents)
             group_document_count = len(prepared_documents)
@@ -662,8 +708,16 @@ class BidDocumentReviewService:
             "config": {
                 "document_types": list(requested_types),
                 "personnel_reuse_scope": "per_document_type",
+                "confirmation_required": normalized_confirmed_names is None,
+                "confirmation_status": "pending" if normalized_confirmed_names is None else "confirmed",
+                "confirmed_names": normalized_confirmed_names or [],
             },
             "groups": groups,
+            "personnel_extraction": self._build_personnel_extraction_summary(
+                all_prepared_documents,
+                confirmation_status="pending" if normalized_confirmed_names is None else "confirmed",
+            ),
+            "combined_personnel_reuse_check": self._run_personnel_reuse_check(all_prepared_documents),
             "summary": {
                 "requested_document_types": list(requested_types),
                 "document_count": total_document_count,
@@ -674,6 +728,397 @@ class BidDocumentReviewService:
             },
         }
 
+    def build_personnel_reuse_from_draft(
+        self,
+        *,
+        project_identifier: str,
+        project: dict[str, Any] | None,
+        documents: list[dict[str, Any]],
+        confirmation_status: str,
+    ) -> dict[str, Any]:
+        """Build personnel reuse result directly from frontend-edited per-document draft."""
+        prepared_documents = [
+            self._normalize_personnel_draft_document(document)
+            for document in documents
+            if isinstance(document, dict)
+        ]
+        prepared_documents = [document for document in prepared_documents if document is not None]
+
+        requested_types: list[str] = []
+        for document in prepared_documents:
+            document_type = str(document.get("document_type") or DOCUMENT_TYPE_BUSINESS_BID).strip()
+            if document_type not in requested_types:
+                requested_types.append(document_type)
+        if not requested_types:
+            requested_types = [DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID]
+
+        groups: dict[str, Any] = {}
+        all_prepared_documents: list[dict[str, Any]] = []
+        total_personnel_count = 0
+        for role in requested_types:
+            role_documents = [
+                document for document in prepared_documents
+                if str(document.get("document_type") or DOCUMENT_TYPE_BUSINESS_BID).strip() == role
+            ]
+            all_prepared_documents.extend(role_documents)
+            personnel_reuse_check = self._run_personnel_reuse_check(
+                role_documents,
+                include_reuse_issues=confirmation_status == "confirmed",
+            )
+            group_personnel_count = int(personnel_reuse_check.get("personnel_count") or 0)
+            total_personnel_count += group_personnel_count
+            groups[role] = {
+                "documents": self._document_summaries(
+                    role_documents,
+                    include_personnel_details=True,
+                ),
+                "skipped_documents": [],
+                "personnel_reuse_check": personnel_reuse_check,
+                "summary": {
+                    "document_count": len(role_documents),
+                    "skipped_document_count": 0,
+                    "personnel_count": group_personnel_count,
+                    "reused_name_count": int(personnel_reuse_check.get("reused_name_count") or 0),
+                    "suspicious": bool(int(personnel_reuse_check.get("reused_name_count") or 0)),
+                },
+            }
+
+        combined_check = self._run_personnel_reuse_check(
+            all_prepared_documents,
+            include_reuse_issues=confirmation_status == "confirmed",
+        )
+        combined_reused_count = int(combined_check.get("reused_name_count") or 0)
+        return {
+            "project": project or {"identifier_id": project_identifier},
+            "config": {
+                "document_types": list(requested_types),
+                "personnel_reuse_scope": "all_bid_documents",
+                "confirmation_required": confirmation_status != "confirmed",
+                "confirmation_status": confirmation_status,
+                "draft_source": "frontend_review",
+                "confirmed_names": list(combined_check.get("names") or []) if confirmation_status == "confirmed" else [],
+            },
+            "groups": groups,
+            "personnel_extraction": self._build_personnel_extraction_summary(
+                all_prepared_documents,
+                confirmation_status=confirmation_status,
+            ),
+            "combined_personnel_reuse_check": combined_check,
+            "summary": {
+                "requested_document_types": list(requested_types),
+                "document_count": len(all_prepared_documents),
+                "skipped_document_count": 0,
+                "personnel_count": total_personnel_count,
+                "reused_name_count": combined_reused_count,
+                "suspicious": bool(combined_reused_count),
+            },
+        }
+
+    def _normalize_personnel_draft_document(self, document: dict[str, Any]) -> dict[str, Any] | None:
+        identifier_id = str(
+            document.get("document_identifier_id") or
+            document.get("identifier_id") or
+            document.get("doc_id") or
+            ""
+        ).strip()
+        file_name = str(document.get("file_name") or document.get("fileName") or identifier_id or "").strip()
+        if not identifier_id and not file_name:
+            return None
+
+        document_type = str(
+            document.get("document_type") or
+            document.get("relation_role") or
+            DOCUMENT_TYPE_BUSINESS_BID
+        ).strip() or DOCUMENT_TYPE_BUSINESS_BID
+        entries: list[dict[str, Any]] = []
+        for entry in document.get("personnel_entries") or []:
+            normalized = self._normalize_personnel_draft_entry(
+                entry,
+                document_identifier_id=identifier_id,
+                relation_id=document.get("relation_id"),
+                file_name=file_name,
+                document_type=document_type,
+            )
+            if normalized:
+                entries.append(normalized)
+        entries = self._dedupe_personnel_entries_within_document(entries)
+
+        pages = {
+            int(entry["page"])
+            for entry in entries
+            if isinstance(entry.get("page"), int)
+        }
+        return {
+            "identifier_id": identifier_id,
+            "relation_id": document.get("relation_id"),
+            "file_name": file_name,
+            "document_type": document_type,
+            "page_count": int(document.get("page_count") or 0),
+            "layout_section_count": int(document.get("layout_section_count") or 0),
+            "table_count": int(document.get("table_count") or 0),
+            "sections": [],
+            "tables": [],
+            "personnel_entries": entries,
+            "personnel_pages": pages,
+        }
+
+    def _normalize_personnel_draft_entry(
+        self,
+        entry: Any,
+        *,
+        document_identifier_id: str,
+        relation_id: Any,
+        file_name: str,
+        document_type: str = "",
+    ) -> dict[str, Any] | None:
+        if not isinstance(entry, dict):
+            return None
+        name = self._clean_person_name(entry.get("name") or entry.get("person_name") or entry.get("personnel_name"))
+        if not name:
+            return None
+        role = self._normalize_role(entry.get("role") or entry.get("person_role") or entry.get("position") or "待确认") or "待确认"
+        page_value = entry.get("page") or entry.get("page_no") or entry.get("page_number")
+        try:
+            page = int(page_value) if page_value not in (None, "") else None
+        except (TypeError, ValueError):
+            page = None
+        if page is not None and page <= 0:
+            page = None
+        bbox = self._normalize_bbox(entry.get("bbox") or entry.get("box"))
+        text = self._normalize_text(entry.get("text") or entry.get("evidence_text") or entry.get("note") or name)
+        normalized = {
+            "name": name,
+            "role": role,
+            "page": page,
+            "bbox": bbox,
+            "text": text,
+            "source_type": str(entry.get("source_type") or "frontend_personnel_draft"),
+            "document_identifier_id": document_identifier_id,
+            "document_type": str(entry.get("document_type") or document_type or "").strip(),
+            "relation_id": entry.get("relation_id", relation_id),
+            "file_name": entry.get("file_name") or file_name,
+        }
+        normalized["locations"] = [
+            location for location in [
+                make_location(
+                    document_identifier_id=document_identifier_id,
+                    file_name=normalized.get("file_name"),
+                    page=page,
+                    bbox=bbox,
+                    text=text or name,
+                )
+            ] if location
+        ]
+        if entry.get("note"):
+            normalized["note"] = str(entry.get("note") or "").strip()
+        return normalized
+
+    def _manual_personnel_entries_override(
+        self,
+        record: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        manual_payload = self._manual_personnel_payload(record, payload)
+        if manual_payload is None:
+            return False, []
+
+        raw_entries = self._manual_personnel_raw_entries(manual_payload)
+        identifier_id = str(
+            record.get("identifier_id")
+            or record.get("document_identifier_id")
+            or ""
+        ).strip()
+        file_name = str(record.get("file_name") or identifier_id or "").strip()
+        entries: list[dict[str, Any]] = []
+        for raw_entry in raw_entries:
+            normalized = self._normalize_personnel_draft_entry(
+                raw_entry,
+                document_identifier_id=identifier_id,
+                relation_id=record.get("relation_id"),
+                file_name=file_name,
+            )
+            if normalized:
+                normalized["source_type"] = str(
+                    normalized.get("source_type") or "manual_personnel_review"
+                )
+                entries.append(normalized)
+        return True, entries
+
+    @classmethod
+    def _manual_personnel_payload(
+        cls,
+        record: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        direct_payload = cls._as_dict(record.get("manual_personnel_reuse_check"))
+        if direct_payload:
+            return direct_payload
+
+        for source in (
+            payload,
+            cls._as_dict(cls._as_dict(record.get("review_content")).get("effective_content")),
+        ):
+            manual_extractions = cls._as_dict(source.get(MANUAL_EXTRACTIONS_KEY))
+            manual_payload = cls._as_dict(manual_extractions.get(PERSONNEL_REUSE_CHECK_KEY))
+            if manual_payload:
+                return manual_payload
+
+        review_inputs = cls._as_dict(cls._as_dict(record.get("review_content")).get("inputs"))
+        legacy_payload = cls._as_dict(review_inputs.get(PERSONNEL_REUSE_CHECK_KEY))
+        return legacy_payload if legacy_payload else None
+
+    @classmethod
+    def _manual_personnel_raw_entries(cls, manual_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        entries = cls._dict_items(manual_payload.get("personnel_entries"))
+        if entries:
+            return entries
+
+        documents = manual_payload.get("documents")
+        if isinstance(documents, list):
+            collected: list[dict[str, Any]] = []
+            for document in documents:
+                if isinstance(document, dict):
+                    collected.extend(cls._dict_items(document.get("personnel_entries")))
+            return collected
+
+        document = manual_payload.get("document")
+        if isinstance(document, dict):
+            return cls._dict_items(document.get("personnel_entries"))
+
+        confirmed_names = manual_payload.get("confirmed_names")
+        if isinstance(confirmed_names, list):
+            collected = []
+            for item in confirmed_names:
+                if isinstance(item, dict):
+                    name = item.get("name") or item.get("person_name") or item.get("personnel_name")
+                    raw = dict(item)
+                    raw["name"] = name
+                    collected.append(raw)
+                elif str(item or "").strip():
+                    collected.append({"name": str(item).strip(), "role": "manual_confirmed"})
+            return collected
+        return []
+
+    @staticmethod
+    def _as_dict(value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _dict_items(value: Any) -> list[dict[str, Any]]:
+        return [dict(item) for item in value or [] if isinstance(item, dict)]
+
+    def _normalize_confirmed_personnel_names(self, values: list[Any] | None) -> list[str] | None:
+        """Normalize user-confirmed personnel names; None means not confirmed yet."""
+        if values is None:
+            return None
+        names: list[str] = []
+        for value in values:
+            raw_name = value.get("name") if isinstance(value, dict) else value
+            name = self._clean_person_name(raw_name)
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _apply_confirmed_personnel_names(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        confirmed_names: list[str],
+    ) -> None:
+        """Keep only confirmed names and backfill manually added names from OCR text."""
+        confirmed_set = set(confirmed_names)
+        for document in documents:
+            existing_entries = [
+                entry
+                for entry in list(document.get("personnel_entries") or [])
+                if str(entry.get("name") or "").strip() in confirmed_set
+            ]
+            existing_keys = {
+                (
+                    str(entry.get("name") or "").strip(),
+                    entry.get("page"),
+                    str(entry.get("text") or ""),
+                )
+                for entry in existing_entries
+            }
+            for name in confirmed_names:
+                for entry in self._find_person_name_occurrences(document, name):
+                    key = (str(entry.get("name") or "").strip(), entry.get("page"), str(entry.get("text") or ""))
+                    if key in existing_keys:
+                        continue
+                    existing_entries.append(entry)
+                    existing_keys.add(key)
+            document["personnel_entries"] = existing_entries
+            document["personnel_pages"] = {
+                int(entry["page"])
+                for entry in existing_entries
+                if isinstance(entry.get("page"), int)
+            }
+
+    def _find_person_name_occurrences(self, document: dict[str, Any], name: str) -> list[dict[str, Any]]:
+        """Find manually confirmed names in document sections and tables."""
+        entries: list[dict[str, Any]] = []
+        if not name:
+            return entries
+        sources = list(document.get("sections") or []) + list(document.get("tables") or [])
+        for source in sources:
+            text = self._normalize_text(source.get("text") or source.get("raw_text") or source.get("block_content"))
+            if not text or name not in text:
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "role": "待确认",
+                    "page": source.get("page") if isinstance(source.get("page"), int) else None,
+                    "bbox": self._normalize_bbox(source.get("bbox")),
+                    "text": text[:240],
+                    "source_type": "personnel_confirmed_name_search",
+                    "document_identifier_id": document["identifier_id"],
+                    "relation_id": document.get("relation_id"),
+                    "file_name": document.get("file_name"),
+                    "locations": [
+                        location for location in [
+                            make_location(
+                                document_identifier_id=document["identifier_id"],
+                                file_name=document.get("file_name"),
+                                page=source.get("page"),
+                                bbox=source.get("bbox"),
+                                text=name,
+                            )
+                        ] if location
+                    ],
+                }
+            )
+        return entries
+
+    def _build_personnel_extraction_summary(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        confirmation_status: str,
+    ) -> dict[str, Any]:
+        """List all extracted/confirmed names for frontend confirmation."""
+        entries: list[dict[str, Any]] = []
+        for document in documents:
+            entries.extend(list(document.get("personnel_entries") or []))
+        names = sorted(
+            {
+                str(entry.get("name") or "").strip()
+                for entry in entries
+                if str(entry.get("name") or "").strip()
+            }
+        )
+        return {
+            "confirmation_status": confirmation_status,
+            "name_count": len(names),
+            "names": names,
+            "personnel_entries": entries,
+            "documents": self._document_summaries(
+                documents,
+                include_personnel_details=True,
+            ),
+        }
+
     # 文档预处理：提取人员信息、统计基础信息
     def _prepare_document(
         self,
@@ -682,14 +1127,22 @@ class BidDocumentReviewService:
         payload = self._coerce_payload(record.get("content"))
         sections = self._sections(payload)
         tables = self._native_tables(payload)
-        if not sections and not tables:
+        manual_personnel_exists, manual_personnel_entries = self._manual_personnel_entries_override(
+            record,
+            payload,
+        )
+        if not sections and not tables and not manual_personnel_exists:
             return None, self.SKIP_REASON_MISSING_CONTENT
 
         personnel_section_pages = self._detect_personnel_section_pages(sections)
-        personnel_entries = self._extract_personnel_entries(
-            record=record,
-            sections=sections,
-            tables=tables,
+        personnel_entries = (
+            manual_personnel_entries
+            if manual_personnel_exists
+            else self._extract_personnel_entries(
+                record=record,
+                sections=sections,
+                tables=tables,
+            )
         )
         personnel_pages = set(personnel_section_pages)
         personnel_pages.update(
@@ -702,6 +1155,11 @@ class BidDocumentReviewService:
             "identifier_id": str(record.get("identifier_id") or "").strip(),
             "relation_id": record.get("relation_id"),
             "file_name": record.get("file_name"),
+            "document_type": str(
+                record.get("document_type")
+                or record.get("relation_role")
+                or ""
+            ).strip(),
             "page_count": self._page_count(sections, tables),
             "layout_section_count": len(sections),
             "table_count": len(tables),
@@ -811,7 +1269,12 @@ class BidDocumentReviewService:
         }
 
     # 人员复用分析：聚合同名人员信息
-    def _run_personnel_reuse_check(self, documents: list[dict[str, Any]]) -> dict[str, Any]:
+    def _run_personnel_reuse_check(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        include_reuse_issues: bool = True,
+    ) -> dict[str, Any]:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         total_personnel_count = 0
         document_summaries: list[dict[str, Any]] = []
@@ -833,6 +1296,7 @@ class BidDocumentReviewService:
                     "identifier_id": document["identifier_id"],
                     "relation_id": document.get("relation_id"),
                     "file_name": document.get("file_name"),
+                    "document_type": document.get("document_type"),
                     "personnel_count": len(entries),
                     "names": names,
                     "personnel_entries": entries,
@@ -846,13 +1310,20 @@ class BidDocumentReviewService:
 
         reused_names: list[dict[str, Any]] = []
         for name, items in grouped.items():
+            if not include_reuse_issues:
+                continue
+            bidder_keys = {
+                self._personnel_reuse_bidder_key(item)
+                for item in items
+                if self._personnel_reuse_bidder_key(item)
+            }
+            if len(bidder_keys) < 2:
+                continue
             document_ids = {
                 str(item.get("document_identifier_id") or "").strip()
                 for item in items
                 if str(item.get("document_identifier_id") or "").strip()
             }
-            if len(document_ids) < 2:
-                continue
 
             roles = sorted(
                 {
@@ -861,13 +1332,35 @@ class BidDocumentReviewService:
                     if str(item.get("role") or "").strip()
                 }
             )
+            pages = sorted(
+                {
+                    int(item["page"])
+                    for item in items
+                    if isinstance(item.get("page"), int)
+                }
+            )
+            pages_by_file: dict[str, list[int]] = {}
+            for item in items:
+                file_name = str(item.get("file_name") or item.get("document_identifier_id") or "").strip()
+                page = item.get("page")
+                if not file_name or not isinstance(page, int):
+                    continue
+                pages_by_file.setdefault(file_name, [])
+                if page not in pages_by_file[file_name]:
+                    pages_by_file[file_name].append(page)
+            for file_pages in pages_by_file.values():
+                file_pages.sort()
             reused_names.append(
                 {
                     "name": name,
                     "document_count": len(document_ids),
+                    "bidder_count": len(bidder_keys),
+                    "bidder_keys": sorted(bidder_keys),
                     "occurrence_count": len(items),
                     "roles": roles,
-                    "risk_level": self._personnel_reuse_risk_level(roles, len(document_ids)),
+                    "pages": pages,
+                    "pages_by_file": dict(sorted(pages_by_file.items())),
+                    "risk_level": self._personnel_reuse_risk_level(roles, len(bidder_keys)),
                     "locations": collect_locations(items),
                     "occurrences": items,
                 }
@@ -907,6 +1400,20 @@ class BidDocumentReviewService:
                 "同名人员跨不同技术标重复出现时标记为疑似一人多用，建议结合原文页码与框选位置人工复核。",
             ],
         }
+
+    def _personnel_reuse_bidder_key(self, item: dict[str, Any]) -> str:
+        relation_id = item.get("relation_id")
+        if relation_id not in (None, ""):
+            return f"relation:{relation_id}"
+        for key in ("bidder_key", "bidder_name", "company_name"):
+            text = str(item.get(key) or "").strip()
+            if text:
+                return f"{key}:{text}"
+        document_id = str(item.get("document_identifier_id") or "").strip()
+        if document_id:
+            return f"document:{document_id}"
+        file_name = str(item.get("file_name") or "").strip()
+        return f"file:{file_name}" if file_name else ""
 
     def _correct_ernie_csc_batch(
         self,
@@ -1443,18 +1950,42 @@ class BidDocumentReviewService:
             if section_entries:
                 entries.extend(section_entries)
 
-        # 同一文档中同一姓名+角色仅保留质量最高的一条证据，避免多规则重复命中。
+        return self._dedupe_personnel_entries_within_document(entries)
+
+    def _dedupe_personnel_entries_within_document(
+        self,
+        entries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """同一 PDF 内同名人员仅保留一条；不同 PDF 的同名人员不在抽取阶段合并。"""
         selected: dict[tuple[Any, ...], dict[str, Any]] = {}
         for entry in entries:
+            document_key = (
+                entry.get("document_identifier_id")
+                or entry.get("file_name")
+                or ""
+            )
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
             key = (
-                entry.get("document_identifier_id"),
-                entry.get("name"),
-                entry.get("role"),
+                document_key,
+                name,
             )
             existing = selected.get(key)
-            if existing is None or self._personnel_entry_priority(entry) > self._personnel_entry_priority(existing):
+            entry_priority = self._personnel_entry_display_priority(entry)
+            existing_priority = (
+                self._personnel_entry_display_priority(existing)
+                if existing is not None
+                else -1
+            )
+            if existing is None or entry_priority > existing_priority:
                 selected[key] = entry
-            elif existing is not None and self._personnel_entry_priority(entry) == self._personnel_entry_priority(existing):
+            elif existing is not None and entry_priority == existing_priority:
+                existing_role = str(existing.get("role") or "").strip()
+                entry_role = str(entry.get("role") or "").strip()
+                if existing_role in ("", "待确认") and entry_role not in ("", "待确认"):
+                    selected[key] = entry
+                    continue
                 existing_page = int(existing.get("page") or 10**9)
                 entry_page = int(entry.get("page") or 10**9)
                 if entry_page < existing_page:
@@ -1722,6 +2253,7 @@ class BidDocumentReviewService:
             "text": self._normalize_text(evidence_text),
             "source_type": source_type,
             "document_identifier_id": str(record.get("identifier_id") or "").strip(),
+            "document_type": str(record.get("document_type") or record.get("relation_role") or "").strip(),
             "relation_id": record.get("relation_id"),
             "file_name": record.get("file_name"),
         }

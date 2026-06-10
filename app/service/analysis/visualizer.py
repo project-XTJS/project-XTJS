@@ -1345,11 +1345,11 @@ class ReportVisualizer:
         details_html = "".join([f"<li>{html.escape(d)}</li>" for d in details])
 
         overview_locations = []
-        for entry in total_candidates[:6]:
-            overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "总价"))
+        for entry in extracted_items[:6]:
+            overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "分项金额"))
         if not overview_locations:
-            for entry in extracted_items[:6]:
-                overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "分项金额"))
+            for entry in total_candidates[:6]:
+                overview_locations.extend(self._entry_locations(entry, default_label=entry.get("label") or "总价"))
         location_html = self._render_location_summary(locations=overview_locations, limit=6)
         
         sum_panel = ""

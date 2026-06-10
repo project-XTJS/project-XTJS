@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
 from app.service.analysis_service import get_analysis_service
+from app.service.cache_service import RedisCacheService, get_cache_service as get_shared_cache_service
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 
@@ -42,6 +43,11 @@ def get_db_service() -> PostgreSQLService:
 def get_oss_service() -> MinioService:
     """获取 MinIO 对象存储服务实例。"""
     return MinioService()
+
+
+def get_cache_service() -> RedisCacheService:
+    """获取生产缓存服务实例。"""
+    return get_shared_cache_service()
 
 
 # 分析服务

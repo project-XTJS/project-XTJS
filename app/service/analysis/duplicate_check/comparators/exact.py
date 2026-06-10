@@ -125,9 +125,9 @@ def _build_block_run_item(
         "sentence_count": sentence_count,
         "left_start_index": first_left.get("sequence"),
         "right_start_index": first_right.get("sequence"),
-        "text": clip(left_text, 200),
-        "left_text": clip(left_text, 200),
-        "right_text": clip(right_text, 200),
+        "text": clip(left_text, 4000),
+        "left_text": clip(left_text, 4000),
+        "right_text": clip(right_text, 4000),
     }
 
 
@@ -186,8 +186,8 @@ def compare_sections(
                 "left_bbox": left_section.get("bbox"),
                 "right_bbox": right_section.get("bbox"),
                 "exact": True,
-                "left_preview": clip(left_section.get("text") or left_section.get("preview") or "", 200),
-                "right_preview": clip(right_section.get("text") or right_section.get("preview") or "", 200),
+                "left_preview": clip(left_section.get("text") or left_section.get("preview") or "", 4000),
+                "right_preview": clip(right_section.get("text") or right_section.get("preview") or "", 4000),
             }
         )
         if len(items) >= max_evidence_sections:

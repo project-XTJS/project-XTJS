@@ -32,6 +32,5 @@ CHECK_DISPLAY_ORDER = (
     "consistency_check",
     "pricing_check",
     "itemized_pricing_check",
-    "deviation_check",
     "verification_check",
 )

@@ -11,7 +11,6 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-import psycopg2
 from fastapi.encoders import jsonable_encoder
 from psycopg2.extras import Json, RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
@@ -32,6 +31,18 @@ from app.service.analysis.location_utils import (
     normalize_locations,
 )
 from app.service.minio_service import MinioService
+from app.service.manual_review_state import (
+    MANUAL_REVIEW_RESULTS_KEY,
+    build_manual_review_results,
+    build_review_content,
+    effective_document_content,
+    manual_review_results_from_record,
+    normalize_review_content,
+)
+from app.service.workflow_scope import (
+    filter_document_records,
+    workflow_scope_from_result_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -610,6 +621,51 @@ class PostgreSQLService:
 
     def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """按项目下文档 extracted 状态重算 0/1/2/3 的 OCR 阶段。"""
+        payload = self.get_project_documents_for_duplicate_check(identifier_id)
+        if not payload:
+            return None
+
+        project = payload.get("project") or {}
+        normalized_identifier = str(project.get("identifier_id") or identifier_id)
+        documents = list(payload.get("documents") or [])
+        workflow_scope = payload.get("workflow_scope") or {}
+        active_documents = filter_document_records(documents, workflow_scope)
+
+        def unique_records(records: list[dict[str, Any]], role: str) -> dict[str, dict[str, Any]]:
+            values: dict[str, dict[str, Any]] = {}
+            for record in records:
+                if str(record.get("relation_role") or "") != role:
+                    continue
+                doc_id = str(record.get("identifier_id") or "").strip()
+                if doc_id:
+                    values.setdefault(doc_id, record)
+            return values
+
+        tender_docs: dict[str, dict[str, Any]] = {}
+        for record in documents:
+            tender_id = str(record.get("tender_identifier_id") or "").strip()
+            if tender_id:
+                tender_docs.setdefault(
+                    tender_id,
+                    {"extracted": bool(record.get("tender_extracted"))},
+                )
+        business_docs = unique_records(documents, "business_bid")
+        technical_docs = unique_records(active_documents, "technical_bid")
+
+        def extracted_count(records: dict[str, dict[str, Any]]) -> int:
+            return sum(1 for item in records.values() if bool(item.get("extracted")))
+
+        if not tender_docs or extracted_count(tender_docs) < len(tender_docs):
+            next_status = self.PARSING_STATUS_PENDING
+        elif not business_docs or extracted_count(business_docs) < len(business_docs):
+            next_status = self.PARSING_STATUS_TENDER_OCR_COMPLETED
+        elif not technical_docs or extracted_count(technical_docs) < len(technical_docs):
+            next_status = self.PARSING_STATUS_BUSINESS_OCR_COMPLETED
+        else:
+            next_status = self.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
+
+        return self.update_project_parsing_status(normalized_identifier, next_status)
+
         status_query = """
             WITH project_row AS (
                 SELECT identifier_id
@@ -712,6 +768,8 @@ class PostgreSQLService:
         file_url: str,
         document_type: str,
         identifier_id: Optional[str] = None,
+        source_file_hash: Optional[str] = None,
+        source_file_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         """创建文档记录（不含识别内容），文档 UUID 默认由数据库生成。"""
         identifier = (identifier_id or "").strip() or None
@@ -727,8 +785,15 @@ class PostgreSQLService:
                         raise ValueError(f"文档标识已存在：{identifier}")
                     cursor.execute(
                         """
-                        INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO xtjs_documents (
+                            identifier_id,
+                            document_type,
+                            file_name,
+                            file_url,
+                            source_file_hash,
+                            source_file_size
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         RETURNING
                             identifier_id,
                             document_type,
@@ -736,6 +801,13 @@ class PostgreSQLService:
                             file_url,
                             extracted,
                             content,
+                            review_content,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id,
                             deleted,
                             create_time,
                             update_time
@@ -745,13 +817,21 @@ class PostgreSQLService:
                             normalized_document_type,
                             normalized_file_name,
                             normalized_file_url,
+                            source_file_hash,
+                            source_file_size,
                         ),
                     )
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO xtjs_documents (document_type, file_name, file_url)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO xtjs_documents (
+                            document_type,
+                            file_name,
+                            file_url,
+                            source_file_hash,
+                            source_file_size
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
                         RETURNING
                             identifier_id,
                             document_type,
@@ -759,6 +839,13 @@ class PostgreSQLService:
                             file_url,
                             extracted,
                             content,
+                            review_content,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id,
                             deleted,
                             create_time,
                             update_time
@@ -767,6 +854,8 @@ class PostgreSQLService:
                             normalized_document_type,
                             normalized_file_name,
                             normalized_file_url,
+                            source_file_hash,
+                            source_file_size,
                         ),
                     )
                 return dict(cursor.fetchone())
@@ -778,6 +867,12 @@ class PostgreSQLService:
         document_type: str,
         recognition_content: Dict[str, Any],
         identifier_id: Optional[str] = None,
+        source_file_hash: Optional[str] = None,
+        source_file_size: Optional[int] = None,
+        ocr_cache_key: Optional[str] = None,
+        ocr_engine_version: Optional[str] = None,
+        ocr_config_hash: Optional[str] = None,
+        ocr_cache_source_document_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """创建文档记录并同时写入识别内容，文档 UUID 默认由数据库生成。"""
         identifier = (identifier_id or "").strip() or None
@@ -796,8 +891,19 @@ class PostgreSQLService:
                         raise ValueError(f"文档标识已存在：{identifier}")
                     cursor.execute(
                         """
-                        INSERT INTO xtjs_documents (identifier_id, document_type, file_name, file_url)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO xtjs_documents (
+                            identifier_id,
+                            document_type,
+                            file_name,
+                            file_url,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING identifier_id, document_type
                         """,
                         (
@@ -805,19 +911,41 @@ class PostgreSQLService:
                             normalized_document_type,
                             normalized_file_name,
                             normalized_file_url,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id,
                         ),
                     )
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO xtjs_documents (document_type, file_name, file_url)
-                        VALUES (%s, %s, %s)
+                        INSERT INTO xtjs_documents (
+                            document_type,
+                            file_name,
+                            file_url,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING identifier_id, document_type
                         """,
                         (
                             normalized_document_type,
                             normalized_file_name,
                             normalized_file_url,
+                            source_file_hash,
+                            source_file_size,
+                            ocr_cache_key,
+                            ocr_engine_version,
+                            ocr_config_hash,
+                            ocr_cache_source_document_id,
                         ),
                     )
                 document = dict(cursor.fetchone())
@@ -825,7 +953,16 @@ class PostgreSQLService:
                 cursor.execute(
                     """
                     UPDATE xtjs_documents
-                    SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
+                    SET
+                        content = %s,
+                        extracted = TRUE,
+                        source_file_hash = COALESCE(%s, source_file_hash),
+                        source_file_size = COALESCE(%s, source_file_size),
+                        ocr_cache_key = COALESCE(%s, ocr_cache_key),
+                        ocr_engine_version = COALESCE(%s, ocr_engine_version),
+                        ocr_config_hash = COALESCE(%s, ocr_config_hash),
+                        ocr_cache_source_document_id = %s,
+                        update_time = CURRENT_TIMESTAMP
                     WHERE identifier_id = %s
                     RETURNING
                         identifier_id,
@@ -834,11 +971,27 @@ class PostgreSQLService:
                         file_url,
                         extracted,
                         content,
+                        review_content,
+                        source_file_hash,
+                        source_file_size,
+                        ocr_cache_key,
+                        ocr_engine_version,
+                        ocr_config_hash,
+                        ocr_cache_source_document_id,
                         deleted,
                         create_time,
                         update_time
                     """,
-                    (Json(recognition_content), document["identifier_id"]),
+                    (
+                        Json(recognition_content),
+                        source_file_hash,
+                        source_file_size,
+                        ocr_cache_key,
+                        ocr_engine_version,
+                        ocr_config_hash,
+                        ocr_cache_source_document_id,
+                        document["identifier_id"],
+                    ),
                 )
                 updated_document = dict(cursor.fetchone())
 
@@ -890,6 +1043,13 @@ class PostgreSQLService:
                         file_url,
                         extracted,
                         content,
+                        review_content,
+                        source_file_hash,
+                        source_file_size,
+                        ocr_cache_key,
+                        ocr_engine_version,
+                        ocr_config_hash,
+                        ocr_cache_source_document_id,
                         deleted,
                         create_time,
                         update_time
@@ -918,6 +1078,13 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                review_content,
+                source_file_hash,
+                source_file_size,
+                ocr_cache_key,
+                ocr_engine_version,
+                ocr_config_hash,
+                ocr_cache_source_document_id,
                 deleted,
                 create_time,
                 update_time
@@ -931,6 +1098,149 @@ class PostgreSQLService:
                 cursor.execute(query, (resolved_identifier,))
                 result = cursor.fetchone()
                 return dict(result) if result else None
+
+    def get_document_review_content(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """Return the normalized manual OCR working copy for a document."""
+        document = self.get_document_by_identifier(identifier_id)
+        if not document:
+            return None
+        return {
+            "identifier_id": str(document["identifier_id"]),
+            "document_type": document.get("document_type"),
+            "file_name": document.get("file_name"),
+            "review_content": normalize_review_content(
+                document.get("review_content"),
+                content=document.get("content"),
+            ),
+        }
+
+    def update_document_review_content(
+        self,
+        identifier_id: str,
+        *,
+        effective_content: Dict[str, Any],
+        inputs: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Save a manual OCR working copy while keeping raw content unchanged."""
+        if not isinstance(effective_content, dict):
+            raise ValueError("effective_content must be a JSON object")
+        if inputs is not None and not isinstance(inputs, dict):
+            raise ValueError("inputs must be a JSON object")
+
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute(
+                    """
+                    SELECT identifier_id, content, review_content
+                    FROM xtjs_documents
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    FOR UPDATE
+                    """,
+                    (normalized_identifier,),
+                )
+                document = cursor.fetchone()
+                if not document:
+                    return None
+                existing = normalize_review_content(
+                    document.get("review_content"),
+                    content=document.get("content"),
+                )
+                next_inputs = dict(existing.get("inputs") or {})
+                next_inputs.update(dict(inputs or {}))
+                review_content = build_review_content(
+                    content=document.get("content"),
+                    existing_review_content=document.get("review_content"),
+                    effective_content=effective_content,
+                )
+                review_content["inputs"] = next_inputs
+                cursor.execute(
+                    """
+                    UPDATE xtjs_documents
+                    SET review_content = %s, update_time = CURRENT_TIMESTAMP
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    RETURNING identifier_id, content, review_content, update_time
+                    """,
+                    (
+                        Json(jsonable_encoder(review_content)),
+                        normalized_identifier,
+                    ),
+                )
+                updated = cursor.fetchone()
+                if not updated:
+                    return None
+                return {
+                    "identifier_id": str(updated["identifier_id"]),
+                    "review_content": normalize_review_content(
+                        updated.get("review_content"),
+                        content=updated.get("content"),
+                    ),
+                }
+
+    def update_document_review_input(
+        self,
+        identifier_id: str,
+        *,
+        input_key: str,
+        input_value: Dict[str, Any],
+        effective_content: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update one business-domain input in a document working copy."""
+        normalized_input_key = str(input_key or "").strip()
+        if not normalized_input_key:
+            raise ValueError("input_key is required")
+        if not isinstance(input_value, dict):
+            raise ValueError("input_value must be a JSON object")
+
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute(
+                    """
+                    SELECT identifier_id, content, review_content
+                    FROM xtjs_documents
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    FOR UPDATE
+                    """,
+                    (normalized_identifier,),
+                )
+                document = cursor.fetchone()
+                if not document:
+                    return None
+                next_effective = (
+                    effective_content
+                    if effective_content is not None
+                    else effective_document_content(dict(document))
+                )
+                review_content = build_review_content(
+                    content=document.get("content"),
+                    existing_review_content=document.get("review_content"),
+                    effective_content=next_effective,
+                    input_key=normalized_input_key,
+                    input_value=input_value,
+                )
+                cursor.execute(
+                    """
+                    UPDATE xtjs_documents
+                    SET review_content = %s, update_time = CURRENT_TIMESTAMP
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    RETURNING identifier_id, content, review_content, update_time
+                    """,
+                    (
+                        Json(jsonable_encoder(review_content)),
+                        normalized_identifier,
+                    ),
+                )
+                updated = cursor.fetchone()
+                if not updated:
+                    return None
+                return {
+                    "identifier_id": str(updated["identifier_id"]),
+                    "review_content": normalize_review_content(
+                        updated.get("review_content"),
+                        content=updated.get("content"),
+                    ),
+                }
 
     def update_document(
         self,
@@ -963,6 +1273,13 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                review_content,
+                source_file_hash,
+                source_file_size,
+                ocr_cache_key,
+                ocr_engine_version,
+                ocr_config_hash,
+                ocr_cache_source_document_id,
                 deleted,
                 create_time,
                 update_time
@@ -979,6 +1296,12 @@ class PostgreSQLService:
         self,
         identifier_id: str,
         recognition_content: Dict[str, Any],
+        source_file_hash: Optional[str] = None,
+        source_file_size: Optional[int] = None,
+        ocr_cache_key: Optional[str] = None,
+        ocr_engine_version: Optional[str] = None,
+        ocr_config_hash: Optional[str] = None,
+        ocr_cache_source_document_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """覆盖写入文档的识别内容，并标记为已提取。"""
         if not isinstance(recognition_content, dict):
@@ -986,7 +1309,16 @@ class PostgreSQLService:
 
         query = """
             UPDATE xtjs_documents
-            SET content = %s, extracted = TRUE, update_time = CURRENT_TIMESTAMP
+            SET
+                content = %s,
+                extracted = TRUE,
+                source_file_hash = COALESCE(%s, source_file_hash),
+                source_file_size = COALESCE(%s, source_file_size),
+                ocr_cache_key = COALESCE(%s, ocr_cache_key),
+                ocr_engine_version = COALESCE(%s, ocr_engine_version),
+                ocr_config_hash = COALESCE(%s, ocr_config_hash),
+                ocr_cache_source_document_id = %s,
+                update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
             RETURNING
                 identifier_id,
@@ -995,6 +1327,13 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                review_content,
+                source_file_hash,
+                source_file_size,
+                ocr_cache_key,
+                ocr_engine_version,
+                ocr_config_hash,
+                ocr_cache_source_document_id,
                 deleted,
                 create_time,
                 update_time
@@ -1002,9 +1341,134 @@ class PostgreSQLService:
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
-                cursor.execute(query, (Json(recognition_content), normalized_identifier))
+                cursor.execute(
+                    query,
+                    (
+                        Json(recognition_content),
+                        source_file_hash,
+                        source_file_size,
+                        ocr_cache_key,
+                        ocr_engine_version,
+                        ocr_config_hash,
+                        ocr_cache_source_document_id,
+                        normalized_identifier,
+                    ),
+                )
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
+
+    def update_document_source_metadata(
+        self,
+        identifier_id: str,
+        *,
+        source_file_hash: str,
+        source_file_size: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Persist source file hash/size for documents created before OCR runs."""
+        query = """
+            UPDATE xtjs_documents
+            SET
+                source_file_hash = %s,
+                source_file_size = %s,
+                update_time = CURRENT_TIMESTAMP
+            WHERE identifier_id = %s AND deleted = FALSE
+            RETURNING
+                identifier_id,
+                document_type,
+                file_name,
+                file_url,
+                extracted,
+                content,
+                review_content,
+                source_file_hash,
+                source_file_size,
+                ocr_cache_key,
+                ocr_engine_version,
+                ocr_config_hash,
+                ocr_cache_source_document_id,
+                deleted,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute(
+                    query,
+                    (
+                        source_file_hash,
+                        source_file_size,
+                        normalized_identifier,
+                    ),
+                )
+                updated = cursor.fetchone()
+                return dict(updated) if updated else None
+
+    def find_reusable_ocr_document(
+        self,
+        *,
+        source_file_hash: str,
+        document_type: str,
+        ocr_engine_version: str,
+        ocr_config_hash: str,
+        exclude_identifier_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find an extracted document with equivalent source and OCR configuration."""
+        normalized_hash = str(source_file_hash or "").strip()
+        normalized_type = self._normalize_document_type(document_type)
+        normalized_engine = str(ocr_engine_version or "").strip()
+        normalized_config = str(ocr_config_hash or "").strip()
+        if not normalized_hash or not normalized_engine or not normalized_config:
+            return None
+
+        conditions = [
+            "deleted = FALSE",
+            "extracted = TRUE",
+            "content IS NOT NULL",
+            "source_file_hash = %s",
+            "document_type = %s",
+            "ocr_engine_version = %s",
+            "ocr_config_hash = %s",
+        ]
+        values: list[Any] = [
+            normalized_hash,
+            normalized_type,
+            normalized_engine,
+            normalized_config,
+        ]
+        normalized_exclude = self._extract_identifier(exclude_identifier_id)
+        if normalized_exclude:
+            conditions.append("identifier_id <> %s")
+            values.append(normalized_exclude)
+
+        query = f"""
+            SELECT
+                identifier_id,
+                document_type,
+                file_name,
+                file_url,
+                extracted,
+                content,
+                review_content,
+                source_file_hash,
+                source_file_size,
+                ocr_cache_key,
+                ocr_engine_version,
+                ocr_config_hash,
+                ocr_cache_source_document_id,
+                deleted,
+                create_time,
+                update_time
+            FROM xtjs_documents
+            WHERE {" AND ".join(conditions)}
+            ORDER BY update_time DESC, create_time DESC, identifier_id DESC
+            LIMIT 1
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, tuple(values))
+                result = cursor.fetchone()
+                return dict(result) if result else None
 
     def soft_delete_document(self, identifier_id: str) -> bool:
         """软删除文档。"""
@@ -1479,6 +1943,49 @@ class PostgreSQLService:
                     business_bid["identifier_id"],
                     technical_bid["identifier_id"],
                 )
+
+    def detach_technical_bid_documents_from_project(
+        self,
+        *,
+        project_identifier: str,
+        technical_bid_document_identifiers: list[str],
+    ) -> int:
+        """从项目绑定关系中剔除指定技术标，保留招标文件和商务标绑定。"""
+        normalized_project_identifier = self._normalize_required_identifier(
+            project_identifier,
+            "project_identifier",
+        )
+        normalized_identifiers = [
+            str(identifier or "").strip()
+            for identifier in (technical_bid_document_identifiers or [])
+            if str(identifier or "").strip()
+        ]
+        if not normalized_identifiers:
+            return 0
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cursor:
+                project = self._get_project_record(cursor, normalized_project_identifier)
+                if not project:
+                    raise ValueError(f"项目不存在：{normalized_project_identifier}")
+
+                detached_count = 0
+                for document_identifier in dict.fromkeys(normalized_identifiers):
+                    resolved_document_identifier = self._resolve_document_identifier(
+                        cursor,
+                        document_identifier,
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE xtjs_project_documents
+                        SET technical_bid_document_id = NULL
+                        WHERE project_id = %s
+                          AND technical_bid_document_id = %s
+                        """,
+                        (project["identifier_id"], resolved_document_identifier),
+                    )
+                    detached_count += int(cursor.rowcount or 0)
+                return detached_count
 
     def delete_relation(self, relation_id: int) -> bool:
         """物理删除一条项目文档关系。"""
@@ -2212,9 +2719,9 @@ class PostgreSQLService:
     def _sanitize_project_result_record(cls, record: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(record)
         if "result" in payload:
-            payload["result"] = cls._strip_legacy_project_file_urls(payload.get("result"))
-        if payload.get("result_fot_frontend") is None:
-            payload["result_fot_frontend"] = {}
+            result_payload = cls._strip_legacy_project_file_urls(payload.get("result"))
+            payload["result"] = result_payload if isinstance(result_payload, dict) else {}
+        payload[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results_from_record(payload)
         return payload
 
     def _prepare_project_result_for_persistence(
@@ -2224,10 +2731,66 @@ class PostgreSQLService:
     ) -> Dict[str, Any]:
         project_detail = self.get_project_detail(project_identifier_id)
         source_index = self._build_project_document_source_index(project_detail)
-        return self._enrich_result_node_with_document_sources(
+        enriched = self._enrich_result_node_with_document_sources(
             dict(result or {}),
             source_index,
         )
+        existing = self.get_project_result(project_identifier_id)
+        manual_review_results = manual_review_results_from_record(existing)
+        embedded_manual_results = dict(enriched.get(MANUAL_REVIEW_RESULTS_KEY) or {})
+        if embedded_manual_results:
+            manual_review_results = embedded_manual_results
+        if manual_review_results.get("latest") or manual_review_results.get("workflow_scope"):
+            enriched[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+        return enriched
+
+    @classmethod
+    def _duplicate_check_payload_has_text(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(cls._duplicate_check_payload_has_text(item) for item in value)
+        if isinstance(value, dict):
+            for key in (
+                "text",
+                "raw_text",
+                "content",
+                "full_text",
+                "markdown",
+                "block_content",
+                "html",
+                "rows",
+                "records",
+                "headers",
+            ):
+                if cls._duplicate_check_payload_has_text(value.get(key)):
+                    return True
+        return False
+
+    @classmethod
+    def _duplicate_check_payload_has_usable_content(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if not isinstance(value, dict):
+            return False
+
+        container = value.get("data") if isinstance(value.get("data"), dict) else value
+        if cls._duplicate_check_payload_has_text(container):
+            return True
+
+        for key in ("layout_sections", "logical_tables", "table_sections", "pages"):
+            items = container.get(key)
+            if isinstance(items, list) and any(
+                cls._duplicate_check_payload_has_text(item) for item in items
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _choose_duplicate_check_content(cls, preferred: Any, fallback: Any) -> Any:
+        if cls._duplicate_check_payload_has_usable_content(preferred):
+            return preferred
+        return fallback
 
     def get_project_documents_for_duplicate_check(
         self,
@@ -2248,13 +2811,17 @@ class PostgreSQLService:
                 bbd.file_name,
                 bbd.file_url,
                 bbd.extracted,
-                bbd.content,
+                COALESCE(bbd.review_content -> 'effective_content', bbd.content) AS content,
+                bbd.content AS raw_content,
+                bbd.review_content,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 td.extracted AS tender_extracted,
-                td.content AS tender_content,
+                COALESCE(td.review_content -> 'effective_content', td.content) AS tender_content,
+                td.content AS tender_raw_content,
+                td.review_content AS tender_review_content,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
@@ -2276,13 +2843,17 @@ class PostgreSQLService:
                 tbd.file_name,
                 tbd.file_url,
                 tbd.extracted,
-                tbd.content,
+                COALESCE(tbd.review_content -> 'effective_content', tbd.content) AS content,
+                tbd.content AS raw_content,
+                tbd.review_content,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 td.extracted AS tender_extracted,
-                td.content AS tender_content,
+                COALESCE(td.review_content -> 'effective_content', td.content) AS tender_content,
+                td.content AS tender_raw_content,
+                td.review_content AS tender_review_content,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
@@ -2300,7 +2871,23 @@ class PostgreSQLService:
                 cursor.execute(query, (project["identifier_id"], project["identifier_id"]))
                 documents: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
 
-        return {"project": project, "documents": documents}
+        for document in documents:
+            document["content"] = self._choose_duplicate_check_content(
+                document.get("content"),
+                document.get("raw_content"),
+            )
+            document["tender_content"] = self._choose_duplicate_check_content(
+                document.get("tender_content"),
+                document.get("tender_raw_content"),
+            )
+
+        result_record = self.get_project_result(project["identifier_id"])
+        return {
+            "project": project,
+            "documents": documents,
+            "workflow_scope": workflow_scope_from_result_record(result_record),
+            MANUAL_REVIEW_RESULTS_KEY: manual_review_results_from_record(result_record),
+        }
 
     # 分析结果管理
     def get_project_result(self, project_identifier_id: str) -> Optional[Dict[str, Any]]:
@@ -2310,7 +2897,6 @@ class PostgreSQLService:
                 id,
                 project_identifier_id,
                 result,
-                result_fot_frontend,
                 create_time,
                 update_time
             FROM xtjs_result
@@ -2356,7 +2942,6 @@ class PostgreSQLService:
                 r.project_identifier_id,
                 p.project_name,
                 r.result,
-                r.result_fot_frontend,
                 r.create_time,
                 r.update_time
             FROM xtjs_result r
@@ -2410,7 +2995,6 @@ class PostgreSQLService:
                 id,
                 project_identifier_id,
                 result,
-                result_fot_frontend,
                 create_time,
                 update_time
         """
@@ -2458,47 +3042,6 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
-    def update_project_result_for_frontend(
-        self,
-        project_identifier_id: str,
-        result_fot_frontend: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """单独更新前端删减后的项目结果，不改动原始分析 result。"""
-        if not isinstance(result_fot_frontend, dict):
-            raise ValueError("result_fot_frontend must be a JSON object")
-
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"项目不存在：{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
-
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result, result_fot_frontend)
-            VALUES (%s, '{}'::jsonb, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result_fot_frontend = EXCLUDED.result_fot_frontend,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                result_fot_frontend,
-                create_time,
-                update_time
-        """
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(result_fot_frontend)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
-
     def upsert_project_result_item(
         self,
         project_identifier_id: str,
@@ -2531,7 +3074,6 @@ class PostgreSQLService:
                 id,
                 project_identifier_id,
                 result,
-                result_fot_frontend,
                 create_time,
                 update_time
         """
@@ -2542,6 +3084,105 @@ class PostgreSQLService:
                     (
                         normalized_project_identifier,
                         Json(jsonable_encoder(payload)),
+                    ),
+                )
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+
+    def update_project_manual_review_result(
+        self,
+        project_identifier_id: str,
+        result_key: str,
+        result_value: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Save a rerun/manual judgment result under result.manual_review_results.latest."""
+        normalized_result_key = self._normalize_required_identifier(result_key, "result_key")
+        if not isinstance(result_value, dict):
+            raise ValueError("result_value must be a JSON object")
+
+        project = self.get_project_by_identifier(project_identifier_id)
+        if not project:
+            raise ValueError(f"项目不存在：{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
+
+        existing = self.get_project_result(normalized_project_identifier) or {}
+        existing_result = dict(existing.get("result") or {})
+        manual_review_results = build_manual_review_results(
+            manual_review_results_from_record(existing),
+            latest_key=normalized_result_key,
+            latest_value=result_value,
+        )
+        existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+
+        query = """
+            INSERT INTO xtjs_result (project_identifier_id, result)
+            VALUES (%s, %s)
+            ON CONFLICT (project_identifier_id)
+            DO UPDATE
+            SET
+                result = EXCLUDED.result,
+                update_time = CURRENT_TIMESTAMP
+            RETURNING
+                id,
+                project_identifier_id,
+                result,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(jsonable_encoder(existing_result)),
+                    ),
+                )
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+
+    def update_project_manual_review_workflow_scope(
+        self,
+        project_identifier_id: str,
+        workflow_scope: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Save project-level manual workflow scope under result.manual_review_results."""
+        if not isinstance(workflow_scope, dict):
+            raise ValueError("workflow_scope must be a JSON object")
+
+        project = self.get_project_by_identifier(project_identifier_id)
+        if not project:
+            raise ValueError(f"项目不存在：{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
+
+        existing = self.get_project_result(normalized_project_identifier) or {}
+        existing_result = dict(existing.get("result") or {})
+        manual_review_results = build_manual_review_results(
+            manual_review_results_from_record(existing),
+            workflow_scope=workflow_scope,
+        )
+        existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+
+        query = """
+            INSERT INTO xtjs_result (project_identifier_id, result)
+            VALUES (%s, %s)
+            ON CONFLICT (project_identifier_id)
+            DO UPDATE
+            SET
+                result = EXCLUDED.result,
+                update_time = CURRENT_TIMESTAMP
+            RETURNING
+                id,
+                project_identifier_id,
+                result,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(jsonable_encoder(existing_result)),
                     ),
                 )
                 return self._sanitize_project_result_record(dict(cursor.fetchone()))

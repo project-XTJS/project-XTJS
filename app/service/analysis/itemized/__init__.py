@@ -82,6 +82,9 @@ class ItemizedPricingChecker(
         total_sections = document["total_sections"]
         candidate_sections = document["candidate_sections"]
 
+        if not item_sections:
+            return self._build_missing_itemized_result()
+
         if self._detect_downward_rate_mode(candidate_sections):
             tender_document = self._prepare_document(tender_text) if tender_text is not None else None
             return self._check_downward_rate_mode(
@@ -90,3 +93,73 @@ class ItemizedPricingChecker(
                 item_sections=item_sections,
             )
         return self._check_normal_mode(item_sections, total_sections, candidate_sections, document=document)
+
+    def _build_missing_itemized_result(
+        self,
+        *,
+        mode: str = "normal",
+        summary: str | None = None,
+    ) -> dict:
+        """Return a hard missing result when no real itemized pricing table is found."""
+        message = summary or "未识别到分项报价表，无法执行分项报价表一致性校验。"
+        return {
+            "itemized_table_detected": False,
+            "mode": mode,
+            "status": "not_detected",
+            "passed": None,
+            "summary": message,
+            "checks": {
+                "row_arithmetic": {
+                    "status": "not_detected",
+                    "issue_count": 0,
+                    "issues": [],
+                    "unresolved_count": 0,
+                    "unresolved_rows": [],
+                },
+                "sum_consistency": {
+                    "status": "not_detected",
+                    "calculated_total": None,
+                    "declared_total": None,
+                    "difference": None,
+                    "matched_total_label": None,
+                },
+                "duplicate_items": {
+                    "status": "not_detected",
+                    "issue_count": 0,
+                    "issues": [],
+                },
+                "missing_item": {
+                    "status": "missing",
+                    "missing_items": [],
+                    "comparison_basis": None,
+                    "hints": [],
+                    "hint_level": None,
+                },
+            },
+            "evidence": {
+                "analysis_basis": "not_detected",
+                "structured_tables": [],
+                "structured_relation_count": 0,
+                "structured_relations": [],
+                "structured_group_checks": [],
+                "extracted_item_count": 0,
+                "extracted_items": [],
+                "total_candidates": [],
+                "excluded_total_candidates": [],
+                "unresolved_rows": [],
+            },
+            "manual_review": {
+                "required": False,
+                "recognized_total": None,
+                "calculated_total": None,
+                "difference": None,
+                "total_candidates": [],
+                "unclear_content_count": 0,
+                "unclear_contents": [],
+                "row_issue_count": 0,
+                "row_issues": [],
+                "confidence_level": "missing",
+                "confidence_reasons": ["未识别到真实分项报价表。"],
+            },
+            "details": [message],
+        }

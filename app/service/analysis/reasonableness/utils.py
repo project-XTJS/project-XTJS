@@ -129,6 +129,7 @@ class UtilsMixin:
         *,
         pages: Optional[List[int]] = None,
         locations: Optional[List[Dict]] = None,
+        extra: Optional[Dict] = None,
     ) -> Dict:
         """构建统一格式的检查结果字典。"""
         normalized_pages = []
@@ -162,13 +163,16 @@ class UtilsMixin:
                 }
             )
 
-        return {
+        result = {
             "result": result_text,
             "type": price_type,
             "summary": summary,
             "pages": normalized_pages,
             "locations": normalized_locations,
         }
+        if isinstance(extra, dict):
+            result.update(extra)
+        return result
 
     def _build_fail_result(
         self,

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 class DocumentParserMixin:
     # 依赖常量（来自 __init__ 中定义的实例属性）
     BID_OPENING_TITLES: list
+    BID_SECURITY_TITLES: list
     ITEMIZED_SECTION_TITLES: list
     SECTION_END_TITLES: list
 
@@ -109,13 +110,45 @@ class DocumentParserMixin:
                     table_section["coordinate_system"] = coordinate_system
                 parsed_table_sections.append(table_section)
 
-        raw_text = "\n".join(sec["text"] for sec in sections if sec["text"])
+        all_sections = self._merge_layout_and_table_sections(sections, parsed_table_sections)
+        raw_text = "\n".join(sec["text"] for sec in all_sections if sec["text"])
         return {
             "raw_text": raw_text,
-            "sections": sections,
+            "sections": all_sections,
             "table_sections": parsed_table_sections,
             "logical_tables": logical_tables,
         }
+
+    def _merge_layout_and_table_sections(
+        self,
+        layout_sections: List[Dict],
+        table_sections: List[Dict],
+    ) -> List[Dict]:
+        """合并版面块和表格块，便于同页标题+表格内容一起参与报价页定位。"""
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[Any, str, str]] = set()
+        for section in [*layout_sections, *table_sections]:
+            text = str(section.get("text") or "")
+            key = (section.get("page"), str(section.get("type") or ""), text)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(section)
+
+        def section_order(section: dict[str, Any]) -> tuple[int, float, int]:
+            page = section.get("page")
+            normalized_page = page if isinstance(page, int) else 10**9
+            bbox = section.get("bbox") or section.get("box")
+            top = 10**9
+            if isinstance(bbox, (list, tuple)) and len(bbox) >= 2:
+                try:
+                    top = float(bbox[1])
+                except (TypeError, ValueError):
+                    top = 10**9
+            type_order = 0 if str(section.get("type") or "").lower() == "heading" else 1
+            return (normalized_page, top, type_order)
+
+        return sorted(merged, key=section_order)
 
     def _has_bid_opening_context(self, text: str) -> bool:
         """判断文本是否具备开标一览表常见上下文字段。"""
@@ -222,13 +255,66 @@ class DocumentParserMixin:
                 row_like_hits += 1
         return row_like_hits >= 3
 
+    def _looks_like_bid_security_page(self, page_sections: List[Dict], page_text: str) -> bool:
+        """识别投标保证书/保证金页，避免把保证金承诺里的报价句当成开标报价。"""
+        titles = list(
+            getattr(
+                self,
+                "BID_SECURITY_TITLES",
+                ("投标保证书", "比选保证书", "投标保证金", "响应保证金", "报价保证金"),
+            )
+        )
+        if self._has_page_heading_title(page_sections, titles):
+            return True
+
+        early_lines: list[str] = []
+        for section in page_sections:
+            text = str(section.get("text") or "").strip()
+            if not text:
+                continue
+            early_lines.extend(line.strip() for line in text.splitlines() if line.strip())
+            if len(early_lines) >= 8:
+                break
+
+        for line in early_lines[:8]:
+            compact = self._normalize(line)
+            if any(title in compact for title in titles) and len(compact) <= 80:
+                return True
+
+        normalized_prefix = self._normalize(page_text)[:250]
+        return any(title in normalized_prefix for title in titles)
+
+    def _has_itemized_page_heading(self, page_sections: List[Dict]) -> bool:
+        """判断当前页是否真的以分项报价表为标题，而不是备注中引用该附件。"""
+        titles = list(getattr(self, "ITEMIZED_SECTION_TITLES", ("分项报价表",)))
+        for section in page_sections:
+            text = str(section.get("text") or "").strip()
+            if not text or self._is_catalog_line(text):
+                continue
+            section_type = str(section.get("type") or "").strip().lower()
+            if section_type == "heading" and any(title in self._normalize(text) for title in titles):
+                return True
+            for line in text.splitlines():
+                compact = self._normalize(line)
+                if not compact or not any(title in compact for title in titles):
+                    continue
+                if compact.startswith(("注", "备注", "说明")):
+                    continue
+                if any(token in compact for token in ("为附件", "详见", "格式参见", "服务内容")):
+                    continue
+                if len(compact) <= 50:
+                    return True
+        return False
+
     # 开标一览表定位
     def _score_page_candidate(self, page_sections: List[Dict]) -> int:
         page_text = "\n".join(sec["text"] for sec in page_sections if sec["text"])
         normalized_page_text = self._normalize(page_text)
-        if self._has_page_heading_title(page_sections, self.ITEMIZED_SECTION_TITLES):
+        if self._has_itemized_page_heading(page_sections):
             return -1000
         has_heading_title = self._has_page_heading_title(page_sections, self.BID_OPENING_TITLES)
+        if not has_heading_title and self._looks_like_bid_security_page(page_sections, page_text):
+            return -1000
         has_bid_total_amount = self._has_bid_total_amount_signal(
             page_text, assume_opening_context=has_heading_title
         )

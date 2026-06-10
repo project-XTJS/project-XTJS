@@ -34,6 +34,9 @@ class NormalModeMixin:
         document: dict | None = None,
     ) -> dict:
         """执行普通报价模式下的分项检查。"""
+        if not item_sections:
+            return self._build_missing_itemized_result()
+
         item_source_sections = item_sections or total_sections or candidate_sections
         structured_analysis = self._extract_structured_itemized_entries(
             document,

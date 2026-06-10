@@ -31,6 +31,7 @@ class ReasonablenessChecker(
         self.SMALL_UNITS = {"拾": 10, "佰": 100, "仟": 1000}
         self.BIG_UNITS = {"万": 10000, "亿": 100000000}
         self.BID_OPENING_TITLES = ["开标一览表", "报价一览表", "投标一览表", "响应报价一览表", "参选报价一览表"]
+        self.BID_SECURITY_TITLES = ["投标保证书", "比选保证书", "投标保证金", "响应保证金", "报价保证金", "保证金缴纳凭证", "保证金回单"]
         self.ITEMIZED_SECTION_TITLES = ["分项报价表"]
         self.SECTION_END_TITLES = ["分项报价表", "已标价工程量清单", "工程量清单", "商务条款偏离表", "技术条款偏离表", "投标人基本情况介绍", "类似项目业绩清单", "投标人的资格证明文件", "项目人员情况", "资格审查资料", "法定代表人身份证明", "授权委托书", "投标保证书", "比选保证书", "承诺函"]
         self.FLOAT_RULE_PHRASES = ["低于或等于", "高于或等于", "不得超过", "不超过", "不得高于", "不得大于", "不得低于", "不得小于", "不低于", "不少于", "不高于", "不大于", "大于", "高于", "低于", "小于", "等于"]
@@ -65,30 +66,61 @@ class ReasonablenessChecker(
         price_pairs = self._extract_direct_price_pairs(bid_opening_text)
         if price_pairs:
             summary = []
-            all_match = True
+            has_mismatch = False
+            has_missing_info = False
+            normalized_pairs = []
             for pair in price_pairs:
                 small_price = pair["small_price"]
                 capital_price = pair["capital_price"]
                 small_str = pair["small_price_str"]
                 capital_str = pair["capital_price_str"]
 
-                is_match = (
-                    small_price is not None
-                    and capital_price is not None
-                    and abs(small_price - capital_price) < 0.01
-                )
-                if not is_match:
-                    all_match = False
+                if small_price is None or capital_price is None:
+                    case_status = "missing"
+                    has_missing_info = True
+                elif abs(small_price - capital_price) < 0.01:
+                    case_status = "pass"
+                else:
+                    case_status = "fail"
+                    has_mismatch = True
+                status_label = {
+                    "pass": "一致",
+                    "fail": "不一致",
+                    "missing": "缺少信息",
+                }[case_status]
                 summary.append(
-                    f"小写 {small_str} 与大写 {capital_str} {'一致' if is_match else '不一致'}，{'合格' if is_match else '不合格'}"
+                    f"小写 {small_str or '未识别'} 与大写 {capital_str or '未识别'} {status_label}"
+                )
+                normalized_pairs.append(
+                    {
+                        "small_raw_amount": small_str,
+                        "small_amount_yuan": small_price,
+                        "capital_raw_amount": capital_str,
+                        "capital_amount_yuan": capital_price,
+                        "case_consistency_status": case_status,
+                    }
                 )
 
+            first_pair = normalized_pairs[0] if normalized_pairs else {}
+            overall_case_status = "fail" if has_mismatch else ("missing" if has_missing_info else "pass")
+            result_text = "失败" if overall_case_status == "fail" else (
+                "缺少信息" if overall_case_status == "missing" else "合格"
+            )
             return self._build_result(
-                result_text="合格" if all_match else "失败",
+                result_text=result_text,
                 price_type="直接报价",
                 summary=summary,
                 pages=fallback_pages,
                 locations=fallback_locations,
+                extra={
+                    "amount_yuan": first_pair.get("small_amount_yuan") or first_pair.get("capital_amount_yuan"),
+                    "raw_amount": first_pair.get("small_raw_amount") or first_pair.get("capital_raw_amount"),
+                    "capital_amount": first_pair.get("capital_amount_yuan"),
+                    "capital_raw_amount": first_pair.get("capital_raw_amount"),
+                    "case_consistency_status": overall_case_status,
+                    "case_consistency_summary": "；".join(summary),
+                    "price_pairs": normalized_pairs,
+                },
             )
 
         direct_total = self._extract_bid_total_amount(source)
@@ -101,6 +133,7 @@ class ReasonablenessChecker(
                 if isinstance(page, int)
                 else f"已识别直接报价：{raw_amount or amount_yuan}"
             ]
+            summary.append("大小写金额对缺少信息，无法确认大小写报价是否一致。")
             locations = (
                 [{"page": page, "label": "投标总价", "document": "bidder"}]
                 if isinstance(page, int)
@@ -108,11 +141,19 @@ class ReasonablenessChecker(
             )
             pages = [page] if isinstance(page, int) else fallback_pages
             return self._build_result(
-                result_text="合格",
+                result_text="缺少信息",
                 price_type="直接报价",
                 summary=summary,
                 pages=pages,
                 locations=locations,
+                extra={
+                    "amount_yuan": amount_yuan,
+                    "raw_amount": raw_amount,
+                    "capital_amount": None,
+                    "capital_raw_amount": None,
+                    "case_consistency_status": "missing",
+                    "case_consistency_summary": "已识别直接报价，但缺少可比对的大写或小写金额信息。",
+                },
             )
 
         # 4. 尝试分流模式 B：下浮率报价（提取规则与行）

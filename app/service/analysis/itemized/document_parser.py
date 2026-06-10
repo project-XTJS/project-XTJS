@@ -204,6 +204,8 @@ class DocumentParserMixin:
         lines = [str(line or "").strip() for line in section.get("lines") or [] if str(line or "").strip()]
         if not lines:
             return False
+        if self._looks_like_opening_sheet_section(lines):
+            return False
 
         has_table_header = any(self._is_table_header_line(line) for line in lines)
         data_row_count = sum(
@@ -218,6 +220,32 @@ class DocumentParserMixin:
             return True
 
         # 没有真实列项时，不能仅凭“分项报价表”这个词认定表存在。
+        return False
+
+    def _looks_like_opening_sheet_section(self, lines: list[str]) -> bool:
+        """排除开标一览表，避免把总报价表误作分项报价表。"""
+        combined = self._normalize_label_key(" ".join(lines))
+        if not combined:
+            return False
+        has_opening_anchor = any(anchor in combined for anchor in self.TOTAL_SECTION_ANCHORS)
+        has_case_pair = "小写" in combined and "大写" in combined
+        has_opening_price_label = any(
+            label in combined
+            for label in ("投标价格", "投标总价", "总报价", "报价总价")
+        )
+        has_itemized_header = any(self._is_table_header_line(line) for line in lines)
+        real_item_rows = [
+            line
+            for line in lines
+            if self._looks_like_itemized_data_row(line)
+            and not any(label in self._normalize_label_key(line) for label in ("投标价格", "投标总价", "总报价"))
+        ]
+        if has_opening_anchor and has_case_pair and not real_item_rows:
+            return True
+        if has_case_pair and has_opening_price_label and not has_itemized_header:
+            return True
+        if has_opening_anchor and has_opening_price_label and not real_item_rows and not has_itemized_header:
+            return True
         return False
 
     def _looks_like_itemized_data_row(self, line: str) -> bool:

@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID
+from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
 
 
 class OrchestratorMixin:
@@ -279,6 +279,197 @@ class OrchestratorMixin:
             "bidders": [],
         }
 
+    # 项目偏离表检查（商务标 + 技术标）
+    def _review_project_deviation_documents(
+        self,
+        *,
+        project_identifier: str,
+        payload_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """基于同一投标人的商务标和技术标执行独立偏离表检查。"""
+        document_records = list(payload_data.get("documents") or [])
+        if not document_records:
+            return self._build_empty_project_deviation_review(
+                project_identifier=project_identifier,
+                reason=f"project has no bound documents: {project_identifier}",
+            )
+
+        tender_record = next(
+            (
+                record
+                for record in document_records
+                if isinstance(self._coerce_stored_payload(record.get("tender_content")), dict)
+                and self._coerce_stored_payload(record.get("tender_content"))
+            ),
+            None,
+        )
+        if not tender_record:
+            return self._build_empty_project_deviation_review(
+                project_identifier=project_identifier,
+                reason=f"project has no tender content: {project_identifier}",
+            )
+
+        tender_payload = self._coerce_stored_payload(tender_record.get("tender_content"))
+        tender_meta = self._build_project_record_meta(
+            record=tender_record,
+            payload=tender_payload,
+            role="tender",
+            bidder_key=None,
+            file_name_key="tender_file_name",
+            file_url_key="tender_file_url",
+            identifier_key="tender_identifier_id",
+        )
+
+        relation_groups: dict[Any, dict[str, Any]] = {}
+        for record in document_records:
+            role = self._normalize_project_document_role(record.get("relation_role"))
+            if role not in {DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID}:
+                continue
+            relation_id = record.get("relation_id") or record.get("identifier_id")
+            group = relation_groups.setdefault(relation_id, {})
+            if role == DOCUMENT_TYPE_BUSINESS_BID and "business_record" not in group:
+                group["business_record"] = record
+            elif role == DOCUMENT_TYPE_TECHNICAL_BID and "technical_record" not in group:
+                group["technical_record"] = record
+
+        bidders: list[dict[str, Any]] = []
+        bidder_entries: list[dict[str, Any]] = []
+        used_bidder_keys: set[str] = set()
+        for relation_id, group in relation_groups.items():
+            business_record = group.get("business_record")
+            technical_record = group.get("technical_record")
+            if not business_record or not technical_record:
+                continue
+
+            business_payload = self._coerce_stored_payload(business_record.get("content"))
+            technical_payload = self._coerce_stored_payload(technical_record.get("content"))
+            bidder_key = self._ensure_project_bidder_key(
+                self._derive_project_bidder_key(
+                    business_record.get("file_name") or technical_record.get("file_name"),
+                    str(business_record.get("identifier_id") or technical_record.get("identifier_id") or relation_id),
+                ),
+                used_bidder_keys,
+            )
+            business_meta = self._build_project_record_meta(
+                record=business_record,
+                payload=business_payload,
+                role="business",
+                bidder_key=bidder_key,
+                file_name_key="file_name",
+                file_url_key="file_url",
+                identifier_key="identifier_id",
+            )
+            technical_meta = self._build_project_record_meta(
+                record=technical_record,
+                payload=technical_payload,
+                role="technical",
+                bidder_key=bidder_key,
+                file_name_key="file_name",
+                file_url_key="file_url",
+                identifier_key="identifier_id",
+            )
+
+            check = self._execute_check(
+                check_code="deviation_check",
+                check_name="偏离表检查",
+                runner=lambda tender_payload=tender_payload, business_payload=business_payload, technical_payload=technical_payload: (
+                    self.deviation_checker.check_technical_deviation(
+                        tender_payload,
+                        business_payload,
+                        technical_payload,
+                    )
+                ),
+                normalizer=self._normalize_deviation,
+            )
+            checks = {"deviation_check": check}
+            bidder_name = self._extract_bidder_name(checks, bidder_key)
+            summary = self._summarize_bidder_checks(checks)
+            bidder = {
+                "bidder_key": bidder_key,
+                "bidder_name": bidder_name,
+                "reading_guide": self._build_bidder_reading_guide(
+                    bidder_key=bidder_key,
+                    bidder_name=bidder_name,
+                    summary=summary,
+                    checks=checks,
+                    tender_meta=tender_meta,
+                    business_meta=business_meta,
+                    technical_meta=technical_meta,
+                ),
+                "documents": {
+                    "tender": tender_meta,
+                    "business": business_meta,
+                    "technical": technical_meta,
+                },
+                "summary": summary,
+                "checks": checks,
+                "issues": self._aggregate_bidder_issues(checks),
+            }
+            bidders.append(bidder)
+            bidder_entries.append(
+                {
+                    "bidder_key": bidder_key,
+                    "business": business_meta,
+                    "technical": technical_meta,
+                }
+            )
+
+        if not bidders:
+            return self._build_empty_project_deviation_review(
+                project_identifier=project_identifier,
+                reason=f"project has no complete business/technical bidder pairs: {project_identifier}",
+            )
+
+        return {
+            "schema_version": self.RESULT_SCHEMA_VERSION,
+            "review_type": "deviation_check",
+            "generated_at": self._utc_now_iso(),
+            "project_identifier_id": project_identifier,
+            "dataset": {
+                "input_mode": "project_documents",
+                "tender": tender_meta,
+                "bidders": bidder_entries,
+                "file_count": 1 + len(bidder_entries) * 2,
+            },
+            "reading_guide": self._build_review_reading_guide(
+                tender_meta=tender_meta,
+                bidders=bidders,
+            ),
+            "function_validation": self._summarize_function_validation(bidders),
+            "summary": self._summarize_review(bidders),
+            "bidders": bidders,
+        }
+
+    def _build_empty_project_deviation_review(
+        self,
+        *,
+        project_identifier: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        summary = self._summarize_review([])
+        return {
+            "schema_version": self.RESULT_SCHEMA_VERSION,
+            "review_type": "deviation_check",
+            "generated_at": self._utc_now_iso(),
+            "project_identifier_id": project_identifier,
+            "empty": True,
+            "empty_reason": reason,
+            "dataset": {
+                "input_mode": "project_documents",
+                "tender": None,
+                "bidders": [],
+                "file_count": 0,
+            },
+            "reading_guide": {
+                "tender_file_name": None,
+                "bidder_overview": [],
+                "message": reason,
+            },
+            "function_validation": self._summarize_function_validation([]),
+            "summary": summary,
+            "bidders": [],
+        }
+
     # 单个投标人审查（含技术标）
     def _review_bidder(
         self,
@@ -325,12 +516,6 @@ class OrchestratorMixin:
                     tender_text=tender_payload,
                 ),
                 normalizer=self._normalize_itemized,
-            ),
-            "deviation_check": self._execute_check(
-                check_code="deviation_check",
-                check_name="偏离条款审查",
-                runner=lambda: self.deviation_checker.check_technical_deviation(tender_payload, business_payload),
-                normalizer=self._normalize_deviation,
             ),
             "verification_check": self._execute_check(
                 check_code="verification_check",
@@ -381,7 +566,7 @@ class OrchestratorMixin:
         business_payload: dict[str, Any],
         business_meta: dict[str, Any],
     ) -> dict[str, Any]:
-        """对提供商务标的投标人执行审查，偏离检查仅基于当前商务标内容。"""
+        """对提供商务标的投标人执行审查。"""
         integrity_check = self._execute_check(
             check_code="integrity_check",
             check_name="商务标完整性审查",
@@ -417,13 +602,6 @@ class OrchestratorMixin:
                     tender_text=tender_payload,
                 ),
                 normalizer=self._normalize_itemized,
-            ),
-            # 商务标形式审查只检查当前商务标文件中出现的商务/技术偏离表内容，不读取技术标文件。
-            "deviation_check": self._execute_check(
-                check_code="deviation_check",
-                check_name="偏离条款审查",
-                runner=lambda: self.deviation_checker.check_technical_deviation(tender_payload, business_payload),
-                normalizer=self._normalize_deviation,
             ),
             "verification_check": self._execute_check(
                 check_code="verification_check",

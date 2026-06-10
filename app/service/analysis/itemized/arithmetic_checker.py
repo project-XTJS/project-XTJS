@@ -434,43 +434,52 @@ class ArithmeticCheckerMixin:
                     )
                 continue
 
-            table_items.append(
-                {
-                    "label": self._extract_block_label(block),
-                    "amount": amounts[-1],
-                    "source": "table_row",
-                    **self._build_entry_context(
-                        section_context,
-                        serial=block.get("serial"),
-                        line_index=block.get("start_index"),
-                    ),
-                }
-            )
-
+            table_item = {
+                "label": self._extract_block_label(block),
+                "amount": amounts[-1],
+                "source": "table_row",
+                **self._build_entry_context(
+                    section_context,
+                    serial=block.get("serial"),
+                    line_index=block.get("start_index"),
+                ),
+            }
             arithmetic_info = self._extract_row_arithmetic(block_text)
-            if arithmetic_info is None:
-                continue
-
-            expected_total = (
-                arithmetic_info["quantity"] * arithmetic_info["unit_price"]
-            )
-            difference = expected_total - arithmetic_info["line_total"]
-            if abs(difference) > self.MONEY_TOLERANCE:
-                row_issues.append(
+            if arithmetic_info is not None:
+                expected_total = (
+                    arithmetic_info["quantity"] * arithmetic_info["unit_price"]
+                )
+                difference = expected_total - arithmetic_info["line_total"]
+                table_item.update(
                     {
-                        "label": self._extract_block_label(block),
-                        "quantity": self._format_decimal(arithmetic_info["quantity"]),
-                        "unit_price": self._format_decimal(arithmetic_info["unit_price"]),
-                        "line_total": self._format_decimal(arithmetic_info["line_total"]),
-                        "expected_total": self._format_decimal(expected_total),
-                        "difference": self._format_decimal(difference),
-                        **self._build_entry_context(
-                            section_context,
-                            serial=block.get("serial"),
-                            line_index=block.get("start_index"),
-                        ),
+                        "amount": expected_total,
+                        "quantity": arithmetic_info["quantity"],
+                        "unit_price": arithmetic_info["unit_price"],
+                        "declared_line_total": arithmetic_info["line_total"],
+                        "expected_total": expected_total,
+                        "difference": difference,
+                        "relation_type": "row_total",
                     }
                 )
+                if abs(difference) > self.MONEY_TOLERANCE:
+                    row_issues.append(
+                        {
+                            "label": self._extract_block_label(block),
+                            "quantity": self._format_decimal(arithmetic_info["quantity"]),
+                            "unit_price": self._format_decimal(arithmetic_info["unit_price"]),
+                            "line_total": self._format_decimal(arithmetic_info["line_total"]),
+                            "expected_total": self._format_decimal(expected_total),
+                            "difference": self._format_decimal(difference),
+                            **self._build_entry_context(
+                                section_context,
+                                serial=block.get("serial"),
+                                line_index=block.get("start_index"),
+                            ),
+                        }
+                    )
+            table_items.append(table_item)
+            if arithmetic_info is None:
+                continue
 
         items = [entry for entry in explicit_entries if not entry["is_total"]]
         totals = [entry for entry in explicit_entries if entry["is_total"]]

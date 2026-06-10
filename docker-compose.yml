@@ -9,9 +9,14 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - milvus
-      - postgres
-      - minio
+      milvus:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      redis:
+        condition: service_healthy
     environment:
       - DATABASE_URL=${DATABASE_URL:-postgresql://admin:password@postgres:5432/xtjs_db}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
@@ -45,6 +50,18 @@ services:
       - OCR_STORAGE_ROOT=${OCR_STORAGE_ROOT:-/app/.ocr_runtime}
       - PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/app/.ocr_runtime/paddlex-cache}
       - OCR_RUNTIME_TEMP_DIR=${OCR_RUNTIME_TEMP_DIR:-/app/.ocr_runtime/runtime-tmp}
+      - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
+      - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
+      - XTJS_CACHE_REQUIRED=${XTJS_CACHE_REQUIRED:-true}
+      - XTJS_CACHE_REDIS_URL=${XTJS_CACHE_REDIS_URL:-redis://redis:6379/1}
+      - XTJS_CACHE_KEY_PREFIX=${XTJS_CACHE_KEY_PREFIX:-xtjs}
+      - XTJS_CACHE_PROJECT_LIST_TTL_SECONDS=${XTJS_CACHE_PROJECT_LIST_TTL_SECONDS:-30}
+      - XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS=${XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS:-120}
+      - XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS=${XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS:-300}
+      - XTJS_CACHE_OCR_STATUS_TTL_SECONDS=${XTJS_CACHE_OCR_STATUS_TTL_SECONDS:-3}
+      - XTJS_CACHE_PREVIEW_META_TTL_SECONDS=${XTJS_CACHE_PREVIEW_META_TTL_SECONDS:-604800}
+      - XTJS_CACHE_PREVIEW_OBJECT_PREFIX=${XTJS_CACHE_PREVIEW_OBJECT_PREFIX:-cache/previews}
+      - XTJS_CACHE_SCAN_BATCH_SIZE=${XTJS_CACHE_SCAN_BATCH_SIZE:-500}
     volumes:
       - ocr_runtime:/app/.ocr_runtime
     networks:
@@ -109,6 +126,23 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app_network
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   # MinIO 服务
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
@@ -148,4 +182,5 @@ volumes:
   milvus_data:
   postgres_data:
   minio_data:
+  redis_data:
   ocr_runtime:

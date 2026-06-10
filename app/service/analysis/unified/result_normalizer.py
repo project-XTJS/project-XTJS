@@ -102,6 +102,19 @@ class ResultNormalizerMixin:
             )
             if tender_locations:
                 evidence["tender_star_locations"] = tender_locations
+        if not evidence.get("response_locations") and item.get("response_page"):
+            response_role = str(item.get("response_document_role") or "business_bid")
+            evidence["response_locations"] = self._locations_with_document_role(
+                [
+                    {
+                        "page": item.get("response_page"),
+                        "bbox": item.get("response_bbox"),
+                        "text": item.get("response_evidence") or item.get("requirement"),
+                        "coordinate_system": "pdf_point",
+                    }
+                ],
+                response_role,
+            )
         return evidence
 
     @staticmethod
@@ -220,6 +233,7 @@ class ResultNormalizerMixin:
         passed = []
         failed = []
         missing_items = []
+        unclear_items = []
         short_body_skipped = 0
         attachment_not_found_skipped = 0
         integrity_skipped = 0
@@ -245,8 +259,17 @@ class ResultNormalizerMixin:
                 segment.get("template_locations") or [],
                 "tender",
             )
+            template_attachment_locations = self._locations_with_document_role(
+                segment.get("template_attachment_locations")
+                or segment.get("template_locations")
+                or [],
+                "tender",
+            )
             tender_highlight_locations = self._locations_with_document_role(
-                segment.get("tender_highlight_locations") or segment.get("template_locations") or [],
+                segment.get("tender_highlight_locations")
+                or segment.get("template_attachment_locations")
+                or segment.get("template_locations")
+                or [],
                 "tender",
             )
             evidence = {
@@ -263,9 +286,23 @@ class ResultNormalizerMixin:
                     "business_bid",
                 ),
                 "template_locations": template_locations,
+                "template_attachment_locations": template_attachment_locations,
                 "tender_highlight_locations": tender_highlight_locations,
+                "engine_version": segment.get("engine_version"),
+                "model_status": segment.get("model_status") or {},
+                "attachment_match": segment.get("attachment_match") or {},
+                "element_results": segment.get("element_results") or [],
+                "difference_category": segment.get("difference_category"),
+                "difference_items": segment.get("difference_items") or [],
             }
-            if segment.get("is_passed"):
+            segment_status = str(segment.get("status") or "").strip().lower()
+            if segment_status not in {"pass", "missing", "unclear", "skipped"}:
+                segment_status = (
+                    "pass"
+                    if segment.get("is_passed")
+                    else ("missing" if missing or unfilled_fields else "unclear")
+                )
+            if segment_status == "pass":
                 passed.append(
                     self._issue(
                         status="pass",
@@ -274,21 +311,27 @@ class ResultNormalizerMixin:
                         evidence=evidence,
                     )
                 )
-            else:
+            elif segment_status == "missing":
                 parts = []
                 if missing:
                     parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
-                issue_status = "missing" if missing or unfilled_fields else "fail"
+                issue_status = "missing"
                 issue = self._issue(
                     status=issue_status,
                     title=title,
                     message="；".join(parts) or "模板正文固定内容疑似被修改。",
                     evidence=evidence,
                 )
-                if issue_status == "missing":
-                    missing_items.append(issue)
-                else:
-                    failed.append(issue)
+                missing_items.append(issue)
+            elif segment_status == "unclear":
+                unclear_items.append(
+                    self._issue(
+                        status="unclear",
+                        title=title,
+                        message="模板骨架存在疑似改写或对齐不确定项，需要人工复核。",
+                        evidence=evidence,
+                    )
+                )
 
         has_results = bool(segments or skipped_segments)
         if skipped_segments:
@@ -304,7 +347,10 @@ class ResultNormalizerMixin:
 
         if has_results:
             review_status = self._combine_review_status(
-                [issue["status"] for issue in passed + failed + missing_items]
+                [
+                    issue["status"]
+                    for issue in passed + failed + missing_items + unclear_items
+                ]
             )
         else:
             review_status = "unclear"
@@ -337,10 +383,16 @@ class ResultNormalizerMixin:
                 "passed_segment_count": len(passed),
                 "failed_segment_count": len(failed),
                 "missing_segment_count": len(missing_items),
+                "unclear_segment_count": len(unclear_items),
                 "fillable_field_count": 0,
                 "unfilled_field_count": 0,
             },
-            "issues": {"passed": passed, "failed": failed, "missing": missing_items, "unclear": []},
+            "issues": {
+                "passed": passed,
+                "failed": failed,
+                "missing": missing_items,
+                "unclear": unclear_items,
+            },
         }
 
     def _normalize_pricing(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -348,95 +400,161 @@ class ResultNormalizerMixin:
         self_check = raw.get("self_check", {}) if isinstance(raw, dict) else {}
         tender_limit_check = raw.get("tender_limit_check", {}) if isinstance(raw, dict) else {}
 
-        passed: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        missing: list[dict[str, Any]] = []
-        unclear: list[dict[str, Any]] = []
-        shared_tender_price_locations: list[dict[str, Any]] = []
-        if isinstance(tender_limit_check, dict):
-            shared_tender_price_locations = [
-                dict(location)
-                for location in tender_limit_check.get("locations") or []
-                if isinstance(location, dict)
-                and str(
-                    location.get("document_role")
-                    or location.get("document")
-                    or location.get("role")
-                    or ""
-                ).lower()
-                in {"tender", "鎷涙爣鏂囦欢", "招标文件"}
-            ]
+        def location_role(location: dict[str, Any]) -> str:
+            raw_role = str(
+                location.get("document_role")
+                or location.get("document")
+                or location.get("role")
+                or ""
+            ).lower()
+            if (
+                raw_role in {"tender", "招标文件"}
+                or "tender" in raw_role
+                or "招标" in raw_role
+            ):
+                return "tender"
+            if (
+                raw_role in {"bidder", "bid", "business", "business_bid", "投标文件", "商务标"}
+                or "bidder" in raw_role
+                or "business" in raw_role
+                or "投标" in raw_role
+                or "商务" in raw_role
+            ):
+                return "business_bid"
+            return ""
 
-        for subcheck_code, title, payload in (
-            ("price_reasonableness", "投标总价自检", self_check),
-            ("tender_limit_check", "招标限价校验", tender_limit_check),
+        def positive_pages(values: Any) -> list[int]:
+            pages: list[int] = []
+            seen: set[int] = set()
+            raw_values = values if isinstance(values, list) else [values]
+            for value in raw_values:
+                page = self._first_positive_page(value)
+                if page and page not in seen:
+                    seen.add(page)
+                    pages.append(page)
+            return pages
+
+        subchecks: list[dict[str, Any]] = []
+        message_parts: list[str] = []
+        business_locations: list[dict[str, Any]] = []
+        tender_locations: list[dict[str, Any]] = []
+        business_pages: list[int] = []
+        tender_pages: list[int] = []
+
+        for subcheck_code, label, payload in (
+            ("price_reasonableness", "直接报价大小写一致", self_check),
+            ("tender_limit_check", "是否超过最高限价", tender_limit_check),
         ):
+            payload = payload if isinstance(payload, dict) else {}
             summary_text = self._join_text(payload.get("summary"))
             status = self._map_price_result(payload.get("result"), summary_text)
-            evidence = dict(payload) if isinstance(payload, dict) else {}
-            evidence.update(
+            message = summary_text or "未返回明确结论。"
+            message_parts.append(f"{label}：{message}")
+
+            subcheck_locations = [
+                dict(location)
+                for location in payload.get("locations") or []
+                if isinstance(location, dict)
+            ]
+            for location in subcheck_locations:
+                role = location_role(location)
+                if subcheck_code == "price_reasonableness" or role == "business_bid":
+                    business_locations.append(location)
+                elif role == "tender":
+                    tender_locations.append(location)
+            if subcheck_code == "price_reasonableness":
+                business_pages.extend(positive_pages(payload.get("pages")))
+            elif subcheck_code == "tender_limit_check":
+                for page in positive_pages(payload.get("pages")):
+                    tender_page = any(
+                        self._first_positive_page(location) == page
+                        for location in subcheck_locations
+                        if location_role(location) == "tender"
+                    )
+                    if tender_page:
+                        tender_pages.append(page)
+                    else:
+                        business_pages.append(page)
+
+            subchecks.append(
                 {
+                    "subcheck_code": subcheck_code,
+                    "label": label,
+                    "status": status,
                     "result": payload.get("result"),
                     "type": payload.get("type"),
                     "summary": payload.get("summary"),
-                    "subcheck_code": subcheck_code,
+                    "message": message,
+                    "pages": payload.get("pages") or [],
+                    "locations": subcheck_locations,
                 }
             )
-            if subcheck_code == "tender_limit_check" and isinstance(payload, dict):
-                tender_locations = [
-                    dict(location)
-                    for location in payload.get("locations") or []
-                    if isinstance(location, dict)
-                    and str(
-                        location.get("document_role")
-                        or location.get("document")
-                        or location.get("role")
-                        or ""
-                    ).lower()
-                    in {"tender", "招标文件"}
-                ]
-                if tender_locations:
-                    evidence["tender_price_locations"] = self._locations_with_document_role(
-                        tender_locations,
-                        "tender",
-                    )
-            elif shared_tender_price_locations and not evidence.get("tender_price_locations"):
-                evidence["tender_price_locations"] = self._locations_with_document_role(
-                    shared_tender_price_locations,
-                    "tender",
-                )
-            issue = self._issue(
-                status=status,
-                title=title,
-                message=summary_text or "未返回明确结论。",
-                evidence=evidence,
-            )
-            if status == "pass":
-                passed.append(issue)
-            elif status == "fail":
-                failed.append(issue)
-            elif status == "missing":
-                missing.append(issue)
-            else:
-                unclear.append(issue)
 
+        for location in tender_locations:
+            page = self._first_positive_page(location)
+            if page:
+                tender_pages.append(page)
+        for location in business_locations:
+            page = self._first_positive_page(location)
+            if page:
+                business_pages.append(page)
+
+        business_pages = positive_pages(business_pages)
+        tender_pages = positive_pages(tender_pages)
         review_status = self._combine_review_status(
-            [issue["status"] for issue in passed + failed + missing + unclear]
+            [subcheck["status"] for subcheck in subchecks]
         )
+        issue_evidence: dict[str, Any] = {
+            "subcheck_code": "pricing_reasonableness",
+            "self_check": self_check,
+            "tender_limit_check": tender_limit_check,
+            "subchecks": subchecks,
+        }
+        if business_locations:
+            issue_evidence["locations"] = self._locations_with_document_role(
+                business_locations,
+                "business_bid",
+            )
+        if business_pages:
+            issue_evidence["pages"] = business_pages
+        if tender_locations:
+            issue_evidence["tender_price_locations"] = self._locations_with_document_role(
+                tender_locations,
+                "tender",
+            )
+        if tender_pages:
+            issue_evidence["tender_pages"] = tender_pages
+
+        issue = self._issue(
+            status=review_status,
+            title="报价合理性",
+            message="；".join(message_parts),
+            evidence=issue_evidence,
+        )
+        passed = [issue] if review_status == "pass" else []
+        failed = [issue] if review_status == "fail" else []
+        missing = [issue] if review_status == "missing" else []
+        unclear = [issue] if review_status == "unclear" else []
+        status_counts = {
+            "pass": sum(1 for subcheck in subchecks if subcheck["status"] == "pass"),
+            "fail": sum(1 for subcheck in subchecks if subcheck["status"] == "fail"),
+            "missing": sum(1 for subcheck in subchecks if subcheck["status"] == "missing"),
+            "unclear": sum(1 for subcheck in subchecks if subcheck["status"] == "unclear"),
+        }
         return {
             "validation": {
                 "status": "correct" if self_check or tender_limit_check else "unclear",
-                "reason": "模块返回了报价自检和招标限价校验两部分结果。",
+                "reason": "模块返回了报价合理性的两个子项结果，已合并为报价合理性审查。",
             },
             "review": {
                 "status": review_status,
-                "summary": "；".join(issue["message"] for issue in passed + failed + unclear if issue["message"]),
+                "summary": issue["message"],
             },
             "metrics": {
-                "passed_subcheck_count": len(passed),
-                "failed_subcheck_count": len(failed),
-                "missing_subcheck_count": len(missing),
-                "unclear_subcheck_count": len(unclear),
+                "passed_subcheck_count": status_counts["pass"],
+                "failed_subcheck_count": status_counts["fail"],
+                "missing_subcheck_count": status_counts["missing"],
+                "unclear_subcheck_count": status_counts["unclear"],
             },
             "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }
@@ -482,11 +600,6 @@ class ResultNormalizerMixin:
                 "issues": {"passed": [], "failed": [], "missing": [missing_issue], "unclear": []},
             }
 
-        passed: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        missing: list[dict[str, Any]] = []
-        unclear: list[dict[str, Any]] = []
-
         subcheck_labels = {
             "row_arithmetic": "分项行算术校验",
             "sum_consistency": "分项汇总一致性校验",
@@ -513,7 +626,37 @@ class ResultNormalizerMixin:
                     }
                 )
 
+            def append_primary_itemized_location() -> None:
+                for item in itemized_evidence.get("extracted_items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    append_page_location(
+                        item.get("section_pages") or item.get("pages"),
+                        item.get("label") or item.get("serial") or "分项报价表",
+                    )
+                    if locations:
+                        return
+
+                for table in itemized_evidence.get("structured_tables") or []:
+                    if not isinstance(table, dict):
+                        continue
+                    for location in table.get("locations") or []:
+                        if isinstance(location, dict):
+                            locations.append(location)
+                    if locations:
+                        return
+                    append_page_location(
+                        table.get("pages") or table.get("page"),
+                        table.get("title") or "分项报价表",
+                    )
+                    if locations:
+                        return
+
             if subcheck_code == "sum_consistency":
+                append_primary_itemized_location()
+                if locations:
+                    return locations
+
                 matched_label = str(payload.get("matched_total_label") or "").strip()
                 for total in itemized_evidence.get("total_candidates") or []:
                     if not isinstance(total, dict):
@@ -526,9 +669,17 @@ class ResultNormalizerMixin:
                         break
                 if not locations:
                     for table in itemized_evidence.get("structured_tables") or []:
+                        if not isinstance(table, dict):
+                            continue
                         for location in table.get("locations") or []:
                             if isinstance(location, dict):
                                 locations.append(location)
+                        if locations:
+                            break
+                        append_page_location(
+                            table.get("pages") or table.get("page"),
+                            table.get("title") or "分项报价表",
+                        )
                         if locations:
                             break
             elif subcheck_code == "row_arithmetic":
@@ -536,6 +687,8 @@ class ResultNormalizerMixin:
                     if not isinstance(item, dict):
                         continue
                     append_page_location(item.get("section_pages"), item.get("label") or item.get("serial"))
+                if not locations:
+                    append_primary_itemized_location()
             elif subcheck_code == "missing_item":
                 for item in payload.get("missing_items") or []:
                     if not isinstance(item, dict):
@@ -544,14 +697,16 @@ class ResultNormalizerMixin:
 
             return locations
 
-        for subcheck_code, payload in checks.items():
+        subchecks: list[dict[str, Any]] = []
+        for subcheck_code in ("row_arithmetic", "sum_consistency"):
+            payload = checks.get(subcheck_code) or {}
+            if not isinstance(payload, dict) or not payload:
+                continue
             sub_status = str(payload.get("status") or "").strip().lower()
             if sub_status == "not_applicable":
                 continue
 
             normalized_status = self._map_generic_status(sub_status)
-            if subcheck_code == "missing_item" and normalized_status == "fail":
-                normalized_status = "missing"
             label = subcheck_labels.get(subcheck_code, subcheck_code)
             message = self._summarize_itemized_subcheck(subcheck_code, payload)
             evidence = dict(payload)
@@ -559,57 +714,94 @@ class ResultNormalizerMixin:
                 locations = itemized_locations_for_subcheck(subcheck_code, evidence)
                 if locations:
                     evidence["locations"] = locations
-            issue = self._issue(status=normalized_status, title=label, message=message, evidence=evidence)
-            if normalized_status == "pass":
-                passed.append(issue)
-            elif normalized_status == "fail":
-                failed.append(issue)
-            elif normalized_status == "missing":
-                missing.append(issue)
-            else:
-                unclear.append(issue)
-
-        if manual_review.get("required") and not missing_itemized_table:
-            manual_evidence = dict(manual_review)
-            if not manual_evidence.get("locations"):
-                recognized_total = manual_evidence.get("recognized_total")
-                if isinstance(recognized_total, dict):
-                    page = self._first_positive_page(recognized_total.get("section_pages") or recognized_total.get("pages"))
-                    if page:
-                        manual_evidence["locations"] = [
-                            {
-                                "page": page,
-                                "text": recognized_total.get("label") or "分项报价识别总价",
-                                "document": "bidder",
-                            }
-                        ]
-                if not manual_evidence.get("locations"):
-                    for table in itemized_evidence.get("structured_tables") or []:
-                        table_locations = [
-                            location
-                            for location in (table.get("locations") or [])
-                            if isinstance(location, dict)
-                        ]
-                        if table_locations:
-                            manual_evidence["locations"] = table_locations
-                            break
-            unclear.append(
-                self._issue(
-                    status="unclear",
-                    title="人工复核提示",
-                    message="分项报价识别存在歧义，建议人工核对识别总价和未完整识别行。",
-                    evidence=manual_evidence,
-                )
+            subchecks.append(
+                {
+                    "subcheck_code": subcheck_code,
+                    "label": label,
+                    "status": normalized_status,
+                    "message": message,
+                    "evidence": evidence,
+                }
             )
+
+        if not subchecks:
+            fallback_status = top_status if top_status in {"pass", "fail", "missing", "unclear"} else "unclear"
+            subchecks.append(
+                {
+                    "subcheck_code": "itemized_pricing_check",
+                    "label": "分项报价表校验",
+                    "status": fallback_status,
+                    "message": str(raw.get("summary") or "未返回分项报价表校验明细。"),
+                    "evidence": {"raw_status": raw_status, "itemized_table_detected": itemized_table_detected},
+                }
+            )
+
+        issue_locations: list[dict[str, Any]] = []
+        for subcheck in subchecks:
+            evidence = subcheck.get("evidence") or {}
+            for location in evidence.get("locations") or []:
+                if isinstance(location, dict):
+                    issue_locations.append(location)
+        if not issue_locations:
+            for table in itemized_evidence.get("structured_tables") or []:
+                for location in table.get("locations") or []:
+                    if isinstance(location, dict):
+                        issue_locations.append(location)
+                if issue_locations:
+                    break
+
+        issue_evidence: dict[str, Any] = {
+            "subcheck_code": "itemized_pricing_check",
+            "itemized_table_detected": raw.get("itemized_table_detected"),
+            "subchecks": subchecks,
+            "row_arithmetic": checks.get("row_arithmetic") or {},
+            "sum_consistency": checks.get("sum_consistency") or {},
+            "manual_review": manual_review,
+        }
+        if issue_locations:
+            issue_evidence["locations"] = self._locations_with_document_role(
+                issue_locations,
+                "business_bid",
+            )
+        if itemized_evidence.get("extracted_item_count") is not None:
+            issue_evidence["extracted_item_count"] = itemized_evidence.get("extracted_item_count")
+        if itemized_evidence.get("total_candidates"):
+            issue_evidence["total_candidates"] = itemized_evidence.get("total_candidates")
+
+        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks])
+        message_parts = [
+            f"{subcheck['label']}：{subcheck['message']}"
+            for subcheck in subchecks
+        ]
+        if manual_review.get("required"):
+            message_parts.append("人工复核提示：分项报价识别存在歧义，建议核对分项行和合计金额。")
+            if review_status == "pass":
+                review_status = "unclear"
+
+        issue = self._issue(
+            status=review_status,
+            title="分项报价表校验",
+            message="；".join(message_parts),
+            evidence=issue_evidence,
+        )
+        passed = [issue] if review_status == "pass" else []
+        failed = [issue] if review_status == "fail" else []
+        missing = [issue] if review_status == "missing" else []
+        unclear = [issue] if review_status == "unclear" else []
 
         validation_status = "correct"
         validation_reason = "模块返回了分项报价校验明细。"
-        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear]
-        review_status = self._combine_review_status(issue_statuses) if issue_statuses else top_status
-        review_summary = str(raw.get("summary") or "未返回分项报价结论。")
+        review_summary = issue["message"]
         if top_status == "unclear":
             validation_status = "unclear"
             validation_reason = "模块已执行，但当前样本存在未完整识别的分项行，结论需人工复核。"
+
+        status_counts = {
+            "pass": sum(1 for subcheck in subchecks if subcheck["status"] == "pass"),
+            "fail": sum(1 for subcheck in subchecks if subcheck["status"] == "fail"),
+            "missing": sum(1 for subcheck in subchecks if subcheck["status"] == "missing"),
+            "unclear": sum(1 for subcheck in subchecks if subcheck["status"] == "unclear"),
+        }
 
         return {
             "validation": {"status": validation_status, "reason": validation_reason},
@@ -619,10 +811,10 @@ class ResultNormalizerMixin:
             },
             "metrics": {
                 "itemized_table_detected": raw.get("itemized_table_detected"),
-                "passed_subcheck_count": len(passed),
-                "failed_subcheck_count": len(failed),
-                "missing_subcheck_count": len(missing),
-                "unclear_subcheck_count": len(unclear),
+                "passed_subcheck_count": status_counts["pass"],
+                "failed_subcheck_count": status_counts["fail"],
+                "missing_subcheck_count": status_counts["missing"],
+                "unclear_subcheck_count": status_counts["unclear"],
             },
             "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
         }
@@ -639,18 +831,7 @@ class ResultNormalizerMixin:
         missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
 
-        if raw.get("deviation_status") == "no_star_requirements":
-            passed.append(
-                self._issue(
-                    status="pass",
-                    title="星标条款检查",
-                    message=str(raw.get("summary") or "未发现带 ★ 的强制性要求。"),
-                    evidence={
-                        "core_requirements_count": raw.get("core_requirements_count"),
-                        "deviation_tables": raw.get("deviation_tables"),
-                    },
-                )
-            )
+        no_star_requirements = raw.get("deviation_status") == "no_star_requirements"
 
         for item in missing_items:
             evidence = self._deviation_issue_evidence(item, raw)
@@ -683,7 +864,7 @@ class ResultNormalizerMixin:
                 )
             )
 
-        if compliance_status == "pass" and not passed:
+        if compliance_status == "pass" and not passed and not no_star_requirements:
             passed.append(
                 self._issue(
                     status="pass",
@@ -774,8 +955,8 @@ class ResultNormalizerMixin:
                     "tender",
                 )
 
-        if source == "position_check":
-            for key in ("signature_check", "seal_check"):
+        if source in {"attachment_result", "position_check", "date_check"}:
+            for key in ("requirements", "signature_check", "seal_check", "date_check"):
                 value = item.get(key)
                 if isinstance(value, dict):
                     evidence[key] = value
@@ -800,62 +981,166 @@ class ResultNormalizerMixin:
         missing_date = date_check.get("missing_date_attachments") or []
         late_date = date_check.get("late_date_attachments") or []
         attachment_lookup = self._verification_attachment_lookup(raw)
+        attachment_results = [item for item in (raw.get("attachment_results") or []) if isinstance(item, dict)]
+        handled_attachment_titles: set[str] = set()
 
-        if seal_company_check.get("status") == "pass":
-            passed.append(
-                self._issue(status="pass", title="公章与投标人匹配", message="检测到的公章与投标人名称匹配。", evidence=seal_company_check)
+        def status_of(value: Any) -> str:
+            return str(value or "").strip().lower()
+
+        def attachment_title(item: dict[str, Any]) -> str:
+            return str(item.get("title") or item.get("matched_bid_title") or item.get("attachment_number") or "签字盖章日期审查").strip()
+
+        def component_status(item: dict[str, Any], key: str) -> str:
+            value = item.get(key)
+            return status_of(value.get("status") if isinstance(value, dict) else None)
+
+        def effective_attachment_status(item: dict[str, Any]) -> str:
+            status = status_of(item.get("status"))
+            statuses = [
+                component_status(item, "signature_check"),
+                component_status(item, "seal_check"),
+                component_status(item, "date_check"),
+            ]
+            active_statuses = [value for value in statuses if value and value != "not_required"]
+            if any(value in {"fail", "late"} for value in active_statuses):
+                return "fail"
+            if any(value in {"missing", "missing_date"} for value in active_statuses):
+                return "missing"
+            if any(value in {"pending", "missing_deadline", "unclear"} for value in active_statuses):
+                return "pending"
+            if status and status != "pass":
+                return status
+            if active_statuses and all(value == "pass" for value in active_statuses):
+                return "pass"
+            if status == "pass" and not active_statuses:
+                return "pass"
+            return compliance_status
+
+        def attachment_status_details(item: dict[str, Any]) -> list[str]:
+            details: list[str] = []
+            signature_status = component_status(item, "signature_check")
+            seal_status = component_status(item, "seal_check")
+            item_date_status = component_status(item, "date_check")
+            if signature_status in {"missing", "fail"}:
+                details.append("缺少签字")
+            elif signature_status == "pending":
+                details.append("签字待复核")
+            if seal_status in {"missing", "fail"}:
+                details.append("缺少盖章")
+            elif seal_status == "pending":
+                details.append("盖章待复核")
+            if item_date_status == "missing_date":
+                details.append("缺少落款日期")
+            elif item_date_status == "late":
+                details.append("落款日期晚于招标截止时间")
+            elif item_date_status == "missing_deadline":
+                details.append("未识别到招标截止日期，需复核日期")
+            return details
+
+        for item in attachment_results:
+            title = attachment_title(item)
+            if not title:
+                continue
+            handled_attachment_titles.add(title)
+            status = effective_attachment_status(item)
+            evidence = self._verification_attachment_evidence(
+                title,
+                source="attachment_result",
+                lookup=attachment_lookup,
             )
-        elif seal_company_check:
+            details = attachment_status_details(item)
+            if status == "pass":
+                passed.append(
+                    self._issue(
+                        status="pass",
+                        title=title,
+                        message="附件要求的签字、盖章、落款日期均已满足。",
+                        evidence=evidence,
+                    )
+                )
+            elif status in {"fail", "late"}:
+                failed.append(
+                    self._issue(
+                        status="fail",
+                        title=title,
+                        message="附件签字盖章日期要求未通过：" + ("；".join(details) if details else "存在不符合项") + "。",
+                        evidence=evidence,
+                    )
+                )
+            elif status in {"pending", "missing_deadline", "unclear"}:
+                unclear.append(
+                    self._issue(
+                        status="unclear",
+                        title=title,
+                        message="附件签字盖章日期要求待复核：" + ("；".join(details) if details else "存在待确认项") + "。",
+                        evidence=evidence,
+                    )
+                )
+            elif status in {"missing", "missing_date"}:
+                missing.append(
+                    self._issue(
+                        status="missing",
+                        title=title,
+                        message="附件签字盖章日期要求未全部满足：" + ("；".join(details) if details else "存在缺失项") + "。",
+                        evidence=evidence,
+                    )
+                )
+
+        seal_company_status = status_of(seal_company_check.get("status"))
+        if seal_company_status == "fail":
             failed.append(
                 self._issue(status="fail", title="公章与投标人匹配", message="检测到的公章与投标人名称不匹配。", evidence=seal_company_check)
             )
 
-        if position_check.get("status") == "pass":
-            passed.append(
-                self._issue(status="pass", title="签字盖章位置检查", message="所有必需附件均已找到，未发现缺失签字或盖章。", evidence=position_check)
+        for attachment in missing_attachments:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
+            missing.append(
+                self._issue(
+                    status="missing",
+                    title=attachment,
+                    message="未找到要求签章的附件。",
+                    evidence=self._verification_attachment_evidence(
+                        attachment,
+                        source="position_check",
+                        lookup=attachment_lookup,
+                    ),
+                )
             )
-        else:
-            for attachment in missing_attachments:
-                missing.append(
-                    self._issue(
-                        status="missing",
-                        title=attachment,
-                        message="未找到要求签章的附件。",
-                        evidence=self._verification_attachment_evidence(
-                            attachment,
-                            source="position_check",
-                            lookup=attachment_lookup,
-                        ),
-                    )
+        for attachment in missing_signature:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
+            missing.append(
+                self._issue(
+                    status="missing",
+                    title=attachment,
+                    message="附件缺少签字。",
+                    evidence=self._verification_attachment_evidence(
+                        attachment,
+                        source="position_check",
+                        lookup=attachment_lookup,
+                    ),
                 )
-            for attachment in missing_signature:
-                missing.append(
-                    self._issue(
-                        status="missing",
-                        title=attachment,
-                        message="附件缺少签字。",
-                        evidence=self._verification_attachment_evidence(
-                            attachment,
-                            source="position_check",
-                            lookup=attachment_lookup,
-                        ),
-                    )
+            )
+        for attachment in missing_seal:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
+            missing.append(
+                self._issue(
+                    status="missing",
+                    title=attachment,
+                    message="附件缺少盖章。",
+                    evidence=self._verification_attachment_evidence(
+                        attachment,
+                        source="position_check",
+                        lookup=attachment_lookup,
+                    ),
                 )
-            for attachment in missing_seal:
-                missing.append(
-                    self._issue(
-                        status="missing",
-                        title=attachment,
-                        message="附件缺少盖章。",
-                        evidence=self._verification_attachment_evidence(
-                            attachment,
-                            source="position_check",
-                            lookup=attachment_lookup,
-                        ),
-                    )
-                )
+            )
 
         for attachment in pending_signature:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
             unclear.append(
                 self._issue(
                     status="unclear",
@@ -869,37 +1154,36 @@ class ResultNormalizerMixin:
                 )
             )
 
-        if date_check.get("status") == "pass":
-            passed.append(
-                self._issue(status="pass", title="落款日期检查", message="已检测到落款日期，且均未晚于投标截止时间。", evidence=date_check)
+        for attachment in missing_date:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
+            missing.append(
+                self._issue(
+                    status="missing",
+                    title=attachment,
+                    message="附件缺少落款日期。",
+                    evidence=self._verification_attachment_evidence(
+                        attachment,
+                        source="date_check",
+                        lookup=attachment_lookup,
+                    ),
+                )
             )
-        else:
-            for attachment in missing_date:
-                missing.append(
-                    self._issue(
-                        status="missing",
-                        title=attachment,
-                        message="附件缺少落款日期。",
-                        evidence=self._verification_attachment_evidence(
-                            attachment,
-                            source="date_check",
-                            lookup=attachment_lookup,
-                        ),
-                    )
+        for attachment in late_date:
+            if str(attachment or "").strip() in handled_attachment_titles:
+                continue
+            failed.append(
+                self._issue(
+                    status="fail",
+                    title=attachment,
+                    message="附件落款日期晚于招标截止时间。",
+                    evidence=self._verification_attachment_evidence(
+                        attachment,
+                        source="date_check",
+                        lookup=attachment_lookup,
+                    ),
                 )
-            for attachment in late_date:
-                failed.append(
-                    self._issue(
-                        status="fail",
-                        title=attachment,
-                        message="附件落款日期晚于招标截止时间。",
-                        evidence=self._verification_attachment_evidence(
-                            attachment,
-                            source="date_check",
-                            lookup=attachment_lookup,
-                        ),
-                    )
-                )
+            )
 
         required_attachment_count = int(raw.get("required_attachment_count") or 0)
         position_pass_count = max(

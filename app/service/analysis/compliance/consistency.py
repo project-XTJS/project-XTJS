@@ -6,9 +6,11 @@
 """
 
 import re
+import difflib
 from typing import Any, List, Dict
 
 from .template_extractor import TemplateExtractor 
+from .structured_consistency import StructuredConsistencyEngine
 from ..verification import VerificationChecker
 
 
@@ -63,6 +65,10 @@ class ConsistencyChecker:
     FOOTER_PAGE_RE = re.compile(r"^\s*(?:第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?|\d+\s*/\s*\d+|\d+)\s*$")
     FIELD_LABEL_PREFIXES = ("地址", "邮政编码", "电话号码", "传真号码", "电子邮件", "电子邮箱", "电话", "传真")
     AMOUNT_LINE_MARKERS = ("总报价为", "不含税总价", "含税总价", "人民币")
+    AMOUNT_FILL_FRAGMENT_RE = re.compile(
+        r"(?:投标报价|报价|总报价|投标总价|报价总价)\s*(?:为)?\s*(?:人民币)?\s*(?:大写)?\s*[：:]\s*[^；;。,\n]*"
+        r"(?:[，,；;]\s*小写\s*[：:]\s*[^；;。,\n]*)?"
+    )
     UNDERLINE_PRESERVE_MARKERS = (
         "副本",
         "电子文件",
@@ -193,6 +199,11 @@ class ConsistencyChecker:
         self.NORM_PATTERN = re.compile(r'[\u4e00-\u9fa5a-zA-Z0-9]+')
         self.GAP_PATTERN = re.compile(r'[^\u4e00-\u9fa5a-zA-Z0-9]+')
         self._verification_checker = VerificationChecker(None)
+        self._structured_engine = StructuredConsistencyEngine(self)
+
+    def build_template_skeleton(self, model_json: dict) -> List[Dict]:
+        """Return the effective structured tender skeleton."""
+        return self._structured_engine.build_template_skeleton(model_json)
 
     def _normalize(self, text: str) -> str:
         """提取文本中的中英文字母和数字，去除所有其他字符。"""
@@ -202,7 +213,11 @@ class ConsistencyChecker:
         for token in ("underline", "underset", "cdot", "text"):
             normalized = normalized.replace(token, "")
         normalized = normalized.replace("需要说明的", "")
-        return "".join(self.NORM_PATTERN.findall(normalized))
+        normalized = "".join(self.NORM_PATTERN.findall(normalized))
+        # “在投标有效期内”和“在有效期内”在撤销投标声明上下文中表达同一固定条款。
+        normalized = normalized.replace("在投标有效期内", "在有效期内")
+        normalized = normalized.replace("投标文件有效期内", "有效期内")
+        return normalized
 
     def _normalize_title(self, text: str) -> str:
         """归一化标题：去括号、去噪声、去序号。"""
@@ -510,6 +525,12 @@ class ConsistencyChecker:
 
         return self.FILLED_UNDERLINE_CAPTURE_RE.sub(repl, text)
 
+    def _strip_amount_fill_fragments(self, text: str) -> str:
+        """剥离报价大写/小写填写值，避免由报价字段触发模板一致性误报。"""
+        value = self.AMOUNT_FILL_FRAGMENT_RE.sub(" ", str(text or ""))
+        value = re.sub(r"\s+", " ", value).strip("：:；;，,。 ")
+        return value
+
     def _fixed_body_line(self, line: str) -> str:
         """提取一行中的固定正文，只保留不随填写内容变化的部分。"""
         text = self._plain_text(line)
@@ -547,6 +568,7 @@ class ConsistencyChecker:
             if "总报价为" in normalized_text and (has_dynamic_marker or re.search(r"[¥￥]|\d[\d,，.]*", text)):
                 return ""
         fixed_line = self._strip_or_preserve_filled_underlines(text)
+        fixed_line = self._strip_amount_fill_fragments(fixed_line)
         fixed_line = self.FILLED_BLANK_SPAN_RE.sub(" ", fixed_line)
         fixed_line = self.SHORT_PAREN_RE.sub(" ", fixed_line)
         normalized_fixed_candidate = self._normalize(self._strip_placeholder_hints(fixed_line))
@@ -585,6 +607,92 @@ class ConsistencyChecker:
             if fixed_line:
                 fixed_lines.append(fixed_line)
         return "\n".join(fixed_lines)
+
+    def _template_text_differences(self, template_text: str, bid_text: str) -> list[dict[str, str]]:
+        """生成业务人员可读的模板原文与投标 OCR 文本差异片段。"""
+        def lines(value: str) -> list[str]:
+            return [
+                re.sub(r"\s+", " ", line).strip()
+                for line in str(value or "").splitlines()
+                if self._normalize(line)
+            ]
+
+        def compact(value: list[str]) -> str:
+            text = "；".join(item for item in value if item).strip()
+            return text[:500] + ("..." if len(text) > 500 else "")
+
+        def equivalent(template_part: str, bid_part: str) -> bool:
+            template_key = self._normalize(template_part)
+            bid_key = self._normalize(bid_part)
+            if not template_key or not bid_key:
+                return False
+            if template_key == bid_key:
+                return True
+            if len(template_key) >= 4 and template_key in bid_key:
+                return True
+            if len(bid_key) >= 4 and bid_key in template_key:
+                return True
+            anchors = [
+                anchor
+                for anchor in self._get_anchors(template_part)
+                if len(anchor) >= 2 and not anchor.isdigit()
+            ]
+            return bool(anchors) and all(
+                self._anchor_present_in_bid(
+                    anchor,
+                    bid_key,
+                    normalized_raw_bid_body=bid_key,
+                )
+                for anchor in anchors
+            )
+
+        template_lines = lines(template_text)
+        bid_lines = lines(bid_text)
+        differences: list[dict[str, str]] = []
+        matcher = difflib.SequenceMatcher(
+            None,
+            [self._normalize(line) for line in template_lines],
+            [self._normalize(line) for line in bid_lines],
+            autojunk=False,
+        )
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            template_part = compact(template_lines[i1:i2])
+            bid_part = compact(bid_lines[j1:j2])
+            if not template_part and not bid_part:
+                continue
+            if equivalent(template_part, bid_part):
+                continue
+            if tag == "delete":
+                label = "投标文件缺少模板内容"
+            elif tag == "insert":
+                label = "投标文件新增内容"
+            else:
+                label = "文本不一致"
+            differences.append(
+                {
+                    "type": tag,
+                    "label": label,
+                    "template_text": template_part,
+                    "bid_text": bid_part,
+                }
+            )
+            if len(differences) >= 20:
+                break
+        return differences
+
+    def _template_difference_summary(self, differences: list[dict[str, str]]) -> str:
+        if not differences:
+            return "未发现模板原文与投标 OCR 文本差异。"
+        lines: list[str] = []
+        for index, item in enumerate(differences[:8], start=1):
+            template_text = item.get("template_text") or "无"
+            bid_text = item.get("bid_text") or "无"
+            lines.append(f"{index}. {item.get('label') or '文本差异'}\n模板：{template_text}\n投标OCR：{bid_text}")
+        if len(differences) > 8:
+            lines.append(f"另有 {len(differences) - 8} 处差异未展开。")
+        return "\n".join(lines)
 
     def _trim_instruction_note_block(self, text: str) -> str:
         """移除正文中的注释/说明块（以“注：”或“说明：”开头的内容）。"""
@@ -1398,6 +1506,12 @@ class ConsistencyChecker:
         主比对方法：将招标文件模板与投标文件段落进行比对，
         返回每个模板的通过状态及缺失锚点列表。
         """
+        return self._structured_engine.compare(
+            model_json,
+            test_json,
+            integrity_raw=integrity_raw,
+        )
+
         temps = TemplateExtractor.extract_consistency_templates(model_json)
         model_segments = [
             {
@@ -1481,6 +1595,17 @@ class ConsistencyChecker:
                         "is_passed": bool(is_optional),
                         "missing_anchors": [],
                         "unfilled_fields": [],
+                        "template_text": m_txt,
+                        "bid_text": "",
+                        "difference_items": [
+                            {
+                                "type": "missing_attachment",
+                                "label": "投标文件未找到对应附件模板",
+                                "template_text": title,
+                                "bid_text": "",
+                            }
+                        ],
+                        "difference_summary": "投标文件未找到对应附件模板，无法比对模板正文。",
                         "pages": [],
                         "locations": [],
                         "template_locations": template_locations,
@@ -1500,12 +1625,17 @@ class ConsistencyChecker:
             matched_pages = list(matched_section.get("pages") or []) if isinstance(matched_section, dict) else []
             matched_locations = self._serialize_section_locations(matched_section)
             if is_self_defined_format:
+                difference_items = self._template_text_differences(m_txt, t_txt)
                 results.append(
                     {
                         "name": title,
                         "is_passed": True,
                         "missing_anchors": [],
                         "unfilled_fields": [],
+                        "template_text": m_txt,
+                        "bid_text": t_txt,
+                        "difference_items": difference_items,
+                        "difference_summary": self._template_difference_summary(difference_items),
                         "pages": matched_pages,
                         "locations": matched_locations,
                         "template_locations": template_locations,
@@ -1519,12 +1649,17 @@ class ConsistencyChecker:
             template_analysis = self._analyze_template_segment(title, m_txt)
             dynamic_slot_specs = template_analysis.get("dynamic_slot_specs") or []
             if int(template_analysis.get("fixed_body_length") or 0) <= self.MIN_BODY_LENGTH and not dynamic_slot_specs:
+                difference_items = self._template_text_differences(template_analysis.get("body") or m_txt, t_txt)
                 results.append(
                     {
                         "name": title,
                         "is_passed": True,
                         "missing_anchors": [],
                         "unfilled_fields": [],
+                        "template_text": template_analysis.get("body") or m_txt,
+                        "bid_text": t_txt,
+                        "difference_items": difference_items,
+                        "difference_summary": self._template_difference_summary(difference_items),
                         "fillable_field_count": 0,
                         "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
                         "pages": matched_pages,
@@ -1543,6 +1678,10 @@ class ConsistencyChecker:
                 self._trim_non_body_lines(self._strip_title_line(t_txt, title))
             )
             fixed_bid_body = self._build_fixed_body(t_body)
+            template_body_text = template_analysis.get("body") or m_txt
+            difference_template_text = template_analysis.get("fixed_body") or template_body_text
+            difference_bid_text = fixed_bid_body or t_body
+            difference_items = self._template_text_differences(difference_template_text, difference_bid_text)
 
             norm_t = self._normalize(fixed_bid_body)
             norm_raw_t = self._normalize(t_body)
@@ -1613,6 +1752,10 @@ class ConsistencyChecker:
                     "missing_anchors": missing,
                     "missing_anchor_locations": missing_anchor_location_details,
                     "unfilled_fields": [],
+                    "template_text": template_body_text,
+                    "bid_text": t_body,
+                    "difference_items": difference_items,
+                    "difference_summary": self._template_difference_summary(difference_items),
                     "fillable_field_count": 0,
                     "template_body_length": int(template_analysis.get("fixed_body_length") or 0),
                     "bid_body_length": len(self._normalize(fixed_bid_body)),

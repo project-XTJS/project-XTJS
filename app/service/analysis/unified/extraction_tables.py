@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.service.analysis.compliance.template_extractor import TemplateExtractor
@@ -138,43 +139,59 @@ class ExtractionTablesMixin:
                 )
             )
 
-        # 一致性检查项
-        for template in TemplateExtractor.extract_consistency_templates(tender_payload or {}):
-            title = str(template.get("title") or "").strip() or "unnamed_template"
-            content_text = "\n".join(template.get("content") or [])
-            locations = [
-                location
-                for location in template.get("locations") or []
-                if isinstance(location, dict)
-            ]
-            analysis = self.consistency_checker._analyze_template_segment(title, content_text)
-            anchors = analysis.get("anchors") or []
-            rows.append(
-                self._make_extraction_row(
-                    row_index=len(rows) + 1,
-                    document_side="tender",
-                    document_role="tender",
-                    check_code="consistency_check",
-                    field_group="template_attachment",
-                    field_name=title,
-                    value={
-                        "fixed_body_length": int(analysis.get("fixed_body_length") or 0),
-                        "anchor_count": len(anchors),
-                        "anchor_sample": anchors[:8],
-                        "min_body_length": int(getattr(self.consistency_checker, "MIN_BODY_LENGTH", 50)),
-                    },
-                    status="extracted",
-                    page_refs=self._coerce_page_refs(locations),
-                    expected_document_role="business",
-                    evidence={
-                        "content_preview": self._trim_text(
-                            analysis.get("fixed_body") or analysis.get("body") or content_text,
-                            max_length=200,
+        # 一致性检查项：招标侧按结构化骨架元素逐行展示和编辑。
+        for attachment in self.consistency_checker.build_template_skeleton(
+            tender_payload or {}
+        ):
+            for skeleton_item in attachment.get("items") or []:
+                if not isinstance(skeleton_item, dict):
+                    continue
+                locations = [
+                    location
+                    for location in skeleton_item.get("source_locations") or []
+                    if isinstance(location, dict)
+                ]
+                rows.append(
+                    self._make_extraction_row(
+                        row_index=len(rows) + 1,
+                        document_side="tender",
+                        document_role="tender",
+                        check_code="consistency_check",
+                        field_group="template_skeleton_item",
+                        field_name=str(
+                            skeleton_item.get("label")
+                            or skeleton_item.get("item_id")
+                            or "template_skeleton_item"
                         ),
-                    },
-                    locations=locations,
+                        value={
+                            key: skeleton_item.get(key)
+                            for key in (
+                                "item_id",
+                                "kind",
+                                "label",
+                                "reference_text",
+                                "required",
+                                "enabled",
+                                "confirmation_status",
+                                "source",
+                                "extraction_confidence",
+                            )
+                        },
+                        status=(
+                            "confirmed"
+                            if skeleton_item.get("source") == "manual"
+                            else "extracted"
+                        ),
+                        page_refs=self._coerce_page_refs(locations),
+                        expected_document_role="business",
+                        evidence={
+                            "attachment_key": attachment.get("attachment_key"),
+                            "attachment_number": attachment.get("attachment_number"),
+                            "attachment_title": attachment.get("title"),
+                        },
+                        locations=locations,
+                    )
                 )
-            )
 
         # 报价限价检查项
         tender_limit = self.reasonableness_checker._extract_tender_max_limit(tender_payload)
@@ -188,9 +205,7 @@ class ExtractionTablesMixin:
                 field_name="tender_limit_or_budget",
                 value=(
                     {
-                        "raw_amount": tender_limit.get("raw_amount"),
                         "amount_yuan": tender_limit.get("amount_yuan"),
-                        "keyword": tender_limit.get("keyword"),
                     }
                     if tender_limit
                     else None
@@ -205,6 +220,7 @@ class ExtractionTablesMixin:
                     if tender_limit
                     else {"reason": "tender_limit_not_detected"}
                 ),
+                locations=(tender_limit.get("locations") or []) if tender_limit else None,
             )
         )
 
@@ -234,42 +250,7 @@ class ExtractionTablesMixin:
             )
 
         # 偏离条款检查项
-        star_requirements = self.deviation_checker._extract_star_requirements(tender_payload)
-        if star_requirements:
-            for item in star_requirements:
-                rows.append(
-                    self._make_extraction_row(
-                        row_index=len(rows) + 1,
-                        document_side="tender",
-                        document_role="tender",
-                        check_code="deviation_check",
-                        field_group="star_requirement",
-                        field_name=str(item.get("requirement") or "star_requirement"),
-                        value={
-                            "requirement_id": item.get("requirement_id"),
-                            "section_type": item.get("section_type"),
-                            "chapter_title": item.get("chapter_title"),
-                        },
-                        status="extracted",
-                        page_refs=self._coerce_page_refs(item),
-                        expected_document_role="combined",
-                    )
-                )
-        else:
-            rows.append(
-                self._make_extraction_row(
-                    row_index=len(rows) + 1,
-                    document_side="tender",
-                    document_role="tender",
-                    check_code="deviation_check",
-                    field_group="star_requirement",
-                    field_name="star_requirements",
-                    value=[],
-                    status="missing",
-                    expected_document_role="combined",
-                    evidence={"reason": "no_star_requirements_detected"},
-                )
-            )
+        # Star-clause deviation checks are handled by the standalone deviation review.
 
         # 签章验证检查项
         required_attachments = self.verification_checker._required_attachments(tender_payload)
@@ -385,9 +366,12 @@ class ExtractionTablesMixin:
         for segment in consistency_raw.get("evaluated_segments") or []:
             missing_anchors = list(segment.get("missing_anchors") or [])
             unfilled_fields = list(segment.get("unfilled_fields") or [])
-            status = "pass" if segment.get("is_passed") else (
-                "missing" if missing_anchors or unfilled_fields else "fail"
-            )
+            segment_locations = [location for location in (segment.get("locations") or []) if isinstance(location, dict)]
+            status = str(segment.get("status") or "").strip().lower()
+            if status not in {"pass", "missing", "unclear", "skipped"}:
+                status = "pass" if segment.get("is_passed") else (
+                    "missing" if missing_anchors or unfilled_fields else "unclear"
+                )
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -399,11 +383,33 @@ class ExtractionTablesMixin:
                     value={
                         "missing_anchors": missing_anchors,
                         "unfilled_fields": unfilled_fields,
+                        "pages": list(segment.get("pages") or []),
+                        "template_text": segment.get("template_text") or "",
+                        "bid_text": segment.get("bid_text") or "",
+                        "difference_items": list(segment.get("difference_items") or []),
+                        "difference_summary": segment.get("difference_summary") or "",
+                        "element_results": list(segment.get("element_results") or []),
+                        "template_attachment_locations": segment.get("template_attachment_locations")
+                        or segment.get("template_locations")
+                        or [],
+                        "attachment_match": segment.get("attachment_match") or {},
+                        "engine_version": segment.get("engine_version"),
+                        "model_status": segment.get("model_status") or {},
+                        "manual_status": status,
                     },
                     status=status,
+                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations, segment),
+                    evidence={
+                        "template_attachment_locations": segment.get("template_attachment_locations")
+                        or segment.get("template_locations")
+                        or [],
+                        "template_locations": segment.get("template_locations") or [],
+                    },
+                    locations=segment_locations,
                 )
             )
         for segment in consistency_raw.get("skipped_segments") or []:
+            segment_locations = [location for location in (segment.get("locations") or []) if isinstance(location, dict)]
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -415,9 +421,30 @@ class ExtractionTablesMixin:
                     value={
                         "missing_anchors": list(segment.get("missing_anchors") or []),
                         "unfilled_fields": list(segment.get("unfilled_fields") or []),
+                        "pages": list(segment.get("pages") or []),
+                        "template_text": segment.get("template_text") or "",
+                        "bid_text": segment.get("bid_text") or "",
+                        "difference_items": list(segment.get("difference_items") or []),
+                        "difference_summary": segment.get("difference_summary") or "",
+                        "element_results": list(segment.get("element_results") or []),
+                        "template_attachment_locations": segment.get("template_attachment_locations")
+                        or segment.get("template_locations")
+                        or [],
+                        "attachment_match": segment.get("attachment_match") or {},
+                        "engine_version": segment.get("engine_version"),
+                        "model_status": segment.get("model_status") or {},
+                        "manual_status": "skipped",
                     },
                     status="skipped",
-                    evidence={"skip_reason": segment.get("skip_reason")},
+                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations, segment),
+                    evidence={
+                        "skip_reason": segment.get("skip_reason"),
+                        "template_attachment_locations": segment.get("template_attachment_locations")
+                        or segment.get("template_locations")
+                        or [],
+                        "template_locations": segment.get("template_locations") or [],
+                    },
+                    locations=segment_locations,
                 )
             )
 
@@ -456,16 +483,34 @@ class ExtractionTablesMixin:
         ):
             if not payload:
                 continue
+            field_group = (
+                "price_case_consistency"
+                if subcheck_code == "price_reasonableness"
+                else "price_limit_comparison"
+            )
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
                     document_side="bid",
-                    document_role="business",
+                    document_role="combined" if subcheck_code == "tender_limit_check" else "business",
                     check_code="pricing_check",
-                    field_group="pricing_subcheck",
+                    field_group=field_group,
                     field_name=subcheck_code,
-                    value={"type": payload.get("type"), "summary": payload.get("summary")},
+                    value={
+                        "type": payload.get("type"),
+                        "result": payload.get("result"),
+                        "status": self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
+                        "summary": payload.get("summary"),
+                        "amount_yuan": payload.get("amount_yuan"),
+                        "raw_amount": payload.get("raw_amount"),
+                        "capital_amount": payload.get("capital_amount"),
+                        "capital_raw_amount": payload.get("capital_raw_amount"),
+                        "case_consistency_status": payload.get("case_consistency_status"),
+                        "case_consistency_summary": payload.get("case_consistency_summary"),
+                    },
                     status=self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
+                    page_refs=self._coerce_page_refs(payload.get("pages"), payload.get("locations")),
+                    locations=[location for location in (payload.get("locations") or []) if isinstance(location, dict)],
                 )
             )
 
@@ -473,6 +518,7 @@ class ExtractionTablesMixin:
         itemized_raw = (checks.get("itemized_pricing_check") or {}).get("raw_result") or {}
         itemized_evidence = itemized_raw.get("evidence") or {}
         for item in itemized_evidence.get("extracted_items") or []:
+            itemized_value = self._build_itemized_amount_value(item)
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -481,16 +527,12 @@ class ExtractionTablesMixin:
                     check_code="itemized_pricing_check",
                     field_group="itemized_amount",
                     field_name=str(item.get("label") or item.get("serial") or "itemized_amount"),
-                    value={
-                        "serial": item.get("serial"),
-                        "amount": item.get("amount"),
-                        "source": item.get("source"),
-                        "section_anchor": item.get("section_anchor"),
-                    },
-                    status="found",
+                    value=itemized_value,
+                    status=str(itemized_value.get("row_status") or "found"),
                     page_refs=self._coerce_page_refs(item.get("section_pages"), item),
                 )
             )
+        itemized_sum_check = (itemized_raw.get("checks") or {}).get("sum_consistency") or {}
         for total in itemized_evidence.get("total_candidates") or []:
             rows.append(
                 self._make_extraction_row(
@@ -500,7 +542,17 @@ class ExtractionTablesMixin:
                     check_code="itemized_pricing_check",
                     field_group="itemized_total",
                     field_name=str(total.get("label") or "itemized_total"),
-                    value={"amount": total.get("amount"), "source": total.get("source")},
+                    value={
+                        "amount": total.get("amount"),
+                        "amount_yuan": total.get("amount"),
+                        "declared_total": total.get("amount"),
+                        "calculated_total": itemized_sum_check.get("calculated_total"),
+                        "difference": itemized_sum_check.get("difference"),
+                        "matched_total_label": itemized_sum_check.get("matched_total_label"),
+                        "summary_status": itemized_sum_check.get("status"),
+                        "raw_amount": total.get("source"),
+                        "source": total.get("source"),
+                    },
                     status="found",
                     page_refs=self._coerce_page_refs(total.get("section_pages"), total),
                 )
@@ -593,32 +645,6 @@ class ExtractionTablesMixin:
                 status="found" if bidder_name else "missing",
             )
         )
-        seal_texts = list(verification_raw.get("seal_contents") or [])
-        rows.append(
-            self._make_extraction_row(
-                row_index=len(rows) + 1,
-                document_side="bid",
-                document_role="business",
-                check_code="verification_check",
-                field_group="seal_detection",
-                field_name="seal_texts",
-                value=seal_texts[:10],
-                status="found" if seal_texts else "missing",
-            )
-        )
-        signature_texts = list(verification_raw.get("signature_contents") or [])
-        rows.append(
-            self._make_extraction_row(
-                row_index=len(rows) + 1,
-                document_side="bid",
-                document_role="business",
-                check_code="verification_check",
-                field_group="signature_detection",
-                field_name="signature_texts",
-                value=signature_texts[:10],
-                status="found" if signature_texts else "missing",
-            )
-        )
         for title in verification_raw.get("skipped_missing_attachments") or []:
             rows.append(
                 self._make_extraction_row(
@@ -634,6 +660,29 @@ class ExtractionTablesMixin:
                 )
             )
         for item in verification_raw.get("attachment_results") or []:
+            signature_evidence = self._attachment_signature_evidence_texts(item)
+            signature_check = item.get("signature_check") or {}
+            signature_status = signature_check.get("status") if isinstance(signature_check, dict) else None
+            signature_parse_status = None
+            if signature_evidence:
+                signature_parse_status = "parsed"
+            elif str(signature_status or "").strip().lower() in {"pass", "found", "pending"}:
+                signature_parse_status = "unparsed"
+            seal_evidence = self._attachment_seal_evidence_texts(item)
+            date_check = item.get("date_check") or {}
+            date_text = None
+            deadline_date = None
+            deadline_text = None
+            deadline_page = None
+            deadline_locations = []
+            if isinstance(date_check, dict):
+                date_text = date_check.get("matched_sign_text") or date_check.get("sign_date")
+                deadline_date = date_check.get("deadline_date")
+                deadline_text = date_check.get("matched_deadline_text")
+                deadline_page = date_check.get("matched_deadline_page")
+                deadline_locations = date_check.get("deadline_locations") or []
+            date_status = date_check.get("status") if isinstance(date_check, dict) else None
+            row_status = str(item.get("status") or ("found" if item.get("found") else "missing"))
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -645,11 +694,20 @@ class ExtractionTablesMixin:
                     value={
                         "attachment_number": item.get("attachment_number"),
                         "matched_bid_title": item.get("matched_bid_title"),
-                        "signature_status": (item.get("signature_check") or {}).get("status"),
+                        "signature_status": signature_status,
+                        "signature_parse_status": signature_parse_status,
                         "seal_status": (item.get("seal_check") or {}).get("status"),
-                        "date_status": (item.get("date_check") or {}).get("status"),
+                        "date_status": date_status,
+                        "date_text": date_text,
+                        "deadline_date": deadline_date,
+                        "deadline_text": deadline_text,
+                        "deadline_page": deadline_page,
+                        "deadline_locations": deadline_locations,
+                        "signature_evidence": signature_evidence,
+                        "seal_texts": seal_evidence,
+                        "seal_evidence": seal_evidence,
                     },
-                    status=str(item.get("status") or ("found" if item.get("found") else "missing")),
+                    status=row_status,
                     page_refs=self._coerce_page_refs(item.get("pages"), item),
                     evidence={"requirements": item.get("requirements") or {}},
                 )
@@ -658,6 +716,200 @@ class ExtractionTablesMixin:
         return rows
 
     # 抽数表工具
+    def _itemized_decimal(self, value: Any) -> Decimal | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, (int, float)):
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, ValueError):
+                return None
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return Decimal(match.group(0))
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _format_itemized_decimal(self, value: Any) -> str | None:
+        amount = self._itemized_decimal(value)
+        if amount is None:
+            return None
+        return format(amount.quantize(Decimal("0.01")), "f")
+
+    def _build_itemized_amount_value(self, item: dict[str, Any]) -> dict[str, Any]:
+        quantity = self._itemized_decimal(item.get("quantity"))
+        unit_price = self._itemized_decimal(item.get("unit_price"))
+        ocr_total = (
+            self._itemized_decimal(item.get("declared_line_total"))
+            or self._itemized_decimal(item.get("line_total"))
+            or self._itemized_decimal(item.get("amount"))
+        )
+        calculated_total = (
+            quantity * unit_price
+            if quantity is not None and unit_price is not None
+            else (
+                self._itemized_decimal(item.get("expected_total"))
+                or self._itemized_decimal(item.get("amount"))
+            )
+        )
+        difference = (
+            calculated_total - ocr_total
+            if calculated_total is not None and ocr_total is not None
+            else self._itemized_decimal(item.get("difference"))
+        )
+        if calculated_total is None and ocr_total is None:
+            row_status = "missing"
+        elif quantity is None or unit_price is None:
+            row_status = "unclear" if item.get("relation_type") not in {"amount_only_row"} else "found"
+        elif ocr_total is None:
+            row_status = "missing"
+        else:
+            row_status = "pass" if abs(difference or Decimal("0")) <= Decimal("0.01") else "fail"
+
+        display_total = calculated_total if calculated_total is not None else ocr_total
+        return {
+            "serial": item.get("serial"),
+            "item_label": item.get("label") or item.get("serial"),
+            "quantity": self._format_itemized_decimal(quantity),
+            "unit_price": self._format_itemized_decimal(unit_price),
+            "ocr_total": self._format_itemized_decimal(ocr_total),
+            "declared_line_total": self._format_itemized_decimal(ocr_total),
+            "calculated_total": self._format_itemized_decimal(calculated_total),
+            "expected_total": self._format_itemized_decimal(calculated_total),
+            "difference": self._format_itemized_decimal(difference),
+            "row_status": row_status,
+            "relation_type": item.get("relation_type"),
+            "amount": self._format_itemized_decimal(display_total),
+            "amount_yuan": self._format_itemized_decimal(display_total),
+            "raw_amount": item.get("source"),
+            "source": item.get("source"),
+            "section_anchor": item.get("section_anchor"),
+        }
+
+    def _attachment_signature_evidence_texts(self, attachment_result: dict[str, Any]) -> list[str]:
+        """提取真实 OCR 签字文本，不混入通过状态或占位符。"""
+        if not isinstance(attachment_result, dict):
+            return []
+        signature_check = attachment_result.get("signature_check") or {}
+        if not isinstance(signature_check, dict):
+            return []
+
+        texts: list[str] = []
+        seen: set[str] = set()
+        ocr_evidence_modes = {
+            "",
+            "text_inline",
+            "ocr_signature_section",
+            "ocr_signature_region",
+            "ocr_signature_location",
+            "ocr_signature_location_fallback",
+            "nearby_text_mark",
+            "personal_seal_as_alternative",
+        }
+        non_content_values = {
+            "",
+            "已签字",
+            "已盖章",
+            "已签章",
+            "通过",
+            "pass",
+            "found",
+            "ok",
+            "true",
+        }
+
+        def compact(text: Any) -> str:
+            return re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]", "", str(text or ""))
+
+        non_content_keys = {compact(value).lower() for value in non_content_values}
+
+        def content_value(raw: Any) -> str:
+            value = str(raw or "").strip()
+            if not value or compact(value).lower() in non_content_keys:
+                return ""
+            return value
+
+        def candidates(item: dict[str, Any], mode: str) -> list[Any]:
+            if mode == "personal_seal_as_alternative":
+                return [item.get("value"), item.get("seal_text")]
+            if mode == "nearby_text_mark":
+                return [item.get("value"), item.get("evidence_text")]
+            return [item.get("signature_text"), item.get("value")]
+
+        for item in signature_check.get("filled_values") or []:
+            if not isinstance(item, dict):
+                continue
+            mode = str(item.get("mode") or "").strip()
+            if mode not in ocr_evidence_modes:
+                continue
+            evidence_text = ""
+            for candidate in candidates(item, mode):
+                evidence_text = content_value(candidate)
+                if evidence_text:
+                    break
+            if not evidence_text:
+                continue
+            key = compact(evidence_text)
+            if key not in seen:
+                seen.add(key)
+                texts.append(evidence_text)
+        return texts
+
+    def _compact_seal_evidence_text(self, text: Any) -> str:
+        return re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]", "", str(text or ""))
+
+    def _looks_like_company_seal_evidence_text(self, text: Any) -> bool:
+        compact = self._compact_seal_evidence_text(text)
+        return bool(re.search(r"(有限责任公司|股份有限公司|集团有限公司|有限公司|公司|专用章)$", compact) or "公司" in compact)
+
+    def _looks_like_person_seal_evidence_text(self, text: Any) -> bool:
+        compact = self._compact_seal_evidence_text(text)
+        return bool(re.fullmatch(r"[\u4e00-\u9fa5]{2,4}|[A-Za-z]{2,20}", compact))
+
+    def _official_seal_evidence_texts(self, values: Any) -> list[str]:
+        texts = list(dict.fromkeys(str(value or "").strip() for value in (values or []) if str(value or "").strip()))
+        company_texts = [text for text in texts if self._looks_like_company_seal_evidence_text(text)]
+        if company_texts:
+            return company_texts
+        return [text for text in texts if not self._looks_like_person_seal_evidence_text(text)]
+
+    def _attachment_seal_evidence_texts(self, attachment_result: dict[str, Any]) -> list[str]:
+        """提取该附件中真实识别到的盖章文本。"""
+        if not isinstance(attachment_result, dict):
+            return []
+        seal_check = attachment_result.get("seal_check") or {}
+        if not isinstance(seal_check, dict):
+            return []
+
+        texts: list[str] = []
+        seen: set[str] = set()
+
+        def add(text: Any, page: Any = None) -> None:
+            value = str(text or "").strip()
+            if not value:
+                return
+            key = self._compact_seal_evidence_text(value)
+            if key in seen:
+                return
+            seen.add(key)
+            label = f"{value}（P{page}）" if page else value
+            texts.append(label)
+
+        for seal_text in self._official_seal_evidence_texts(seal_check.get("seal_texts") or []):
+            add(seal_text)
+        best_match = seal_check.get("best_match") or {}
+        if isinstance(best_match, dict) and str(best_match.get("mode") or "").strip() != "textual_seal_line":
+            for seal_text in self._official_seal_evidence_texts([best_match.get("seal_text")]):
+                add(seal_text, best_match.get("page"))
+        return texts[:10]
+
     def _make_extraction_row(
         self,
         *,

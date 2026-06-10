@@ -168,8 +168,8 @@ def compare_business_similarity_blocks(
                 "type": "similar_sentence",
                 "left_type": left_unit.get("type"),
                 "right_type": right_unit.get("type"),
-                "left_text": clip(left_unit.get("text") or "", 160),
-                "right_text": clip(right_unit.get("text") or "", 160),
+                "left_text": clip(left_unit.get("text") or "", 4000),
+                "right_text": clip(right_unit.get("text") or "", 4000),
                 "similarity": round(ratio, 4),
             }
         )
@@ -210,8 +210,8 @@ def compare_business_similarity_sections(
                 "right_bbox": right_unit.get("bbox"),
                 "exact": False,
                 "similarity": round(ratio, 4),
-                "left_preview": left_unit.get("preview"),
-                "right_preview": right_unit.get("preview"),
+                "left_preview": clip(left_unit.get("text") or left_unit.get("preview") or "", 4000),
+                "right_preview": clip(right_unit.get("text") or right_unit.get("preview") or "", 4000),
             }
         )
     return {

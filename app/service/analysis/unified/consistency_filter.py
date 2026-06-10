@@ -53,6 +53,22 @@ class ConsistencyFilterMixin:
                 "evaluated_segments": evaluated_segments,
                 "skipped_segments": skipped_segments,
                 "original_segment_count": len(raw_segments) if isinstance(raw_segments, list) else 0,
+                "engine_version": next(
+                    (
+                        segment.get("engine_version")
+                        for segment in raw_segments
+                        if isinstance(segment, dict) and segment.get("engine_version")
+                    ),
+                    None,
+                ),
+                "model_status": next(
+                    (
+                        segment.get("model_status")
+                        for segment in raw_segments
+                        if isinstance(segment, dict) and segment.get("model_status")
+                    ),
+                    {},
+                ),
             }
             normalized = self._normalize_consistency(raw_result)
             execution = {

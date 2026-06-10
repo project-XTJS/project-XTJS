@@ -114,6 +114,13 @@ class TableExtractorMixin:
                         continue
                     if self._matches_other_anchor(section_text, anchors):
                         break
+                    if (
+                        anchors == self.ITEM_SECTION_ANCHORS
+                        and self._matches_other_anchor(
+                            section_text, self.TOTAL_SECTION_ANCHORS
+                        )
+                    ):
+                        break
                     if self._is_heading_line(section_text):
                         break
                     continue

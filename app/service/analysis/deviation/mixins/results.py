@@ -19,7 +19,12 @@ class ResultsMixin:
     _extract_text: Any
     _extract_pair: Any
 
-    def check_technical_deviation(self, tender_document: Any, bid_document: Any | None = None) -> dict:
+    def check_technical_deviation(
+        self,
+        tender_document: Any,
+        bid_document: Any | None = None,
+        technical_bid_document: Any | None = None,
+    ) -> dict:
         """对招标文件和投标文件进行偏离检查。"""
         tender = self._coerce_payload(tender_document)
         if bid_document is None:
@@ -29,17 +34,23 @@ class ResultsMixin:
             tender, bid = pair
         else:
             bid = self._coerce_payload(bid_document)
-        return self._run_check(tender, bid)
+        technical_bid = self._coerce_payload(technical_bid_document) if technical_bid_document is not None else None
+        return self._run_check(tender, bid, technical_bid)
 
     def compare_raw_data(self, tender_raw_json: Any, bid_raw_json: Any) -> dict:
         """对外一致性接口。"""
         return self.check_technical_deviation(tender_raw_json, bid_raw_json)
 
-    def _run_check(self, tender_payload: dict, bid_payload: dict) -> dict:
+    def _run_check(
+        self,
+        tender_payload: dict,
+        bid_payload: dict,
+        technical_bid_payload: dict | None = None,
+    ) -> dict:
         """核心检查逻辑。"""
         star_requirements = self._extract_star_requirements(tender_payload)
         tender_template_requirements = self._technical_deviation_template_requirements(tender_payload)
-        sections = self._extract_bid_deviation_sections(bid_payload)
+        sections = self._extract_combined_bid_deviation_sections(bid_payload, technical_bid_payload)
         global_stmt = self._detect_global_no_deviation(sections["combined_text"])
         table_coverage = self._collect_table_coverage(sections)
 
@@ -53,7 +64,10 @@ class ResultsMixin:
             )
         if not star_requirements:
             return self._build_empty_star_result(sections, global_stmt, table_coverage)
-        if not str(self._extract_text(bid_payload) or "").strip():
+        bid_texts = [self._extract_text(bid_payload)]
+        if technical_bid_payload is not None:
+            bid_texts.append(self._extract_text(technical_bid_payload))
+        if not "\n".join(str(text or "").strip() for text in bid_texts).strip():
             return self._build_missing_bid_content_result(star_requirements, sections, table_coverage)
         if not sections.get("business") and not sections.get("technical"):
             return self._build_missing_deviation_table_result(star_requirements, sections, table_coverage)
@@ -80,6 +94,7 @@ class ResultsMixin:
                         "requirement_bbox": item.get("requirement_bbox"),
                         "response_page": item.get("response_page"),
                         "response_bbox": item.get("response_bbox"),
+                        "response_document_role": item.get("response_document_role"),
                         "response_status": "missing",
                     }
                 )
@@ -96,6 +111,7 @@ class ResultsMixin:
                         "response_evidence": item.get("response_evidence", ""),
                         "response_page": item.get("response_page"),
                         "response_bbox": item.get("response_bbox"),
+                        "response_document_role": item.get("response_document_role"),
                         "requirement_page": item.get("requirement_page"),
                         "requirement_bbox": item.get("requirement_bbox"),
                     }
@@ -122,6 +138,7 @@ class ResultsMixin:
                         "response_evidence": item.get("response_evidence", ""),
                         "response_page": item.get("response_page"),
                         "response_bbox": item.get("response_bbox"),
+                        "response_document_role": item.get("response_document_role"),
                         "requirement_page": item.get("requirement_page"),
                         "requirement_bbox": item.get("requirement_bbox"),
                     }
@@ -180,7 +197,7 @@ class ResultsMixin:
 
     def _technical_deviation_template_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
         """Extract tender-side technical deviation table templates as auditable requirements."""
-        sections = self._extract_bid_deviation_sections(tender_payload)
+        sections = self._extract_bid_deviation_sections(tender_payload, document_role="tender")
         requirements: list[dict[str, Any]] = []
         seen: set[str] = set()
         for section in sections.get("technical") or []:
@@ -204,6 +221,41 @@ class ResultsMixin:
                 }
             )
         return requirements
+
+    def _extract_combined_bid_deviation_sections(
+        self,
+        business_payload: dict,
+        technical_payload: dict | None = None,
+    ) -> dict[str, Any]:
+        """Extract deviation tables from both business and technical bid documents."""
+        parts = [
+            self._extract_bid_deviation_sections(business_payload, document_role="business_bid")
+        ]
+        if technical_payload is not None:
+            parts.append(
+                self._extract_bid_deviation_sections(technical_payload, document_role="technical_bid")
+            )
+
+        combined: dict[str, Any] = {
+            "business": [],
+            "technical": [],
+            "rows": [],
+            "catalog_pages": [],
+            "catalog_locations": [],
+        }
+        combined_text_parts: list[str] = []
+        for part in parts:
+            for key in ("business", "technical", "rows", "catalog_locations"):
+                combined[key].extend(part.get(key) or [])
+            for page in part.get("catalog_pages") or []:
+                if page not in combined["catalog_pages"]:
+                    combined["catalog_pages"].append(page)
+            text = str(part.get("combined_text") or "").strip()
+            if text:
+                combined_text_parts.append(text)
+        combined["catalog_pages"] = sorted(page for page in combined["catalog_pages"] if isinstance(page, int))
+        combined["combined_text"] = "\n\n".join(combined_text_parts)
+        return combined
 
     def _single_doc_result(self, payload: dict) -> dict:
         """单文档输入时生成提示结果。"""

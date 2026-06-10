@@ -57,6 +57,7 @@ class DuplicateCheckService:
         self._deviation_checker = DeviationChecker()
         self._minio_service: MinioService | None = None
         self._document_image_cache: dict[str, list[dict[str, Any]]] = {}
+        self._short_duplicate_typo_service: Any | None = None
 
     # 公共入口
     def check_project_documents(
@@ -68,6 +69,7 @@ class DuplicateCheckService:
         document_types: list[str] | None = None,
         max_evidence_sections: int = 5,
         max_pairs_per_type: int = 0,
+        duplicate_scope: str | None = None,
     ) -> dict[str, Any]:
         """主入口：对项目中的文档分组进行两两比较，返回查重分析结果。"""
         requested_types = self._normalize_requested_types(document_types)
@@ -106,7 +108,10 @@ class DuplicateCheckService:
                 record, role=role, cache=template_cache,
             )
             prepared, skip_reason = self._prepare_document(
-                record, role=role, template_context=template_context,
+                record,
+                role=role,
+                template_context=template_context,
+                duplicate_scope=duplicate_scope,
             )
             if prepared is None:
                 skipped_groups[role].append(
@@ -128,13 +133,18 @@ class DuplicateCheckService:
 
         for role in requested_types:
             documents = prepared_groups[role]
-            pair_items = [
-                self._compare_documents(left, right, role=role, max_evidence_sections=max_evidence_sections)
+            compared_pair_items = [
+                self._filter_short_duplicate_evidence(
+                    self._compare_documents(left, right, role=role, max_evidence_sections=max_evidence_sections)
+                )
                 for left, right in combinations(documents, 2)
+            ]
+            total_pair_count = len(compared_pair_items)
+            pair_items = [
+                item for item in compared_pair_items if str(item.get("risk_level") or "none") != "none"
             ]
             pair_items.sort(key=self._pair_sort_key, reverse=True)
 
-            total_pair_count = len(pair_items)
             if max_pairs_per_type > 0:
                 pair_items = pair_items[:max_pairs_per_type]
 
@@ -186,6 +196,7 @@ class DuplicateCheckService:
                 "block_matching_unit": "sentence",
                 "business_similarity_enabled": DOCUMENT_TYPE_BUSINESS_BID in enabled_similarity_roles,
                 "technical_similarity_enabled": DOCUMENT_TYPE_TECHNICAL_BID in enabled_similarity_roles,
+                "duplicate_scope": duplicate_scope or "full",
             },
             "groups": groups,
             "summary": {
@@ -206,6 +217,7 @@ class DuplicateCheckService:
         *,
         role: str,
         template_context: dict[str, Any] | None = None,
+        duplicate_scope: str | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         """对单条文档记录提取内容，排除模板，返回可用于比较的结构化对象。"""
         payload = self._coerce_payload(record.get("content"))
@@ -224,6 +236,10 @@ class DuplicateCheckService:
                 itemized_template_context=(
                     template_context.get("itemized_template_context") if template_context else None
                 ),
+            )
+            scoped_segments = self._filter_business_duplicate_segments(
+                scoped_segments,
+                duplicate_scope=duplicate_scope,
             )
             if not scoped_segments:
                 return None, BUSINESS_SCOPE_SKIP_REASON
@@ -250,6 +266,27 @@ class DuplicateCheckService:
 
         prepared = self._build_prepared_document(record, ordered_blocks, table_entries, role=role)
         return prepared, None if prepared is not None else empty_reason
+
+    @staticmethod
+    def _filter_business_duplicate_segments(
+        segments: list[dict[str, Any]],
+        *,
+        duplicate_scope: str | None,
+    ) -> list[dict[str, Any]]:
+        scope = str(duplicate_scope or "").strip().lower()
+        if not scope or scope in {"full", "business", "business_bid"}:
+            return list(segments or [])
+        if scope in {"itemized", "itemized_pricing", "business_itemized"}:
+            allowed_sources = {"itemized_pricing"}
+        elif scope in {"response", "bid_response", "deviation", "deviation_response"}:
+            allowed_sources = {"deviation_table"}
+        else:
+            return list(segments or [])
+        return [
+            segment
+            for segment in (segments or [])
+            if str(segment.get("source") or "") in allowed_sources
+        ]
 
     def _build_prepared_document(
         self,
@@ -1099,6 +1136,200 @@ class DuplicateCheckService:
         }
         issue["locations"] = self._build_duplicate_issue_locations(issue)
         return issue
+
+    def _filter_short_duplicate_evidence(self, issue: dict[str, Any]) -> dict[str, Any]:
+        """Suppress short duplicate text unless it contains typos or identical business numbers."""
+        text_evidence_keys = (
+            "duplicate_blocks",
+            "duplicate_sections",
+            "duplicate_tables",
+            "similar_blocks",
+            "similar_sections",
+            "similar_tables",
+        )
+        suppressed_count = 0
+        kept_count = 0
+        for evidence_key in text_evidence_keys:
+            kept_items: list[dict[str, Any]] = []
+            for evidence in issue.get(evidence_key) or []:
+                if not isinstance(evidence, dict):
+                    continue
+                next_evidence = dict(evidence)
+                decision = self._short_duplicate_report_decision(next_evidence)
+                next_evidence["duplicate_text_length"] = decision["text_length"]
+                next_evidence["duplicate_report_reason"] = decision["reason"]
+                if decision.get("typo_issues"):
+                    next_evidence["short_duplicate_typo_issues"] = decision["typo_issues"]
+                if decision["report"]:
+                    kept_items.append(next_evidence)
+                    kept_count += 1
+                else:
+                    suppressed_count += 1
+            issue[evidence_key] = kept_items
+
+        issue["short_duplicate_filter"] = {
+            "enabled": True,
+            "threshold_chars": 30,
+            "suppressed_evidence_count": suppressed_count,
+            "reported_evidence_count": kept_count,
+        }
+        issue["locations"] = self._build_duplicate_issue_locations(issue)
+        has_image_evidence = bool(issue.get("duplicate_images"))
+        if kept_count == 0 and not has_image_evidence:
+            issue["risk_level"] = "none"
+            issue["suspicious"] = False
+        return issue
+
+    def _short_duplicate_report_decision(self, evidence: dict[str, Any]) -> dict[str, Any]:
+        left_text, right_text = self._duplicate_evidence_pair_text(evidence)
+        representative_text = left_text or right_text
+        text_length = self._duplicate_text_length(representative_text)
+        if text_length >= 30:
+            return {"report": True, "reason": "duplicate_text_at_least_30_chars", "text_length": text_length}
+
+        if self._has_identical_non_serial_numbers(left_text, right_text):
+            return {"report": True, "reason": "identical_non_serial_numbers", "text_length": text_length}
+
+        typo_issues = self._short_duplicate_typo_issues(evidence, left_text=left_text, right_text=right_text)
+        if typo_issues:
+            return {
+                "report": True,
+                "reason": "short_duplicate_contains_typo",
+                "text_length": text_length,
+                "typo_issues": typo_issues,
+            }
+        return {"report": False, "reason": "short_duplicate_without_typo", "text_length": text_length}
+
+    def _duplicate_evidence_pair_text(self, evidence: dict[str, Any]) -> tuple[str, str]:
+        left_candidates = (
+            evidence.get("left_text"),
+            evidence.get("left_preview"),
+            evidence.get("left_rows"),
+            evidence.get("left_sample_rows"),
+            evidence.get("sample_rows"),
+            evidence.get("text"),
+        )
+        right_candidates = (
+            evidence.get("right_text"),
+            evidence.get("right_preview"),
+            evidence.get("right_rows"),
+            evidence.get("right_sample_rows"),
+            evidence.get("sample_rows"),
+            evidence.get("text"),
+        )
+        return self._join_evidence_text(left_candidates), self._join_evidence_text(right_candidates)
+
+    def _join_evidence_text(self, values: tuple[Any, ...]) -> str:
+        parts: list[str] = []
+        for value in values:
+            if value in (None, "", []):
+                continue
+            if isinstance(value, list):
+                parts.extend(str(item or "").strip() for item in value if str(item or "").strip())
+            else:
+                parts.append(str(value or "").strip())
+        deduped: list[str] = []
+        for part in parts:
+            if part and part not in deduped:
+                deduped.append(part)
+        return "\n".join(deduped).strip()
+
+    def _duplicate_text_length(self, text: str) -> int:
+        compact = compact_raw_text(text)
+        return len(compact)
+
+    def _has_identical_non_serial_numbers(self, left_text: str, right_text: str) -> bool:
+        left_numbers = self._non_serial_numbers(left_text)
+        right_numbers = self._non_serial_numbers(right_text)
+        return bool(left_numbers and left_numbers == right_numbers)
+
+    def _non_serial_numbers(self, text: str) -> list[str]:
+        normalized = normalize_plain_text(text)
+        cleaned_lines: list[str] = []
+        for line in normalized.splitlines() or [normalized]:
+            line = re.sub(
+                r"^\s*(?:[(（]?\d{1,4}[)）]?[.、:：]?|"
+                r"\d+(?:\.\d+){1,5}[、.．)]?|"
+                r"[一二三四五六七八九十百千]+[、.．])\s*",
+                "",
+                line,
+            )
+            line = re.sub(r"第\s*\d+\s*页", " ", line, flags=re.IGNORECASE)
+            line = re.sub(r"(?:P|p)\s*\d+(?:\s*[-~]\s*(?:P|p)?\s*\d+)?", " ", line)
+            cleaned_lines.append(line)
+        cleaned = "\n".join(cleaned_lines)
+        return re.findall(r"(?<![A-Za-z])\d+(?:[.,]\d+)?%?", cleaned)
+
+    def _short_duplicate_typo_issues(
+        self,
+        evidence: dict[str, Any],
+        *,
+        left_text: str,
+        right_text: str,
+    ) -> list[dict[str, Any]]:
+        left_issues = self._check_short_duplicate_side_typos("left", left_text, evidence)
+        right_issues = self._check_short_duplicate_side_typos("right", right_text, evidence)
+        left_signature = self._typo_issue_signature(left_issues)
+        right_signature = self._typo_issue_signature(right_issues)
+        if not left_signature or left_signature != right_signature:
+            return []
+        return left_issues + right_issues
+
+    def _check_short_duplicate_side_typos(
+        self,
+        side: str,
+        text: str,
+        evidence: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not str(text or "").strip():
+            return []
+        snippet = {
+            "side": side,
+            "text": text,
+            "page": evidence.get(f"{side}_page"),
+            "bbox": evidence.get(f"{side}_bbox"),
+        }
+        try:
+            issues = self._get_short_duplicate_typo_service().check_text_snippets_for_typos([snippet])
+        except Exception:
+            return []
+        normalized: list[dict[str, Any]] = []
+        for issue in issues or []:
+            if not isinstance(issue, dict):
+                continue
+            item = dict(issue)
+            item.setdefault("side", side)
+            normalized.append(item)
+        return normalized
+
+    def _typo_issue_signature(self, issues: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+        signatures: list[tuple[str, str]] = []
+        for issue in issues or []:
+            matched = str(
+                issue.get("matched_text") or
+                issue.get("matchedText") or
+                issue.get("wrong") or
+                issue.get("error_word") or
+                issue.get("source") or
+                ""
+            ).strip()
+            suggestion = str(
+                issue.get("suggestion") or
+                issue.get("correct") or
+                issue.get("correct_word") or
+                issue.get("target") or
+                ""
+            ).strip()
+            if matched:
+                signatures.append((matched, suggestion))
+        return tuple(sorted(set(signatures)))
+
+    def _get_short_duplicate_typo_service(self) -> Any:
+        if self._short_duplicate_typo_service is None:
+            from app.service.analysis.bid_document_review import BidDocumentReviewService
+
+            self._short_duplicate_typo_service = BidDocumentReviewService()
+        return self._short_duplicate_typo_service
 
     def _build_duplicate_issue_locations(self, item: dict[str, Any]) -> list[dict[str, Any]]:
         locations: list[dict[str, Any]] = []

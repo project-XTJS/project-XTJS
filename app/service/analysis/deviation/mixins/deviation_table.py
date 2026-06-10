@@ -46,13 +46,18 @@ class DeviationTableMixin:
     _section_text: Any
     _is_catalog_like_line: Any
 
-    def _extract_bid_deviation_sections(self, bid_payload: dict) -> dict[str, Any]:
+    def _extract_bid_deviation_sections(
+        self,
+        bid_payload: dict,
+        *,
+        document_role: str = "business_bid",
+    ) -> dict[str, Any]:
         """从投标文件中提取商务偏离表、技术偏离表等区段。"""
         line_items = self._page_lines(bid_payload)
-        business = self._collect_sections(line_items, self.BUSINESS_TITLES)
-        technical = self._collect_sections(line_items, self.TECH_TITLES)
+        business = self._collect_sections(line_items, self.BUSINESS_TITLES, document_role=document_role)
+        technical = self._collect_sections(line_items, self.TECH_TITLES, document_role=document_role)
         if not business and not technical:
-            generic = self._collect_sections(line_items, ("偏离表",))
+            generic = self._collect_sections(line_items, ("偏离表",), document_role=document_role)
             for sec in generic:
                 head = "\n".join((sec.get("lines") or [])[:3])
                 if "技术" in head:
@@ -65,9 +70,14 @@ class DeviationTableMixin:
 
         business = self._dedupe_sections(business)
         technical = self._dedupe_sections(technical)
-        rows = self._extract_deviation_rows(bid_payload, business, technical)
+        rows = self._extract_deviation_rows(
+            bid_payload,
+            business,
+            technical,
+            document_role=document_role,
+        )
         combined = "\n\n".join(x["text"] for x in business + technical if x.get("text"))
-        catalog = self._collect_catalog_locations(line_items)
+        catalog = self._collect_catalog_locations(line_items, document_role=document_role)
         return {
             "business": business,
             "technical": technical,
@@ -77,7 +87,12 @@ class DeviationTableMixin:
             "catalog_locations": catalog["locations"],
         }
 
-    def _collect_catalog_locations(self, line_items: list[dict[str, Any]]) -> dict[str, Any]:
+    def _collect_catalog_locations(
+        self,
+        line_items: list[dict[str, Any]],
+        *,
+        document_role: str = "business_bid",
+    ) -> dict[str, Any]:
         """收集投标文件目录页，用于缺少偏离表时的人工复核定位。"""
         page_hits: dict[int, dict[str, Any]] = {}
         toc_like_count_by_page: dict[int, int] = {}
@@ -97,7 +112,7 @@ class DeviationTableMixin:
 
             if is_catalog_heading and page not in page_hits:
                 page_hits[page] = {
-                    "document_role": "business_bid",
+                    "document_role": document_role,
                     "page": page,
                     "bbox": normalize_bbox(item.get("bbox") or item.get("box")),
                     "text": line[:120],
@@ -115,7 +130,7 @@ class DeviationTableMixin:
             item = first_toc_line_by_page.get(page) or {}
             line = str(item.get("text") or "").strip()
             page_hits[page] = {
-                "document_role": "business_bid",
+                "document_role": document_role,
                 "page": page,
                 "bbox": normalize_bbox(item.get("bbox") or item.get("box")),
                 "text": line[:120] or "目录",
@@ -177,6 +192,8 @@ class DeviationTableMixin:
         bid_payload: dict,
         business_sections: list[dict[str, Any]],
         technical_sections: list[dict[str, Any]],
+        *,
+        document_role: str = "business_bid",
     ) -> list[dict[str, Any]]:
         """从投标文件的逻辑表格和段落中提取所有可能的偏离响应行。"""
         rows: list[dict[str, Any]] = []
@@ -192,13 +209,14 @@ class DeviationTableMixin:
                             table,
                             section_hints=section_hints,
                             doc=doc,
+                            document_role=document_role,
                         )
                     )
 
         for section in technical_sections:
-            rows.extend(self._extract_rows_from_section(section, "technical"))
+            rows.extend(self._extract_rows_from_section(section, "technical", document_role=document_role))
         for section in business_sections:
-            rows.extend(self._extract_rows_from_section(section, "business"))
+            rows.extend(self._extract_rows_from_section(section, "business", document_role=document_role))
 
         out_by_key: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -219,6 +237,7 @@ class DeviationTableMixin:
         *,
         section_hints: list[dict[str, Any]] | None = None,
         doc: dict[str, Any] | None = None,
+        document_role: str = "business_bid",
     ) -> list[dict[str, Any]]:
         """解析一个逻辑表格，将其记录转换为偏离行结构。"""
         out: list[dict[str, Any]] = []
@@ -243,7 +262,14 @@ class DeviationTableMixin:
         if isinstance(records, list):
             for record in records:
                 if isinstance(record, dict):
-                    row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title, bbox=table_bbox)
+                    row = self._build_row_from_record(
+                        record,
+                        headers=headers,
+                        page_no=page_no,
+                        title=title,
+                        bbox=table_bbox,
+                        document_role=document_role,
+                    )
                     if row:
                         out.append(row)
         if out:
@@ -253,7 +279,14 @@ class DeviationTableMixin:
         if not isinstance(rows, list):
             native_headers, native_records = self._extract_native_table_records(table)
             for record in native_records:
-                row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title, bbox=table_bbox)
+                row = self._build_row_from_record(
+                    record,
+                    headers=native_headers,
+                    page_no=page_no,
+                    title=title,
+                    bbox=table_bbox,
+                    document_role=document_role,
+                )
                 if row:
                     out.append(row)
             return out
@@ -265,7 +298,14 @@ class DeviationTableMixin:
             for idx, value in enumerate(values):
                 key = headers[idx] if idx < len(headers) else f"col_{idx + 1}"
                 record[str(key)] = value
-            row = self._build_row_from_record(record, headers=headers, page_no=page_no, title=title, bbox=table_bbox)
+            row = self._build_row_from_record(
+                record,
+                headers=headers,
+                page_no=page_no,
+                title=title,
+                bbox=table_bbox,
+                document_role=document_role,
+            )
             if row:
                 out.append(row)
 
@@ -274,7 +314,14 @@ class DeviationTableMixin:
 
         native_headers, native_records = self._extract_native_table_records(table)
         for record in native_records:
-            row = self._build_row_from_record(record, headers=native_headers, page_no=page_no, title=title, bbox=table_bbox)
+            row = self._build_row_from_record(
+                record,
+                headers=native_headers,
+                page_no=page_no,
+                title=title,
+                bbox=table_bbox,
+                document_role=document_role,
+            )
             if row:
                 out.append(row)
         return out
@@ -517,6 +564,7 @@ class DeviationTableMixin:
         page_no: int | None,
         title: str,
         bbox: Any = None,
+        document_role: str = "business_bid",
     ) -> dict[str, Any] | None:
         """将表格中的一行记录转换为偏离分析所需的结构。"""
         ordered_keys = list(record.keys())
@@ -562,6 +610,7 @@ class DeviationTableMixin:
             "group": self._guess_row_group(title, joined_text),
             "source": "logical_table",
             "page": page_no,
+            "document_role": document_role,
             "title": title,
             "requirement_text": requirement,
             "response_text": response,
@@ -625,7 +674,13 @@ class DeviationTableMixin:
             return "deviation"
         return None
 
-    def _extract_rows_from_section(self, section: dict[str, Any], group: str) -> list[dict[str, Any]]:
+    def _extract_rows_from_section(
+        self,
+        section: dict[str, Any],
+        group: str,
+        *,
+        document_role: str = "business_bid",
+    ) -> list[dict[str, Any]]:
         """从纯文本区段中提取标记为★或含偏离响应的行。"""
         out: list[dict[str, Any]] = []
         title = str(section.get("title") or "")
@@ -646,6 +701,7 @@ class DeviationTableMixin:
                     "group": group,
                     "source": "section_text",
                     "page": section.get("page"),
+                    "document_role": document_role,
                     "title": title,
                     "requirement_text": segment,
                     "response_text": segment if has_response_marker else "",
@@ -731,6 +787,8 @@ class DeviationTableMixin:
         line_items: list[dict[str, Any]],
         anchors: tuple[str, ...],
         window: int = 220,
+        *,
+        document_role: str = "business_bid",
     ) -> list[dict[str, Any]]:
         """在行列表中收集以给定 anchor 字符串开头的段落。"""
         out: list[dict[str, Any]] = []
@@ -777,6 +835,7 @@ class DeviationTableMixin:
                     {
                         "title": anchor,
                         "page": item.get("page"),
+                        "document_role": document_role,
                         "start_line": item.get("line_number", i + 1),
                         "lines": chunk,
                         "line_items": chunk_items,

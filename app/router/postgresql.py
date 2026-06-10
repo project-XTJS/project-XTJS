@@ -11,16 +11,15 @@ import json
 import io
 import os
 import hashlib
+import logging
 import re
 import tempfile
-import time
-from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime
-from threading import Lock
 from typing import Any, Literal, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse
 from docx import Document
 from docx.oxml import OxmlElement
@@ -39,6 +38,7 @@ from app.core.document_types import (
 from app.router.dependencies import (
     RecognitionOptions,
     get_bid_document_review_service,
+    get_cache_service,
     get_db_service,
     get_duplicate_check_service,
     get_form_recognition_options,
@@ -52,27 +52,60 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.schemas.postgresql import (
+    BusinessBidManualReviewInputsRequest,
     DuplicateCheckScope,
+    DocumentReviewContentUpdateRequest,
     DocumentPreviewRequest,
     DocumentUpdateRequest,
     IdentifierBatchDeleteRequest,
+    PersonnelReuseCheckRequest,
+    PersonnelReuseDraftRequest,
     ProjectBindDocumentsRequest,
     ProjectCreateRequest,
     ProjectDuplicateCheckRequest,
-    ProjectResultFrontendUpdateRequest,
+    ProjectManualReviewRerunRequest,
+    ProjectManualReviewResultInputsRequest,
+    ProjectReportExportRequest,
     ProjectResultUpdateRequest,
     ProjectResultUpsertRequest,
     ProjectRelationUpdateRequest,
+    ProjectWorkflowScopeRequest,
     RelationBatchDeleteRequest,
     ProjectUpdateRequest,
 )
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
+from app.service.cache_service import CacheUnavailableError, RedisCacheService
 from app.service.analysis.duplicate_merge import (
     DOC_TYPE_BY_MERGED_RESULT_KEY,
     MERGE_STRATEGY,
     MERGED_RESULT_KEY_BY_DOC_TYPE,
     RAW_RESULT_KEY_BY_DOC_TYPE,
     build_duplicate_merge_results,
+)
+from app.service.analysis.manual_review.business_bid_format import (
+    BUSINESS_FORMAT_RESULT_KEY,
+    _apply_manual_business_review_inputs,
+    _build_business_format_editable_items,
+    _business_manual_payload_for_project,
+    _business_review_from_record,
+    _save_business_manual_inputs,
+)
+from app.service.analysis.project_input_loader import ProjectAnalysisInputLoader
+from app.service.manual_review_state import (
+    MANUAL_REVIEW_RESULTS_KEY,
+    WORKFLOW_SCOPE_KEY,
+    display_result_view,
+    manual_review_results_from_record,
+    raw_result_view,
+)
+from app.service.manual_review.working_copy import (
+    DocumentWorkingCopyService,
+)
+from app.service.workflow_scope import (
+    EXCLUDED_BIDDERS_KEY,
+    filter_project_payload,
+    normalize_workflow_scope,
+    workflow_scope_from_result_record,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
@@ -84,18 +117,62 @@ from app.service.project_runtime import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
-# 预览缓存容量与过期时间（可通过环境变量调整）
-_PREVIEW_CACHE_MAX_ITEMS = max(8, min(int(os.getenv("XTJS_PREVIEW_CACHE_MAX_ITEMS", "64")), 512))
-_PREVIEW_CACHE_TTL_SECONDS = max(30, int(os.getenv("XTJS_PREVIEW_CACHE_TTL_SECONDS", "900")))
-_DOCUMENT_PREVIEW_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, dict]]" = OrderedDict()
-_DOCUMENT_PREVIEW_CACHE_LOCK = Lock()
 _FINE_OCR_PREVIEW_STRATEGY_VERSION = "fine-ocr-v1"
 # 用于从高亮短语中提取有效 token 的正则
 _HIGHLIGHT_TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]+")
 
 
+def _set_cache_header(response: Optional[Response], status: str) -> None:
+    if response is not None:
+        response.headers["X-XTJS-Cache"] = status
+
+
+def _cache_get_or_set_payload(
+    *,
+    cache_service: RedisCacheService,
+    cache_key: str,
+    ttl_seconds: int,
+    response: Optional[Response],
+    factory,
+):
+    if not settings.XTJS_CACHE_ENABLED:
+        _set_cache_header(response, "disabled")
+        return factory()
+    try:
+        payload, cache_status = cache_service.get_or_set_json(cache_key, ttl_seconds, factory)
+        _set_cache_header(response, cache_status)
+        return payload
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _invalidate_project_cache_or_error(cache_service: RedisCacheService, identifier_id: Optional[str] = None) -> None:
+    if not settings.XTJS_CACHE_ENABLED:
+        return
+    try:
+        cache_service.invalidate_project(identifier_id)
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _invalidate_document_preview_cache_or_error(cache_service: RedisCacheService, document_id: Optional[str] = None) -> None:
+    if not settings.XTJS_CACHE_ENABLED:
+        return
+    try:
+        cache_service.invalidate_document_preview(document_id)
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _invalidate_project_cache_by_identifier(identifier_id: Optional[str] = None) -> None:
+    _invalidate_project_cache_or_error(get_cache_service(), identifier_id)
+
+
 def _is_result_key_visible(result_key: str) -> bool:
+    if result_key == MANUAL_REVIEW_RESULTS_KEY:
+        return False
     if result_key == "typo_check":
         return bool(settings.TYPO_CHECK_VISIBLE)
     return True
@@ -107,6 +184,18 @@ def _filter_visible_result_keys(results: dict[str, Any]) -> dict[str, Any]:
         for key, value in dict(results or {}).items()
         if _is_result_key_visible(str(key))
     }
+
+
+_PROJECT_SERVICE_RESULT_KEYS = {
+    "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+    "deviation_check": "deviation_check",
+    "business_bid_duplicate_check": "business_bid_duplicate_check",
+    "business_itemized_duplicate_check": "business_itemized_duplicate_check",
+    "bid_response_duplicate_check": "bid_response_duplicate_check",
+    "technical_bid_duplicate_check": "technical_bid_duplicate_check",
+    "personnel_reuse_check": "personnel_reuse_check",
+    "typo_check": "typo_check",
+}
 
 
 # 将查重范围枚举转换为文档类型列表
@@ -266,50 +355,188 @@ def _load_document_source_bytes(
     return data, content_type, object_name
 
 
-# 构建预览缓存的唯一键（基于文档标识、版本、页码和高亮参数）
-def _preview_cache_key(document: dict, page: int, variant: str = "") -> tuple[str, str, int, str]:
-    identifier_id = str(document.get("identifier_id") or "").strip()
-    version = str(document.get("update_time") or document.get("file_url") or "").strip()
-    return identifier_id, version, int(page), variant
+def _preview_document_version(document: dict) -> str:
+    raw_version = "|".join(
+        [
+            str(document.get("update_time") or ""),
+            str(document.get("file_url") or ""),
+            str(document.get("source_file_hash") or ""),
+        ]
+    )
+    return hashlib.sha1(raw_version.encode("utf-8")).hexdigest()
 
 
-# 清理预览缓存中过期的条目
-def _preview_cache_prune(now: float) -> None:
-    expired_keys = [
-        key for key, (created_at, _payload) in _DOCUMENT_PREVIEW_CACHE.items()
-        if now - created_at > _PREVIEW_CACHE_TTL_SECONDS
-    ]
-    for key in expired_keys:
-        _DOCUMENT_PREVIEW_CACHE.pop(key, None)
+def _preview_cache_object_name(document: dict, version: str, page: int) -> str:
+    document_id = str(document.get("identifier_id") or "").strip()
+    prefix = str(settings.XTJS_CACHE_PREVIEW_OBJECT_PREFIX or "cache/previews").strip("/")
+    return f"{prefix}/{document_id}/{version}/p{int(page)}.png"
 
 
-# 从缓存获取预览数据（线程安全）
-def _preview_cache_get(document: dict, page: int, variant: str = "") -> Optional[dict]:
-    cache_key = _preview_cache_key(document, page, variant)
-    now = time.monotonic()
-    with _DOCUMENT_PREVIEW_CACHE_LOCK:
-        _preview_cache_prune(now)
-        cached = _DOCUMENT_PREVIEW_CACHE.get(cache_key)
-        if not cached:
-            return None
-        created_at, payload = cached
-        if now - created_at > _PREVIEW_CACHE_TTL_SECONDS:
-            _DOCUMENT_PREVIEW_CACHE.pop(cache_key, None)
-            return None
-        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)  # LRU 提升
-        return dict(payload)
+def _raw_preview_payload_from_source(
+    *,
+    file_bytes: bytes,
+    source_kind: str,
+    page: int,
+) -> dict[str, Any]:
+    if page <= 0:
+        raise ValueError("page must be greater than 0")
+
+    if source_kind == "pdf":
+        import fitz
+
+        pdf = fitz.open(stream=file_bytes, filetype="pdf")
+        try:
+            page_count = int(pdf.page_count)
+            if page > page_count:
+                raise ValueError(f"page {page} is out of range, max page is {page_count}")
+            pdf_page = pdf.load_page(page - 1)
+            rect = pdf_page.rect
+            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+            return {
+                "page": page,
+                "page_count": page_count,
+                "width": float(rect.width),
+                "height": float(rect.height),
+                "image_bytes": pix.tobytes("png"),
+                "source_kind": "pdf",
+            }
+        finally:
+            pdf.close()
+
+    if source_kind == "image":
+        if page != 1:
+            raise ValueError("image document only supports page 1 preview")
+        from PIL import Image
+
+        with Image.open(io.BytesIO(file_bytes)) as image:
+            rgb = image.convert("RGB")
+            buffer = io.BytesIO()
+            rgb.save(buffer, format="PNG")
+            return {
+                "page": 1,
+                "page_count": 1,
+                "width": int(rgb.width),
+                "height": int(rgb.height),
+                "image_bytes": buffer.getvalue(),
+                "source_kind": "image",
+            }
+
+    raise ValueError("document source kind does not support preview")
 
 
-# 将预览数据写入缓存（线程安全，并控制总量）
-def _preview_cache_set(document: dict, page: int, payload: dict, variant: str = "") -> None:
-    cache_key = _preview_cache_key(document, page, variant)
-    now = time.monotonic()
-    with _DOCUMENT_PREVIEW_CACHE_LOCK:
-        _preview_cache_prune(now)
-        _DOCUMENT_PREVIEW_CACHE[cache_key] = (now, dict(payload))
-        _DOCUMENT_PREVIEW_CACHE.move_to_end(cache_key)
-        while len(_DOCUMENT_PREVIEW_CACHE) > _PREVIEW_CACHE_MAX_ITEMS:
-            _DOCUMENT_PREVIEW_CACHE.popitem(last=False)
+def _raw_preview_response_payload(
+    *,
+    document: dict,
+    page: int,
+    image_bytes: bytes,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "page": int(page),
+        "page_count": int(meta.get("page_count") or 1),
+        "width": float(meta.get("width") or 0),
+        "height": float(meta.get("height") or 0),
+        "image_data_url": _render_png_data_url(image_bytes),
+        "source_kind": str(meta.get("source_kind") or "unknown"),
+        "highlight_rect_count": 0,
+        "highlight_applied": False,
+        "highlight_coordinate_space": _document_preview_coordinate_space(document, "auto"),
+        "highlight_strategy": "none",
+        "highlight_refined": False,
+        "highlight_fallback_reason": None,
+        "preview_cache_object_name": str(meta.get("object_name") or ""),
+    }
+
+
+def _load_or_create_raw_preview_payload(
+    *,
+    document: dict,
+    page: int,
+    source_kind: str,
+    cache_service: RedisCacheService,
+    oss_service: MinioService,
+) -> dict[str, Any]:
+    if not settings.XTJS_CACHE_ENABLED:
+        file_bytes, _content_type, _object_name = _load_document_source_bytes(
+            document=document,
+            oss_service=oss_service,
+        )
+        raw_payload = _raw_preview_payload_from_source(
+            file_bytes=file_bytes,
+            source_kind=source_kind,
+            page=page,
+        )
+        image_bytes = bytes(raw_payload.pop("image_bytes"))
+        return _raw_preview_response_payload(
+            document=document,
+            page=page,
+            image_bytes=image_bytes,
+            meta=raw_payload,
+        )
+
+    version = _preview_document_version(document)
+    meta_key = cache_service.preview_meta_key(str(document.get("identifier_id")), version, page)
+    cached_meta = cache_service.get_json(meta_key)
+    if cached_meta.hit and isinstance(cached_meta.value, dict):
+        object_name = str(cached_meta.value.get("object_name") or "").strip()
+        if object_name:
+            try:
+                image_bytes, _content_type = oss_service.get_object_bytes(
+                    object_name,
+                    cached_meta.value.get("bucket_name") or None,
+                )
+                return _raw_preview_response_payload(
+                    document=document,
+                    page=page,
+                    image_bytes=image_bytes,
+                    meta=cached_meta.value,
+                )
+            except RuntimeError:
+                logger.exception(
+                    "preview cache object missing or unavailable document=%s page=%s object=%s",
+                    document.get("identifier_id"),
+                    page,
+                    object_name,
+                )
+
+    file_bytes, _content_type, _object_name = _load_document_source_bytes(
+        document=document,
+        oss_service=oss_service,
+    )
+    raw_payload = _raw_preview_payload_from_source(
+        file_bytes=file_bytes,
+        source_kind=source_kind,
+        page=page,
+    )
+    image_bytes = bytes(raw_payload.pop("image_bytes"))
+    object_name = _preview_cache_object_name(document, version, page)
+    upload_result = oss_service.upload_bytes(
+        image_bytes,
+        filename=f"p{int(page)}.png",
+        content_type="image/png",
+        object_name=object_name,
+    )
+    meta = {
+        "object_name": upload_result["object_name"],
+        "bucket_name": upload_result.get("bucket_name"),
+        "page_count": raw_payload["page_count"],
+        "width": raw_payload["width"],
+        "height": raw_payload["height"],
+        "source_kind": raw_payload["source_kind"],
+        "content_type": "image/png",
+        "created_at": f"{datetime.utcnow().isoformat()}Z",
+    }
+    cache_service.set_json(
+        meta_key,
+        meta,
+        settings.XTJS_CACHE_PREVIEW_META_TTL_SECONDS,
+    )
+    return _raw_preview_response_payload(
+        document=document,
+        page=page,
+        image_bytes=image_bytes,
+        meta=meta,
+    )
 
 
 def _coerce_document_content(document: Optional[dict]) -> dict[str, Any]:
@@ -1388,8 +1615,10 @@ def _run_project_duplicate_check(
     result_key: str,
     db_service: PostgreSQLService,
     duplicate_check_service: DuplicateCheckService,
+    duplicate_scope: Optional[str] = None,
+    persist_to_latest: bool = False,
 ):
-    payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
+    payload_data = ProjectAnalysisInputLoader(db_service).load(identifier_id)
     if not payload_data:
         raise HTTPException(status_code=404, detail="项目不存在")
 
@@ -1400,27 +1629,81 @@ def _run_project_duplicate_check(
         document_types=document_types,
         max_evidence_sections=max_evidence_sections,
         max_pairs_per_type=max_pairs_per_type,
+        duplicate_scope=duplicate_scope,
     )
-    db_service.upsert_project_result_item(
-        project_identifier_id=identifier_id,
-        result_key=result_key,
-        result_value=duplicate_result,
-    )
-    _persist_duplicate_merge_results(
-        db_service=db_service,
-        project_identifier=identifier_id,
-        source_result_key=result_key,
-        raw_result=duplicate_result,
-    )
+    if persist_to_latest:
+        db_service.update_project_manual_review_result(
+            project_identifier_id=identifier_id,
+            result_key=result_key,
+            result_value=duplicate_result,
+        )
+    else:
+        db_service.upsert_project_result_item(
+            project_identifier_id=identifier_id,
+            result_key=result_key,
+            result_value=duplicate_result,
+        )
+        _persist_duplicate_merge_results(
+            db_service=db_service,
+            project_identifier=identifier_id,
+            source_result_key=result_key,
+            raw_result=duplicate_result,
+        )
+    _invalidate_project_cache_by_identifier(identifier_id)
     return duplicate_result
+
+
+def _run_project_deviation_check(
+    *,
+    identifier_id: str,
+    db_service: PostgreSQLService,
+    persist_to_latest: bool = False,
+) -> dict:
+    review_service = UnifiedBusinessReviewService(db_service=db_service)
+    payload_data = _load_project_review_documents(
+        identifier_id=identifier_id,
+        db_service=db_service,
+        include_excluded=False,
+    )
+    project = db_service.get_project_by_identifier(identifier_id)
+    if not project:
+        raise ValueError(f"project not found: {identifier_id}")
+    review = review_service._review_project_deviation_documents(
+        project_identifier=identifier_id,
+        payload_data=payload_data,
+    )
+    if persist_to_latest:
+        result_record = db_service.update_project_manual_review_result(
+            project_identifier_id=identifier_id,
+            result_key="deviation_check",
+            result_value=review,
+        )
+    else:
+        result_record = db_service.upsert_project_result_item(
+            identifier_id,
+            "deviation_check",
+            review,
+        )
+    _invalidate_project_cache_by_identifier(identifier_id)
+    return {
+        "project": project,
+        "result_key": "deviation_check",
+        "overview": review_service._build_response_overview(review),
+        "review": review,
+        "result_record": result_record,
+    }
 
 
 def _load_project_review_documents(
     *,
     identifier_id: str,
     db_service: PostgreSQLService,
+    include_excluded: bool = False,
 ) -> dict[str, Any]:
-    payload_data = db_service.get_project_documents_for_duplicate_check(identifier_id)
+    payload_data = ProjectAnalysisInputLoader(db_service).load(
+        identifier_id,
+        include_excluded=include_excluded,
+    )
     if not payload_data:
         raise HTTPException(status_code=404, detail="项目不存在")
     return payload_data
@@ -1433,6 +1716,8 @@ def _run_project_personnel_reuse_check(
     identifier_id: str,
     db_service: PostgreSQLService,
     bid_document_review_service: BidDocumentReviewService,
+    confirmed_names: Optional[list[Any]] = None,
+    persist_to_latest: bool = False,
 ) -> dict:
     payload_data = _load_project_review_documents(
         identifier_id=identifier_id,
@@ -1442,17 +1727,164 @@ def _run_project_personnel_reuse_check(
         project_identifier=identifier_id,
         project=payload_data["project"],
         document_records=payload_data["documents"],
-        document_types=[DuplicateCheckScope.BUSINESS_BID.value],
+        document_types=None,
+        confirmed_names=confirmed_names,
     )
-    db_service.upsert_project_result_item(
-        project_identifier_id=identifier_id,
-        result_key="personnel_reuse_check",
-        result_value=personnel_result,
-    )
+    if persist_to_latest:
+        db_service.update_project_manual_review_result(
+            project_identifier_id=identifier_id,
+            result_key="personnel_reuse_check",
+            result_value=personnel_result,
+        )
+    else:
+        db_service.upsert_project_result_item(
+            project_identifier_id=identifier_id,
+            result_key="personnel_reuse_check",
+            result_value=personnel_result,
+        )
+    if confirmed_names is not None:
+        db_service.update_project_manual_review_result(
+            project_identifier_id=identifier_id,
+            result_key="personnel_reuse_check",
+            result_value=personnel_result,
+        )
+        for item in confirmed_names:
+            if isinstance(item, dict):
+                document_id = str(item.get("document_identifier_id") or item.get("identifier_id") or "").strip()
+                if document_id:
+                    DocumentWorkingCopyService(db_service).apply_personnel_reuse_check(
+                        document_id,
+                        {
+                            "schema_version": "1.0",
+                            "confirmation_status": "confirmed",
+                            "confirmed_names": confirmed_names,
+                        },
+                    )
+                    break
+    _invalidate_project_cache_by_identifier(identifier_id)
     return personnel_result
 
 
-# 项目错别字检查
+def _normalize_personnel_draft_documents(
+    draft_documents: list[dict[str, Any]],
+    project_documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    metadata_by_id: dict[str, dict[str, Any]] = {}
+    for document in project_documents:
+        if not isinstance(document, dict):
+            continue
+        document_id = str(document.get("identifier_id") or document.get("document_id") or "").strip()
+        if not document_id:
+            continue
+        metadata = {
+            "identifier_id": document_id,
+            "document_type": str(document.get("relation_role") or document.get("document_type") or "").strip(),
+            "file_name": str(document.get("file_name") or "").strip(),
+            "relation_id": document.get("relation_id"),
+        }
+        metadata_by_id[document_id] = metadata
+
+    def apply_metadata(document: dict[str, Any]) -> dict[str, Any]:
+        normalized = deepcopy(document)
+        document_id = str(
+            normalized.get("document_identifier_id")
+            or normalized.get("identifier_id")
+            or normalized.get("doc_id")
+            or ""
+        ).strip()
+        metadata = metadata_by_id.get(document_id)
+        if not metadata:
+            return normalized
+        normalized["document_identifier_id"] = metadata["identifier_id"]
+        normalized["identifier_id"] = str(normalized.get("identifier_id") or metadata["identifier_id"])
+        normalized["document_type"] = metadata["document_type"] or normalized.get("document_type")
+        if metadata.get("file_name") and not str(normalized.get("file_name") or "").strip():
+            normalized["file_name"] = metadata["file_name"]
+        if metadata.get("relation_id") is not None and normalized.get("relation_id") in (None, ""):
+            normalized["relation_id"] = metadata["relation_id"]
+
+        entries = normalized.get("personnel_entries")
+        if isinstance(entries, list):
+            normalized["personnel_entries"] = [
+                _normalize_personnel_draft_entry_metadata(entry, normalized)
+                if isinstance(entry, dict)
+                else entry
+                for entry in entries
+            ]
+        return normalized
+
+    return [
+        apply_metadata(document) if isinstance(document, dict) else document
+        for document in draft_documents
+    ]
+
+
+def _normalize_personnel_draft_entry_metadata(
+    entry: dict[str, Any],
+    document: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = deepcopy(entry)
+    document_id = str(document.get("document_identifier_id") or document.get("identifier_id") or "").strip()
+    if document_id:
+        normalized["document_identifier_id"] = str(normalized.get("document_identifier_id") or document_id)
+    if document.get("document_type"):
+        normalized["document_type"] = document.get("document_type")
+    if document.get("file_name") and not str(normalized.get("file_name") or "").strip():
+        normalized["file_name"] = document.get("file_name")
+    if document.get("relation_id") is not None and normalized.get("relation_id") in (None, ""):
+        normalized["relation_id"] = document.get("relation_id")
+    return normalized
+
+
+def _persist_project_personnel_reuse_draft(
+    *,
+    identifier_id: str,
+    db_service: PostgreSQLService,
+    bid_document_review_service: BidDocumentReviewService,
+    draft_documents: list[dict[str, Any]],
+    confirmation_status: str,
+) -> dict:
+    payload_data = _load_project_review_documents(
+        identifier_id=identifier_id,
+        db_service=db_service,
+    )
+    draft_documents = _normalize_personnel_draft_documents(
+        draft_documents,
+        payload_data["documents"],
+    )
+    personnel_result = bid_document_review_service.build_personnel_reuse_from_draft(
+        project_identifier=identifier_id,
+        project=payload_data["project"],
+        documents=draft_documents,
+        confirmation_status=confirmation_status,
+    )
+    for document in draft_documents:
+        if not isinstance(document, dict):
+            continue
+        document_id = str(document.get("document_identifier_id") or document.get("identifier_id") or "").strip()
+        if not document_id:
+            continue
+        DocumentWorkingCopyService(db_service).apply_personnel_reuse_check(
+            document_id,
+            {
+                "schema_version": "1.0",
+                "confirmation_status": confirmation_status,
+                "document": document,
+                "documents": [document],
+            },
+        )
+    if confirmation_status == "confirmed":
+        db_service.update_project_manual_review_result(
+            project_identifier_id=identifier_id,
+            result_key="personnel_reuse_check",
+            result_value=personnel_result,
+        )
+    _invalidate_project_cache_by_identifier(identifier_id)
+    return personnel_result
+
+
+# ???????
+
 def _run_project_typo_check(
     *,
     identifier_id: str,
@@ -1476,6 +1908,7 @@ def _run_project_typo_check(
         result_key="typo_check",
         result_value=typo_result,
     )
+    _invalidate_project_cache_by_identifier(identifier_id)
     return typo_result
 
 
@@ -1544,6 +1977,89 @@ def _compact_display_results_for_response(display_results: dict[str, Any]) -> di
     return _filter_visible_result_keys(compact_results)
 
 
+def _parse_display_result_path(path: str) -> list[Any]:
+    parts: list[Any] = []
+    token = ""
+    i = 0
+    while i < len(path):
+        ch = path[i]
+        if ch == ".":
+            if token:
+                parts.append(token)
+                token = ""
+            i += 1
+            continue
+        if ch == "[":
+            if token:
+                parts.append(token)
+                token = ""
+            end = path.find("]", i)
+            if end < 0:
+                return []
+            index_text = path[i + 1:end].strip()
+            if not index_text.isdigit():
+                return []
+            parts.append(int(index_text))
+            i = end + 1
+            continue
+        token += ch
+        i += 1
+    if token:
+        parts.append(token)
+    return parts
+
+
+def _set_display_result_path_value(root: Any, path: str, value: Any) -> bool:
+    parts = _parse_display_result_path(path)
+    if not parts:
+        return False
+    node = root
+    for part in parts[:-1]:
+        if isinstance(part, int):
+            if not isinstance(node, list) or part < 0 or part >= len(node):
+                return False
+            node = node[part]
+            continue
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    last = parts[-1]
+    if isinstance(last, int):
+        if not isinstance(node, list) or last < 0 or last >= len(node):
+            return False
+        node[last] = value
+        return True
+    if not isinstance(node, dict):
+        return False
+    node[last] = value
+    return True
+
+
+def _apply_manual_result_inputs(payload: Any, manual_payload: Any) -> Any:
+    if not isinstance(payload, dict) or not isinstance(manual_payload, dict):
+        return payload
+    corrected = deepcopy(payload)
+    applied_items: list[dict[str, Any]] = []
+    for item in manual_payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if "manual_value" not in item or item.get("manual_value") is None:
+            continue
+        result_path = str(item.get("result_path") or "").strip()
+        if not result_path:
+            continue
+        if _set_display_result_path_value(corrected, result_path, item.get("manual_value")):
+            applied_items.append(item)
+    if applied_items:
+        corrected["manual_review_summary"] = {
+            "applied": True,
+            "applied_item_count": len(applied_items),
+            "stored_item_count": len([item for item in manual_payload.get("items") or [] if isinstance(item, dict)]),
+        }
+        corrected["review_mode"] = "manual_corrected"
+    return corrected
+
+
 # 组装项目可视化数据（前端大屏用）
 def _build_project_visualization_payload(
     *,
@@ -1590,10 +2106,6 @@ def _build_project_visualization_payload(
         relation_items.append(relation_payload)
 
     compact_display_results = _compact_display_results_for_response(display_results)
-    frontend_results = dict(
-        (refreshed_result_record or project_result or {}).get("result_fot_frontend") or {}
-    )
-    frontend_results = _filter_visible_result_keys(frontend_results)
     payload = {
         "project": project_detail.get("project") or {"identifier_id": identifier_id},
         "project_links": _project_api_links(identifier_id),
@@ -1602,8 +2114,6 @@ def _build_project_visualization_payload(
         "result_record_meta": _build_result_record_meta(refreshed_result_record or project_result),
         "results": compact_display_results,
         "available_result_keys": sorted(compact_display_results.keys()),
-        "result_fot_frontend": frontend_results,
-        "available_frontend_result_keys": sorted(frontend_results.keys()),
     }
     if include_result_record:
         payload["result_record"] = refreshed_result_record or project_result
@@ -1655,11 +2165,13 @@ def _persist_uploaded_result(
     result_key: str,
     result_value: dict,
 ) -> dict:
-    return db_service.upsert_project_result_item(
+    result = db_service.upsert_project_result_item(
         project_identifier_id=project_identifier,
         result_key=result_key,
         result_value=result_value,
     )
+    _invalidate_project_cache_by_identifier(project_identifier)
+    return result
 
 
 # 持久化查重合并结果（多个 key）
@@ -1680,6 +2192,7 @@ def _persist_duplicate_merge_results(
             result_key=merged_key,
             result_value=merged_value,
         )
+    _invalidate_project_cache_by_identifier(project_identifier)
     return merged_results
 
 
@@ -1786,8 +2299,15 @@ def _build_project_display_results(
         result_record=result_record,
         db_service=db_service,
     )
-    raw_results = dict((refreshed_record or result_record or {}).get("result") or {})
-    display_results = dict(raw_results)
+    record = refreshed_record or result_record or {}
+    result_payload = dict(record.get("result") or {})
+    manual_review_results = manual_review_results_from_record(record)
+    raw_results = raw_result_view(result_payload)
+    display_results = display_result_view(
+        result_payload,
+        manual_review_results=manual_review_results,
+    )
+    latest_results = dict(manual_review_results.get("latest") or {})
 
     merged_key_aliases = {
         "business_bid_duplicate_check": MERGED_RESULT_KEY_BY_DOC_TYPE.get(DOCUMENT_TYPE_BUSINESS_BID),
@@ -1795,6 +2315,8 @@ def _build_project_display_results(
     }
     for raw_key, merged_key in merged_key_aliases.items():
         if not merged_key:
+            continue
+        if raw_key in latest_results:
             continue
         merged_payload = merged_results.get(merged_key)
         if isinstance(merged_payload, dict) and merged_payload:
@@ -1811,10 +2333,367 @@ def _build_project_display_results(
     return refreshed_record or result_record or {}, raw_results, display_results
 
 
+def _build_workflow_document_summary(payload_data: dict[str, Any], workflow_scope: dict[str, Any]) -> dict[str, Any]:
+    all_documents = list(payload_data.get("documents") or [])
+    active_payload = filter_project_payload({**payload_data, "workflow_scope": workflow_scope})
+    active_documents = list(active_payload.get("documents") or [])
+    excluded_count = max(0, len(all_documents) - len(active_documents))
+
+    def _count_role(records: list[dict[str, Any]], role: str) -> int:
+        ids = {
+            str(record.get("identifier_id") or "").strip()
+            for record in records
+            if str(record.get("relation_role") or "") == role and str(record.get("identifier_id") or "").strip()
+        }
+        return len(ids)
+
+    return {
+        "total_document_rows": len(all_documents),
+        "active_document_rows": len(active_documents),
+        "excluded_document_rows": excluded_count,
+        "business_bid_count": _count_role(all_documents, DOCUMENT_TYPE_BUSINESS_BID),
+        "technical_bid_count": _count_role(all_documents, DOCUMENT_TYPE_TECHNICAL_BID),
+        "active_business_bid_count": _count_role(active_documents, DOCUMENT_TYPE_BUSINESS_BID),
+        "active_technical_bid_count": _count_role(active_documents, DOCUMENT_TYPE_TECHNICAL_BID),
+        "excluded_bidder_count": len(workflow_scope.get(EXCLUDED_BIDDERS_KEY) or []),
+    }
+
+
+def _build_project_workflow_state(
+    *,
+    identifier_id: str,
+    db_service: PostgreSQLService,
+) -> dict[str, Any]:
+    project = db_service.refresh_project_parsing_status(identifier_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    payload_data = db_service.get_project_documents_for_duplicate_check(str(project["identifier_id"]))
+    if not payload_data:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    result_record = db_service.get_project_result(str(project["identifier_id"]))
+    manual_review_results = manual_review_results_from_record(result_record)
+    workflow_scope = workflow_scope_from_result_record(result_record)
+    result_payload = display_result_view(
+        (result_record or {}).get("result") or {},
+        manual_review_results=manual_review_results,
+    )
+    result_keys = sorted(
+        key
+        for key in result_payload.keys()
+        if _is_result_key_visible(str(key))
+    )
+    parsing_status = int(project.get("parsing_status") or 0)
+    if parsing_status >= PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED:
+        stage = "technical_ocr_completed"
+    elif parsing_status >= PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED:
+        stage = "business_review_ready"
+    elif parsing_status >= PostgreSQLService.PARSING_STATUS_TENDER_OCR_COMPLETED:
+        stage = "business_ocr_pending"
+    else:
+        stage = "tender_ocr_pending"
+
+    return {
+        "project": project,
+        "stage": stage,
+        "workflow_scope": workflow_scope,
+        "excluded_bidders": workflow_scope.get(EXCLUDED_BIDDERS_KEY) or [],
+        MANUAL_REVIEW_RESULTS_KEY: manual_review_results,
+        "documents": _build_workflow_document_summary(payload_data, workflow_scope),
+        "results_status": {
+            "available_result_keys": result_keys,
+            "business_review_completed": "business_bid_format_review" in result_payload,
+            "deviation_check_completed": "deviation_check" in result_payload,
+            "business_itemized_duplicate_completed": "business_itemized_duplicate_check" in result_payload,
+            "bid_response_duplicate_completed": "bid_response_duplicate_check" in result_payload,
+            "technical_duplicate_completed": "technical_bid_duplicate_check" in result_payload,
+            "personnel_reuse_completed": "personnel_reuse_check" in result_payload,
+        },
+    }
+
+
+@router.get("/projects/{identifier_id}/workflow-state", summary="查询项目分步工作台状态")
+async def get_project_workflow_state(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """返回项目 OCR 阶段、软剔除范围和结果完成状态。"""
+    try:
+        return await run_in_threadpool(
+            _build_project_workflow_state,
+            identifier_id=identifier_id,
+            db_service=db_service,
+        )
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.put("/projects/{identifier_id}/workflow-scope", summary="保存项目工作流范围")
+async def save_project_workflow_scope(
+    identifier_id: str,
+    payload: ProjectWorkflowScopeRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    """保存或恢复软剔除投标公司范围。"""
+    try:
+        workflow_scope = normalize_workflow_scope(payload.model_dump())
+        result_record = await run_in_threadpool(
+            db_service.update_project_manual_review_workflow_scope,
+            project_identifier_id=identifier_id,
+            workflow_scope=workflow_scope,
+        )
+        _invalidate_project_cache_or_error(cache_service, identifier_id)
+        manual_review_results = manual_review_results_from_record(result_record)
+        saved_scope = workflow_scope_from_result_record(result_record)
+        return {
+            "project_identifier_id": identifier_id,
+            "result_key": WORKFLOW_SCOPE_KEY,
+            "workflow_scope": saved_scope,
+            "excluded_bidders": saved_scope.get(EXCLUDED_BIDDERS_KEY) or [],
+            MANUAL_REVIEW_RESULTS_KEY: manual_review_results,
+            "result_record": result_record,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.put("/projects/{identifier_id}/manual-review-results/{result_key}/inputs", summary="保存最新人工审查结果输入")
+async def save_project_manual_review_result_inputs(
+    identifier_id: str,
+    result_key: str,
+    payload: ProjectManualReviewResultInputsRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    """保存任意结果键的人工判断补丁，结果写入 manual_review_results.latest。"""
+    normalized_result_key = str(result_key or "").strip()
+    if not normalized_result_key:
+        raise HTTPException(status_code=400, detail="result_key is required")
+    try:
+        current_record = await run_in_threadpool(db_service.get_project_result, identifier_id)
+        manual_review_results = manual_review_results_from_record(current_record)
+        result_payload = dict((current_record or {}).get("result") or {})
+        latest_payload = dict((manual_review_results.get("latest") or {}).get(normalized_result_key) or {})
+        base_payload = latest_payload or dict(result_payload.get(normalized_result_key) or {})
+        if not base_payload:
+            raise HTTPException(status_code=404, detail=f"result key not found: {normalized_result_key}")
+        next_result_value = _apply_manual_result_inputs(base_payload, payload.inputs)
+        result_record = await run_in_threadpool(
+            db_service.update_project_manual_review_result,
+            project_identifier_id=identifier_id,
+            result_key=normalized_result_key,
+            result_value=next_result_value,
+        )
+        _invalidate_project_cache_or_error(cache_service, identifier_id)
+        manual_review_results = manual_review_results_from_record(result_record)
+        return {
+            "project_identifier_id": identifier_id,
+            "result_key": normalized_result_key,
+            MANUAL_REVIEW_RESULTS_KEY: manual_review_results,
+            "latest": (manual_review_results.get("latest") or {}).get(normalized_result_key) or {},
+            "result_record": result_record,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/projects/{identifier_id}/manual-review-rerun", summary="人工修订后项目级重审")
+async def rerun_project_manual_review_results(
+    identifier_id: str,
+    payload: ProjectManualReviewRerunRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
+    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    """Run selected services against effective document content and save outputs as latest manual results."""
+    selected_services = [
+        service
+        for service in _normalize_selected_services(payload.services)
+        if service
+    ]
+    if not selected_services:
+        raise HTTPException(status_code=400, detail="services cannot be empty")
+
+    latest_results: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="人工重审")
+
+        for service_name in selected_services:
+            result_key = _PROJECT_SERVICE_RESULT_KEYS.get(service_name, service_name)
+            try:
+                if service_name == "business_bid_format_review":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                        analysis_name="商务标形式重审",
+                    )
+                    result_record = await run_in_threadpool(db_service.get_project_result, identifier_id)
+                    review = _business_review_from_record(result_record)
+                    manual_payload = await run_in_threadpool(
+                        _business_manual_payload_for_project,
+                        identifier_id=identifier_id,
+                        db_service=db_service,
+                    )
+                    result_value = _apply_manual_business_review_inputs(review, manual_payload)
+                    await run_in_threadpool(
+                        db_service.update_project_manual_review_result,
+                        project_identifier_id=identifier_id,
+                        result_key=BUSINESS_FORMAT_RESULT_KEY,
+                        result_value=result_value,
+                    )
+                elif service_name == "deviation_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        analysis_name="偏离表重审",
+                    )
+                    result_payload = await run_in_threadpool(
+                        _run_project_deviation_check,
+                        identifier_id=identifier_id,
+                        db_service=db_service,
+                        persist_to_latest=True,
+                    )
+                    result_value = result_payload.get("review") or {}
+                elif service_name == "business_bid_duplicate_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                        analysis_name="商务标查重重审",
+                    )
+                    result_value = await run_in_threadpool(
+                        _run_project_duplicate_check,
+                        identifier_id=identifier_id,
+                        document_types=["business_bid"],
+                        max_evidence_sections=5,
+                        max_pairs_per_type=0,
+                        result_key="business_bid_duplicate_check",
+                        db_service=db_service,
+                        duplicate_check_service=duplicate_check_service,
+                        persist_to_latest=True,
+                    )
+                elif service_name == "business_itemized_duplicate_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                        analysis_name="商务分项报价查重重审",
+                    )
+                    result_value = await run_in_threadpool(
+                        _run_project_duplicate_check,
+                        identifier_id=identifier_id,
+                        document_types=["business_bid"],
+                        max_evidence_sections=5,
+                        max_pairs_per_type=0,
+                        result_key="business_itemized_duplicate_check",
+                        db_service=db_service,
+                        duplicate_check_service=duplicate_check_service,
+                        duplicate_scope="itemized_pricing",
+                        persist_to_latest=True,
+                    )
+                elif service_name == "bid_response_duplicate_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        analysis_name="响应内容查重重审",
+                    )
+                    result_value = await run_in_threadpool(
+                        _run_project_duplicate_check,
+                        identifier_id=identifier_id,
+                        document_types=["business_bid", "technical_bid"],
+                        max_evidence_sections=5,
+                        max_pairs_per_type=0,
+                        result_key="bid_response_duplicate_check",
+                        db_service=db_service,
+                        duplicate_check_service=duplicate_check_service,
+                        duplicate_scope="bid_response",
+                        persist_to_latest=True,
+                    )
+                elif service_name == "technical_bid_duplicate_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        analysis_name="技术标查重重审",
+                    )
+                    result_value = await run_in_threadpool(
+                        _run_project_duplicate_check,
+                        identifier_id=identifier_id,
+                        document_types=["technical_bid"],
+                        max_evidence_sections=5,
+                        max_pairs_per_type=0,
+                        result_key="technical_bid_duplicate_check",
+                        db_service=db_service,
+                        duplicate_check_service=duplicate_check_service,
+                        persist_to_latest=True,
+                    )
+                elif service_name == "personnel_reuse_check":
+                    _ensure_project_analysis_status(
+                        project,
+                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        analysis_name="人员复用重审",
+                    )
+                    result_value = await run_in_threadpool(
+                        _run_project_personnel_reuse_check,
+                        identifier_id=identifier_id,
+                        db_service=db_service,
+                        bid_document_review_service=bid_document_review_service,
+                        persist_to_latest=True,
+                    )
+                else:
+                    raise HTTPException(status_code=400, detail=f"不支持的人工重审服务：{service_name}")
+
+                latest_results[result_key] = result_value
+                items.append({"service": service_name, "result_key": result_key, "status": "completed"})
+            except HTTPException as exc:
+                items.append(
+                    {
+                        "service": service_name,
+                        "result_key": result_key,
+                        "status": "failed",
+                        "status_code": exc.status_code,
+                        "error": _http_exception_detail_to_text(exc.detail),
+                    }
+                )
+
+        result_record = await run_in_threadpool(db_service.get_project_result, identifier_id)
+        manual_review_results = manual_review_results_from_record(result_record)
+        _invalidate_project_cache_or_error(cache_service, identifier_id)
+        return {
+            "project_identifier_id": identifier_id,
+            "services": selected_services,
+            "items": items,
+            "latest": manual_review_results.get("latest") or latest_results,
+            MANUAL_REVIEW_RESULTS_KEY: manual_review_results,
+            "result_record": result_record,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
 _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
     ("business_bid_duplicate_check", "商务标查重"),
+    ("business_itemized_duplicate_check", "商务分项报价查重"),
+    ("bid_response_duplicate_check", "响应内容查重"),
     ("technical_bid_duplicate_check", "技术标查重"),
     ("business_bid_format_review", "商务标形式审查"),
+    ("deviation_check", "偏离表检查"),
     ("typo_check", "错别字检查"),
     ("personnel_reuse_check", "人员复用检查"),
     ("business_bid_duplicate_clusters", "商务标查重聚类"),
@@ -2370,6 +3249,8 @@ def _collect_report_section_issue_rows(section_key: str, payload: Any) -> list[l
         "personnel_reuse_check": _collect_personnel_issue_rows,
         "business_bid_format_review": _collect_business_format_issue_rows,
         "business_bid_duplicate_check": _collect_duplicate_issue_rows,
+        "business_itemized_duplicate_check": _collect_duplicate_issue_rows,
+        "bid_response_duplicate_check": _collect_duplicate_issue_rows,
         "technical_bid_duplicate_check": _collect_duplicate_issue_rows,
         "business_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
         "technical_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
@@ -2528,16 +3409,16 @@ async def _upload_word_report(
     )
 
 
-async def _upload_frontend_result_word_report(
+async def _upload_result_word_report(
     *,
     project: dict[str, Any],
     project_detail: Optional[dict[str, Any]] = None,
-    result_fot_frontend: dict[str, Any],
+    result_payload: dict[str, Any],
     oss_service: MinioService,
 ) -> dict[str, Any]:
     report_name = f"{project.get('project_name') or project['identifier_id']}_最终导出报告"
     report_bytes = _render_result_word_report(
-        result_fot_frontend,
+        result_payload,
         project=project,
         project_detail=project_detail,
     )
@@ -2553,7 +3434,7 @@ async def _upload_frontend_result_word_report(
     }
 
 
-def _attach_frontend_report_to_response(
+def _attach_report_to_response(
     *,
     response: dict[str, Any],
     project: dict[str, Any],
@@ -2577,10 +3458,10 @@ def _attach_frontend_report_to_response(
     return response
 
 
-async def _update_frontend_result_and_upload_report(
+async def _export_result_word_report(
     *,
     project_identifier_id: str,
-    result_fot_frontend: dict[str, Any],
+    result_payload: dict[str, Any],
     db_service: PostgreSQLService,
     oss_service: MinioService,
 ) -> dict[str, Any]:
@@ -2589,18 +3470,14 @@ async def _update_frontend_result_and_upload_report(
         raise ValueError(f"项目不存在：{project_identifier_id}")
     project = project_detail.get("project") or {}
 
-    result_record = db_service.update_project_result_for_frontend(
-        project_identifier_id=str(project["identifier_id"]),
-        result_fot_frontend=result_fot_frontend,
-    )
-    report = await _upload_frontend_result_word_report(
+    report = await _upload_result_word_report(
         project=project,
         project_detail=project_detail,
-        result_fot_frontend=result_fot_frontend,
+        result_payload=result_payload,
         oss_service=oss_service,
     )
-    response = dict(result_record)
-    return _attach_frontend_report_to_response(
+    response = {"project_identifier_id": str(project["identifier_id"])}
+    return _attach_report_to_response(
         response=response,
         project=project,
         report=report,
@@ -2615,12 +3492,15 @@ async def _update_frontend_result_and_upload_report(
 async def create_project(
     payload: ProjectCreateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """创建新项目，项目 UUID 由系统自动生成，若项目名称已存在则返回 409。"""
     try:
-        return db_service.create_project(
+        created = db_service.create_project(
             project_name=payload.project_name,
         )
+        _invalidate_project_cache_or_error(cache_service)
+        return created
     except PsycopgError as exc:
         if getattr(exc, "pgcode", None) == "23505":
             raise HTTPException(status_code=409, detail="项目名称已存在") from exc
@@ -2629,12 +3509,14 @@ async def create_project(
 
 @router.get("/projects", summary="查询项目列表")
 async def list_projects(
+    response: Response,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     offset: Optional[int] = Query(default=None, ge=0),
     keyword: Optional[str] = Query(default=None, description="按项目名称或 UUID 模糊搜索"),
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """分页查询项目列表，支持关键字搜索。"""
     try:
@@ -2644,10 +3526,21 @@ async def list_projects(
             limit=limit,
             offset=offset,
         )
-        return db_service.list_projects(
+        cache_key = cache_service.project_list_key(
             limit=resolved_limit,
             offset=resolved_offset,
             keyword=keyword,
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_LIST_TTL_SECONDS,
+            response=response,
+            factory=lambda: db_service.list_projects(
+                limit=resolved_limit,
+                offset=resolved_offset,
+                keyword=keyword,
+            ),
         )
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
@@ -2657,6 +3550,7 @@ async def list_projects(
 async def batch_delete_projects(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """软删除指定标识集合中的项目。"""
     try:
@@ -2664,6 +3558,7 @@ async def batch_delete_projects(
         for identifier_id in payload.identifier_ids:
             if str(identifier_id or "").strip():
                 cancel_project_runtime(identifier_id)
+        _invalidate_project_cache_or_error(cache_service)
         return {
             "requested_count": len(payload.identifier_ids),
             "deleted_count": deleted_count,
@@ -2677,14 +3572,27 @@ async def batch_delete_projects(
 @router.get("/projects/{identifier_id}", summary="查询项目详情")
 async def get_project_detail(
     identifier_id: str,
+    response: Response,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """按项目标识返回项目详情（含绑定关系）。"""
     try:
-        detail = db_service.get_project_detail(identifier_id)
-        if not detail:
-            raise HTTPException(status_code=404, detail="项目不存在")
-        return detail
+        cache_key = cache_service.project_detail_key(identifier_id)
+
+        def _load_detail():
+            detail = db_service.get_project_detail(identifier_id)
+            if not detail:
+                raise HTTPException(status_code=404, detail="项目不存在")
+            return detail
+
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS,
+            response=response,
+            factory=_load_detail,
+        )
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -2696,6 +3604,7 @@ async def update_project(
     identifier_id: str,
     payload: ProjectUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """修改项目名称，项目 UUID 不允许修改。"""
     try:
@@ -2705,6 +3614,7 @@ async def update_project(
         )
         if not updated:
             raise HTTPException(status_code=404, detail="项目不存在")
+        _invalidate_project_cache_or_error(cache_service, str(updated.get("identifier_id") or identifier_id))
         return updated
     except HTTPException:
         raise
@@ -2720,6 +3630,7 @@ async def update_project(
 async def delete_project(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """软删除项目。"""
     try:
@@ -2731,6 +3642,8 @@ async def delete_project(
         if not deleted:
             raise HTTPException(status_code=404, detail="项目不存在")
         cancel_project_runtime(resolved_identifier)
+        _invalidate_project_cache_or_error(cache_service, resolved_identifier)
+        _invalidate_project_cache_or_error(cache_service)
         return {"status": "deleted"}
     except HTTPException:
         raise
@@ -2742,6 +3655,7 @@ async def delete_project(
 @router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
 async def get_project_results(
     identifier_id: str,
+    response: Response,
     view: Literal["display", "raw"] = Query(
         default="display",
         description="display=默认返回 merge 后的展示结果，raw=返回原始结果",
@@ -2749,49 +3663,60 @@ async def get_project_results(
     include_raw_results: bool = Query(default=False),
     include_result_record: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """获取项目的分析结果，支持展示视图和原始视图，可附加返回原始数据。"""
     try:
-        project = db_service.get_project_by_identifier(identifier_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="project not found")
+        cache_key = cache_service.project_results_key(
+            identifier_id,
+            view=view,
+            include_raw_results=include_raw_results,
+            include_result_record=include_result_record,
+        )
 
-        result_record = db_service.get_project_result(identifier_id)
-        refreshed_record = result_record or {}
-        raw_results = dict((result_record or {}).get("result") or {})
-        display_results = raw_results
-        if view == "display" or include_raw_results:
-            refreshed_record, raw_results, display_results = _build_project_display_results(
-                identifier_id=identifier_id,
-                result_record=result_record,
-                db_service=db_service,
+        def _load_results():
+            project = db_service.get_project_by_identifier(identifier_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="project not found")
+
+            result_record = db_service.get_project_result(identifier_id)
+            refreshed_record = result_record or {}
+            raw_results = raw_result_view((result_record or {}).get("result") or {})
+            display_results = raw_results
+            if view == "display" or include_raw_results:
+                refreshed_record, raw_results, display_results = _build_project_display_results(
+                    identifier_id=identifier_id,
+                    result_record=result_record,
+                    db_service=db_service,
+                )
+
+            selected_results = (
+                _compact_display_results_for_response(display_results)
+                if view == "display"
+                else raw_results
             )
+            selected_result_keys = sorted(selected_results.keys())
+            payload = {
+                "project": project,
+                "view": view,
+                "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+                "results": selected_results,
+                "available_result_keys": selected_result_keys,
+            }
+            if include_result_record:
+                payload["result_record"] = refreshed_record or result_record
+            if include_raw_results:
+                payload["raw_results"] = raw_results
+                payload["raw_available_result_keys"] = sorted(raw_results.keys())
+            return payload
 
-        selected_results = (
-            _compact_display_results_for_response(display_results)
-            if view == "display"
-            else raw_results
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=_load_results,
         )
-        selected_result_keys = sorted(selected_results.keys())
-        frontend_results = dict(
-            (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
-        )
-        frontend_results = _filter_visible_result_keys(frontend_results)
-        payload = {
-            "project": project,
-            "view": view,
-            "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
-            "results": selected_results,
-            "available_result_keys": selected_result_keys,
-            "result_fot_frontend": frontend_results,
-            "available_frontend_result_keys": sorted(frontend_results.keys()),
-        }
-        if include_result_record:
-            payload["result_record"] = refreshed_record or result_record
-        if include_raw_results:
-            payload["raw_results"] = raw_results
-            payload["raw_available_result_keys"] = sorted(raw_results.keys())
-        return payload
     except HTTPException:
         raise
     except PsycopgError as exc:
@@ -2823,10 +3748,6 @@ async def get_project_result_item(
             selected_results = _filter_visible_result_keys(selected_results)
         if result_key not in selected_results:
             raise HTTPException(status_code=404, detail="result_key not found")
-        frontend_results = dict(
-            (refreshed_record or result_record or {}).get("result_fot_frontend") or {}
-        )
-        frontend_results = _filter_visible_result_keys(frontend_results)
 
         payload = {
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
@@ -2834,7 +3755,6 @@ async def get_project_result_item(
             "result_key": result_key,
             "view": view,
             "result": selected_results[result_key],
-            "result_fot_frontend": frontend_results.get(result_key),
             "available_result_keys": sorted(selected_results.keys()),
         }
         if include_result_record:
@@ -2954,13 +3874,16 @@ async def list_results(
 async def create_or_replace_result(
     payload: ProjectResultUpsertRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """创建或完全替换某个项目的结果数据。"""
     try:
-        return db_service.create_or_replace_project_result(
+        result = db_service.create_or_replace_project_result(
             project_identifier_id=payload.project_identifier_id,
             result=payload.result,
         )
+        _invalidate_project_cache_or_error(cache_service, payload.project_identifier_id)
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
@@ -2989,31 +3912,34 @@ async def update_result_record(
     project_identifier_id: str,
     payload: ProjectResultUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """更新指定项目的结果数据（覆盖）。"""
     try:
-        return db_service.create_or_replace_project_result(
+        result = db_service.create_or_replace_project_result(
             project_identifier_id=project_identifier_id,
             result=payload.result,
         )
+        _invalidate_project_cache_or_error(cache_service, project_identifier_id)
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
 
 
-@router.put("/results/{project_identifier_id}/frontend", summary="更新前端删减后的项目结果")
-async def update_result_record_frontend(
+@router.post("/projects/{project_identifier_id}/export-report", summary="导出当前展示结果 Word 报告")
+async def export_project_result_report(
     project_identifier_id: str,
-    payload: ProjectResultFrontendUpdateRequest,
+    payload: ProjectReportExportRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
-    """仅更新前端删减结果，并同步生成 Word 报告上传到 MinIO report/。"""
+    """基于本次请求的展示结果生成 Word 报告，不持久化前端删减副本。"""
     try:
-        return await _update_frontend_result_and_upload_report(
+        return await _export_result_word_report(
             project_identifier_id=project_identifier_id,
-            result_fot_frontend=payload.result_fot_frontend,
+            result_payload=payload.result,
             db_service=db_service,
             oss_service=oss_service,
         )
@@ -3032,6 +3958,7 @@ async def post_document_page_preview(
     payload: DocumentPreviewRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """Use request body for preview and highlight parameters."""
     return await _build_document_page_preview_response(
@@ -3043,6 +3970,7 @@ async def post_document_page_preview(
         highlight_coordinate_space=payload.highlight_coordinate_space or "auto",
         db_service=db_service,
         oss_service=oss_service,
+        cache_service=cache_service,
     )
 
 
@@ -3050,12 +3978,14 @@ async def post_document_page_preview(
 async def delete_result_record(
     project_identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """删除某个项目的所有分析结果。"""
     try:
         deleted = db_service.delete_project_result(project_identifier_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="result record not found")
+        _invalidate_project_cache_or_error(cache_service, project_identifier_id)
         return {"status": "deleted"}
     except HTTPException:
         raise
@@ -3067,10 +3997,12 @@ async def delete_result_record(
 async def batch_delete_result_records(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """批量删除多个项目的结果记录。"""
     try:
         deleted_count = db_service.delete_project_results(payload.identifier_ids)
+        _invalidate_project_cache_or_error(cache_service)
         return {
             "requested_count": len(payload.identifier_ids),
             "deleted_count": deleted_count,
@@ -3133,10 +4065,169 @@ async def project_business_bid_format_review(
             required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
             analysis_name="商务标形式审查",
         )
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             review_service.persist_project_business_review,
             project_identifier=identifier_id,
             result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+        )
+        _invalidate_project_cache_by_identifier(identifier_id)
+        return result
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if "project not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail="项目不存在") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.get("/projects/{identifier_id}/business-bid-format-review/editable", summary="List editable business-bid review values")
+async def get_business_bid_format_review_editable(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        result_record = await run_in_threadpool(db_service.get_project_result, identifier_id)
+        review = _business_review_from_record(result_record)
+        manual_payload = await run_in_threadpool(
+            _business_manual_payload_for_project,
+            identifier_id=identifier_id,
+            db_service=db_service,
+        )
+        items = _build_business_format_editable_items(review, manual_payload)
+        return {
+            "project_identifier_id": identifier_id,
+            "result_key": BUSINESS_FORMAT_RESULT_KEY,
+            "review_content_inputs": manual_payload,
+            "items": items,
+            "item_count": len(items),
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.put("/projects/{identifier_id}/business-bid-format-review/manual-inputs", summary="Save editable business-bid review values")
+async def save_business_bid_format_review_manual_inputs(
+    identifier_id: str,
+    payload: BusinessBidManualReviewInputsRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        raw_items = [item.model_dump() for item in payload.items]
+        result_record = await run_in_threadpool(
+            _save_business_manual_inputs,
+            identifier_id=identifier_id,
+            db_service=db_service,
+            raw_items=raw_items,
+            invalidate_project_cache=_invalidate_project_cache_by_identifier,
+        )
+        review = _business_review_from_record(result_record)
+        manual_payload = await run_in_threadpool(
+            _business_manual_payload_for_project,
+            identifier_id=identifier_id,
+            db_service=db_service,
+        )
+        items = _build_business_format_editable_items(review, manual_payload)
+        return {
+            "project_identifier_id": identifier_id,
+            "result_key": BUSINESS_FORMAT_RESULT_KEY,
+            "review_content_inputs": manual_payload,
+            "items": items,
+            "item_count": len(items),
+            "result_record": result_record,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/projects/{identifier_id}/business-bid-format-review/manual-rerun", summary="Rerun business-bid review with manual values")
+async def rerun_business_bid_format_review_with_manual_inputs(
+    identifier_id: str,
+    payload: Optional[BusinessBidManualReviewInputsRequest] = Body(default=None),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="business bid manual rerun")
+
+        result_record = None
+        if payload is not None and payload.items:
+            result_record = await run_in_threadpool(
+                _save_business_manual_inputs,
+                identifier_id=identifier_id,
+                db_service=db_service,
+                raw_items=[item.model_dump() for item in payload.items],
+                invalidate_project_cache=_invalidate_project_cache_by_identifier,
+            )
+
+        manual_payload = await run_in_threadpool(
+            _business_manual_payload_for_project,
+            identifier_id=identifier_id,
+            db_service=db_service,
+        )
+        review_service = UnifiedBusinessReviewService(db_service=db_service)
+        rerun_result = await run_in_threadpool(
+            review_service.persist_project_business_review,
+            project_identifier=identifier_id,
+            result_key=BUSINESS_FORMAT_RESULT_KEY,
+        )
+        review = rerun_result["review"]
+        corrected_review = _apply_manual_business_review_inputs(
+            review,
+            manual_payload,
+        )
+        result_record = await run_in_threadpool(
+            db_service.update_project_manual_review_result,
+            project_identifier_id=identifier_id,
+            result_key=BUSINESS_FORMAT_RESULT_KEY,
+            result_value=corrected_review,
+        )
+        _invalidate_project_cache_by_identifier(identifier_id)
+        return {
+            "project_identifier_id": identifier_id,
+            "result_key": BUSINESS_FORMAT_RESULT_KEY,
+            "review": corrected_review,
+            "review_content_inputs": manual_payload,
+            MANUAL_REVIEW_RESULTS_KEY: manual_review_results_from_record(result_record),
+            "items": _build_business_format_editable_items(corrected_review, manual_payload),
+            "base_review": review,
+            "result_record": result_record,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc
+
+
+@router.post("/projects/deviation-check", summary="项目偏离表检查")
+async def project_deviation_check(
+    identifier_id: str = Query(...),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    """在商务标和技术标中查找商务/技术偏离表并执行偏离表检查。"""
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="偏离表检查")
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+            analysis_name="偏离表检查",
+        )
+        return await run_in_threadpool(
+            _run_project_deviation_check,
+            identifier_id=identifier_id,
+            db_service=db_service,
         )
     except HTTPException:
         raise
@@ -3349,16 +4440,17 @@ async def upload_technical_bid_duplicate_check(
 @router.post("/projects/personnel-reuse-check", summary="项目一人多用检查")
 async def project_personnel_reuse_check(
     identifier_id: str = Query(...),
+    payload: PersonnelReuseCheckRequest | None = Body(default=None),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
-    """检查商务标中是否存在同一人员出现在多家投标单位的情况。"""
+    """抽取商务标/技术标人员，支持传入确认后名单再做一人多用检查。"""
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
         _ensure_project_ocr_idle(project, analysis_name="一人多用检查")
         _ensure_project_analysis_status(
             project,
-            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
             analysis_name="一人多用检查",
         )
         return await run_in_threadpool(
@@ -3366,6 +4458,61 @@ async def project_personnel_reuse_check(
             identifier_id=identifier_id,
             db_service=db_service,
             bid_document_review_service=bid_document_review_service,
+            confirmed_names=(payload.confirmed_names if payload else None),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.put("/projects/{identifier_id}/personnel-reuse-draft", summary="保存项目人员复用草稿")
+async def save_project_personnel_reuse_draft(
+    identifier_id: str,
+    payload: PersonnelReuseDraftRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
+):
+    """保存结果审核页按文件编辑的人员草稿，不生成跨文件重名问题。"""
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="保存人员复用草稿")
+        return await run_in_threadpool(
+            _persist_project_personnel_reuse_draft,
+            identifier_id=identifier_id,
+            db_service=db_service,
+            bid_document_review_service=bid_document_review_service,
+            draft_documents=[item.model_dump() for item in payload.documents],
+            confirmation_status="draft",
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.post("/projects/{identifier_id}/personnel-reuse-confirm", summary="确认项目人员并重算复用")
+async def confirm_project_personnel_reuse_draft(
+    identifier_id: str,
+    payload: PersonnelReuseDraftRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
+):
+    """保存人员草稿，并按草稿重算全部投标文件之间的重名复用结果。"""
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="确认人员复用")
+        return await run_in_threadpool(
+            _persist_project_personnel_reuse_draft,
+            identifier_id=identifier_id,
+            db_service=db_service,
+            bid_document_review_service=bid_document_review_service,
+            draft_documents=[item.model_dump() for item in payload.documents],
+            confirmation_status="confirmed",
         )
     except HTTPException:
         raise
@@ -3378,22 +4525,32 @@ async def project_personnel_reuse_check(
 @router.post("/projects/personnel-reuse-check/upload-json", summary="上传 OCR JSON 并执行一人多用检查")
 async def upload_personnel_reuse_check(
     tender_json_file: UploadFile = File(...),
-    business_bid_json_files: list[UploadFile] = File(...),
+    business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
     project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
+    confirmed_names_json: Optional[str] = Form(default=None, description="业务确认后的人名 JSON 数组。"),
     db_service: PostgreSQLService = Depends(get_db_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
 ):
     """上传招投标 OCR JSON 文件，直接执行人员复用检查。"""
-    uploads = [upload for upload in business_bid_json_files if upload is not None]
-    if not uploads:
-        raise HTTPException(status_code=400, detail="business_bid_json_files 不能为空。")
+    business_uploads = [upload for upload in (business_bid_json_files or []) if upload is not None]
+    technical_uploads = [upload for upload in (technical_bid_json_files or []) if upload is not None]
+    if not business_uploads and not technical_uploads:
+        raise HTTPException(status_code=400, detail="至少需要上传一份商务标或技术标文件。")
+    confirmed_names = None
+    if confirmed_names_json and confirmed_names_json.strip():
+        try:
+            confirmed_names = json.loads(confirmed_names_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="confirmed_names_json 必须是 JSON 数组。") from exc
+        if not isinstance(confirmed_names, list):
+            raise HTTPException(status_code=400, detail="confirmed_names_json 必须是 JSON 数组。")
 
     try:
         persisted_documents, document_records = await _persist_uploaded_analysis_documents(
             tender_json_file=tender_json_file,
-            business_bid_json_files=uploads,
-            technical_bid_json_files=technical_bid_json_files,
+            business_bid_json_files=business_uploads,
+            technical_bid_json_files=technical_uploads,
             project_name=project_name,
             db_service=db_service,
         )
@@ -3403,7 +4560,8 @@ async def upload_personnel_reuse_check(
             project_identifier=resolved_project_identifier,
             project=_project_snapshot(resolved_project_identifier),
             document_records=document_records,
-            document_types=[DuplicateCheckScope.BUSINESS_BID.value],
+            document_types=None,
+            confirmed_names=confirmed_names,
         )
         result_record = await run_in_threadpool(
             _persist_uploaded_result,
@@ -3547,15 +4705,18 @@ async def bind_project_documents(
     identifier_id: str,
     payload: ProjectBindDocumentsRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """将三个文档标识绑定到项目下形成一个关系记录。"""
     try:
-        return db_service.bind_project_documents(
+        relation = db_service.bind_project_documents(
             identifier_id,
             payload.tender_document_identifier,
             payload.business_bid_document_identifier,
             payload.technical_bid_document_identifier,
         )
+        _invalidate_project_cache_or_error(cache_service, str(relation.get("project_identifier") or identifier_id))
+        return relation
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except PsycopgError as exc:
@@ -3612,6 +4773,7 @@ async def update_relation(
     relation_id: int,
     payload: ProjectRelationUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """修改已有的文档绑定关系。"""
     try:
@@ -3623,6 +4785,7 @@ async def update_relation(
         )
         if not updated:
             raise HTTPException(status_code=404, detail="关联不存在")
+        _invalidate_project_cache_or_error(cache_service, str(updated.get("project_identifier") or ""))
         return updated
     except HTTPException:
         raise
@@ -3636,12 +4799,14 @@ async def update_relation(
 async def delete_relation(
     relation_id: int,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """删除一条文档绑定关系。"""
     try:
         deleted = db_service.delete_relation(relation_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="关联不存在")
+        _invalidate_project_cache_or_error(cache_service)
         return {"status": "deleted"}
     except HTTPException:
         raise
@@ -3653,10 +4818,12 @@ async def delete_relation(
 async def batch_delete_relations(
     payload: RelationBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """批量删除绑定关系。"""
     try:
         deleted_count = db_service.delete_relations(payload.relation_ids)
+        _invalidate_project_cache_or_error(cache_service)
         return {
             "requested_count": len(payload.relation_ids),
             "deleted_count": deleted_count,
@@ -3731,10 +4898,15 @@ async def list_documents(
 async def batch_delete_documents(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """软删除一批文档。"""
     try:
         deleted_count = db_service.soft_delete_documents(payload.identifier_ids)
+        _invalidate_project_cache_or_error(cache_service)
+        for document_identifier in payload.identifier_ids:
+            if str(document_identifier or "").strip():
+                _invalidate_document_preview_cache_or_error(cache_service, document_identifier)
         return {
             "requested_count": len(payload.identifier_ids),
             "deleted_count": deleted_count,
@@ -3762,11 +4934,54 @@ async def get_document(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+@router.get("/documents/{identifier_id}/review-content", summary="查询文档人工识别工作副本")
+async def get_document_review_content(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        payload = db_service.get_document_review_content(identifier_id)
+        if not payload:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        return payload
+    except HTTPException:
+        raise
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
+@router.put("/documents/{identifier_id}/review-content", summary="保存文档人工识别工作副本")
+async def update_document_review_content(
+    identifier_id: str,
+    payload: DocumentReviewContentUpdateRequest,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    try:
+        updated = db_service.update_document_review_content(
+            identifier_id,
+            effective_content=payload.effective_content,
+            inputs=payload.inputs,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="文档不存在")
+        _invalidate_project_cache_or_error(cache_service)
+        _invalidate_document_preview_cache_or_error(cache_service, identifier_id)
+        return updated
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+
+
 @router.put("/documents/{identifier_id}", summary="更新文档")
 async def update_document(
     identifier_id: str,
     payload: DocumentUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """更新文档的文件名或文件 URL。"""
     try:
@@ -3780,6 +4995,8 @@ async def update_document(
         )
         if not updated:
             raise HTTPException(status_code=404, detail="文档不存在")
+        _invalidate_project_cache_or_error(cache_service)
+        _invalidate_document_preview_cache_or_error(cache_service, str(updated.get("identifier_id") or identifier_id))
         return updated
     except HTTPException:
         raise
@@ -3793,12 +5010,15 @@ async def update_document(
 async def delete_document(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """软删除文档。"""
     try:
         deleted = db_service.soft_delete_document(identifier_id)
         if not deleted:
             raise HTTPException(status_code=404, detail="文档不存在")
+        _invalidate_project_cache_or_error(cache_service)
+        _invalidate_document_preview_cache_or_error(cache_service, identifier_id)
         return {"status": "deleted"}
     except HTTPException:
         raise
@@ -3843,6 +5063,7 @@ async def _build_document_page_preview_response(
     highlight_coordinate_space: str = Query(default="auto", description="高亮坐标系：auto/pdf_point/pdf/ocr_image"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """返回文档指定页的 base64 预览图，支持文本/区域高亮。结果会被缓存。"""
     try:
@@ -3862,20 +5083,20 @@ async def _build_document_page_preview_response(
             normalized_highlight_bbox or
             normalized_highlight_rects
         )
-        preview_variant = _preview_variant_signature(
-            normalized_highlight_phrases,
-            normalized_highlight_bbox,
-            normalized_highlight_rects,
-            highlight_coordinate_space=resolved_coordinate_space,
-            document_type=str(document.get("document_type") or ""),
-        )
-
-        if not has_highlight_payload:
-            cached_payload = _preview_cache_get(document, page, preview_variant)
-            if cached_payload is not None:
-                return JSONResponse(cached_payload)
-
         source_kind = _document_source_kind(document)
+        if not has_highlight_payload:
+            payload = _load_or_create_raw_preview_payload(
+                document=document,
+                page=page,
+                source_kind=source_kind,
+                cache_service=cache_service,
+                oss_service=oss_service,
+            )
+            payload["document_identifier"] = identifier_id
+            payload["file_name"] = str(document.get("file_name") or "")
+            payload["source_url"] = f"/api/postgresql/documents/{identifier_id}/source"
+            return JSONResponse(payload)
+
         file_bytes, _content_type, _object_name = _load_document_source_bytes(
             document=document,
             oss_service=oss_service,
@@ -3908,14 +5129,14 @@ async def _build_document_page_preview_response(
         payload["document_identifier"] = identifier_id
         payload["file_name"] = str(document.get("file_name") or "")
         payload["source_url"] = f"/api/postgresql/documents/{identifier_id}/source"
-        if not has_highlight_payload:
-            _preview_cache_set(document, page, payload, preview_variant)
         return JSONResponse(payload)
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CacheUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"预览加载失败，请检查 Redis：{exc}") from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=f"预览加载失败，请检查 MinIO：{exc}") from exc
     except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc    
+        raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc    # ???????

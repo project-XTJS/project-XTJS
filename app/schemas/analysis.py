@@ -5,7 +5,7 @@
 定义文本分析任务类型、项目分析服务类型，以及 TextAnalysisRequest。
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,10 @@ TextTaskType = Literal[
 # 项目级分析服务类型
 ProjectAnalysisService = Literal[
     "business_bid_format_review",
+    "deviation_check",
     "business_bid_duplicate_check",
+    "business_itemized_duplicate_check",
+    "bid_response_duplicate_check",
     "technical_bid_duplicate_check",
     "personnel_reuse_check",
     "typo_check",
@@ -55,9 +58,13 @@ class TextAnalysisRequest(BaseModel):
         default=None,
         description=(
             "需要执行的项目分析服务，可选：business_bid_format_review、"
-            "business_bid_duplicate_check、technical_bid_duplicate_check、"
+            "deviation_check、business_bid_duplicate_check、technical_bid_duplicate_check、"
             "personnel_reuse_check、typo_check。"
         ),
+    )
+    confirmed_personnel_names: list[Any] | None = Field(
+        default=None,
+        description="人员复用检查使用的业务确认后人名列表；为空时返回待确认的抽取名单。",
     )
     max_evidence_sections: int = Field(
         default=5,

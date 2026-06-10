@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any
 
+from app.service.analysis.duplicate_check.text_utils import compact_raw_text
+
 
 class TokenExtractorMixin:
     """提供聚类 family/mode、token 提取、优先级等方法。"""
@@ -30,6 +32,7 @@ class TokenExtractorMixin:
         else:
             text = str(value)
         text = html.unescape(text)
+        text = compact_raw_text(text)
         text = re.sub(r"\d+(?:[\.,]\d+)?", "#", text)
         text = re.sub(r"""[，,。；;：:、\[\]\(\){}（）“”‘’"'`]+""", " ", text)
         text = re.sub(r"\s+", " ", text).strip().lower()

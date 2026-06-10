@@ -147,16 +147,18 @@ class OCRSignatureMixin:
         normalized = self._normalize_section_text(text)
         return f"{normalized[:match[1]]}{match[3]}" if match and normalized else normalized
 
-    def _build_signature_anchor_text(self, text: Any) -> str:
+    def _build_signature_anchor_text(self, text: Any, signature_value: Any = None) -> str:
         """替换或补齐带占位符的签名锚点字符串。"""
         match = self._find_signature_anchor_match(text)
         placeholder = self._signature_placeholder_text()
+        actual_value = self._normalize_section_text(signature_value or "")
+        replacement = actual_value if actual_value and not self._is_signature_placeholder_text(actual_value) else placeholder
         if match is None:
             prefix = self._strip_signature_anchor_value(text)
-            if not prefix: return placeholder
-            return self._clean_signature_anchor_text(f"{prefix}{placeholder}" if prefix.endswith(("：", ":")) else f"{prefix.rstrip('：: ')}：{placeholder}")
+            if not prefix: return replacement
+            return self._clean_signature_anchor_text(f"{prefix}{replacement}" if prefix.endswith(("：", ":")) else f"{prefix.rstrip('：: ')}：{replacement}")
         normalized, start, end, prefix, _ = match
-        return self._clean_signature_anchor_text(f"{normalized[:start]}{prefix}{placeholder}{normalized[end:]}") if prefix else placeholder
+        return self._clean_signature_anchor_text(f"{normalized[:start]}{prefix}{replacement}{normalized[end:]}") if prefix else replacement
 
     def _clean_signature_anchor_text(self, text: Any) -> str:
         normalized = self._normalize_section_text(text)
@@ -273,7 +275,9 @@ class OCRSignatureMixin:
             if str(block.get("type") or "").strip().lower() != "signature": continue
             bbox, key = self._normalize_bbox(block.get("bbox")), self._bbox_signature_key(self._normalize_bbox(block.get("bbox")))
             if key not in existing_keys:
-                synth = {"page": int(block.get("page", 0) or inferred_page_no or 0), "type": "signature", "text": placeholder}
+                signature_text = self._resolve_signature_section_text(block, page_blocks)
+                if not signature_text or self._is_signature_placeholder_text(signature_text): signature_text = placeholder
+                synth = {"page": int(block.get("page", 0) or inferred_page_no or 0), "type": "signature", "text": signature_text}
                 if bbox is not None: synth["bbox"] = bbox
                 sections.append(synth)
                 existing_keys.add(key)
@@ -282,7 +286,8 @@ class OCRSignatureMixin:
         for s in sections:
             s_type = str(s.get("type") or "").strip().lower()
             if s_type == "signature":
-                s["text"] = placeholder
+                signature_text = self._resolve_signature_section_text(s, page_blocks)
+                s["text"] = placeholder if not signature_text or self._is_signature_placeholder_text(signature_text) else signature_text
                 s.pop("_merged", None)
                 sig_sections.append(s)
             elif s_type in {"heading", "text", "table"}:
@@ -304,7 +309,8 @@ class OCRSignatureMixin:
         # 3. 最终应用替换和属性合并
         for s_idx, a_idx in self._match_signatures_to_anchors(sig_sections, anc_sections):
             s_sec, a_sec = sig_sections[s_idx], anc_sections[a_idx]
-            a_sec["text"] = self._build_signature_anchor_text(a_sec.get("text") or "")
+            signature_value = "" if self._is_signature_placeholder_text(s_sec.get("text")) else s_sec.get("text")
+            a_sec["text"] = self._build_signature_anchor_text(a_sec.get("text") or "", signature_value)
             target_bbox, cur_bbox = self._bbox_to_xywh(a_sec.get("_signature_anchor_bbox")), self._bbox_to_xywh(s_sec.get("bbox"))
             if target_bbox is not None and (cur_bbox is None or cur_bbox[2] > max(target_bbox[2] * 2, 220) or cur_bbox[3] > max(target_bbox[3] * 2, 160) or (((page_image_size or (0,0))[0] or 0) > 0 and cur_bbox[2] >= int(((page_image_size or (0,0))[0] or 0) * 0.72))): 
                 s_sec["bbox"] = self._xywh_to_bbox(target_bbox)
@@ -313,10 +319,10 @@ class OCRSignatureMixin:
             # 若锚点位于表格内，一并更新 html 和内部内容缓存
             if str(a_sec.get("type") or "").strip().lower() == "table":
                 for k in ("raw_text", "html"):
-                    if k in a_sec: a_sec[k] = self._build_signature_anchor_text(a_sec.get(k) or "")
+                    if k in a_sec: a_sec[k] = self._build_signature_anchor_text(a_sec.get(k) or "", signature_value)
                 if isinstance(a_sec.get("native_table"), dict):
                     for nk in ("block_content", "content", "text", "html"):
-                        if nk in a_sec["native_table"]: a_sec["native_table"][nk] = self._build_signature_anchor_text(a_sec["native_table"].get(nk) or "")
+                        if nk in a_sec["native_table"]: a_sec["native_table"][nk] = self._build_signature_anchor_text(a_sec["native_table"].get(nk) or "", signature_value)
                         
         # 返回前按页面和物理坐标从上到下重新排序
         sections.sort(key=lambda item: (int(item.get("page", 0) or 0), self._bbox_anchor(item.get("bbox"))[1], self._bbox_anchor(item.get("bbox"))[0], int(item.get("_order", 0) or 0)))

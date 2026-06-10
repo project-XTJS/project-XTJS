@@ -8,12 +8,16 @@
 
 import logging
 import os
+import copy
+import hashlib
+import json
 from typing import Any, Callable, Optional
 
 from fastapi import HTTPException, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
+from app.config.settings import settings
 from app.core.document_types import DOCUMENT_TYPE_TENDER, DocumentType
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -24,6 +28,105 @@ logger = logging.getLogger(__name__)
 
 
 PDF_POINT_COORDINATE_SYSTEM = "pdf_point"
+OCR_CACHE_ENGINE_VERSION = "xtjs-ocr-v1:paddleocr-vl-1.5:pymupdf-text-layer"
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data or b"").hexdigest()
+
+
+def _stable_json_hash(payload: Any) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _ocr_config_payload(document_type: Any) -> dict[str, Any]:
+    return {
+        "document_type": str(document_type or "").strip().lower(),
+        "tender_text_layer_only": True,
+        "pdf_point_coordinate_system": PDF_POINT_COORDINATE_SYSTEM,
+        "paddle": {
+            "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
+            "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
+            "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
+            "use_layout_detection": settings.PADDLE_VL_USE_LAYOUT_DETECTION,
+            "use_chart_recognition": settings.PADDLE_VL_USE_CHART_RECOGNITION,
+            "use_seal_recognition": settings.PADDLE_VL_USE_SEAL_RECOGNITION,
+            "use_signature_recognition": settings.PADDLE_VL_USE_SIGNATURE_RECOGNITION,
+            "use_ocr_for_image_block": settings.PADDLE_VL_USE_OCR_FOR_IMAGE_BLOCK,
+            "format_block_content": settings.PADDLE_VL_FORMAT_BLOCK_CONTENT,
+            "merge_layout_blocks": settings.PADDLE_VL_MERGE_LAYOUT_BLOCKS,
+            "use_queues": settings.PADDLE_VL_USE_QUEUES,
+            "restructure_pages": settings.PADDLE_VL_RESTRUCTURE_PAGES,
+        },
+        "signature_placeholder_text": settings.OCR_SIGNATURE_PLACEHOLDER_TEXT,
+    }
+
+
+def build_ocr_config_hash(document_type: Any) -> str:
+    return _stable_json_hash(_ocr_config_payload(document_type))
+
+
+def build_ocr_cache_key(
+    *,
+    source_file_hash: str,
+    document_type: Any,
+    ocr_engine_version: str,
+    ocr_config_hash: str,
+) -> str:
+    return _stable_json_hash(
+        {
+            "source_file_hash": str(source_file_hash or "").strip(),
+            "document_type": str(document_type or "").strip().lower(),
+            "ocr_engine_version": str(ocr_engine_version or "").strip(),
+            "ocr_config_hash": str(ocr_config_hash or "").strip(),
+        }
+    )
+
+
+def _attach_ocr_cache_metadata(
+    recognition_content: dict[str, Any],
+    *,
+    cache_hit: bool,
+    source_document: Optional[dict[str, Any]],
+    ocr_engine_version: str,
+    ocr_config_hash: str,
+    ocr_cache_key: str,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(recognition_content)
+    payload["ocr_cache_hit"] = bool(cache_hit)
+    payload["ocr_engine_version"] = ocr_engine_version
+    payload["ocr_config_hash"] = ocr_config_hash
+    payload["ocr_cache_key"] = ocr_cache_key
+    if source_document:
+        payload["ocr_cache_source_document_id"] = str(source_document.get("identifier_id") or "")
+        payload["ocr_cache_source_file_name"] = str(source_document.get("file_name") or "")
+    else:
+        payload["ocr_cache_source_document_id"] = None
+        payload["ocr_cache_source_file_name"] = None
+    return payload
+
+
+def _resolve_ocr_cache_context(
+    *,
+    file_bytes: bytes,
+    document_type: Any,
+) -> dict[str, Any]:
+    source_file_hash = _sha256_hex(file_bytes)
+    ocr_config_hash = build_ocr_config_hash(document_type)
+    ocr_cache_key = build_ocr_cache_key(
+        source_file_hash=source_file_hash,
+        document_type=document_type,
+        ocr_engine_version=OCR_CACHE_ENGINE_VERSION,
+        ocr_config_hash=ocr_config_hash,
+    )
+    return {
+        "source_file_hash": source_file_hash,
+        "source_file_size": len(file_bytes or b""),
+        "ocr_engine_version": OCR_CACHE_ENGINE_VERSION,
+        "ocr_config_hash": ocr_config_hash,
+        "ocr_cache_key": ocr_cache_key,
+    }
 
 
 def _is_tender_document_type(document_type: Any) -> bool:
@@ -306,6 +409,12 @@ def compact_document_payload(document: dict[str, Any]) -> dict[str, Any]:
         "file_name",
         "file_url",
         "extracted",
+        "source_file_hash",
+        "source_file_size",
+        "ocr_cache_key",
+        "ocr_engine_version",
+        "ocr_config_hash",
+        "ocr_cache_source_document_id",
         "deleted",
         "create_time",
         "update_time",
@@ -543,14 +652,46 @@ async def upload_extract_and_create_document(
         file_bytes = await file.read()
         if not file_bytes:
             raise ValueError("uploaded file content is empty")
-
-        recognition_content = await run_in_threadpool(
-            _extract_recognition_content,
-            file_bytes,
-            (file.filename or resolved_file_name),
-            analysis_service,
+        ocr_cache_context = _resolve_ocr_cache_context(
+            file_bytes=file_bytes,
             document_type=document_type,
         )
+
+        reusable_document = await run_in_threadpool(
+            db_service.find_reusable_ocr_document,
+            source_file_hash=ocr_cache_context["source_file_hash"],
+            document_type=document_type,
+            ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+            ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+            exclude_identifier_id=identifier_id,
+        )
+        if reusable_document and isinstance(reusable_document.get("content"), dict):
+            recognition_content = _attach_ocr_cache_metadata(
+                reusable_document["content"],
+                cache_hit=True,
+                source_document=reusable_document,
+                ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+                ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+                ocr_cache_key=ocr_cache_context["ocr_cache_key"],
+            )
+            ocr_cache_source_document_id = str(reusable_document.get("identifier_id") or "") or None
+        else:
+            extracted_content = await run_in_threadpool(
+                _extract_recognition_content,
+                file_bytes,
+                (file.filename or resolved_file_name),
+                analysis_service,
+                document_type=document_type,
+            )
+            recognition_content = _attach_ocr_cache_metadata(
+                extracted_content,
+                cache_hit=False,
+                source_document=None,
+                ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+                ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+                ocr_cache_key=ocr_cache_context["ocr_cache_key"],
+            )
+            ocr_cache_source_document_id = None
 
         # 步骤3：写入数据库
         creation_result = await run_in_threadpool(
@@ -560,6 +701,12 @@ async def upload_extract_and_create_document(
             document_type,
             recognition_content,
             identifier_id,
+            ocr_cache_context["source_file_hash"],
+            ocr_cache_context["source_file_size"],
+            ocr_cache_context["ocr_cache_key"],
+            ocr_cache_context["ocr_engine_version"],
+            ocr_cache_context["ocr_config_hash"],
+            ocr_cache_source_document_id,
         )
         document = creation_result["document"]
         return {
@@ -616,6 +763,10 @@ async def upload_and_create_document_without_ocr(
         )
         if not resolved_file_name:
             raise ValueError("document_name cannot be empty")
+        await file.seek(0)
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise ValueError("uploaded file content is empty")
 
         creation_result = await run_in_threadpool(
             db_service.create_document,
@@ -623,6 +774,8 @@ async def upload_and_create_document_without_ocr(
             upload_result["file_url"],
             document_type,
             identifier_id,
+            _sha256_hex(file_bytes),
+            len(file_bytes),
         )
         return {
             "ok": True,
@@ -692,22 +845,70 @@ async def recognize_existing_document(
             object_name,
             bucket_name,
         )
-        if cancel_check is not None:
-            cancel_check()
-        recognition_content = await run_in_threadpool(
-            _extract_recognition_content,
-            file_bytes,
-            str(document.get("file_name") or document_identifier),
-            analysis_service,
-            cancel_check,
+        ocr_cache_context = _resolve_ocr_cache_context(
+            file_bytes=file_bytes,
             document_type=document.get("document_type"),
         )
+        if (
+            str(document.get("source_file_hash") or "").strip() != ocr_cache_context["source_file_hash"]
+            or int(document.get("source_file_size") or 0) != int(ocr_cache_context["source_file_size"])
+        ):
+            document = await run_in_threadpool(
+                db_service.update_document_source_metadata,
+                document_identifier,
+                source_file_hash=ocr_cache_context["source_file_hash"],
+                source_file_size=ocr_cache_context["source_file_size"],
+            ) or document
+        if cancel_check is not None:
+            cancel_check()
+        reusable_document = await run_in_threadpool(
+            db_service.find_reusable_ocr_document,
+            source_file_hash=ocr_cache_context["source_file_hash"],
+            document_type=document.get("document_type"),
+            ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+            ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+            exclude_identifier_id=document_identifier,
+        )
+        if reusable_document and isinstance(reusable_document.get("content"), dict):
+            recognition_content = _attach_ocr_cache_metadata(
+                reusable_document["content"],
+                cache_hit=True,
+                source_document=reusable_document,
+                ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+                ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+                ocr_cache_key=ocr_cache_context["ocr_cache_key"],
+            )
+            ocr_cache_source_document_id = str(reusable_document.get("identifier_id") or "") or None
+        else:
+            extracted_content = await run_in_threadpool(
+                _extract_recognition_content,
+                file_bytes,
+                str(document.get("file_name") or document_identifier),
+                analysis_service,
+                cancel_check,
+                document_type=document.get("document_type"),
+            )
+            recognition_content = _attach_ocr_cache_metadata(
+                extracted_content,
+                cache_hit=False,
+                source_document=None,
+                ocr_engine_version=ocr_cache_context["ocr_engine_version"],
+                ocr_config_hash=ocr_cache_context["ocr_config_hash"],
+                ocr_cache_key=ocr_cache_context["ocr_cache_key"],
+            )
+            ocr_cache_source_document_id = None
         if cancel_check is not None:
             cancel_check()
         updated_document = await run_in_threadpool(
             db_service.update_document_content,
             document_identifier,
             recognition_content,
+            ocr_cache_context["source_file_hash"],
+            ocr_cache_context["source_file_size"],
+            ocr_cache_context["ocr_cache_key"],
+            ocr_cache_context["ocr_engine_version"],
+            ocr_cache_context["ocr_config_hash"],
+            ocr_cache_source_document_id,
         )
         if not updated_document:
             raise ValueError(f"failed to update document content: {document_identifier}")

@@ -304,6 +304,8 @@ class TemplateExtractor:
         processed = []
         page_has_heading = {}
         heading_counts = {}
+        edge_text_pages: dict[str, set[int]] = {}
+        document_pages: set[int] = set()
 
         # 第一遍：清洗文本并识别原生标题
         for sec in layout_sections:
@@ -312,6 +314,8 @@ class TemplateExtractor:
 
             new_sec = sec.copy()
             page = new_sec.get('page', -1)
+            if isinstance(page, int) and page >= 0:
+                document_pages.add(page)
 
             if logical_tables and new_sec.get('type') == 'table':
                 tbs = tables_by_page.get(page, [])
@@ -334,6 +338,34 @@ class TemplateExtractor:
             text = new_sec['text']
             if not text:
                 continue
+
+            bbox = new_sec.get('bbox') or new_sec.get('box')
+            page_height = (
+                new_sec.get('page_height')
+                or new_sec.get('image_height')
+                or ((new_sec.get('page_size') or [None, None])[1]
+                    if isinstance(new_sec.get('page_size'), (list, tuple))
+                    and len(new_sec.get('page_size')) >= 2
+                    else None)
+            )
+            near_page_edge = False
+            if (
+                isinstance(bbox, (list, tuple))
+                and len(bbox) >= 4
+                and all(isinstance(value, (int, float)) for value in bbox[:4])
+            ):
+                top = float(bbox[1])
+                bottom = float(bbox[3])
+                near_page_edge = top <= 180
+                if isinstance(page_height, (int, float)) and page_height > 0:
+                    near_page_edge = near_page_edge or bottom >= float(page_height) * 0.88
+            compact_text = text.replace(' ', '')
+            if (
+                near_page_edge
+                and isinstance(page, int)
+                and 0 < len(compact_text) <= 80
+            ):
+                edge_text_pages.setdefault(compact_text, set()).add(page)
 
             # 如果该区段原本就是 heading 且符合严格标题定义，记录下来
             if new_sec.get('type') == 'heading' and SectionClassifier.is_heading(text, is_strict=True):
@@ -362,7 +394,15 @@ class TemplateExtractor:
                     heading_counts[clean_h] = heading_counts.get(clean_h, 0) + 1
             final_processed.append(sec)
 
-        global_headers = {t for t, c in heading_counts.items() if c > 2}
+        page_count = max(1, len(document_pages))
+        repeated_edge_texts = {
+            text
+            for text, pages in edge_text_pages.items()
+            if len(pages) >= 3 and len(pages) / page_count >= 0.35
+        }
+        global_headers = {
+            t for t, c in heading_counts.items() if c > 2
+        } | repeated_edge_texts
         return final_processed, global_headers
 
     @classmethod
@@ -578,6 +618,7 @@ class TemplateExtractor:
                 attachment_number = current_top_level_number
             normalized_title = cls._attachment_title(title)
             compact_title = cls._compact(normalized_title)
+            title_locations = cls._section_locations(chunk[0])
             attachments.append(
                 {
                     "attachment_number": attachment_number,
@@ -587,6 +628,7 @@ class TemplateExtractor:
                         for section in chunk
                         if str(section.get('text') or '').strip()
                     ],
+                    "title_locations": title_locations,
                     "locations": [
                         location
                         for section in chunk
@@ -756,7 +798,9 @@ class TemplateExtractor:
                 {
                     "title": normalized_title,
                     "content": list(attachment.get("content") or []),
-                    "locations": list(attachment.get("locations") or []),
+                    # 一致性预览应定位到当前附件标题页；整段正文 locations 在 OCR
+                    # 切块跨页或混入下一附件时容易把预览带到下一份模板。
+                    "locations": list(attachment.get("title_locations") or attachment.get("locations") or []),
                     "is_optional": "如有" in normalized_title,
                 }
             )

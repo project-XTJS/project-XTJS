@@ -33,6 +33,7 @@ def normalize_plain_text(value: Any) -> str:
 def compact_raw_text(text: str) -> str:
     """将文本中所有空白字符去除，用于精确哈希比较。"""
     normalized = normalize_plain_text(text)
+    normalized = _strip_numbering_prefixes(normalized)
     return re.sub(r"\s+", "", normalized)
 
 
@@ -105,10 +106,8 @@ def business_similarity_key(value: Any) -> str:
         return ""
     text = re.sub(r"第\s*\d+\s*页", " <PAGE> ", text, flags=re.IGNORECASE)
     text = re.sub(r"(?:P|p)\s*\d+(?:\s*-\s*(?:P|p)?\s*\d+)?", " <PAGE> ", text)
-    text = re.sub(r"[¥￥]?\d[\d,，.．]*", " <NUM> ", text)
     text = re.sub(r"[()（）【】\[\]{}<>《》:：;；,，、/\\|]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip().lower()
-    text = re.sub(r"(?:<num>\s*){2,}", "<num> ", text)
     text = re.sub(r"(?:<page>\s*){2,}", "<page> ", text)
     return text.strip()
 
@@ -124,6 +123,22 @@ def _strip_scope_serial_prefix(text: str) -> str:
         normalized,
     )
     return stripped.strip()
+
+
+def _strip_numbering_prefixes(text: str) -> str:
+    """逐行移除标题/条目序号，保留正文中的业务数字。"""
+    lines = []
+    for line in normalize_plain_text(text).splitlines() or [normalize_plain_text(text)]:
+        stripped = _strip_scope_serial_prefix(line)
+        stripped = re.sub(
+            r"^\s*(?:第\s*[一二三四五六七八九十百千万\d]+\s*[章节条款部分项]|"
+            r"[一二三四五六七八九十百千万]+[、.．)]|"
+            r"\d+(?:\.\d+){1,5}[、.．)]?)\s*",
+            "",
+            stripped,
+        )
+        lines.append(stripped)
+    return "\n".join(lines).strip()
 
 
 def is_noise_block(text: str, section_type: str) -> bool:

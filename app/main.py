@@ -22,6 +22,11 @@ from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
 # 服务层（用于获取项目列表）
 from app.service.postgresql_service import PostgreSQLService
+from app.service.cache_service import CacheUnavailableError, get_cache_service
+from app.service.analysis.compliance.embedding_service import (
+    get_embedding_model_status,
+)
+from app.config.settings import settings
 from app.core.document_types import (
     DOCUMENT_TYPE_BUSINESS_BID,
     DOCUMENT_TYPE_TECHNICAL_BID,
@@ -294,6 +299,14 @@ app.openapi = custom_openapi
 # —— 系统状态接口 ——
 
 
+@app.on_event("startup")
+def verify_required_cache() -> None:
+    """Fail fast when production cache is required but unavailable."""
+    if not settings.XTJS_CACHE_ENABLED or not settings.XTJS_CACHE_REQUIRED:
+        return
+    get_cache_service().ping()
+
+
 @app.get("/", summary="系统根目录", tags=["系统"])
 def read_root():
     return "Welcome to XTJS API"
@@ -301,7 +314,26 @@ def read_root():
 
 @app.get("/health", summary="健康检查接口", tags=["系统"])
 def health_check():
-    return {"status": "healthy"}
+    cache_status = "disabled"
+    if settings.XTJS_CACHE_ENABLED:
+        try:
+            get_cache_service().ping()
+            cache_status = "healthy"
+        except CacheUnavailableError as exc:
+            if settings.XTJS_CACHE_REQUIRED:
+                return {
+                    "status": "unhealthy",
+                    "cache": {
+                        "status": "unavailable",
+                        "message": str(exc),
+                    },
+                }
+            cache_status = "unavailable"
+    return {
+        "status": "healthy" if cache_status != "unavailable" else "degraded",
+        "cache": {"status": cache_status},
+        "consistency_embedding": get_embedding_model_status(load=False),
+    }
 
 
 # —— 开发模式直接启动 ——

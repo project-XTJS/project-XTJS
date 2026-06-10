@@ -104,14 +104,76 @@ class ProjectResultUpdateRequest(BaseModel):
     result: dict[str, Any] = Field(..., description="完整结果 JSON 对象。")
 
 
-class ProjectResultFrontendUpdateRequest(BaseModel):
-    """更新前端删减后的项目分析结果请求。"""
+class BusinessBidManualReviewInputItem(BaseModel):
+    """A single editable business-bid review value confirmed by a user."""
+    model_config = ConfigDict(extra="allow")
+
+    editable_id: str = Field(..., min_length=1, description="Stable editable item id.")
+    result_path: str = Field(..., min_length=1, description="JSON path of the source result value.")
+    bidder_key: Optional[str] = Field(default=None, description="Bidder key in the review result.")
+    check_code: str = Field(..., min_length=1, description="Review check code.")
+    field_group: str = Field(..., min_length=1, description="Editable field group.")
+    field_name: str = Field(..., min_length=1, description="Editable field name.")
+    original_value: Any = Field(default=None, description="Original OCR/review value.")
+    manual_value: Any = Field(default=None, description="Manual correction value.")
+    page_refs: list[int] = Field(default_factory=list, description="Related page numbers.")
+    document_identifier_id: Optional[str] = Field(default=None, description="Related document UUID.")
+    updated_at: Optional[str] = Field(default=None, description="Client-side update timestamp.")
+
+
+class BusinessBidManualReviewInputsRequest(BaseModel):
+    """Manual editable values for business-bid format review."""
     model_config = ConfigDict(extra="forbid")
 
-    result_fot_frontend: dict[str, Any] = Field(
-        ...,
-        description="前端删减后的结果 JSON。",
+    items: list[BusinessBidManualReviewInputItem] = Field(
+        default_factory=list,
+        description="Manual correction items.",
     )
+
+
+class DocumentReviewContentUpdateRequest(BaseModel):
+    """Update a document manual OCR working copy without changing raw OCR content."""
+    model_config = ConfigDict(extra="forbid")
+
+    effective_content: dict[str, Any] = Field(
+        ...,
+        description="Latest effective OCR content used by subsequent analysis.",
+    )
+    inputs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Manual inputs grouped by business domain.",
+    )
+
+
+class ProjectManualReviewResultInputsRequest(BaseModel):
+    """Manual judgment inputs applied to one latest review result key."""
+    model_config = ConfigDict(extra="allow")
+
+    inputs: dict[str, Any] = Field(default_factory=dict, description="Manual correction payload.")
+
+
+class ProjectReportExportRequest(BaseModel):
+    """Stateless report export payload based on the current display result selection."""
+    model_config = ConfigDict(extra="forbid")
+
+    result: dict[str, Any] = Field(..., description="Filtered display result used only for this export.")
+
+
+class ProjectWorkflowScopeRequest(BaseModel):
+    """Workflow scope controls such as soft-excluded bidders."""
+    model_config = ConfigDict(extra="allow")
+
+    excluded_bidders: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Soft-excluded bidder records.",
+    )
+
+
+class ProjectManualReviewRerunRequest(BaseModel):
+    """Explicitly rerun selected services and save them as latest manual results."""
+    model_config = ConfigDict(extra="forbid")
+
+    services: list[str] = Field(default_factory=list, min_length=1)
 
 
 class DuplicateCheckScope(str, Enum):
@@ -138,4 +200,34 @@ class ProjectDuplicateCheckRequest(BaseModel):
         ge=0,
         le=500,
         description="每类文档最多返回的对比对数，0 表示不截断。",
+    )
+
+
+class PersonnelReuseCheckRequest(BaseModel):
+    """人员抽取确认后的一人多用检查请求。"""
+    confirmed_names: Optional[list[Any]] = Field(
+        default=None,
+        description="业务人员确认后的人名列表；为空时返回抽取名单供确认。",
+    )
+
+
+class PersonnelReuseDraftDocument(BaseModel):
+    """前端确认/编辑后的单份投标文件人员草稿。"""
+    model_config = ConfigDict(extra="allow")
+
+    document_identifier_id: Optional[str] = Field(default=None, description="文档 UUID。")
+    identifier_id: Optional[str] = Field(default=None, description="兼容字段：文档 UUID。")
+    document_type: Optional[str] = Field(default=None, description="文档类型：business_bid/technical_bid。")
+    file_name: Optional[str] = Field(default=None, description="文档文件名。")
+    relation_id: Optional[int] = Field(default=None, description="项目文档关系 ID。")
+    personnel_entries: list[dict[str, Any]] = Field(default_factory=list, description="确认后的人员条目。")
+
+
+class PersonnelReuseDraftRequest(BaseModel):
+    """结果审核页保存/确认人员抽取草稿请求。"""
+    model_config = ConfigDict(extra="forbid")
+
+    documents: list[PersonnelReuseDraftDocument] = Field(
+        default_factory=list,
+        description="按投标文件分组的人员草稿。",
     )
