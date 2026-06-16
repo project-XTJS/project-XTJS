@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from app.config.settings import settings
+from app.config.settings import PROJECT_ROOT, settings
 
 
 class ChineseEmbeddingService:
@@ -39,20 +39,43 @@ class ChineseEmbeddingService:
         self._load_attempted = False
         self._error: str | None = None
         self._cache: dict[str, np.ndarray] = {}
+        self._device = settings.CONSISTENCY_EMBEDDING_DEVICE
+
+    @property
+    def configured_model_path(self) -> Path:
+        return Path(settings.CONSISTENCY_EMBEDDING_MODEL_PATH)
 
     @property
     def model_path(self) -> Path:
-        return Path(settings.CONSISTENCY_EMBEDDING_MODEL_PATH)
+        configured = self.configured_model_path
+        if configured.exists():
+            return configured
+        for candidate in self._fallback_model_paths(configured):
+            if candidate.exists():
+                return candidate
+        return configured
+
+    def _fallback_model_paths(self, configured: Path) -> list[Path]:
+        model_dir_name = configured.name or settings.CONSISTENCY_EMBEDDING_MODEL_NAME.rsplit(
+            "/",
+            1,
+        )[-1]
+        local_model_path = PROJECT_ROOT / "models" / model_dir_name
+        if local_model_path == configured:
+            return []
+        return [local_model_path]
 
     def status(self, *, load: bool = False) -> dict[str, Any]:
         if load:
             self._ensure_loaded()
-        configured = self.model_path.exists()
+        configured_path = self.configured_model_path
+        resolved_path = self.model_path
+        resolved = resolved_path.exists()
         if self._model is not None:
             state = "loaded"
         elif self._load_attempted:
             state = "unavailable"
-        elif configured:
+        elif resolved:
             state = "not_loaded"
         else:
             state = "missing"
@@ -60,7 +83,9 @@ class ChineseEmbeddingService:
             "status": state,
             "model": settings.CONSISTENCY_EMBEDDING_MODEL_NAME,
             "revision": settings.CONSISTENCY_EMBEDDING_MODEL_REVISION,
-            "path": str(self.model_path),
+            "path": str(resolved_path),
+            "configured_path": str(configured_path),
+            "resolved_from_fallback": resolved_path != configured_path,
             "device": settings.CONSISTENCY_EMBEDDING_DEVICE,
             "local_files_only": True,
             "error": self._error,
@@ -101,8 +126,16 @@ class ChineseEmbeddingService:
             if self._load_attempted:
                 return False
             self._load_attempted = True
-            if not self.model_path.exists():
-                self._error = f"model path does not exist: {self.model_path}"
+            configured_path = self.configured_model_path
+            resolved_path = self.model_path
+            if not resolved_path.exists():
+                if resolved_path == configured_path:
+                    self._error = f"model path does not exist: {resolved_path}"
+                else:
+                    self._error = (
+                        f"configured model path does not exist: {configured_path}; "
+                        f"fallback model path also missing: {resolved_path}"
+                    )
                 return False
             try:
                 import torch
@@ -113,11 +146,11 @@ class ChineseEmbeddingService:
                     device = "cpu"
                 self._torch = torch
                 self._tokenizer = AutoTokenizer.from_pretrained(
-                    str(self.model_path),
+                    str(resolved_path),
                     local_files_only=True,
                 )
                 self._model = AutoModel.from_pretrained(
-                    str(self.model_path),
+                    str(resolved_path),
                     local_files_only=True,
                 )
                 self._model.to(device)

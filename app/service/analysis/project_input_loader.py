@@ -44,7 +44,7 @@ class ProjectAnalysisInputLoader:
             normalized["raw_content"] = deepcopy(as_dict(normalized.get("content")))
         review_content = as_dict(normalized.get("review_content"))
         effective_content = as_dict(review_content.get("effective_content"))
-        if effective_content:
+        if self._has_usable_analysis_content(effective_content):
             normalized["content"] = deepcopy(effective_content)
 
         if "tender_raw_content" not in normalized:
@@ -55,7 +55,7 @@ class ProjectAnalysisInputLoader:
         effective_tender_content = as_dict(
             tender_review_content.get("effective_content")
         )
-        if effective_tender_content:
+        if self._has_usable_analysis_content(effective_tender_content):
             normalized["tender_content"] = deepcopy(effective_tender_content)
         personnel_payload = self._manual_personnel_payload(normalized)
         if personnel_payload:
@@ -64,6 +64,46 @@ class ProjectAnalysisInputLoader:
             if entries is not None:
                 normalized["personnel_entries"] = entries
         return normalized
+
+    @classmethod
+    def _has_text(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(cls._has_text(item) for item in value)
+        if isinstance(value, dict):
+            for key in (
+                "text",
+                "raw_text",
+                "content",
+                "full_text",
+                "markdown",
+                "block_content",
+                "html",
+                "rows",
+                "records",
+                "headers",
+            ):
+                if cls._has_text(value.get(key)):
+                    return True
+        return False
+
+    @classmethod
+    def _has_usable_analysis_content(cls, value: Any) -> bool:
+        if isinstance(value, str):
+            return bool(value.strip())
+        if not isinstance(value, dict):
+            return False
+
+        container = value.get("data") if isinstance(value.get("data"), dict) else value
+        if cls._has_text(container):
+            return True
+
+        for key in ("layout_sections", "logical_tables", "table_sections", "pages"):
+            items = container.get(key)
+            if isinstance(items, list) and any(cls._has_text(item) for item in items):
+                return True
+        return False
 
     @staticmethod
     def _manual_personnel_payload(document: dict[str, Any]) -> dict[str, Any]:

@@ -60,6 +60,20 @@ TABLE_HEADER_MARKERS = (
     "说明",
     "备注",
 )
+# 可填写表格的题注词：含这些词（或以“表”结尾的短题注）的段落属于需投标人填写的表格题注，
+# 仅校验其在投标附件中是否存在，不对填写内容做“是否被改动”的一致性检查。
+FILLABLE_TABLE_TITLE_MARKERS = (
+    "情况表",
+    "组成表",
+    "明细表",
+    "报价表",
+    "汇总表",
+    "一览表",
+    "登记表",
+    "信息表",
+    "人员表",
+    "配置表",
+)
 TABLE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
     "项目名称": ("项目名称", "项目名"),
     "投标价格": ("投标价格", "投标报价", "报价"),
@@ -81,15 +95,58 @@ NUMBER_PREFIX_RE = re.compile(
     r"^\s*(?:附件|附表)?\s*(?:\d+(?:[-－]\d+)*|[一二三四五六七八九十]+)[、.．)）]?\s*"
 )
 
+TEXT_LAYER_UNDERLINE_TEXT_RE = re.compile(
+    r"\$?\s*\\underline\{\s*\\text\{\s*(?P<content>[^{}\n$]{0,500})\s*\}\s*\}\s*\$?"
+)
+TEXT_LAYER_UNDERLINE_RE = re.compile(
+    r"\$?\s*\\underline\{\s*(?P<content>[^{}\n$]{0,500})\s*\}\s*\$?"
+)
+TEXT_LAYER_TEXT_RE = re.compile(
+    r"\\text\{\s*(?P<content>[^{}\n$]{0,500})\s*\}"
+)
+TEXT_LAYER_DANGLING_PREFIX_RE = re.compile(
+    r"\$?\s*\\underline\s*\{\s*(?:\\text\s*\{\s*)?"
+)
+
+
+def strip_text_layer_noise(value: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    cleaned = text.replace("\u3000", " ").replace("\xa0", " ")
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    previous = None
+    while cleaned != previous:
+        previous = cleaned
+        cleaned = TEXT_LAYER_UNDERLINE_TEXT_RE.sub(
+            lambda match: (match.group("content") or "").strip(),
+            cleaned,
+        )
+        cleaned = TEXT_LAYER_UNDERLINE_RE.sub(
+            lambda match: (match.group("content") or "").strip(),
+            cleaned,
+        )
+        cleaned = TEXT_LAYER_TEXT_RE.sub(
+            lambda match: (match.group("content") or "").strip(),
+            cleaned,
+        )
+    cleaned = TEXT_LAYER_DANGLING_PREFIX_RE.sub("", cleaned)
+    cleaned = cleaned.replace("\\underline", "").replace("\\text", "")
+    cleaned = cleaned.replace("$", "").replace("{", "").replace("}", "")
+    cleaned = cleaned.replace("\\", "")
+    cleaned = re.sub(r"[ \t\f\v]+", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
 
 def normalize_text(value: Any) -> str:
-    text = str(value or "")
+    text = strip_text_layer_noise(value)
     text = PLACEHOLDER_RE.sub("", text)
     return "".join(ch.lower() for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
 def normalize_raw_text(value: Any) -> str:
-    text = str(value or "")
+    text = strip_text_layer_noise(value)
     return "".join(ch.lower() for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
 
 
@@ -142,9 +199,10 @@ class StructuredConsistencyEngine:
     def build_template_skeleton(self, model_json: dict[str, Any]) -> list[dict[str, Any]]:
         templates = TemplateExtractor.extract_consistency_templates(model_json)
         manual_values = {item["item_id"]: item for item in _manual_skeleton_values(model_json)}
+        model_attachment_index = self._index_model_attachments(model_json)
         attachments: list[dict[str, Any]] = []
         for template in templates:
-            attachment = self._build_attachment_skeleton(template, model_json)
+            attachment = self._build_attachment_skeleton(template, model_json, model_attachment_index)
             next_items: list[dict[str, Any]] = []
             auto_ids: set[str] = set()
             for item in attachment["items"]:
@@ -176,7 +234,11 @@ class StructuredConsistencyEngine:
             {"title": item["title"], "text": item["reference_text"]}
             for item in skeletons
         ]
-        _, bid_sections = self.checker._build_attachment_lookup(test_json, templates) if templates else ({}, [])
+        bid_by_no, bid_sections = (
+            self.checker._build_attachment_lookup(test_json, templates)
+            if templates
+            else ({}, [])
+        )
         model_status = self.embedding.status()
         results: list[dict[str, Any]] = []
 
@@ -187,7 +249,11 @@ class StructuredConsistencyEngine:
                 results.append(self._skipped_segment(skeleton, integrity_skip, model_status))
                 continue
 
-            attachment_match = self._match_attachment(skeleton, bid_sections)
+            attachment_match = self._match_attachment_with_integrity_fallback(
+                skeleton,
+                bid_by_no,
+                bid_sections,
+            )
             matched = attachment_match.get("section")
             if matched is None:
                 if skeleton["is_optional"]:
@@ -214,6 +280,7 @@ class StructuredConsistencyEngine:
         self,
         template: dict[str, Any],
         model_json: dict[str, Any],
+        model_attachment_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         title = str(template.get("title") or "").strip()
         content_lines = self._clean_lines(template.get("content") or [])
@@ -224,6 +291,16 @@ class StructuredConsistencyEngine:
             for location in template.get("locations") or []
             if isinstance(location, dict)
         ]
+        # 把模板定位收敛到该附件在招标文件中的“单个准确页”，排除封面/目录/尾页。
+        # 复用 verification 的附件切块逻辑（check_pages 已剔除封面/非正文）。
+        matched_section, accurate_pages = self._accurate_attachment_pages(
+            model_attachment_index or {}, attachment_number, title
+        )
+        if accurate_pages:
+            locations = self._constrain_template_locations(locations, matched_section, accurate_pages)
+            allowed_pages = set(accurate_pages)
+        else:
+            allowed_pages = self._location_pages(locations)
         items: list[dict[str, Any]] = []
         items.append(
             self._make_item(
@@ -248,11 +325,13 @@ class StructuredConsistencyEngine:
                     locations=self._locations_for_text(
                         model_json,
                         paragraph,
-                        allowed_pages=self._location_pages(locations),
+                        allowed_pages=allowed_pages,
                     ) or locations,
                     self_defined=self_defined,
                 )
             )
+
+        items = self._relax_fillable_table_items(items)
 
         deduped: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -272,6 +351,112 @@ class StructuredConsistencyEngine:
             "is_self_defined": self_defined,
             "items": deduped,
         }
+
+    def _is_fillable_table_title(self, text: str) -> bool:
+        """判断段落是否为“可填写表格”的题注（如“项目管理机构人员情况表”）。"""
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+        if any(marker in normalized for marker in FILLABLE_TABLE_TITLE_MARKERS):
+            return True
+        # 以“表”结尾的短题注（避免误伤含“表”字的长固定条款）。
+        return len(normalized) <= 30 and normalized.endswith("表")
+
+    def _relax_fillable_table_items(
+        self,
+        items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """含可填写表格的附件：把表题注(fixed_clause)与表头(table_header)标为仅存在性校验。
+
+        投标人需在这类表格中填写内容，其文本必然与空白模板不同，因此只确认表格在投标附件
+        中存在，不对填写内容做“是否被改动”的一致性检查。其余固定条款保持严格检查不变。
+        """
+        has_table = any(item.get("kind") == "table_header" for item in items)
+        if not has_table:
+            return items
+        for item in items:
+            kind = item.get("kind")
+            if kind == "table_header":
+                item["fillable_existence"] = True
+            elif kind == "fixed_clause" and self._is_fillable_table_title(
+                item.get("reference_text") or ""
+            ):
+                item["fillable_existence"] = True
+        return items
+
+    def _index_model_attachments(self, model_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """对招标文件按附件切块一次，建立 编号/标题 -> 区段 的索引，用于精确定位附件页。"""
+        index: dict[str, dict[str, Any]] = {}
+        verification_checker = self.checker._verification_checker
+        try:
+            sections = verification_checker._attachment_sections(model_json)
+        except Exception:
+            return index
+        for section in sections or []:
+            if not isinstance(section, dict):
+                continue
+            number = section.get("attachment_number")
+            if number:
+                index.setdefault(f"num:{number}", section)
+            title_key = verification_checker._attachment_title_key(str(section.get("title") or ""))
+            if title_key:
+                index.setdefault(f"title:{title_key}", section)
+        return index
+
+    def _accurate_attachment_pages(
+        self,
+        index: dict[str, Any],
+        attachment_number: str | None,
+        title: str,
+    ) -> tuple[dict[str, Any] | None, list[int]]:
+        """在招标文件附件索引中匹配当前附件，返回其区段与有效正文页（check_pages）。"""
+        section = None
+        if attachment_number:
+            section = index.get(f"num:{attachment_number}")
+        if section is None:
+            title_key = self.checker._verification_checker._attachment_title_key(title or "")
+            if title_key:
+                section = index.get(f"title:{title_key}")
+        if not isinstance(section, dict):
+            return None, []
+        pages = [
+            page
+            for page in (section.get("check_pages") or section.get("pages") or [])
+            if isinstance(page, int) and page > 0
+        ]
+        return section, pages
+
+    def _constrain_template_locations(
+        self,
+        raw_locations: list[dict[str, Any]],
+        section: dict[str, Any] | None,
+        pages: list[int],
+    ) -> list[dict[str, Any]]:
+        """把模板定位收敛到附件的“单个准确页”（首个正文页），排除封面/目录/尾页。"""
+        if not pages:
+            return raw_locations
+        primary = pages[0]
+        accurate_set = set(pages)
+        on_primary = [
+            loc for loc in raw_locations
+            if isinstance(loc, dict) and self._coerce_page(loc.get("page")) == primary
+        ]
+        if on_primary:
+            return on_primary
+        on_attachment = [
+            loc for loc in raw_locations
+            if isinstance(loc, dict) and self._coerce_page(loc.get("page")) in accurate_set
+        ]
+        if on_attachment:
+            return on_attachment
+        # 原始模板定位没有命中真实附件页（例如错误地落在封面），改用附件标题区段的定位。
+        section_locs = [
+            loc for loc in self.checker._serialize_section_locations(section)
+            if self._coerce_page(loc.get("page")) == primary
+        ]
+        if section_locs:
+            return section_locs[:1]
+        return [{"page": primary, "document_role": "tender"}]
 
     def _classify_paragraph(
         self,
@@ -386,7 +571,7 @@ class StructuredConsistencyEngine:
         section: dict[str, Any],
         attachment_match: dict[str, Any],
     ) -> dict[str, Any]:
-        bid_text = str(section.get("text") or "")
+        bid_text = strip_text_layer_noise(section.get("text") or "")
         candidate_texts = self._candidate_texts(section)
         locations = self.checker._serialize_section_locations(section)
         element_results: list[dict[str, Any]] = []
@@ -427,7 +612,7 @@ class StructuredConsistencyEngine:
                 "difference_category": item["difference_category"],
                 "label": item["label"],
                 "template_text": item["reference_text"],
-                "bid_text": item.get("matched_text") or "",
+                "bid_text": strip_text_layer_noise(item.get("matched_text") or ""),
                 "status": item["status"],
             }
             for item in element_results
@@ -504,6 +689,7 @@ class StructuredConsistencyEngine:
             "difference_category": None,
             "template_locations": deepcopy(item.get("source_locations") or []),
             "bid_locations": [],
+            "fillable_existence": bool(item.get("fillable_existence")),
         }
         if not item["enabled"] or item["kind"] in DELEGATED_KINDS:
             return result
@@ -608,6 +794,10 @@ class StructuredConsistencyEngine:
         *,
         structural: bool,
     ) -> dict[str, Any]:
+        # 可填写表格的题注/表头：未在主体命中即视为“存在性无法严格确认”，判跳过而非不通过。
+        if result.get("fillable_existence"):
+            result.update(status="skipped", difference_category=None)
+            return result
         scores = self.embedding.similarities(reference, candidates)
         if scores is not None:
             result_model = self.embedding.status()
@@ -642,7 +832,7 @@ class StructuredConsistencyEngine:
             result.update(status="skipped", difference_category=None)
             return result
         deterministic = (
-            attachment_match.get("confidence") == "high"
+            self._supports_deterministic_attachment_decision(attachment_match)
             and len(normalize_text(reference)) >= 12
             and len(normalize_text("".join(candidates))) >= 24
             and best_lexical < settings.CONSISTENCY_DETERMINISTIC_MISSING_MAX_LEXICAL
@@ -669,7 +859,7 @@ class StructuredConsistencyEngine:
     ) -> dict[str, Any]:
         if not result["required"]:
             result["status"] = "skipped"
-        elif attachment_match.get("confidence") == "high" and best_lexical < 0.35:
+        elif self._supports_deterministic_attachment_decision(attachment_match) and best_lexical < 0.35:
             result.update(
                 status="missing",
                 match_method="exhaustive_lexical",
@@ -774,6 +964,87 @@ class StructuredConsistencyEngine:
             "confidence": "unclear" if best >= settings.CONSISTENCY_TITLE_UNMATCHED_THRESHOLD else "low",
         }
 
+    def _match_attachment_with_integrity_fallback(
+        self,
+        skeleton: dict[str, Any],
+        bid_by_no: dict[str, list[dict[str, Any]]],
+        sections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        strict_match = self._match_attachment(skeleton, sections)
+        if strict_match.get("section") is not None:
+            return strict_match
+        candidate_match = self._integrity_candidate_attachment_match(
+            skeleton,
+            bid_by_no,
+            sections,
+        )
+        if candidate_match.get("section") is not None:
+            return candidate_match
+        return strict_match
+
+    def _integrity_candidate_attachment_match(
+        self,
+        skeleton: dict[str, Any],
+        bid_by_no: dict[str, list[dict[str, Any]]],
+        sections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        verifier = self.checker._verification_checker
+        expected_title = str(skeleton.get("title") or "")
+        expected_number = str(skeleton.get("attachment_number") or "").strip()
+        probe = {
+            "attachment_number": expected_number or None,
+            "title": verifier._attachment_title(expected_title),
+        }
+        matched = verifier._match_attachment(probe, bid_by_no, sections)
+        if not isinstance(matched, dict):
+            return {}
+
+        same_number = [
+            section
+            for section in sections
+            if expected_number
+            and str(section.get("attachment_number") or "").strip() == expected_number
+        ]
+        title_candidates = [
+            section
+            for section in sections
+            if verifier._attachment_titles_compatible(
+                probe["title"] or expected_title,
+                str(section.get("title") or section.get("text") or ""),
+            )
+        ]
+        matched_title = str(matched.get("title") or matched.get("text") or "").splitlines()[0]
+        lexical_score = round(lexical_similarity(expected_title, matched_title), 4)
+        method = "integrity_fallback"
+        margin = 0.0
+
+        if same_number and any(section == matched for section in same_number):
+            if len(same_number) == 1:
+                method = "integrity_attachment_number"
+                return {
+                    "section": matched,
+                    "method": method,
+                    "score": 1.0,
+                    "margin": 1.0,
+                    "confidence": "candidate",
+                }
+            method = "integrity_attachment_number_title"
+            margin = self._attachment_title_margin(expected_title, same_number)
+        elif len(title_candidates) == 1 and title_candidates[0] == matched:
+            method = "integrity_unique_title"
+            margin = 1.0
+        elif any(section == matched for section in title_candidates):
+            method = "integrity_title"
+            margin = self._attachment_title_margin(expected_title, title_candidates)
+
+        return {
+            "section": matched,
+            "method": method,
+            "score": lexical_score,
+            "margin": round(margin, 4),
+            "confidence": "candidate",
+        }
+
     def _unmatched_segment(
         self,
         skeleton: dict[str, Any],
@@ -810,6 +1081,35 @@ class StructuredConsistencyEngine:
             "template_locations": skeleton["template_locations"],
             "tender_highlight_locations": skeleton["template_locations"],
         }
+
+    @staticmethod
+    def _attachment_title_margin(
+        expected_title: str,
+        sections: list[dict[str, Any]],
+    ) -> float:
+        scores = sorted(
+            (
+                lexical_similarity(
+                    expected_title,
+                    str(section.get("title") or section.get("text") or "").splitlines()[0],
+                )
+                for section in sections
+            ),
+            reverse=True,
+        )
+        if not scores:
+            return 0.0
+        return scores[0] - (scores[1] if len(scores) > 1 else 0.0)
+
+    @staticmethod
+    def _supports_deterministic_attachment_decision(
+        attachment_match: dict[str, Any],
+    ) -> bool:
+        confidence = str(attachment_match.get("confidence") or "").strip().lower()
+        method = str(attachment_match.get("method") or "").strip().lower()
+        return confidence == "high" or (
+            confidence == "candidate" and method.startswith("integrity_")
+        )
 
     def _skipped_segment(
         self,
@@ -975,13 +1275,14 @@ class StructuredConsistencyEngine:
         for item in section.get("sections") or []:
             if not isinstance(item, dict):
                 continue
-            text = re.sub(r"\s+", " ", str(item.get("text") or "")).strip()
+            text = strip_text_layer_noise(item.get("text") or "")
+            text = re.sub(r"\s+", " ", text).strip()
             if text and not PAGE_NO_RE.match(text):
                 values.extend(part.strip() for part in text.splitlines() if part.strip())
         if not values:
             values.extend(
                 part.strip()
-                for part in str(section.get("text") or "").splitlines()
+                for part in strip_text_layer_noise(section.get("text") or "").splitlines()
                 if part.strip()
             )
         return list(dict.fromkeys(values))

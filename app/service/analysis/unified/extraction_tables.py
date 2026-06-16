@@ -398,7 +398,7 @@ class ExtractionTablesMixin:
                         "manual_status": status,
                     },
                     status=status,
-                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations, segment),
+                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations),
                     evidence={
                         "template_attachment_locations": segment.get("template_attachment_locations")
                         or segment.get("template_locations")
@@ -436,7 +436,7 @@ class ExtractionTablesMixin:
                         "manual_status": "skipped",
                     },
                     status="skipped",
-                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations, segment),
+                    page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations),
                     evidence={
                         "skip_reason": segment.get("skip_reason"),
                         "template_attachment_locations": segment.get("template_attachment_locations")
@@ -708,7 +708,10 @@ class ExtractionTablesMixin:
                         "seal_evidence": seal_evidence,
                     },
                     status=row_status,
-                    page_refs=self._coerce_page_refs(item.get("pages"), item),
+                    page_refs=self._coerce_page_refs(
+                        item.get("check_pages") or item.get("pages"),
+                        item.get("locations") or [],
+                    ),
                     evidence={"requirements": item.get("requirements") or {}},
                 )
             )

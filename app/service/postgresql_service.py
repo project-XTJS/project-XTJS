@@ -38,6 +38,7 @@ from app.service.manual_review_state import (
     effective_document_content,
     manual_review_results_from_record,
     normalize_review_content,
+    utc_now_iso,
 )
 from app.service.workflow_scope import (
     filter_document_records,
@@ -3112,6 +3113,61 @@ class PostgreSQLService:
             latest_value=result_value,
         )
         existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+
+        query = """
+            INSERT INTO xtjs_result (project_identifier_id, result)
+            VALUES (%s, %s)
+            ON CONFLICT (project_identifier_id)
+            DO UPDATE
+            SET
+                result = EXCLUDED.result,
+                update_time = CURRENT_TIMESTAMP
+            RETURNING
+                id,
+                project_identifier_id,
+                result,
+                create_time,
+                update_time
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        normalized_project_identifier,
+                        Json(jsonable_encoder(existing_result)),
+                    ),
+                )
+                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+
+    def clear_project_manual_review_latest_result(
+        self,
+        project_identifier_id: str,
+        result_key: str,
+    ) -> Dict[str, Any]:
+        """Remove one result key from result.manual_review_results.latest."""
+        normalized_result_key = self._normalize_required_identifier(result_key, "result_key")
+
+        project = self.get_project_by_identifier(project_identifier_id)
+        if not project:
+            raise ValueError(f"椤圭洰涓嶅瓨鍦細{project_identifier_id}")
+        normalized_project_identifier = str(project["identifier_id"])
+
+        existing = self.get_project_result(normalized_project_identifier) or {}
+        existing_result = dict(existing.get("result") or {})
+        manual_review_results = manual_review_results_from_record(existing)
+        latest = dict(manual_review_results.get("latest") or {})
+        if normalized_result_key not in latest:
+            return existing
+
+        latest.pop(normalized_result_key, None)
+        manual_review_results["latest"] = latest
+        manual_review_results["updated_at"] = utc_now_iso()
+
+        if latest or manual_review_results.get("workflow_scope"):
+            existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+        else:
+            existing_result.pop(MANUAL_REVIEW_RESULTS_KEY, None)
 
         query = """
             INSERT INTO xtjs_result (project_identifier_id, result)

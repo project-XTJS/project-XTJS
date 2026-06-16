@@ -25,8 +25,6 @@ ProjectAnalysisService = Literal[
     "business_bid_format_review",
     "deviation_check",
     "business_bid_duplicate_check",
-    "business_itemized_duplicate_check",
-    "bid_response_duplicate_check",
     "technical_bid_duplicate_check",
     "personnel_reuse_check",
     "typo_check",

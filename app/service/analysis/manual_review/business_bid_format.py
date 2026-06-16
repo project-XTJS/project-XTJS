@@ -23,7 +23,7 @@ from app.service.postgresql_service import PostgreSQLService
 BUSINESS_FORMAT_RESULT_KEY = UnifiedBusinessReviewService.BUSINESS_RESULT_KEY
 BUSINESS_FORMAT_EDITABLE_GROUPS = {
     "consistency_check": {"template_segment", "template_skeleton_item"},
-    "pricing_check": {"price_constraint", "opening_amount"},
+    "pricing_check": {"price_constraint", "opening_amount", "rate_quote"},
     "itemized_pricing_check": {"itemized_amount", "itemized_total"},
     "verification_check": {"attachment_result"},
 }
@@ -547,6 +547,39 @@ def _compact_opening_amount_value(value: Any, *, tender_limit_value: Any = None)
     return compact or None
 
 
+def _compact_rate_quote_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    compact: dict[str, Any] = {}
+    for key in (
+        "biz_name",
+        "current_float_rate",
+        "required_min_float_rate",
+        "rule_operator",
+        "rate_label",
+        "quote_type",
+        "rule_source",
+    ):
+        current = value.get(key)
+        if current is not None and current != "":
+            compact[key] = current
+    return compact or None
+
+
+def _structured_rate_quote_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return []
+    rows = value.get("rate_rows") if isinstance(value.get("rate_rows"), list) else []
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("current_float_rate") is None and row.get("float_rate") is None:
+            continue
+        result.append(dict(row))
+    return result
+
+
 def _make_business_editable_item(
     *,
     manual_by_id: dict[str, dict[str, Any]],
@@ -668,44 +701,72 @@ def _build_business_format_editable_items(
         document = _business_bidder_document(review, bidder, bidder_index)
         checks = bidder.get("checks") or {}
 
-        for tender_row in pricing_tender_rows:
-            tender_row_index = tender_rows.index(tender_row)
-            path = _result_path(["extraction_tables", "tender_table", "rows", tender_row_index, "value"])
-            items.append(
-                _make_business_editable_item(
-                    manual_by_id=manual_by_id,
-                    result_path=path,
-                    bidder_key=bidder_key,
-                    bidder_name=bidder_name,
-                    check_code="pricing_check",
-                    field_group="price_constraint",
-                    field_name=str(tender_row.get("field_name") or "tender_limit_or_budget"),
-                    original_value=_compact_price_constraint_value(tender_row.get("value")),
-                    page_refs=_coerce_manual_page_refs(tender_row.get("page_refs") or tender_row.get("locations") or tender_row),
-                    document=tender_document,
-                )
-            )
-
         pricing_self_check = (((checks.get("pricing_check") or {}).get("raw_result") or {}).get("self_check") or {})
-        if isinstance(pricing_self_check, dict) and pricing_self_check:
-            path = _result_path(["bidders", bidder_index, "checks", "pricing_check", "raw_result", "self_check"])
-            items.append(
-                _make_business_editable_item(
-                    manual_by_id=manual_by_id,
-                    result_path=path,
-                    bidder_key=bidder_key,
-                    bidder_name=bidder_name,
-                    check_code="pricing_check",
-                    field_group="opening_amount",
-                    field_name="opening_amount",
-                    original_value=_compact_opening_amount_value(
-                        pricing_self_check,
-                        tender_limit_value=primary_tender_limit_value,
-                    ),
-                    page_refs=_coerce_manual_page_refs(pricing_self_check),
-                    document=document,
+        pricing_rate_rows = _structured_rate_quote_rows(pricing_self_check)
+        if pricing_rate_rows:
+            for rate_row_index, rate_row in enumerate(pricing_rate_rows):
+                path = _result_path([
+                    "bidders",
+                    bidder_index,
+                    "checks",
+                    "pricing_check",
+                    "raw_result",
+                    "self_check",
+                    "rate_rows",
+                    rate_row_index,
+                ])
+                items.append(
+                    _make_business_editable_item(
+                        manual_by_id=manual_by_id,
+                        result_path=path,
+                        bidder_key=bidder_key,
+                        bidder_name=bidder_name,
+                        check_code="pricing_check",
+                        field_group="rate_quote",
+                        field_name=str(rate_row.get("biz_name") or rate_row.get("rate_label") or "rate_quote"),
+                        original_value=_compact_rate_quote_value(rate_row),
+                        page_refs=_coerce_manual_page_refs(rate_row.get("pages") or rate_row),
+                        document=document,
+                    )
                 )
-            )
+        else:
+            for tender_row in pricing_tender_rows:
+                tender_row_index = tender_rows.index(tender_row)
+                path = _result_path(["extraction_tables", "tender_table", "rows", tender_row_index, "value"])
+                items.append(
+                    _make_business_editable_item(
+                        manual_by_id=manual_by_id,
+                        result_path=path,
+                        bidder_key=bidder_key,
+                        bidder_name=bidder_name,
+                        check_code="pricing_check",
+                        field_group="price_constraint",
+                        field_name=str(tender_row.get("field_name") or "tender_limit_or_budget"),
+                        original_value=_compact_price_constraint_value(tender_row.get("value")),
+                        page_refs=_coerce_manual_page_refs(tender_row.get("page_refs") or tender_row.get("locations") or tender_row),
+                        document=tender_document,
+                    )
+                )
+
+            if isinstance(pricing_self_check, dict) and pricing_self_check:
+                path = _result_path(["bidders", bidder_index, "checks", "pricing_check", "raw_result", "self_check"])
+                items.append(
+                    _make_business_editable_item(
+                        manual_by_id=manual_by_id,
+                        result_path=path,
+                        bidder_key=bidder_key,
+                        bidder_name=bidder_name,
+                        check_code="pricing_check",
+                        field_group="opening_amount",
+                        field_name="opening_amount",
+                        original_value=_compact_opening_amount_value(
+                            pricing_self_check,
+                            tender_limit_value=primary_tender_limit_value,
+                        ),
+                        page_refs=_coerce_manual_page_refs(pricing_self_check),
+                        document=document,
+                    )
+                )
 
         if bidder_index >= len(bidder_tables):
             continue
@@ -718,10 +779,16 @@ def _build_business_format_editable_items(
                 continue
             path = _result_path(["extraction_tables", "bidder_tables", bidder_index, "rows", row_index, "value"])
             original_value = row.get("value")
+            matched_attachment = None
             if check_code == "verification_check" and field_group == "attachment_result":
+                matched_attachment = _match_business_verification_attachment(
+                    row,
+                    original_value,
+                    attachment_lookup,
+                )
                 original_value = _enrich_business_attachment_value(
                     original_value,
-                    _match_business_verification_attachment(row, original_value, attachment_lookup),
+                    matched_attachment,
                 )
             items.append(
                 _make_business_editable_item(
@@ -733,7 +800,13 @@ def _build_business_format_editable_items(
                     field_group=field_group,
                     field_name=str(row.get("field_name") or field_group),
                     original_value=original_value,
-                    page_refs=_coerce_manual_page_refs(row.get("page_refs") or row.get("locations") or row),
+                    page_refs=_coerce_manual_page_refs(
+                        (matched_attachment or {}).get("check_pages")
+                        or (matched_attachment or {}).get("pages")
+                        or row.get("page_refs")
+                        or row.get("locations")
+                        or row
+                    ),
                     document=document,
                     stable_key=(
                         _stable_consistency_editable_id(
@@ -836,6 +909,20 @@ def _amount_pair_from_value(value: Any) -> tuple[Decimal | None, Decimal | None]
     return amount, None
 
 
+def _compare_manual_rate(actual: Decimal, operator: str, threshold: Decimal) -> bool:
+    if operator == ">":
+        return actual > threshold
+    if operator == ">=":
+        return actual >= threshold
+    if operator == "<":
+        return actual < threshold
+    if operator == "<=":
+        return actual <= threshold
+    if operator == "==":
+        return actual == threshold
+    return False
+
+
 def _manual_issue(status: str, title: str, message: str, items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "status": status,
@@ -909,6 +996,56 @@ def _recompute_manual_consistency(check: dict[str, Any], items: list[dict[str, A
 
 
 def _recompute_manual_pricing(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
+    rate_items = [item for item in items if str(item.get("field_group") or "") == "rate_quote"]
+    if rate_items:
+        has_fail = False
+        has_missing = False
+        has_unclear = False
+        details: list[str] = []
+
+        for item in rate_items:
+            value = item.get("effective_value")
+            if not isinstance(value, dict):
+                has_unclear = True
+                details.append("Manual rate quote value is invalid.")
+                continue
+
+            current_rate = _decimal_from_manual(
+                value.get("current_float_rate")
+                or value.get("float_rate")
+            )
+            required_rate = _decimal_from_manual(
+                value.get("required_min_float_rate")
+                or value.get("rule_threshold")
+                or value.get("threshold")
+            )
+            operator = str(value.get("rule_operator") or value.get("op") or ">").strip() or ">"
+            rate_label = str(value.get("rate_label") or "").strip()
+            metric_label = "discount rate" if "鎶樻墸鐜?" in rate_label else "float rate"
+            biz_name = str(value.get("biz_name") or item.get("field_name") or metric_label).strip()
+
+            if current_rate is None:
+                has_missing = True
+                details.append(f"{biz_name} current {metric_label} is missing.")
+                continue
+            if required_rate is None:
+                has_unclear = True
+                details.append(f"{biz_name} required {metric_label} threshold is missing.")
+                continue
+
+            passed = _compare_manual_rate(current_rate, operator, required_rate)
+            if not passed:
+                has_fail = True
+            details.append(
+                f"{biz_name} {metric_label} {current_rate:.2f}% {operator} {required_rate:.2f}% "
+                f"{'passes' if passed else 'fails'} manual review."
+            )
+
+        status = "fail" if has_fail else ("missing" if has_missing else ("unclear" if has_unclear else "pass"))
+        summary = " ".join(details) if details else "Manual rate quote review needs confirmation."
+        _set_manual_check_summary(check, status, summary, rate_items)
+        return
+
     opening_amount: Decimal | None = None
     capital_amount: Decimal | None = None
     tender_limit: Decimal | None = None

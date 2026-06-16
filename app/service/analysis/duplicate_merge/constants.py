@@ -31,7 +31,5 @@ DOC_TYPE_BY_MERGED_RESULT_KEY = {
 DOC_TYPES_BY_SOURCE_RESULT_KEY = {
     "duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID],
     "business_bid_duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID],
-    "business_itemized_duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID],
-    "bid_response_duplicate_check": [DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID],
     "technical_bid_duplicate_check": [DOCUMENT_TYPE_TECHNICAL_BID],
 }

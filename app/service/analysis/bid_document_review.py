@@ -302,6 +302,13 @@ class BidDocumentReviewService:
         "报告出具单位",
         "国家公共信用信息中心",
     )
+    # 不计入项目人员的来源板块：营业执照/统一社会信用代码信息表里的法定代表人等
+    # 并非项目投入人员，自动抽取阶段直接剔除，避免污染名单与跨文件重名查重。
+    PERSONNEL_EXCLUDED_SOURCE_TYPES = frozenset(
+        {
+            "personnel_public_credit_table",
+        }
+    )
 
     # 人员相关章节标题关键词
     PERSONNEL_SECTION_HINTS = (
@@ -659,6 +666,8 @@ class BidDocumentReviewService:
             document_types=document_types,
         )
         normalized_confirmed_names = self._normalize_confirmed_personnel_names(confirmed_names)
+        confirmation_status = "pending" if normalized_confirmed_names is None else "confirmed"
+        include_reuse_issues = confirmation_status == "confirmed"
         if normalized_confirmed_names is not None:
             for documents in prepared_groups.values():
                 self._apply_confirmed_personnel_names(
@@ -676,7 +685,10 @@ class BidDocumentReviewService:
             prepared_documents = prepared_groups[role]
             all_prepared_documents.extend(prepared_documents)
             skipped_documents = skipped_groups[role]
-            personnel_reuse_check = self._run_personnel_reuse_check(prepared_documents)
+            personnel_reuse_check = self._run_personnel_reuse_check(
+                prepared_documents,
+                include_reuse_issues=include_reuse_issues,
+            )
             group_document_count = len(prepared_documents)
             group_skipped_count = len(skipped_documents)
             group_personnel_count = int(personnel_reuse_check.get("personnel_count") or 0)
@@ -709,15 +721,18 @@ class BidDocumentReviewService:
                 "document_types": list(requested_types),
                 "personnel_reuse_scope": "per_document_type",
                 "confirmation_required": normalized_confirmed_names is None,
-                "confirmation_status": "pending" if normalized_confirmed_names is None else "confirmed",
+                "confirmation_status": confirmation_status,
                 "confirmed_names": normalized_confirmed_names or [],
             },
             "groups": groups,
             "personnel_extraction": self._build_personnel_extraction_summary(
                 all_prepared_documents,
-                confirmation_status="pending" if normalized_confirmed_names is None else "confirmed",
+                confirmation_status=confirmation_status,
             ),
-            "combined_personnel_reuse_check": self._run_personnel_reuse_check(all_prepared_documents),
+            "combined_personnel_reuse_check": self._run_personnel_reuse_check(
+                all_prepared_documents,
+                include_reuse_issues=include_reuse_issues,
+            ),
             "summary": {
                 "requested_document_types": list(requested_types),
                 "document_count": total_document_count,
@@ -1949,6 +1964,15 @@ class BidDocumentReviewService:
             section_entries = self._extract_personnel_entries_from_section(record, section)
             if section_entries:
                 entries.extend(section_entries)
+
+        # 在去重前剔除营业执照/信用信息表等非项目人员来源：只来自这些板块的人名会被
+        # 完全移除，同时出现在正式人员表的人名因正式来源仍在而保留。
+        entries = [
+            entry
+            for entry in entries
+            if str(entry.get("source_type") or "")
+            not in self.PERSONNEL_EXCLUDED_SOURCE_TYPES
+        ]
 
         return self._dedupe_personnel_entries_within_document(entries)
 

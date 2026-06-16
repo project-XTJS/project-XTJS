@@ -186,12 +186,28 @@ class ReasonablenessChecker(
                 summary=summary,
                 pages=row_pages,
                 locations=row_locations,
+                extra={
+                    "quote_mode": "rate",
+                    "rate_rows": [
+                        self._build_manual_rate_quote_row(
+                            biz_name=row.get("biz_name_raw") or row.get("biz_name") or price_type,
+                            float_rate=row.get("float_rate"),
+                            rate_label=row.get("rate_label"),
+                            pages=row.get("pages") or [],
+                            raw_line=row.get("raw_line"),
+                            matched_rule=self._match_rule_for_row(row["biz_name"], rules),
+                        )
+                        for row in rows
+                    ],
+                },
             )
 
         # 5. 兜底：单一下浮率识别
         single_float_rate = self._extract_single_float_rate_from_table(parsed, bid_page, bid_opening_text)
         if single_float_rate is not None:
             # 应用规则判断逻辑...
+            rate_label = self._pick_rate_label(bid_opening_text)
+            matched_rule = rules.get("__generic__")
             if self._contains_discount_rate_keywords(bid_opening_text):
                 passed = single_float_rate < 100
                 summary = [f"折扣率：{single_float_rate:.2f}% < 100% ，{'合格' if passed else '不合格'}"]
@@ -212,6 +228,19 @@ class ReasonablenessChecker(
                 summary=summary,
                 pages=fallback_pages,
                 locations=fallback_locations,
+                extra={
+                    "quote_mode": "rate",
+                    "rate_rows": [
+                        self._build_manual_rate_quote_row(
+                            biz_name=price_type,
+                            float_rate=single_float_rate,
+                            rate_label=rate_label,
+                            pages=fallback_pages,
+                            raw_line=bid_opening_text,
+                            matched_rule=matched_rule,
+                        )
+                    ],
+                },
             )
 
         return self._build_fail_result(

@@ -57,6 +57,54 @@ class FloatRateMixin:
         return "下浮率报价"
 
     # 业务名称归一化与相似度
+    def _build_manual_rate_quote_row(
+        self,
+        *,
+        biz_name: Any,
+        float_rate: Any,
+        rate_label: Any,
+        pages: Any = None,
+        raw_line: Any = None,
+        matched_rule: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        normalized_pages = [
+            page for page in (pages or [])
+            if isinstance(page, int) and page > 0
+        ]
+        normalized_rate_label = str(rate_label or self._pick_rate_label(biz_name)).strip()
+        is_discount = self._is_discount_rate_label(normalized_rate_label)
+        if is_discount:
+            rule_operator = "<"
+            required_min_float_rate = 100.0
+            rule_source = "discount_rate_rule"
+            quote_type = "discount_rate"
+        elif matched_rule:
+            rule_operator = str(matched_rule.get("op") or ">").strip() or ">"
+            required_min_float_rate = matched_rule.get("threshold")
+            rule_source = (
+                "generic_rule"
+                if str(matched_rule.get("biz_name") or "") == "__generic__"
+                else "matched_rule"
+            )
+            quote_type = "float_rate"
+        else:
+            rule_operator = ">"
+            required_min_float_rate = float(self.min_float_rate)
+            rule_source = "fallback_rule"
+            quote_type = "float_rate"
+
+        return {
+            "biz_name": str(biz_name or "").strip(),
+            "current_float_rate": float_rate,
+            "required_min_float_rate": required_min_float_rate,
+            "rule_operator": rule_operator,
+            "rate_label": normalized_rate_label or ("鎶樻墸鐜?" if is_discount else "涓嬫诞鐜?"),
+            "quote_type": quote_type,
+            "rule_source": rule_source,
+            "pages": normalized_pages,
+            "raw_line": str(raw_line or "").strip(),
+        }
+
     def _normalize_biz_name(self, name: str) -> str:
         """归一化业务名称，去除表格中的固定标签词。"""
         n = self._normalize(name)

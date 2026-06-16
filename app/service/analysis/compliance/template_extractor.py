@@ -10,6 +10,11 @@
 
 import re
 
+from ..attachment_synonyms import (
+    canonicalize_attachment_title,
+    strip_attachment_title_parenthetical_noise,
+)
+
 
 class SectionClassifier:
     """文本类型识别器，提供标题识别和目录排除等功能。"""
@@ -188,6 +193,51 @@ class TemplateExtractor:
     CHAPTER_HEADING_RE = re.compile(r'^\s*第[一二三四五六七八九十百零\d]+章')
     ATTACHMENT_NUMBER_RE = re.compile(
         r'^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?(?:附件|附表)\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)'
+    )
+    ATTACHMENT_SCOPE_STOP_MARKERS = (
+        "营业执照",
+        "信用中国",
+        "中国政府采购网",
+        "国家企业信用信息公示系统",
+        "纳税证明",
+        "完税证明",
+        "税收完税",
+        "税收缴款",
+        "电子缴税",
+        "缴款凭证",
+        "缴费凭证",
+        "社会保障资金",
+        "社会保险",
+        "社保",
+        "审计报告",
+        "财务报表",
+        "银行资信",
+        "开户许可证",
+        "开户证明",
+        "基本存款账户",
+        "保证金缴纳",
+        "投标保证金",
+        "发票",
+    )
+    COMMON_ATTACHMENT_TITLES = (
+        "投标保证书",
+        "投标承诺书",
+        "投标函",
+        "开标一览表",
+        "分项报价表",
+        "商务条款偏离表",
+        "技术条款偏离表",
+        "投标人基本情况表",
+        "类似项目业绩清单",
+        "法定代表人资格证明书",
+        "法定代表人授权委托书",
+        "投标人承诺声明函",
+        "不参与围标串标承诺书",
+        "保证金缴纳凭证",
+        "财务状况及税收、社会保障资金缴纳情况声明函",
+        "制造商声明函",
+        "制造商授权书",
+        "投标人认为需加以说明的其他内容",
     )
 
     @classmethod
@@ -479,6 +529,121 @@ class TemplateExtractor:
         return re.sub(r'\s+', ' ', value).strip('：:；;，,。')
 
     @classmethod
+    def _attachment_title_key(cls, text: str) -> str:
+        title = cls._attachment_title(text)
+        title = strip_attachment_title_parenthetical_noise(title)
+        title = re.split(r'[（(【\[]', title, maxsplit=1)[0]
+        title = re.sub(r'(附件|附表|附录|格式|模板)', '', title)
+        title = canonicalize_attachment_title(title)
+        title = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', title)
+        return title.strip()
+
+    @classmethod
+    def _catalog_like(cls, text: str) -> bool:
+        compact = cls._compact(text)
+        if not compact:
+            return False
+        if "目录" in compact:
+            return True
+        if re.search(r'(?:\.{2,}|…{2,}|_{2,})\d{1,4}$', compact):
+            return True
+        return len(re.findall(r'(?:\.{2,}|…{2,}|_{2,})\d{1,4}', compact)) >= 2
+
+    @classmethod
+    def _normalize_bbox(cls, value) -> list[int] | None:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 4 and all(isinstance(item, (int, float)) for item in value[:4]):
+                x, y, w, h = [int(round(float(item))) for item in value[:4]]
+                if w >= 0 and h >= 0:
+                    return [x, y, w, h]
+                return [min(x, w), min(y, h), abs(w - x), abs(h - y)]
+            if value and all(
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+                and all(isinstance(part, (int, float)) for part in item[:2])
+                for item in value
+            ):
+                xs = [float(item[0]) for item in value]
+                ys = [float(item[1]) for item in value]
+                left, top = int(round(min(xs))), int(round(min(ys)))
+                right, bottom = int(round(max(xs))), int(round(max(ys)))
+                return [left, top, max(right - left, 0), max(bottom - top, 0)]
+        return None
+
+    @classmethod
+    def _is_page_title_like(cls, section: dict) -> bool:
+        text = str(section.get('text') or '').strip()
+        compact = cls._compact(text)
+        if not compact:
+            return False
+        section_type = str(section.get('type') or '').strip().lower()
+        if section_type == 'heading':
+            return True
+        if section_type in {'seal', 'signature'}:
+            return False
+        if len(compact) <= 42:
+            return True
+        if len(compact) > 96:
+            return False
+        bbox = cls._normalize_bbox(section.get('bbox') or section.get('box'))
+        return bool(bbox and bbox[1] <= 260)
+
+    @classmethod
+    def _is_attachment_scope_stop_section(cls, section: dict, current_title: str) -> bool:
+        text = str(section.get('text') or '').strip()
+        compact = cls._compact(text)
+        if not compact or cls._catalog_like(text):
+            return False
+        if str(section.get('type') or '').strip().lower() in {'seal', 'signature'}:
+            return False
+
+        current_key = cls._attachment_title_key(current_title)
+        current_number = cls._attachment_number(current_title)
+        attachment_number = cls._attachment_number(text)
+        if attachment_number is not None:
+            if current_number and attachment_number == current_number:
+                return False
+            return True
+
+        if cls.CHAPTER_HEADING_RE.match(text) and not cls._is_response_format_chapter_heading(text):
+            return True
+
+        if not cls._is_page_title_like(section):
+            return False
+
+        title_key = cls._attachment_title_key(text)
+        if title_key and current_key and title_key == current_key:
+            return False
+        if cls._is_response_format_attachment_heading(section):
+            return True
+        common_title_keys = {cls._attachment_title_key(title) for title in cls.COMMON_ATTACHMENT_TITLES}
+        if title_key and title_key in common_title_keys:
+            return True
+        return any(marker in compact for marker in cls.ATTACHMENT_SCOPE_STOP_MARKERS)
+
+    @classmethod
+    def _effective_attachment_chunk(cls, chunk: list[dict]) -> list[dict]:
+        if not chunk:
+            return []
+        title = str(chunk[0].get('text') or '').strip()
+        start_page = chunk[0].get('page') if isinstance(chunk[0].get('page'), int) else None
+        effective: list[dict] = []
+        for index, section in enumerate(chunk):
+            page = section.get('page') if isinstance(section.get('page'), int) else None
+            same_start_page = start_page is not None and page == start_page
+            section_type = str(section.get('type') or '').strip().lower()
+            if (
+                index > 0
+                and (not same_start_page or section_type == 'heading')
+                and cls._is_attachment_scope_stop_section(section, title)
+            ):
+                break
+            effective.append(section)
+        return effective or chunk[:1]
+
+    @classmethod
     def _is_embedded_response_format_heading(cls, section: dict) -> bool:
         if str(section.get('type') or '').strip().lower() != 'heading':
             return False
@@ -607,7 +772,7 @@ class TemplateExtractor:
         current_top_level_number: str | None = None
         for pos, start in enumerate(starts):
             end = starts[pos + 1] if pos + 1 < len(starts) else len(candidate_sections)
-            chunk = candidate_sections[start:end]
+            chunk = cls._effective_attachment_chunk(candidate_sections[start:end])
             if not chunk:
                 continue
             title = str(chunk[0].get('text') or '').strip()
@@ -760,6 +925,7 @@ class TemplateExtractor:
             return []
 
         attachments_by_title: dict[str, dict] = {}
+        attachments_by_core_title: dict[str, dict] = {}
         attachments_by_number: dict[str, dict] = {}
         for attachment in response_attachments:
             title = str(attachment.get("title") or "").strip()
@@ -768,6 +934,9 @@ class TemplateExtractor:
             compact_title = cls._compact(title)
             if compact_title and compact_title not in attachments_by_title:
                 attachments_by_title[compact_title] = attachment
+            compact_core_title = cls._compact(cls._attachment_core_title(title))
+            if compact_core_title and compact_core_title not in attachments_by_core_title:
+                attachments_by_core_title[compact_core_title] = attachment
             attachment_number = str(attachment.get("attachment_number") or "").strip()
             if attachment_number and attachment_number not in attachments_by_number:
                 attachments_by_number[attachment_number] = attachment
@@ -780,6 +949,10 @@ class TemplateExtractor:
                 continue
 
             attachment = attachments_by_title.get(cls._compact(item_title))
+            if attachment is None:
+                attachment = attachments_by_core_title.get(
+                    cls._compact(cls._requirement_core_title(item_title))
+                )
             if attachment is None:
                 for ref in attachment_mapping.get(item_title) or []:
                     attachment = attachments_by_number.get(str(ref).strip())
@@ -820,6 +993,7 @@ class TemplateExtractor:
     def _attachment_core_title(cls, text: str) -> str:
         """提取附件标题主体，便于与“投标文件的组成”中的商务标条目比对。"""
         value = cls._attachment_title(text)
+        value = strip_attachment_title_parenthetical_noise(value)
         value = re.sub(
             r'^\s*(?:附件|附表)\s*\d+(?:\s*[-－]\s*\d+)*[、.)）．]?\s*',
             '',
@@ -827,12 +1001,14 @@ class TemplateExtractor:
         )
         value = re.sub(r'[(（].*?格式.*?[)）]', '', value)
         value = re.sub(r'格式', '', value)
+        value = canonicalize_attachment_title(value)
         return re.sub(r'\s+', ' ', value).strip('：:；;，,。 ')
 
     @classmethod
     def _requirement_core_title(cls, text: str) -> str:
         """提取要求条目的标题主体，用于和附件标题做统一去重。"""
         value = cls._clean_label(text or "")
+        value = strip_attachment_title_parenthetical_noise(value)
         value = re.sub(r'^\s*(?:[A-Z]|\d+|[一二三四五六七八九十百零]+)\s*[．\.、)]\s*', '', value)
         value = re.sub(r'^[（(](?:\d+|[A-Z]|[一二三四五六七八九十百零]+)[）)]\s*', '', value)
         value = re.sub(r'格式参见本章附件\s*[\d\-—，,、\s]+', '', value)
@@ -842,6 +1018,7 @@ class TemplateExtractor:
         value = value.replace('（如有）', '').replace('(如有)', '')
         value = value.replace('完成的', '').replace('近三年以来', '').replace('近三年内', '').replace('近三年', '')
         value = value.replace('情况介绍', '情况').replace('情况表', '情况').replace('介绍', '')
+        value = canonicalize_attachment_title(value)
         return re.sub(r'\s+', '', value).strip('：:；;，,。 ')
 
     @classmethod

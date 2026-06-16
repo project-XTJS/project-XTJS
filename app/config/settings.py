@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     CONSISTENCY_EMBEDDING_MODEL_REVISION: str = (
         "7999e1d3359715c523056ef9478215996d62a620"
     )
-    CONSISTENCY_EMBEDDING_MODEL_PATH: Path = Path(
-        "/app/models/bge-small-zh-v1.5"
+    CONSISTENCY_EMBEDDING_MODEL_PATH: Path = (
+        PROJECT_ROOT / "models" / "bge-small-zh-v1.5"
     )
     CONSISTENCY_EMBEDDING_DEVICE: str = "cpu"
     CONSISTENCY_EMBEDDING_BATCH_SIZE: int = 32

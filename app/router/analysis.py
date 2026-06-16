@@ -60,8 +60,6 @@ _RUN_ANALYSIS_OPENAPI_EXAMPLES = {
                 "business_bid_format_review",
                 "deviation_check",
                 "business_bid_duplicate_check",
-                "business_itemized_duplicate_check",
-                "bid_response_duplicate_check",
                 "technical_bid_duplicate_check",
                 "personnel_reuse_check",
                 "typo_check",
@@ -409,8 +407,6 @@ _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
     "deviation_check": "deviation_check",
     "business_bid_duplicate_check": "business_bid_duplicate_check",
-    "business_itemized_duplicate_check": "business_itemized_duplicate_check",
-    "bid_response_duplicate_check": "bid_response_duplicate_check",
     "technical_bid_duplicate_check": "technical_bid_duplicate_check",
     "personnel_reuse_check": "personnel_reuse_check",
     "typo_check": "typo_check",
@@ -579,40 +575,6 @@ async def _run_selected_project_services(
                     result_key="business_bid_duplicate_check",
                     db_service=db_service,
                     duplicate_check_service=duplicate_check_service,
-                )
-            elif service_name == "business_itemized_duplicate_check":
-                _ensure_project_analysis_status(
-                    project,
-                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
-                    analysis_name="business itemized duplicate check",
-                )
-                result = await run_in_threadpool(
-                    _run_project_duplicate_check,
-                    identifier_id=identifier_id,
-                    document_types=["business_bid"],
-                    max_evidence_sections=max_evidence_sections,
-                    max_pairs_per_type=max_pairs_per_type,
-                    result_key="business_itemized_duplicate_check",
-                    db_service=db_service,
-                    duplicate_check_service=duplicate_check_service,
-                    duplicate_scope="itemized_pricing",
-                )
-            elif service_name == "bid_response_duplicate_check":
-                _ensure_project_analysis_status(
-                    project,
-                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
-                    analysis_name="bid response duplicate check",
-                )
-                result = await run_in_threadpool(
-                    _run_project_duplicate_check,
-                    identifier_id=identifier_id,
-                    document_types=["business_bid", "technical_bid"],
-                    max_evidence_sections=max_evidence_sections,
-                    max_pairs_per_type=max_pairs_per_type,
-                    result_key="bid_response_duplicate_check",
-                    db_service=db_service,
-                    duplicate_check_service=duplicate_check_service,
-                    duplicate_scope="bid_response",
                 )
             elif service_name == "technical_bid_duplicate_check":
                 _ensure_project_analysis_status(

@@ -209,7 +209,9 @@ class UnifiedBusinessReviewService(
         project_identifier: str,
     ) -> dict[str, Any]:
         """从数据库中读取项目绑定的招投标文档并执行审查。"""
-        payload_data = self.db_service.get_project_documents_for_duplicate_check(project_identifier)
+        payload_data = ProjectAnalysisInputLoader(self.db_service).load(
+            project_identifier
+        )
         if not payload_data:
             raise ValueError(f"project not found: {project_identifier}")
         return self._review_project_business_documents(
@@ -250,6 +252,13 @@ class UnifiedBusinessReviewService(
             result_key,
             review,
         )
+        clear_latest_result = getattr(
+            self.db_service,
+            "clear_project_manual_review_latest_result",
+            None,
+        )
+        if callable(clear_latest_result):
+            result_record = clear_latest_result(project_identifier, result_key)
         return {
             "project": project,
             "result_key": result_key,

@@ -1251,6 +1251,9 @@ class ConsistencyChecker:
         label = re.sub(r"[（(][^()（）]{0,40}[）)]", "", label)
         label = self._plain_text(label)
         normalized_label = self._normalize(label)
+        # "标签: 值" 仅适用于较短的字段标签；长叙述句中的冒号不应触发截断。
+        if len(normalized_label) > 20:
+            return None
         if re.match(r"^(?:[（(]?[一二三四五六七八九十\d]+[)）]?)", label) and len(normalized_label) <= 8:
             return None
         if normalized_label in {"基本情况", "基本经济指标", "其他情况"}:

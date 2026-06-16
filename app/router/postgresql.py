@@ -173,6 +173,8 @@ def _invalidate_project_cache_by_identifier(identifier_id: Optional[str] = None)
 def _is_result_key_visible(result_key: str) -> bool:
     if result_key == MANUAL_REVIEW_RESULTS_KEY:
         return False
+    if result_key in {"business_itemized_duplicate_check", "bid_response_duplicate_check"}:
+        return False
     if result_key == "typo_check":
         return bool(settings.TYPO_CHECK_VISIBLE)
     return True
@@ -190,8 +192,6 @@ _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_format_review": UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
     "deviation_check": "deviation_check",
     "business_bid_duplicate_check": "business_bid_duplicate_check",
-    "business_itemized_duplicate_check": "business_itemized_duplicate_check",
-    "bid_response_duplicate_check": "bid_response_duplicate_check",
     "technical_bid_duplicate_check": "technical_bid_duplicate_check",
     "personnel_reuse_check": "personnel_reuse_check",
     "typo_check": "typo_check",
@@ -199,6 +199,24 @@ _PROJECT_SERVICE_RESULT_KEYS = {
 
 
 # 将查重范围枚举转换为文档类型列表
+def _normalize_selected_services(services: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for service_name in services or []:
+        token = str(service_name or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _http_exception_detail_to_text(detail: Any) -> str:
+    if isinstance(detail, str):
+        return detail
+    return json.dumps(detail, ensure_ascii=False)
+
+
 def _document_types_from_scope(scope: DuplicateCheckScope) -> Optional[list[str]]:
     if scope == DuplicateCheckScope.ALL:
         return None
@@ -2405,8 +2423,7 @@ def _build_project_workflow_state(
             "available_result_keys": result_keys,
             "business_review_completed": "business_bid_format_review" in result_payload,
             "deviation_check_completed": "deviation_check" in result_payload,
-            "business_itemized_duplicate_completed": "business_itemized_duplicate_check" in result_payload,
-            "bid_response_duplicate_completed": "bid_response_duplicate_check" in result_payload,
+            "business_duplicate_completed": "business_bid_duplicate_check" in result_payload,
             "technical_duplicate_completed": "technical_bid_duplicate_check" in result_payload,
             "personnel_reuse_completed": "personnel_reuse_check" in result_payload,
         },
@@ -2542,8 +2559,13 @@ async def rerun_project_manual_review_results(
                         required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                         analysis_name="商务标形式重审",
                     )
-                    result_record = await run_in_threadpool(db_service.get_project_result, identifier_id)
-                    review = _business_review_from_record(result_record)
+                    review_service = UnifiedBusinessReviewService(db_service=db_service)
+                    rerun_result = await run_in_threadpool(
+                        review_service.persist_project_business_review,
+                        project_identifier=identifier_id,
+                        result_key=BUSINESS_FORMAT_RESULT_KEY,
+                    )
+                    review = rerun_result.get("review") or {}
                     manual_payload = await run_in_threadpool(
                         _business_manual_payload_for_project,
                         identifier_id=identifier_id,
@@ -2584,42 +2606,6 @@ async def rerun_project_manual_review_results(
                         result_key="business_bid_duplicate_check",
                         db_service=db_service,
                         duplicate_check_service=duplicate_check_service,
-                        persist_to_latest=True,
-                    )
-                elif service_name == "business_itemized_duplicate_check":
-                    _ensure_project_analysis_status(
-                        project,
-                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
-                        analysis_name="商务分项报价查重重审",
-                    )
-                    result_value = await run_in_threadpool(
-                        _run_project_duplicate_check,
-                        identifier_id=identifier_id,
-                        document_types=["business_bid"],
-                        max_evidence_sections=5,
-                        max_pairs_per_type=0,
-                        result_key="business_itemized_duplicate_check",
-                        db_service=db_service,
-                        duplicate_check_service=duplicate_check_service,
-                        duplicate_scope="itemized_pricing",
-                        persist_to_latest=True,
-                    )
-                elif service_name == "bid_response_duplicate_check":
-                    _ensure_project_analysis_status(
-                        project,
-                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
-                        analysis_name="响应内容查重重审",
-                    )
-                    result_value = await run_in_threadpool(
-                        _run_project_duplicate_check,
-                        identifier_id=identifier_id,
-                        document_types=["business_bid", "technical_bid"],
-                        max_evidence_sections=5,
-                        max_pairs_per_type=0,
-                        result_key="bid_response_duplicate_check",
-                        db_service=db_service,
-                        duplicate_check_service=duplicate_check_service,
-                        duplicate_scope="bid_response",
                         persist_to_latest=True,
                     )
                 elif service_name == "technical_bid_duplicate_check":
@@ -2689,8 +2675,6 @@ async def rerun_project_manual_review_results(
 
 _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
     ("business_bid_duplicate_check", "商务标查重"),
-    ("business_itemized_duplicate_check", "商务分项报价查重"),
-    ("bid_response_duplicate_check", "响应内容查重"),
     ("technical_bid_duplicate_check", "技术标查重"),
     ("business_bid_format_review", "商务标形式审查"),
     ("deviation_check", "偏离表检查"),
@@ -3249,8 +3233,6 @@ def _collect_report_section_issue_rows(section_key: str, payload: Any) -> list[l
         "personnel_reuse_check": _collect_personnel_issue_rows,
         "business_bid_format_review": _collect_business_format_issue_rows,
         "business_bid_duplicate_check": _collect_duplicate_issue_rows,
-        "business_itemized_duplicate_check": _collect_duplicate_issue_rows,
-        "bid_response_duplicate_check": _collect_duplicate_issue_rows,
         "technical_bid_duplicate_check": _collect_duplicate_issue_rows,
         "business_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
         "technical_bid_duplicate_clusters": _collect_duplicate_cluster_issue_rows,
@@ -3662,6 +3644,7 @@ async def get_project_results(
     ),
     include_raw_results: bool = Query(default=False),
     include_result_record: bool = Query(default=False),
+    force_refresh: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
 ):
@@ -3709,6 +3692,11 @@ async def get_project_results(
                 payload["raw_results"] = raw_results
                 payload["raw_available_result_keys"] = sorted(raw_results.keys())
             return payload
+
+        if force_refresh:
+            _invalidate_project_cache_or_error(cache_service, identifier_id)
+            _set_cache_header(response, "bypass")
+            return _load_results()
 
         return _cache_get_or_set_payload(
             cache_service=cache_service,

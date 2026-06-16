@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Iterable
 
 
@@ -118,10 +119,38 @@ ATTACHMENT_TITLE_SYNONYMS: dict[str, list[str]] = {
         "拟派项目经理和项目经理有效的注册建造师、安全生产考核证书、项目负责人的近三个月任一一个月的社保证明文件",
         "拟派项目经理有效的注册建造师、安全生产考核证书，社保证明材料",
     ],
+    "\u9879\u76ee\u7ba1\u7406\u673a\u6784\u4eba\u5458\u60c5\u51b5\u8868": [
+        "\u9879\u76ee\u7ba1\u7406\u673a\u6784\u4eba\u5458\u7ec4\u6210\u8868",
+    ],
 }
 
 
+PACKAGE_OPTION_TOKEN_RE = (
+    r"(?:[\u25a1\u25a0\u2610\u2611\u2713\u2714]?\s*"
+    r"\u5305\u4ef6(?:[\u4e00-\u9fff]+|\d+|[A-Za-z]+))"
+)
+PACKAGE_OPTION_GROUP_RE = re.compile(
+    r"[\(\uFF08\[\u3010]\s*"
+    + PACKAGE_OPTION_TOKEN_RE
+    + r"(?:\s*(?:/|\uFF0F|\u3001|,|\uFF0C)\s*"
+    + PACKAGE_OPTION_TOKEN_RE
+    + r")*\s*[\)\uFF09\]\u3011]"
+)
+
+
+def strip_attachment_title_parenthetical_noise(title: str) -> str:
+    """Remove common package-option suffixes like （包件一/包件二） from titles."""
+    value = str(title or "").strip()
+    previous = None
+    while value != previous:
+        previous = value
+        value = PACKAGE_OPTION_GROUP_RE.sub("", value)
+        value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
 def normalize_attachment_title_token(text: str) -> str:
+    text = strip_attachment_title_parenthetical_noise(text)
     return "".join(
         ch
         for ch in str(text or "").strip()
@@ -169,28 +198,30 @@ ATTACHMENT_TITLE_GROUP_INDEX = _build_group_index()
 
 
 def attachment_title_group(title: str) -> list[str]:
-    normalized = normalize_attachment_title_token(title)
+    cleaned = strip_attachment_title_parenthetical_noise(title)
+    normalized = normalize_attachment_title_token(cleaned)
     if not normalized:
-        return [str(title or "").strip()]
+        return [cleaned]
     direct = ATTACHMENT_TITLE_GROUP_INDEX.get(normalized)
     if direct:
         return direct
     for key, group in ATTACHMENT_TITLE_GROUP_INDEX.items():
         if _matches_alias(normalized, key):
             return group
-    return [str(title or "").strip()]
+    return [cleaned]
 
 
 def canonicalize_attachment_title(title: str) -> str:
-    group = attachment_title_group(title)
-    return group[0] if group else str(title or "").strip()
+    cleaned = strip_attachment_title_parenthetical_noise(title)
+    group = attachment_title_group(cleaned)
+    return group[0] if group else cleaned
 
 
 def attachment_title_variants(title: str) -> list[str]:
-    return attachment_title_group(title)
+    return attachment_title_group(strip_attachment_title_parenthetical_noise(title))
 
 
 def all_attachment_synonym_titles() -> Iterable[str]:
-    for canonical, aliases in ATTACHMENT_TITLE_SYNONYMS.items():
+    for canonical, aliases in ATTACHMENT_TITLE_SYNONYMS.items():  
         yield canonical
         yield from aliases
