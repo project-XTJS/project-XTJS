@@ -187,6 +187,28 @@ def _bbox_anchor(bbox: Any) -> tuple[int, int]:
     return (10**9, 10**9)
 
 
+def _is_duplicate_table_signature(
+    pages_set: set[int],
+    compact: str,
+    accepted_signatures: list[tuple[set[int], str]],
+) -> bool:
+    """判断该表是否与已收录的某张表为「同页同内容」的重复副本。"""
+    if not compact:
+        return False
+    for prev_pages, prev_compact in accepted_signatures:
+        if not (pages_set & prev_pages):
+            continue
+        if prev_compact == compact:
+            return True
+        if (
+            len(compact) >= 8
+            and len(prev_compact) >= 8
+            and similarity_ratio(compact[:400], prev_compact[:400]) >= 0.95
+        ):
+            return True
+    return False
+
+
 def _build_table_queues(
     container: dict[str, Any],
 ) -> tuple[dict[int, list[str]], list[dict[str, Any]]]:
@@ -199,6 +221,9 @@ def _build_table_queues(
 
     page_queues: dict[int, list[str]] = {}
     table_entries: list[dict[str, Any]] = []
+    # 同一张表可能同时出现在 logical_tables 与 table_sections（文本略有差异→不同哈希），
+    # 这里按「同页 + 内容高度相似」去重，避免同一张表被计为两次重复。
+    accepted_signatures: list[tuple[set[int], str]] = []
     for raw_item in candidates:
         if not isinstance(raw_item, dict):
             continue
@@ -217,6 +242,12 @@ def _build_table_queues(
         text = "\n".join(lines).strip()
         if not text:
             continue
+
+        compact = compact_raw_text(text)
+        pages_set = set(normalized_pages or [1])
+        if _is_duplicate_table_signature(pages_set, compact, accepted_signatures):
+            continue
+        accepted_signatures.append((pages_set, compact))
 
         bbox = (
             normalize_bbox(raw_item.get("bbox") or raw_item.get("bbox_ocr") or raw_item.get("box"))

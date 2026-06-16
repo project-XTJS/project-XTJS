@@ -27,7 +27,6 @@ ProjectAnalysisService = Literal[
     "business_bid_duplicate_check",
     "technical_bid_duplicate_check",
     "personnel_reuse_check",
-    "typo_check",
 ]
 
 
@@ -57,7 +56,7 @@ class TextAnalysisRequest(BaseModel):
         description=(
             "需要执行的项目分析服务，可选：business_bid_format_review、"
             "deviation_check、business_bid_duplicate_check、technical_bid_duplicate_check、"
-            "personnel_reuse_check、typo_check。"
+            "personnel_reuse_check。"
         ),
     )
     confirmed_personnel_names: list[Any] | None = Field(

@@ -27,11 +27,9 @@ from app.router.postgresql import (
     _ensure_project_ocr_idle,
     _ensure_project_analysis_status,
     _refresh_project_or_404,
-    _resolve_project_typo_document_types,
     _run_project_deviation_check,
     _run_project_duplicate_check,
     _run_project_personnel_reuse_check,
-    _run_project_typo_check,
 )
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
@@ -62,7 +60,6 @@ _RUN_ANALYSIS_OPENAPI_EXAMPLES = {
                 "business_bid_duplicate_check",
                 "technical_bid_duplicate_check",
                 "personnel_reuse_check",
-                "typo_check",
             ],
             "max_evidence_sections": 5,
             "max_pairs_per_type": 0,
@@ -409,7 +406,6 @@ _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_duplicate_check": "business_bid_duplicate_check",
     "technical_bid_duplicate_check": "technical_bid_duplicate_check",
     "personnel_reuse_check": "personnel_reuse_check",
-    "typo_check": "typo_check",
 }
 
 
@@ -604,16 +600,6 @@ async def _run_selected_project_services(
                     db_service=db_service,
                     bid_document_review_service=bid_document_review_service,
                     confirmed_names=confirmed_personnel_names,
-                )
-            elif service_name == "typo_check":
-                # 错别字范围依赖当前 OCR 阶段，按需延迟计算即可。
-                typo_document_types = _resolve_project_typo_document_types(project)
-                result = await run_in_threadpool(
-                    _run_project_typo_check,
-                    identifier_id=identifier_id,
-                    db_service=db_service,
-                    bid_document_review_service=bid_document_review_service,
-                    document_types=typo_document_types,
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"不支持的分析服务：{service_name}")

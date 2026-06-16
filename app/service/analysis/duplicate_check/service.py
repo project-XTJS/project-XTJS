@@ -18,6 +18,7 @@ from .constants import (
     SUPPORTED_DOCUMENT_TYPES,
     BUSINESS_SCOPE_SKIP_REASON,
     TEMPLATE_EXCLUDED_SKIP_REASON,
+    MAX_EVIDENCE_ITEMS_PER_PAIR,
 )
 from .text_utils import (
     normalize_plain_text,
@@ -1014,10 +1015,13 @@ class DuplicateCheckService:
         max_evidence_sections: int,
     ) -> dict[str, Any]:
         """执行两个文档的完整比较（精确+相似度），返回结构化比较记录。"""
-        block_metrics = compare_blocks(left, right, max_evidence_sections=max_evidence_sections)
-        section_metrics = compare_sections(left, right, max_evidence_sections=max_evidence_sections)
-        table_metrics = compare_tables(left, right, max_evidence_sections=max_evidence_sections)
-        image_metrics = compare_images(left, right, max_evidence_sections=max_evidence_sections)
+        # 检测与展示解耦：证据条目使用较大的安全上限，不被入参的小默认值截断；
+        # 命中总量（exact_shared_count 等）始终统计全部，风险评分不受影响。
+        evidence_limit = max(int(max_evidence_sections or 0), MAX_EVIDENCE_ITEMS_PER_PAIR)
+        block_metrics = compare_blocks(left, right, max_evidence_sections=evidence_limit)
+        section_metrics = compare_sections(left, right, max_evidence_sections=evidence_limit)
+        table_metrics = compare_tables(left, right, max_evidence_sections=evidence_limit)
+        image_metrics = compare_images(left, right, max_evidence_sections=evidence_limit)
 
         exact_duplicate = bool(left["exact_hash"] == right["exact_hash"])
         exact_match_score_val = exact_match_score(
@@ -1045,13 +1049,13 @@ class DuplicateCheckService:
         similar_match_score_val = 0.0
         if self._supports_similarity_matching(role):
             similar_block_metrics = compare_business_similarity_blocks(
-                left, right, max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=evidence_limit,
             )
             similar_section_metrics = compare_business_similarity_sections(
-                left, right, max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=evidence_limit,
             )
             similar_table_metrics = compare_business_similarity_tables(
-                left, right, max_evidence_sections=max_evidence_sections,
+                left, right, max_evidence_sections=evidence_limit,
             )
             similar_match_score_val = business_similarity_match_score(
                 similar_block_overlap_ratio=float(similar_block_metrics["similar_overlap_ratio"]),
@@ -1167,6 +1171,24 @@ class DuplicateCheckService:
                     suppressed_count += 1
             issue[evidence_key] = kept_items
 
+        # 汇总该对文档全部证据中的错别字，去重后挂到 issue 层，供合并/前端展示。
+        aggregated_typo_issues: list[dict[str, Any]] = []
+        seen_typo_keys: set[tuple[str, str]] = set()
+        for evidence_key in text_evidence_keys:
+            for evidence in issue.get(evidence_key) or []:
+                for typo in evidence.get("short_duplicate_typo_issues") or []:
+                    if not isinstance(typo, dict):
+                        continue
+                    key = (
+                        str(typo.get("matched_text") or ""),
+                        str(typo.get("suggestion") or ""),
+                    )
+                    if not key[0] or key in seen_typo_keys:
+                        continue
+                    seen_typo_keys.add(key)
+                    aggregated_typo_issues.append(typo)
+        issue["short_duplicate_typo_issues"] = aggregated_typo_issues
+
         issue["short_duplicate_filter"] = {
             "enabled": True,
             "threshold_chars": 30,
@@ -1184,13 +1206,20 @@ class DuplicateCheckService:
         left_text, right_text = self._duplicate_evidence_pair_text(evidence)
         representative_text = left_text or right_text
         text_length = self._duplicate_text_length(representative_text)
+        # 对所有重复证据文本（不限长度）检测错别字，只保留两边一致的错字。
+        typo_issues = self._short_duplicate_typo_issues(evidence, left_text=left_text, right_text=right_text)
         if text_length >= 30:
-            return {"report": True, "reason": "duplicate_text_at_least_30_chars", "text_length": text_length}
+            decision = {"report": True, "reason": "duplicate_text_at_least_30_chars", "text_length": text_length}
+            if typo_issues:
+                decision["typo_issues"] = typo_issues
+            return decision
 
         if self._has_identical_non_serial_numbers(left_text, right_text):
-            return {"report": True, "reason": "identical_non_serial_numbers", "text_length": text_length}
+            decision = {"report": True, "reason": "identical_non_serial_numbers", "text_length": text_length}
+            if typo_issues:
+                decision["typo_issues"] = typo_issues
+            return decision
 
-        typo_issues = self._short_duplicate_typo_issues(evidence, left_text=left_text, right_text=right_text)
         if typo_issues:
             return {
                 "report": True,

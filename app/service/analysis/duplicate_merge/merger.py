@@ -28,6 +28,31 @@ class DuplicateResultMerger(
         """helper 需提供 _coalesce_page_ranges、_project_normalize_pages 等辅助方法。"""
         self.helper = helper
 
+    @staticmethod
+    def _cluster_typo_issues(cluster: dict[str, Any]) -> list[dict[str, Any]]:
+        """从聚类的源 issue 中汇总去重后的错别字，供前端在文本框内标红。"""
+        aggregated: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for source_issue in cluster.get("items") or []:
+            if not isinstance(source_issue, dict):
+                continue
+            for typo in source_issue.get("short_duplicate_typo_issues") or []:
+                if not isinstance(typo, dict):
+                    continue
+                key = (str(typo.get("matched_text") or ""), str(typo.get("suggestion") or ""))
+                if not key[0] or key in seen:
+                    continue
+                seen.add(key)
+                aggregated.append(
+                    {
+                        "matched_text": typo.get("matched_text"),
+                        "suggestion": typo.get("suggestion"),
+                        "highlight_text": typo.get("highlight_text"),
+                        "page": typo.get("page"),
+                    }
+                )
+        return aggregated
+
     # ── 构建最终合并结果字典 ──────────────────────
 
     def build_merge_payload(
@@ -83,6 +108,7 @@ class DuplicateResultMerger(
                         for file_name, previews in (cluster.get("doc_previews_by_file") or {}).items()
                     },
                     "tokens": list(cluster.get("tokens") or []),
+                    "short_duplicate_typo_issues": self._cluster_typo_issues(cluster),
                     "occurrence_count": len(cluster.get("occurrences") or []),
                     "source_issue_count": len(cluster.get("items") or []),
                     "locations": self._cluster_locations(cluster),

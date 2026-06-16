@@ -18,6 +18,11 @@ TEMPLATE_EXCLUDED_SKIP_REASON = "content_fully_covered_by_tender_template"
 MIN_SENTENCE_COMPACT_LENGTH = 10
 BUSINESS_SIMILARITY_MIN_KEY_LENGTH = 8
 
+# 证据展示与检测解耦：检测层始终统计全部命中（exact_shared_count 等），
+# 证据条目（duplicate_blocks/sections/tables/...）单独使用一个较大的安全上限，
+# 避免被入参 max_evidence_sections 的小默认值（5）截断而漏掉靠后的重复。
+MAX_EVIDENCE_ITEMS_PER_PAIR = 200
+
 BUSINESS_BLOCK_SIMILARITY_THRESHOLD = 0.78
 BUSINESS_SECTION_SIMILARITY_THRESHOLD = 0.72
 BUSINESS_TABLE_SIMILARITY_THRESHOLD = 0.72

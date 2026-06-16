@@ -176,7 +176,8 @@ def _is_result_key_visible(result_key: str) -> bool:
     if result_key in {"business_itemized_duplicate_check", "bid_response_duplicate_check"}:
         return False
     if result_key == "typo_check":
-        return bool(settings.TYPO_CHECK_VISIBLE)
+        # 独立错别字检查已下线，历史结果不再展示。
+        return False
     return True
 
 
@@ -194,7 +195,6 @@ _PROJECT_SERVICE_RESULT_KEYS = {
     "business_bid_duplicate_check": "business_bid_duplicate_check",
     "technical_bid_duplicate_check": "technical_bid_duplicate_check",
     "personnel_reuse_check": "personnel_reuse_check",
-    "typo_check": "typo_check",
 }
 
 
@@ -296,23 +296,6 @@ def _required_parsing_status_for_document_types(document_types: Optional[list[st
     if normalized and normalized <= {DOCUMENT_TYPE_BUSINESS_BID}:
         return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
-
-
-def _resolve_project_typo_document_types(project: dict[str, Any]) -> Optional[list[str]]:
-    """状态 2 只跑商务标错别字，状态 3 跑全部错别字。"""
-    current_status = int(project.get("parsing_status") or 0)
-    _ensure_project_analysis_status(
-        project,
-        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
-        analysis_name="错别字检查",
-    )
-    if PostgreSQLService.parsing_status_reached(
-        current_status,
-        PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
-    ):
-        # None 代表不限制文档类型，直接按“全部文档”跑。
-        return None
-    return [DOCUMENT_TYPE_BUSINESS_BID]
 
 
 # 统一分页参数解析（兼容 page/limit 两种方式）
@@ -1901,35 +1884,6 @@ def _persist_project_personnel_reuse_draft(
     return personnel_result
 
 
-# ???????
-
-def _run_project_typo_check(
-    *,
-    identifier_id: str,
-    db_service: PostgreSQLService,
-    bid_document_review_service: BidDocumentReviewService,
-    document_types: Optional[list[str]] = None,
-) -> dict:
-    # document_types=None 表示全量错别字；传列表则只检查指定类型。
-    payload_data = _load_project_review_documents(
-        identifier_id=identifier_id,
-        db_service=db_service,
-    )
-    typo_result = bid_document_review_service.check_project_typos(
-        project_identifier=identifier_id,
-        project=payload_data["project"],
-        document_records=payload_data["documents"],
-        document_types=document_types,
-    )
-    db_service.upsert_project_result_item(
-        project_identifier_id=identifier_id,
-        result_key="typo_check",
-        result_value=typo_result,
-    )
-    _invalidate_project_cache_by_identifier(identifier_id)
-    return typo_result
-
-
 # 构建项目快照（仅含标识）
 def _project_snapshot(project_identifier: str) -> dict:
     return {"identifier_id": project_identifier}
@@ -2678,7 +2632,6 @@ _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
     ("technical_bid_duplicate_check", "技术标查重"),
     ("business_bid_format_review", "商务标形式审查"),
     ("deviation_check", "偏离表检查"),
-    ("typo_check", "错别字检查"),
     ("personnel_reuse_check", "人员复用检查"),
     ("business_bid_duplicate_clusters", "商务标查重聚类"),
     ("technical_bid_duplicate_clusters", "技术标查重聚类"),
@@ -2976,45 +2929,6 @@ def _report_issue_row(
     ])
 
 
-def _collect_typo_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
-    rows: list[list[str]] = []
-    groups = payload.get("groups") or {"default": payload}
-    for group in groups.values():
-        if not isinstance(group, dict):
-            continue
-        check = group.get("typo_check") if isinstance(group.get("typo_check"), dict) else group
-        document_items = check.get("documents") or []
-        if not document_items and isinstance(check.get("issues"), list):
-            document_items = [{"issues": check.get("issues")}]
-        for document in document_items:
-            if not isinstance(document, dict):
-                continue
-            document_file, document_page = _report_file_and_page(document)
-            for issue in document.get("issues") or []:
-                if not isinstance(issue, dict):
-                    continue
-                issue_file, issue_page = _report_file_and_page(issue)
-                matched = (
-                    issue.get("display_text")
-                    or issue.get("highlight_text")
-                    or issue.get("matched_text")
-                    or issue.get("wrong")
-                    or _report_issue_title(issue)
-                )
-                suggestion = issue.get("suggestion") or issue.get("correct")
-                problem = _report_join_parts(["错别字", matched, f"建议：{suggestion}" if suggestion else ""])
-                reason = _report_issue_message(issue) or "疑似错别字"
-                _report_issue_row(
-                    rows,
-                    problem=problem,
-                    description=_report_issue_description(issue),
-                    reason=reason,
-                    file_name=issue_file or document_file,
-                    page=issue_page or document_page,
-                )
-    return rows
-
-
 def _collect_personnel_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
     rows: list[list[str]] = []
     groups = payload.get("groups") or {"default": payload}
@@ -3229,7 +3143,6 @@ def _collect_generic_issue_rows(section_key: str, payload: Any) -> list[list[str
 
 def _collect_report_section_issue_rows(section_key: str, payload: Any) -> list[list[str]]:
     collectors = {
-        "typo_check": _collect_typo_issue_rows,
         "personnel_reuse_check": _collect_personnel_issue_rows,
         "business_bid_format_review": _collect_business_format_issue_rows,
         "business_bid_duplicate_check": _collect_duplicate_issue_rows,
@@ -4573,91 +4486,6 @@ async def upload_personnel_reuse_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-@router.post(
-    "/projects/typo-check",
-    summary="项目错别字检查",
-    include_in_schema=settings.TYPO_CHECK_VISIBLE,
-)
-async def project_typo_check(
-    identifier_id: str = Query(...),
-    db_service: PostgreSQLService = Depends(get_db_service),
-    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
-):
-    """对项目中的文档进行错别字扫描。"""
-    try:
-        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
-        _ensure_project_ocr_idle(project, analysis_name="错别字检查")
-        typo_document_types = _resolve_project_typo_document_types(project)
-        return await run_in_threadpool(
-            _run_project_typo_check,
-            identifier_id=identifier_id,
-            db_service=db_service,
-            bid_document_review_service=bid_document_review_service,
-            document_types=typo_document_types,
-        )
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
-
-
-@router.post(
-    "/projects/typo-check/upload-json",
-    summary="上传 OCR JSON 并执行错别字检查",
-    include_in_schema=settings.TYPO_CHECK_VISIBLE,
-)
-async def upload_typo_check(
-    tender_json_file: UploadFile = File(...),
-    business_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    technical_bid_json_files: Optional[list[UploadFile]] = File(default=None),
-    project_name: Optional[str] = Form(default=None, description="项目名称；不传时自动生成临时项目名"),
-    db_service: PostgreSQLService = Depends(get_db_service),
-    bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
-):
-    """上传招投标 OCR JSON 文件，直接执行错别字检查。"""
-    business_uploads = [upload for upload in (business_bid_json_files or []) if upload is not None]
-    technical_uploads = [upload for upload in (technical_bid_json_files or []) if upload is not None]
-    if not business_uploads and not technical_uploads:
-        raise HTTPException(status_code=400, detail="至少需要上传一份商务标或技术标文件。")
-
-    try:
-        persisted_documents, document_records = await _persist_uploaded_analysis_documents(
-            tender_json_file=tender_json_file,
-            business_bid_json_files=business_uploads,
-            technical_bid_json_files=technical_uploads,
-            project_name=project_name,
-            db_service=db_service,
-        )
-        resolved_project_identifier = persisted_documents["project"]["identifier_id"]
-        typo_result = await run_in_threadpool(
-            bid_document_review_service.check_project_typos,
-            project_identifier=resolved_project_identifier,
-            project=_project_snapshot(resolved_project_identifier),
-            document_records=document_records,
-            document_types=None,
-        )
-        result_record = await run_in_threadpool(
-            _persist_uploaded_result,
-            db_service=db_service,
-            project_identifier=resolved_project_identifier,
-            result_key="typo_check",
-            result_value=typo_result,
-        )
-        return {
-            "project": persisted_documents["project"],
-            "result_key": "typo_check",
-            "result": typo_result,
-            "result_record": result_record,
-            "document_binding": persisted_documents["binding"],
-        }
-    except HTTPException:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except PsycopgError as exc:
-        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
 @router.post("/projects/{identifier_id}/duplicate-check", summary="项目商务标/技术标查重", include_in_schema=False)
