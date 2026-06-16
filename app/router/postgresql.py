@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -281,20 +282,12 @@ def _ensure_project_ocr_idle(project: dict[str, Any], *, analysis_name: str) -> 
 
 
 def _required_parsing_status_for_duplicate_scope(scope: DuplicateCheckScope) -> int:
-    # 综合查重只要带技术标范围，就必须等到技术标 OCR 完成。
-    if scope == DuplicateCheckScope.BUSINESS_BID:
-        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
+    # 商务标查重也要在技术标里回退查找技术偏离表，故任何查重范围都需技术标 OCR 完成。
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
 
 def _required_parsing_status_for_document_types(document_types: Optional[list[str]]) -> int:
-    normalized = {
-        str(document_type or "").strip().lower()
-        for document_type in (document_types or [])
-        if str(document_type or "").strip()
-    }
-    if normalized and normalized <= {DOCUMENT_TYPE_BUSINESS_BID}:
-        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
+    # 商务标查重需读取配对技术标（技术偏离表回退），统一要求技术标 OCR 完成。
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
 
@@ -2546,9 +2539,10 @@ async def rerun_project_manual_review_results(
                     )
                     result_value = result_payload.get("review") or {}
                 elif service_name == "business_bid_duplicate_check":
+                    # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
                     _ensure_project_analysis_status(
                         project,
-                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
                         analysis_name="商务标查重重审",
                     )
                     result_value = await run_in_threadpool(
@@ -2638,8 +2632,11 @@ _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
 )
 _REPORT_RESULT_LABEL_BY_KEY = dict(_REPORT_RESULT_LABELS)
 _REPORT_ISSUE_TABLE_HEADERS = ["问题项目", "对应文件", "页码", "问题描述"]
-_REPORT_WORD_LATIN_FONT = "Times New Roman"
+_REPORT_WORD_LATIN_FONT = "宋体"
 _REPORT_WORD_EAST_ASIA_FONT = "宋体"
+# 中文字号：二号=22pt（标题，加粗），四号=14pt（正文）。
+_REPORT_HEADING_FONT_SIZE_PT = 22
+_REPORT_BODY_FONT_SIZE_PT = 14
 
 
 def _report_compact_text(value: Any, *, max_length: int = 260) -> str:
@@ -2795,8 +2792,12 @@ def _set_word_rfonts(target: Any) -> None:
     rfonts.set(qn("w:eastAsia"), _REPORT_WORD_EAST_ASIA_FONT)
 
 
-def _set_word_run_fonts(run: Any) -> None:
+def _set_word_run_fonts(run: Any, *, size_pt: Optional[int] = None, bold: Optional[bool] = None) -> None:
     run.font.name = _REPORT_WORD_LATIN_FONT
+    if size_pt is not None:
+        run.font.size = Pt(size_pt)
+    if bold is not None:
+        run.font.bold = bold
     _set_word_rfonts(run._element)
 
 
@@ -2813,14 +2814,19 @@ def _apply_report_document_fonts(document: Document) -> None:
             continue
 
     for paragraph in document.paragraphs:
+        style_name = str(getattr(paragraph.style, "name", "") or "")
+        is_heading = style_name.startswith("Heading") or style_name in ("Title", "Subtitle")
         for run in paragraph.runs:
-            _set_word_run_fonts(run)
+            if is_heading:
+                _set_word_run_fonts(run, size_pt=_REPORT_HEADING_FONT_SIZE_PT, bold=True)
+            else:
+                _set_word_run_fonts(run, size_pt=_REPORT_BODY_FONT_SIZE_PT)
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
-                        _set_word_run_fonts(run)
+                        _set_word_run_fonts(run, size_pt=_REPORT_BODY_FONT_SIZE_PT)
 
 
 def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] = None) -> None:
@@ -2866,11 +2872,32 @@ def _report_issue_table_row(row: list[str]) -> list[str]:
     return [problem, file_name, page, description]
 
 
-def _add_report_issue_table(document: Document, rows: list[list[str]]) -> None:
+_REPORT_DUPLICATE_RESULT_KEYS = frozenset({
+    "business_bid_duplicate_check",
+    "technical_bid_duplicate_check",
+    "business_bid_duplicate_clusters",
+    "technical_bid_duplicate_clusters",
+})
+
+
+def _add_report_issue_table(
+    document: Document,
+    rows: list[list[str]],
+    *,
+    include_description: bool = True,
+) -> None:
+    if include_description:
+        _add_word_table(
+            document,
+            _REPORT_ISSUE_TABLE_HEADERS,
+            [_report_issue_table_row(row) for row in rows],
+        )
+        return
+    # 查重导出不展示「问题描述」列。
     _add_word_table(
         document,
-        _REPORT_ISSUE_TABLE_HEADERS,
-        [_report_issue_table_row(row) for row in rows],
+        ["问题项目", "对应文件", "页码"],
+        [_report_issue_table_row(row)[:3] for row in rows],
     )
 
 
@@ -2930,43 +2957,56 @@ def _report_issue_row(
 
 
 def _collect_personnel_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
+    """人员复用导出只列名单：每个复用人名的每处出现一行（姓名｜文件｜页码｜角色）。"""
     rows: list[list[str]] = []
-    groups = payload.get("groups") or {"default": payload}
-    for group in groups.values():
-        if not isinstance(group, dict):
+    items = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    # 兼容存储结构：payload 本身带 documents 时也按一条 item 处理。
+    if not items and (payload.get("documents") or payload.get("names")):
+        items = [payload]
+
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        check = (
-            group.get("personnel_reuse_check")
-            if isinstance(group.get("personnel_reuse_check"), dict)
-            else group
-        )
-        for item in check.get("issues") or []:
-            if not isinstance(item, dict):
+        # 仅保留被判为复用（跨文件同名）的人名；缺失时退而列出全部抽取到的人名。
+        reused_names = {
+            str(name).strip()
+            for name in (item.get("names") or [])
+            if str(name).strip()
+        }
+        emitted = 0
+        for document in item.get("documents") or []:
+            if not isinstance(document, dict):
                 continue
-            evidence_items = item.get("occurrences") if isinstance(item.get("occurrences"), list) else [item]
-            reason = _report_issue_message(item) or _report_join_parts([
-                item.get("risk_level"),
-                item.get("roles"),
-                f"涉及文件数：{item.get('document_count')}" if item.get("document_count") else "",
-                f"出现次数：{item.get('occurrence_count')}" if item.get("occurrence_count") else "",
-            ])
-            description = _report_join_parts([
-                f"姓名：{item.get('name')}" if item.get("name") else "",
-                f"角色：{item.get('roles')}" if item.get("roles") else "",
-                f"涉及文件数：{item.get('document_count')}" if item.get("document_count") else "",
-                f"出现次数：{item.get('occurrence_count')}" if item.get("occurrence_count") else "",
-            ])
-            for evidence in evidence_items or [item]:
-                if not isinstance(evidence, dict):
+            doc_file = document.get("file_name")
+            for entry in document.get("personnel_entries") or []:
+                if not isinstance(entry, dict):
                     continue
-                file_name, page = _report_file_and_page(evidence)
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                if reused_names and name not in reused_names:
+                    continue
+                page = entry.get("page")
+                role = str(entry.get("role") or "").strip()
                 _report_issue_row(
                     rows,
-                    problem=item.get("name") or _report_issue_title(item) or "人员复用",
-                    description=description or _report_issue_description(evidence),
-                    reason=reason or "疑似一人多用",
-                    file_name=file_name or _report_file_name(item),
-                    page=page or _report_page_text(item),
+                    problem=name,
+                    description=role or "同名人员跨文件出现，疑似一人多用",
+                    reason="人员复用",
+                    file_name=entry.get("file_name") or doc_file or "",
+                    page=(f"第 {page} 页" if isinstance(page, int) and page > 0 else ""),
+                )
+                emitted += 1
+        # 没有 personnel_entries 明细时，至少把复用名单列出来。
+        if emitted == 0:
+            for name in sorted(reused_names):
+                _report_issue_row(
+                    rows,
+                    problem=name,
+                    description="同名人员跨文件出现，疑似一人多用",
+                    reason="人员复用",
+                    file_name="",
+                    page="",
                 )
     return rows
 
@@ -3064,6 +3104,38 @@ def _collect_duplicate_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
     return rows
 
 
+def _duplicate_cluster_full_text(cluster: dict[str, Any]) -> str:
+    """聚合查重聚类里各文件的完整重复文本（去重），用于完整导出、不省略。"""
+    previews_by_file = cluster.get("doc_previews_by_file")
+    if not isinstance(previews_by_file, dict):
+        return ""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for previews in previews_by_file.values():
+        if not isinstance(previews, list):
+            continue
+        for preview in previews:
+            text = str(preview or "").strip()
+            if not text:
+                continue
+            key = re.sub(r"\s+", "", text)
+            if key in seen:
+                continue
+            seen.add(key)
+            parts.append(text)
+    return " ".join(parts)
+
+
+def _duplicate_cluster_problem_text(cluster: dict[str, Any]) -> str:
+    """查重问题项：保留「重复段落/句子/表格」类型前缀 + 完整重复文本。"""
+    title = str(cluster.get("title") or "").strip()
+    full_text = _duplicate_cluster_full_text(cluster)
+    if not full_text:
+        return title or str(cluster.get("cluster_id") or "") or "重复聚类"
+    prefix = title.split("：", 1)[0] if "：" in title else ""
+    return f"{prefix}：{full_text}" if prefix else full_text
+
+
 def _collect_duplicate_cluster_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
     rows: list[list[str]] = []
     for cluster in payload.get("issues") or []:
@@ -3071,7 +3143,7 @@ def _collect_duplicate_cluster_issue_rows(payload: dict[str, Any]) -> list[list[
             continue
         _report_issue_row(
             rows,
-            problem=cluster.get("title") or cluster.get("cluster_id") or "重复聚类",
+            problem=_duplicate_cluster_problem_text(cluster),
             description=_report_join_parts([
                 f"聚类ID：{cluster.get('cluster_id')}" if cluster.get("cluster_id") else "",
                 f"文件：{cluster.get('files')}" if cluster.get("files") else "",
@@ -3170,11 +3242,93 @@ def _dedupe_report_issue_rows(rows: list[list[str]]) -> list[list[str]]:
     return deduped
 
 
-def _collect_frontend_result_issue_sections(items: list[Any]) -> list[tuple[str, str, list[list[str]]]]:
+_REPORT_BIDDER_FILE_SUFFIXES = (
+    "商务标", "技术标", "商务文件", "技术文件", "商务标书", "技术标书",
+    "响应文件", "投标文件", "标书", "商务", "技术",
+)
+
+
+def _report_bidder_from_file(name: Any) -> str:
+    """从文件名推导投标人名称（去扩展名与商务标/技术标等后缀）。"""
+    text = os.path.splitext(os.path.basename(str(name or "").strip()))[0].strip()
+    for suffix in _REPORT_BIDDER_FILE_SUFFIXES:
+        if text.endswith(suffix) and len(text) > len(suffix):
+            text = text[: -len(suffix)].strip(" -_（）()")
+            break
+    return text
+
+
+def _is_passed_export_item(item: dict[str, Any]) -> bool:
+    """判断该结果项是否为「通过/符合项」（不应进入问题清单报告）。
+
+    人工复核优先：被人为「归为有错误项」(frontend_review_status=flagged) 的符合项
+    仍作为问题导出；被「确认无误」(passed) 的问题项不导出。
+    """
+    review_status = str(item.get("frontend_review_status") or "").strip().lower()
+    if review_status == "flagged":
+        return False
+    if review_status == "passed":
+        return True
+    for field in ("source_status", "original_source_status", "status"):
+        if str(item.get(field) or "").strip().lower() == "passed":
+            return True
+    result_key = str(item.get("result_key") or item.get("source_result_key") or "").strip()
+    if result_key.endswith("_passed") or result_key == "business_bid_format_review_passed":
+        return True
+    return False
+
+
+def _item_company_label(item: dict[str, Any]) -> str:
+    """推导一条结果项归属的公司（查重类按「公司A × 公司B」配对）。"""
+    result_key = str(item.get("result_key") or item.get("source_result_key") or "").strip()
+    if result_key == "personnel_reuse_check":
+        # 人员复用是跨公司的名单，不按公司分组（整段为一张名单表）。
+        return ""
+    bidder = str(item.get("bidder_name") or item.get("bidder") or "").strip()
+    if bidder:
+        return bidder
+    left = _report_bidder_from_file(item.get("left_file_name"))
+    right = _report_bidder_from_file(item.get("right_file_name"))
+    if left and right:
+        return left + " × " + right if left != right else left
+    if left or right:
+        return left or right
+    # 查重聚类的文件名在 files 列表里（如 ["阳生文化商务标.pdf","亚元商务标.pdf"]）。
+    bidders: list[str] = []
+    for source in (item.get("files"), item.get("file_names"), item.get("documents")):
+        for raw in source if isinstance(source, list) else []:
+            file_name = raw.get("file_name") if isinstance(raw, dict) else raw
+            name = _report_bidder_from_file(file_name)
+            if name and name not in bidders:
+                bidders.append(name)
+        if bidders:
+            break
+    if bidders:
+        return " × ".join(bidders[:3]) + ("…" if len(bidders) > 3 else "")
+    file_label = _report_bidder_from_file(item.get("file_name"))
+    if file_label:
+        return file_label
+    return "未归类"
+
+
+def _report_row_page_key(row: list[str]) -> tuple[int, str]:
+    """按行的页码列（第 5 列）升序排序；无页码排末尾。"""
+    page_text = row[4] if isinstance(row, list) and len(row) > 4 else ""
+    match = re.search(r"\d+", str(page_text or ""))
+    page_no = int(match.group()) if match else 10**9
+    return (page_no, str(row[0] if isinstance(row, list) and row else ""))
+
+
+def _collect_frontend_result_issue_sections(
+    items: list[Any],
+) -> list[tuple[str, str, list[tuple[str, list[list[str]]]]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     order: list[str] = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        # 导出报告是「问题清单」，通过/符合项不导出。
+        if _is_passed_export_item(item):
             continue
         key = str(item.get("result_key") or item.get("source_result_key") or item.get("type") or "result").strip()
         if not key:
@@ -3186,37 +3340,71 @@ def _collect_frontend_result_issue_sections(items: list[Any]) -> list[tuple[str,
             order.append(key)
         grouped[key].append(item)
 
-    sections: list[tuple[str, str, list[list[str]]]] = []
+    sections: list[tuple[str, str, list[tuple[str, list[list[str]]]]]] = []
     for key in order:
-        section_rows = _dedupe_report_issue_rows(
-            _collect_report_section_issue_rows(key, {"issues": grouped[key]})
-        )
-        if not section_rows:
+        # 查重段不按公司分组（整段一张表，不显示公司小标题）。
+        if key in _REPORT_DUPLICATE_RESULT_KEYS:
+            rows = _dedupe_report_issue_rows(
+                _collect_report_section_issue_rows(key, {"issues": grouped[key]})
+            )
+            if rows:
+                rows.sort(key=_report_row_page_key)
+                sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), [("", rows)]))
             continue
-        sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), section_rows))
+
+        # 其它检查类型按公司分组，组内按页码升序。
+        company_items: dict[str, list[dict[str, Any]]] = {}
+        company_order: list[str] = []
+        for item in grouped[key]:
+            label = _item_company_label(item)
+            if label not in company_items:
+                company_items[label] = []
+                company_order.append(label)
+            company_items[label].append(item)
+
+        company_groups: list[tuple[str, list[list[str]]]] = []
+        for company_label in sorted(company_order):
+            rows = _dedupe_report_issue_rows(
+                _collect_report_section_issue_rows(key, {"issues": company_items[company_label]})
+            )
+            if not rows:
+                continue
+            rows.sort(key=_report_row_page_key)
+            company_groups.append((company_label, rows))
+        if company_groups:
+            sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), company_groups))
     return sections
 
 
-def _collect_report_issue_sections(result_payload: dict[str, Any]) -> list[tuple[str, str, list[list[str]]]]:
-    sections: list[tuple[str, str, list[list[str]]]] = []
+def _collect_report_issue_sections(
+    result_payload: dict[str, Any],
+) -> list[tuple[str, str, list[tuple[str, list[list[str]]]]]]:
+    sections: list[tuple[str, str, list[tuple[str, list[list[str]]]]]] = []
     frontend_items = result_payload.get("result") if isinstance(result_payload, dict) else None
     if isinstance(frontend_items, list):
         return _collect_frontend_result_issue_sections(frontend_items)
 
+    # 存储结果路径无逐项公司信息，整段放在一个空标签公司组里（渲染时不输出公司小标题）。
     for key, payload in _ordered_report_results(result_payload).items():
         section_rows = _dedupe_report_issue_rows(_collect_report_section_issue_rows(key, payload))
         if not section_rows:
             continue
-        sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), section_rows))
+        section_rows.sort(key=_report_row_page_key)
+        sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), [("", section_rows)]))
     return sections
 
 
+def _section_total_rows(company_groups: list[tuple[str, list[list[str]]]]) -> int:
+    return sum(len(rows) for _label, rows in company_groups)
+
+
 def _flatten_report_issue_sections(
-    sections: list[tuple[str, str, list[list[str]]]],
+    sections: list[tuple[str, str, list[tuple[str, list[list[str]]]]]],
 ) -> list[list[str]]:
     rows: list[list[str]] = []
-    for _key, _label, section_rows in sections:
-        rows.extend(section_rows)
+    for _key, _label, company_groups in sections:
+        for _company_label, section_rows in company_groups:
+            rows.extend(section_rows)
     return _dedupe_report_issue_rows(rows)
 
 
@@ -3250,7 +3438,7 @@ def _render_result_word_report(
         _add_word_table(
             document,
             ["审查项", "问题数"],
-            [[label, str(len(section_rows))] for _key, label, section_rows in issue_sections],
+            [[label, str(_section_total_rows(company_groups))] for _key, label, company_groups in issue_sections],
         )
     else:
         _add_word_paragraph(document, "无")
@@ -3264,9 +3452,13 @@ def _render_result_word_report(
 
     document.add_heading("问题清单", level=1)
     if issue_sections:
-        for _key, label, section_rows in issue_sections:
+        for key, label, company_groups in issue_sections:
+            include_description = key not in _REPORT_DUPLICATE_RESULT_KEYS
             document.add_heading(label, level=2)
-            _add_report_issue_table(document, section_rows)
+            for company_label, section_rows in company_groups:
+                if company_label:
+                    document.add_heading(company_label, level=3)
+                _add_report_issue_table(document, section_rows, include_description=include_description)
     else:
         _add_word_paragraph(document, "无")
 
@@ -4152,9 +4344,10 @@ async def project_business_bid_duplicate_check(
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
         _ensure_project_ocr_idle(project, analysis_name="商务标查重")
+        # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
         _ensure_project_analysis_status(
             project,
-            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
             analysis_name="商务标查重",
         )
         return await run_in_threadpool(

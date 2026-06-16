@@ -557,9 +557,10 @@ async def _run_selected_project_services(
                     db_service=db_service,
                 )
             elif service_name == "business_bid_duplicate_check":
+                # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
                 _ensure_project_analysis_status(
                     project,
-                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
                     analysis_name="商务标查重",
                 )
                 result = await run_in_threadpool(

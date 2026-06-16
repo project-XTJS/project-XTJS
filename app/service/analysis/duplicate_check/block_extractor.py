@@ -187,12 +187,32 @@ def _bbox_anchor(bbox: Any) -> tuple[int, int]:
     return (10**9, 10**9)
 
 
+_TABLE_SIGNATURE_STRIP_PATTERN = re.compile(
+    r"[\s|｜/\\.．。,，、:：;；·…(){}\[\]【】<>《》\"'`*\-_=+~!?！？]+"
+)
+
+
+def _table_dedup_signature(text: str) -> str:
+    """表格去重签名：去掉分隔符/标点/空格，只留中文与字母数字。
+
+    同一张表被 logical_tables（空格分隔、含空行“1. 2. …”）与
+    table_sections（“|”分隔、仅表头）各抽一份时，归一化后表头一致，
+    短的（仅表头）会成为长的（表头+空行数字）的子串，从而判为同一张表。
+    """
+    return _TABLE_SIGNATURE_STRIP_PATTERN.sub("", str(text or "")).lower()
+
+
 def _is_duplicate_table_signature(
     pages_set: set[int],
     compact: str,
     accepted_signatures: list[tuple[set[int], str]],
 ) -> bool:
-    """判断该表是否与已收录的某张表为「同页同内容」的重复副本。"""
+    """判断该表是否与已收录的某张表为「同页同内容」的重复副本。
+
+    同一张表常被 logical_tables 与 table_sections 各抽一份，文本略有差异
+    （如一份只有表头，另一份还带空行标记“1. 2. ……”），需同时用
+    「子串包含」与「相似度」两种判据识别为同一张表，避免被计为两次重复。
+    """
     if not compact:
         return False
     for prev_pages, prev_compact in accepted_signatures:
@@ -200,11 +220,17 @@ def _is_duplicate_table_signature(
             continue
         if prev_compact == compact:
             return True
-        if (
-            len(compact) >= 8
-            and len(prev_compact) >= 8
-            and similarity_ratio(compact[:400], prev_compact[:400]) >= 0.95
-        ):
+        if len(compact) < 8 or len(prev_compact) < 8:
+            continue
+        shorter, longer = (
+            (compact, prev_compact)
+            if len(compact) <= len(prev_compact)
+            else (prev_compact, compact)
+        )
+        # 表头 vs 表头+空行：短文本是长文本的子串即视为同一张表
+        if shorter in longer:
+            return True
+        if similarity_ratio(compact[:400], prev_compact[:400]) >= 0.9:
             return True
     return False
 
@@ -243,11 +269,11 @@ def _build_table_queues(
         if not text:
             continue
 
-        compact = compact_raw_text(text)
+        signature = _table_dedup_signature(text)
         pages_set = set(normalized_pages or [1])
-        if _is_duplicate_table_signature(pages_set, compact, accepted_signatures):
+        if _is_duplicate_table_signature(pages_set, signature, accepted_signatures):
             continue
-        accepted_signatures.append((pages_set, compact))
+        accepted_signatures.append((pages_set, signature))
 
         bbox = (
             normalize_bbox(raw_item.get("bbox") or raw_item.get("bbox_ocr") or raw_item.get("box"))

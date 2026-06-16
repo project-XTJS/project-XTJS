@@ -46,6 +46,13 @@ from .risk_scorer import (
 )
 
 
+def _bbox_overlap(a: list[float], b: list[float]) -> bool:
+    """两个 [x1, y1, x2, y2] 包围盒是否相交（同一坐标系）。"""
+    if len(a) < 4 or len(b) < 4:
+        return False
+    return not (a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1])
+
+
 class DuplicateCheckService:
     """文档查重服务，支持精确匹配和基于相似度的内容分析。"""
 
@@ -81,6 +88,18 @@ class DuplicateCheckService:
         skipped_groups: dict[str, list[dict[str, Any]]] = {item: [] for item in requested_types}
         template_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
 
+        # 技术偏离表可能在配对技术标里：按 relation_id 建立技术标内容映射，
+        # 供商务标查重在商务标缺失技术偏离表时回退查找。
+        technical_payload_by_relation: dict[str, Any] = {}
+        for record in document_records:
+            if self._normalize_document_role(
+                record.get("relation_role") or record.get("document_type")
+            ) != DOCUMENT_TYPE_TECHNICAL_BID:
+                continue
+            relation_key = str(record.get("relation_id") or "").strip()
+            if relation_key and relation_key not in technical_payload_by_relation:
+                technical_payload_by_relation[relation_key] = record.get("content")
+
         dedupe_keys: set[tuple[str, str]] = set()
         for record in document_records:
             role = self._normalize_document_role(
@@ -108,11 +127,16 @@ class DuplicateCheckService:
             template_context = self._get_tender_template_context(
                 record, role=role, cache=template_cache,
             )
+            technical_payload = None
+            if role == DOCUMENT_TYPE_BUSINESS_BID:
+                relation_key = str(record.get("relation_id") or "").strip()
+                technical_payload = technical_payload_by_relation.get(relation_key)
             prepared, skip_reason = self._prepare_document(
                 record,
                 role=role,
                 template_context=template_context,
                 duplicate_scope=duplicate_scope,
+                technical_payload=technical_payload,
             )
             if prepared is None:
                 skipped_groups[role].append(
@@ -219,6 +243,7 @@ class DuplicateCheckService:
         role: str,
         template_context: dict[str, Any] | None = None,
         duplicate_scope: str | None = None,
+        technical_payload: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
         """对单条文档记录提取内容，排除模板，返回可用于比较的结构化对象。"""
         payload = self._coerce_payload(record.get("content"))
@@ -237,6 +262,7 @@ class DuplicateCheckService:
                 itemized_template_context=(
                     template_context.get("itemized_template_context") if template_context else None
                 ),
+                technical_payload=technical_payload,
             )
             scoped_segments = self._filter_business_duplicate_segments(
                 scoped_segments,
@@ -248,6 +274,12 @@ class DuplicateCheckService:
             empty_reason = BUSINESS_SCOPE_SKIP_REASON
         else:
             ordered_blocks, table_entries, empty_reason = _extract_document_content_blocks(payload, role=role)
+            if role == DOCUMENT_TYPE_TECHNICAL_BID:
+                # 偏离表查重统一由商务标查重负责（含技术偏离表回退），
+                # 技术标查重剔除偏离表区域，避免相同内容被二次查重。
+                ordered_blocks, table_entries = self._exclude_deviation_regions(
+                    payload, ordered_blocks, table_entries,
+                )
 
         if not ordered_blocks:
             # 即使没有区块，仍尝试仅用表格构建文档，供表格重复检测
@@ -267,6 +299,73 @@ class DuplicateCheckService:
 
         prepared = self._build_prepared_document(record, ordered_blocks, table_entries, role=role)
         return prepared, None if prepared is not None else empty_reason
+
+    def _exclude_deviation_regions(
+        self,
+        payload: dict[str, Any],
+        ordered_blocks: list[dict[str, Any]],
+        table_entries: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """从技术标查重内容中剔除偏离表区域（偏离表查重归商务标查重）。
+
+        按偏离段的「页 + bbox」识别偏离表区域：同页且 bbox 重叠的块/表予以剔除；
+        偏离段缺 bbox 时，将该页整体视为偏离区域。
+        """
+        deviation_payload = self._deviation_checker._coerce_payload(payload)
+        deviation_sections = self._deviation_checker._extract_bid_deviation_sections(deviation_payload)
+
+        regions_by_page: dict[int, list[list[float]]] = {}
+        whole_pages: set[int] = set()
+
+        def add_region(page: Any, bbox: Any) -> None:
+            if not isinstance(page, int):
+                return
+            normalized = normalize_bbox(bbox)
+            if isinstance(normalized, list) and len(normalized) >= 4:
+                regions_by_page.setdefault(page, []).append(
+                    [float(normalized[0]), float(normalized[1]), float(normalized[2]), float(normalized[3])]
+                )
+            else:
+                whole_pages.add(page)
+
+        for group in ("business", "technical"):
+            for section in deviation_sections.get(group) or []:
+                if isinstance(section, dict):
+                    add_region(section.get("page"), section.get("bbox") or section.get("box"))
+        for row in deviation_sections.get("rows") or []:
+            if isinstance(row, dict):
+                add_region(row.get("page"), row.get("bbox") or row.get("box"))
+
+        if not regions_by_page and not whole_pages:
+            return ordered_blocks, table_entries
+
+        def in_deviation(page: Any, bbox: Any) -> bool:
+            if not isinstance(page, int):
+                return False
+            if page in whole_pages:
+                return True
+            regions = regions_by_page.get(page)
+            if not regions:
+                return False
+            normalized = normalize_bbox(bbox)
+            if not (isinstance(normalized, list) and len(normalized) >= 4):
+                # 块缺 bbox 但与偏离段同页 → 视为偏离区域内
+                return True
+            return any(_bbox_overlap(normalized, region) for region in regions)
+
+        kept_blocks = [
+            block
+            for block in ordered_blocks
+            if not in_deviation(block.get("page"), block.get("bbox"))
+        ]
+        kept_tables = []
+        for table in table_entries:
+            pages = [page for page in (table.get("pages") or []) if isinstance(page, int)]
+            bbox = table.get("bbox")
+            if pages and all(in_deviation(page, bbox) for page in pages):
+                continue
+            kept_tables.append(table)
+        return kept_blocks, kept_tables
 
     @staticmethod
     def _filter_business_duplicate_segments(

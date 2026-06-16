@@ -104,8 +104,13 @@ def extract_business_duplicate_segments(
     star_requirement_context: dict[str, Any] | None = None,
     deviation_template_context: dict[str, Any] | None = None,
     itemized_template_context: dict[str, Any] | None = None,
+    technical_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """从商务标中提取分项报价和偏离表相关段落作为查重范围。"""
+    """从商务标中提取分项报价和偏离表相关段落作为查重范围。
+
+    技术偏离表可能放在商务标里，也可能放在配对的技术标里。商务标中没有
+    技术偏离段时，回退到 technical_payload（配对技术标）中继续抽取，纳入查重比对。
+    """
     segments: list[dict[str, Any]] = []
 
     # 分项报价先按招标模板剔除表头/固定行，再保留剩余可比内容。
@@ -121,15 +126,51 @@ def extract_business_duplicate_segments(
     # 偏离表先按招标模板剔除要求列/模板行，再保留响应内容。
     deviation_payload = deviation_checker._coerce_payload(payload)
     deviation_sections = deviation_checker._extract_bid_deviation_sections(deviation_payload)
+    segments.extend(
+        _deviation_segments(
+            deviation_sections,
+            deviation_checker=deviation_checker,
+            star_requirement_context=star_requirement_context,
+            deviation_template_context=deviation_template_context,
+        )
+    )
+
+    # 技术偏离表回退：商务标里没有技术偏离段时，去配对技术标里继续找。
+    if not deviation_sections.get("technical") and technical_payload is not None:
+        technical_deviation_payload = deviation_checker._coerce_payload(technical_payload)
+        technical_sections = deviation_checker._extract_bid_deviation_sections(
+            technical_deviation_payload
+        )
+        segments.extend(
+            _deviation_segments(
+                technical_sections,
+                deviation_checker=deviation_checker,
+                star_requirement_context=star_requirement_context,
+                deviation_template_context=deviation_template_context,
+            )
+        )
+
+    deduped = _dedupe_scoped_segments(segments)
+    deduped.sort(key=_scoped_segment_sort_key)
+    return deduped
+
+
+def _deviation_segments(
+    deviation_sections: dict[str, Any],
+    *,
+    deviation_checker: DeviationChecker,
+    star_requirement_context: dict[str, Any] | None,
+    deviation_template_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """从一份文档的偏离解析结果中构建偏离表查重段落（偏离行 + 未覆盖章节）。"""
     row_segments = _segments_from_deviation_rows(
         deviation_sections,
         deviation_checker=deviation_checker,
         star_requirement_context=star_requirement_context,
         deviation_template_context=deviation_template_context,
     )
-    segments.extend(row_segments)
+    segments: list[dict[str, Any]] = list(row_segments)
 
-    # 补充未被行覆盖的偏离表章节
     covered_page_keys = {
         tuple(int(page) for page in (segment.get("pages") or []) if isinstance(page, int))
         for segment in row_segments
@@ -150,10 +191,7 @@ def extract_business_duplicate_segments(
         )
         if segment is not None:
             segments.append(segment)
-
-    deduped = _dedupe_scoped_segments(segments)
-    deduped.sort(key=_scoped_segment_sort_key)
-    return deduped
+    return segments
 
 
 def _segments_from_deviation_rows(
