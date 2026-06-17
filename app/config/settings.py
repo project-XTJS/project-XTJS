@@ -108,6 +108,18 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
 
+    # —— 认证与账号安全 ——
+    # 生产环境必须在 .env 中用强随机长串覆盖此默认值，切勿沿用默认。
+    JWT_SECRET_KEY: str = "CHANGE_ME_IN_ENV_use_a_long_random_secret"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
+    AUTH_MAX_FAILED_ATTEMPTS: int = 5
+    AUTH_LOCK_MINUTES: int = 15
+    AUTH_PASSWORD_MIN_LENGTH: int = 8
+    # 启动时自动创建初始管理员；密码留空则不创建。
+    AUTH_INITIAL_ADMIN_USERNAME: str = "admin"
+    AUTH_INITIAL_ADMIN_PASSWORD: str = ""
+
     XTJS_CACHE_ENABLED: bool = True
     XTJS_CACHE_REQUIRED: bool = True
     XTJS_CACHE_REDIS_URL: str = "redis://localhost:6379/1"

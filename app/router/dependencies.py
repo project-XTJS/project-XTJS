@@ -13,6 +13,7 @@ from app.service.analysis_service import get_analysis_service
 from app.service.cache_service import RedisCacheService, get_cache_service as get_shared_cache_service
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.service.user_service import UserService
 
 
 # 历史兼容对象，仅用于避免改动无关路由签名
@@ -43,6 +44,11 @@ def get_db_service() -> PostgreSQLService:
 def get_oss_service() -> MinioService:
     """获取 MinIO 对象存储服务实例。"""
     return MinioService()
+
+
+def get_user_service() -> UserService:
+    """获取用户服务实例。"""
+    return UserService()
 
 
 def get_cache_service() -> RedisCacheService:

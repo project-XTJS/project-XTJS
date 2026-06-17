@@ -11,6 +11,7 @@ __pycache__/
 # 3. 环境变量与机密配置
 .env
 .env.*
+!.env.example
 *.pem
 
 # 4. PaddleOCR 运行时缓存与自动下载的大模型权重

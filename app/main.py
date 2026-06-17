@@ -6,9 +6,11 @@ FastAPI 应用主入口模块。
 并自定义 OpenAPI schema 以注入项目标识可选值。
 """
 
+import logging
+
 import uvicorn
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.openapi.utils import get_openapi
@@ -17,9 +19,12 @@ from fastapi.openapi.utils import get_openapi
 from app.core.response import UnifiedResponse, configure_exception_handlers
 # 路由模块
 from app.router.analysis import router as analysis_router
+from app.router.auth import router as auth_router
+from app.router.auth_dependencies import get_current_user
 from app.router.file import router as file_router
 from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
+from app.service.user_service import UserService
 # 服务层（用于获取项目列表）
 from app.service.postgresql_service import PostgreSQLService
 from app.service.cache_service import CacheUnavailableError, get_cache_service
@@ -54,11 +59,28 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # 注册全局异常拦截器（HTTP 异常、参数校验异常等）
 configure_exception_handlers(app)
 
-# 注册路由模块
-app.include_router(analysis_router, prefix="/api/analysis", tags=["文档解析"])
-app.include_router(file_router, prefix="/api/files", tags=["文件存储"])
-app.include_router(postgresql_router, prefix="/api/postgresql", tags=["项目业务"])
-app.include_router(postgresql_batch_router, prefix="/api/postgresql", tags=["项目业务"])
+# 认证路由（登录公开；/me、改密、用户管理由路由内部依赖各自守卫）
+app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
+
+# 业务路由统一要求登录（携带有效 JWT）。
+# 后续如需逐功能的级别限制，可在具体路由上追加 Depends(require_role(n))。
+_login_required = [Depends(get_current_user)]
+app.include_router(
+    analysis_router, prefix="/api/analysis", tags=["文档解析"],
+    dependencies=_login_required,
+)
+app.include_router(
+    file_router, prefix="/api/files", tags=["文件存储"],
+    dependencies=_login_required,
+)
+app.include_router(
+    postgresql_router, prefix="/api/postgresql", tags=["项目业务"],
+    dependencies=_login_required,
+)
+app.include_router(
+    postgresql_batch_router, prefix="/api/postgresql", tags=["项目业务"],
+    dependencies=_login_required,
+)
 
 
 # —— OpenAPI 增强：为项目/文档标识字段注入人类可读可选值 ——
@@ -299,12 +321,24 @@ app.openapi = custom_openapi
 # —— 系统状态接口 ——
 
 
+logger = logging.getLogger(__name__)
+
+
 @app.on_event("startup")
 def verify_required_cache() -> None:
     """Fail fast when production cache is required but unavailable."""
     if not settings.XTJS_CACHE_ENABLED or not settings.XTJS_CACHE_REQUIRED:
         return
     get_cache_service().ping()
+
+
+@app.on_event("startup")
+def bootstrap_initial_admin() -> None:
+    """按配置自动创建初始管理员，解决首个账号的引导问题。"""
+    try:
+        UserService().ensure_initial_admin()
+    except Exception as exc:  # 数据库尚未就绪等情况不应阻断启动
+        logger.warning("初始管理员引导失败（可忽略，稍后可手动创建）：%s", exc)
 
 
 @app.get("/", summary="系统根目录", tags=["系统"])
