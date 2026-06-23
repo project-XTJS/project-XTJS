@@ -338,15 +338,25 @@ class OrchestratorMixin:
         for relation_id, group in relation_groups.items():
             business_record = group.get("business_record")
             technical_record = group.get("technical_record")
-            if not business_record or not technical_record:
+            # 商务标 OCR 完成即可检查商务标偏离表；技术标未就绪时按商务标单独检查。
+            if not business_record:
                 continue
 
             business_payload = self._coerce_stored_payload(business_record.get("content"))
-            technical_payload = self._coerce_stored_payload(technical_record.get("content"))
+            technical_payload = (
+                self._coerce_stored_payload(technical_record.get("content"))
+                if technical_record
+                else None
+            )
             bidder_key = self._ensure_project_bidder_key(
                 self._derive_project_bidder_key(
-                    business_record.get("file_name") or technical_record.get("file_name"),
-                    str(business_record.get("identifier_id") or technical_record.get("identifier_id") or relation_id),
+                    business_record.get("file_name")
+                    or (technical_record.get("file_name") if technical_record else None),
+                    str(
+                        business_record.get("identifier_id")
+                        or (technical_record.get("identifier_id") if technical_record else None)
+                        or relation_id
+                    ),
                 ),
                 used_bidder_keys,
             )
@@ -359,14 +369,18 @@ class OrchestratorMixin:
                 file_url_key="file_url",
                 identifier_key="identifier_id",
             )
-            technical_meta = self._build_project_record_meta(
-                record=technical_record,
-                payload=technical_payload,
-                role="technical",
-                bidder_key=bidder_key,
-                file_name_key="file_name",
-                file_url_key="file_url",
-                identifier_key="identifier_id",
+            technical_meta = (
+                self._build_project_record_meta(
+                    record=technical_record,
+                    payload=technical_payload or {},
+                    role="technical",
+                    bidder_key=bidder_key,
+                    file_name_key="file_name",
+                    file_url_key="file_url",
+                    identifier_key="identifier_id",
+                )
+                if technical_record
+                else None
             )
 
             check = self._execute_check(
@@ -417,7 +431,7 @@ class OrchestratorMixin:
         if not bidders:
             return self._build_empty_project_deviation_review(
                 project_identifier=project_identifier,
-                reason=f"project has no complete business/technical bidder pairs: {project_identifier}",
+                reason=f"project has no business bid documents for deviation check: {project_identifier}",
             )
 
         return {
@@ -429,7 +443,12 @@ class OrchestratorMixin:
                 "input_mode": "project_documents",
                 "tender": tender_meta,
                 "bidders": bidder_entries,
-                "file_count": 1 + len(bidder_entries) * 2,
+                "file_count": 1 + sum(
+                    1
+                    for entry in bidder_entries
+                    for meta in (entry.get("business"), entry.get("technical"))
+                    if meta
+                ),
             },
             "reading_guide": self._build_review_reading_guide(
                 tender_meta=tender_meta,

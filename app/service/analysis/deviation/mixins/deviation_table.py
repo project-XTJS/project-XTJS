@@ -78,6 +78,16 @@ class DeviationTableMixin:
         )
         combined = "\n\n".join(x["text"] for x in business + technical if x.get("text"))
         catalog = self._collect_catalog_locations(line_items, document_role=document_role)
+        # 全文档表格起始页（升序去重）：用于把"偏离表所在页"扩展成整张偏离表跨度
+        # （偏离表常被解析成一整块、所有行只标起始页，无法逐行定位真实视觉页；
+        #   以"下一张表的起始页 - 1"作为偏离表结束边界，确保响应一定落在展示范围内）。
+        table_start_pages = sorted({
+            p
+            for t in (bid_payload.get("logical_tables") or [])
+            if isinstance(t, dict)
+            for p in (t.get("pages") or [])
+            if isinstance(p, int)
+        })
         return {
             "business": business,
             "technical": technical,
@@ -85,6 +95,7 @@ class DeviationTableMixin:
             "rows": rows,
             "catalog_pages": catalog["pages"],
             "catalog_locations": catalog["locations"],
+            "table_start_pages": table_start_pages,
         }
 
     def _collect_catalog_locations(
@@ -574,6 +585,7 @@ class DeviationTableMixin:
         requirement_parts: list[str] = []
         response_parts: list[str] = []
         deviation_parts: list[str] = []
+        material_parts: list[str] = []
         ordered_cells: list[tuple[str, str]] = []
 
         for key in ordered_keys:
@@ -588,6 +600,8 @@ class DeviationTableMixin:
                 response_parts.append(value)
             elif role == "deviation":
                 deviation_parts.append(value)
+            elif role == "material":
+                material_parts.append(value)
 
         if not ordered_cells:
             return None
@@ -606,6 +620,12 @@ class DeviationTableMixin:
         if len(self._norm(requirement or joined_text)) < 4:
             return None
 
+        material_text = " ".join(material_parts).strip()
+        if not material_text:
+            # 列没被识别成"对应材料"时（扫描件/异形表头），从整行所有单元格里正则兜底扫"《技术册》P页码"
+            material_text = self._scan_material_text(" ".join(v for _, v in ordered_cells))
+        material_locations = self._parse_material_locations(material_text)
+
         return {
             "group": self._guess_row_group(title, joined_text),
             "source": "logical_table",
@@ -621,7 +641,65 @@ class DeviationTableMixin:
             "deviation_norm": self._norm(deviation),
             "joined_norm": self._norm(joined_text),
             "bbox": normalize_bbox(bbox),
+            "material_text": material_text,
+            "material_locations": material_locations,
         }
+
+    def _scan_material_text(self, text: str) -> str:
+        """从自由文本里正则扫"对应材料"页码引用（《技术册》P46 / 技术标文件P40-P52 / 商务册P154）。
+
+        用于偏离表"对应材料"列没被正确识别成独立列时（扫描件、异形表头）兜底，
+        只匹配带"册/标/分册"前缀的 P 页码，避免误抓正文里无关的 P 数字。
+        """
+        if not text:
+            return ""
+        # 兼容多种"对应材料所在页"写法：《技术册》P46 / 技术标文件P40-P52 / 见整体交付方案P171-P314 / 纯页码范围P40-P52
+        pattern = (
+            r"(?:《[^》]{0,14}[册标]》|技术[标册分]+(?:文件)?|商务[标册]+(?:文件)?|见|详见|参见|对应材料|交付方案|投标文件)"
+            r"[^Pp\n《》]{0,14}[Pp]\s*\d{1,4}(?:\s*[-~～至]\s*[Pp]?\s*\d{1,4})?"
+            r"|[Pp]\d{1,4}\s*[-~～至]\s*[Pp]?\d{1,4}"
+        )
+        return "；".join(m.strip() for m in re.findall(pattern, str(text)) if m.strip())
+
+    def _parse_material_locations(self, text: str) -> list[dict[str, Any]]:
+        """解析"对应材料投标文件所在页"列：抽出册别+页码，供人工跳转核验。
+
+        兼容《技术册》P46 / 技术标文件P40-P52 / 商务册 P154 / P407-408 等写法。
+        册别→document_role：技术(册/标/分册)→technical_bid，商务(册/标)→business_bid。
+        """
+        if not text or not str(text).strip():
+            return []
+        raw = str(text)
+
+        def role_of(seg: str) -> str | None:
+            if "技术" in seg:
+                return "technical_bid"
+            if "商务" in seg:
+                return "business_bid"
+            return None
+
+        locations: list[dict[str, Any]] = []
+        # 册别(可选) + P + 起始页 (+可选 -结束页)
+        pattern = r"(《[^》]{0,16}》|技术[标册分]+|商务[标册]+)?\s*[Pp]\s*(\d{1,4})(?:\s*[-~～至]\s*[Pp]?\s*(\d{1,4}))?"
+        for m in re.finditer(pattern, raw):
+            book = (m.group(1) or "").strip("《》 ")
+            start = int(m.group(2))
+            end = int(m.group(3)) if m.group(3) else start
+            if end < start:
+                end = start
+            # 无"商务"标记时默认归技术标（"对应材料/整体交付方案"绝大多数是技术内容）
+            role = role_of(book) or role_of(raw) or "technical_bid"
+            locations.append(
+                {
+                    "document_role": role,
+                    "book": book,
+                    "page": start,
+                    "page_end": min(end, start + 60),
+                    "raw": m.group(0).strip(),
+                    "coordinate_system": "printed_page",
+                }
+            )
+        return locations
 
     def _infer_generic_row_columns(self, ordered_cells: list[tuple[str, str]]) -> tuple[str, str, str] | None:
         """无表头时通过内容特征推断需求/响应/偏离列。"""
@@ -672,6 +750,9 @@ class DeviationTableMixin:
             return "response"
         if any(token in text for token in ("偏离说明", "偏离", "说明", "备注")):
             return "deviation"
+        # "对应材料投标文件所在页"/"所附证明材料在本投标文件的所在页码"等：指向技术册/商务册具体页
+        if any(token in text for token in ("所在页", "对应材料", "证明材料", "对应投标文件", "材料所在")):
+            return "material"
         return None
 
     def _extract_rows_from_section(

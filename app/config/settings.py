@@ -100,6 +100,9 @@ class Settings(BaseSettings):
     CONSISTENCY_TEXT_PASS_THRESHOLD: float = 0.93
     CONSISTENCY_DETERMINISTIC_MISSING_MAX_LEXICAL: float = 0.30
 
+    # 偏离表 ★/△ 响应的语义符合度阈值（复用 BGE 向量），≥该值记为“符合”，否则“存疑”待人工。
+    DEVIATION_SEMANTIC_PASS_THRESHOLD: float = 0.70
+
     PROJECT_BATCH_MIN_BID_GROUPS: int = 1
     PROJECT_BATCH_MAX_BID_GROUPS: int = 0
     PROJECT_BATCH_MIN_BID_FILES: int = 1

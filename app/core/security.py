@@ -9,24 +9,33 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config.settings import settings
 
-# bcrypt 上下文；bcrypt 仅取密码前 72 字节，超长不会报错。
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt 仅使用密码的前 72 字节；新版 bcrypt 对超长输入会直接报错，
+# 因此统一手动截断（哈希与校验用同样的截断，结果一致）。
+_BCRYPT_MAX_BYTES = 72
+
+
+def _to_bcrypt_bytes(password: str) -> bytes:
+    """把明文口令编码为 bcrypt 可用字节，超过 72 字节按 bcrypt 规则截断。"""
+    return str(password or "").encode("utf-8")[:_BCRYPT_MAX_BYTES]
 
 
 def hash_password(plain_password: str) -> str:
     """返回明文密码的 bcrypt 哈希值。"""
-    return _pwd_context.hash(plain_password)
+    return bcrypt.hashpw(_to_bcrypt_bytes(plain_password), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """校验明文密码与哈希是否匹配，哈希异常时安全返回 False。"""
     try:
-        return _pwd_context.verify(plain_password, hashed_password)
+        return bcrypt.checkpw(
+            _to_bcrypt_bytes(plain_password),
+            str(hashed_password or "").encode("utf-8"),
+        )
     except (ValueError, TypeError):
         return False
 

@@ -864,6 +864,41 @@ class ResultNormalizerMixin:
                 )
             )
 
+        # 加分项(△)未达标：仅提示、不计入合规失败，但要逐条爆出供人工/模型确认。
+        bonus: list[dict[str, Any]] = []
+        for item in (raw.get("bonus_flagged_items") or []):
+            evidence = self._deviation_issue_evidence(item, raw)
+            bonus.append(
+                self._issue(
+                    status="warning",
+                    title=item.get("requirement") or "加分项(△)未达标",
+                    message="加分项(△)未响应或存在偏离，建议人工确认（不计入合规失败）。",
+                    evidence=evidence,
+                )
+            )
+
+        # 响应正确(无问题)的 ★/△ 项也逐条展示，便于逐项核对(招标★/△条款 ↔ 投标响应)。
+        responded_ok_statuses = {"positive_deviation", "no_deviation", "listed_response"}
+        for item in (raw.get("match_results") or []):
+            if not isinstance(item, dict) or not item.get("responded"):
+                continue
+            if str(item.get("response_status") or "") not in responded_ok_statuses:
+                continue
+            evidence = self._deviation_issue_evidence(item, raw)
+            marker = "△加分项" if item.get("requirement_kind") == "bonus" else "★必须项"
+            message = f"[{marker}] 已响应"
+            if item.get("semantic_status"):
+                message += f"；语义判定：{item.get('semantic_status')}"
+            passed.append(
+                self._issue(
+                    status="pass",
+                    title=item.get("requirement") or "已响应条款",
+                    message=message,
+                    evidence=evidence,
+                )
+            )
+
+        # 兜底：没有逐条通过项但整体通过(或无★要求)时，给一个汇总通过项。
         if compliance_status == "pass" and not passed and not no_star_requirements:
             passed.append(
                 self._issue(
@@ -898,12 +933,47 @@ class ResultNormalizerMixin:
             },
             "metrics": {
                 "core_requirements_count": raw.get("core_requirements_count"),
+                "mandatory_requirements_count": raw.get("mandatory_requirements_count"),
+                "bonus_requirements_count": raw.get("bonus_requirements_count"),
                 "missing_count": len(missing_items),
                 "negative_deviation_count": len(negative_items),
                 "unclear_deviation_count": len(unclear_items),
+                "bonus_flagged_count": len(bonus),
             },
-            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
+            "issues": {
+                "passed": passed,
+                "failed": failed,
+                "missing": missing,
+                "unclear": unclear,
+                "bonus": bonus,
+            },
+            "marker_items": self._build_deviation_marker_items(raw),
         }
+
+    def _build_deviation_marker_items(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        """把每一个 ★/△ 标记项投影成精简列表，确保前端能逐条展示并人工/模型确认。"""
+        items: list[dict[str, Any]] = []
+        for match in (raw.get("match_results") or []):
+            if not isinstance(match, dict):
+                continue
+            items.append(
+                {
+                    "requirement_id": match.get("requirement_id"),
+                    "requirement": match.get("requirement"),
+                    "marker_type": match.get("marker_type"),
+                    "requirement_kind": match.get("requirement_kind"),
+                    "responded": bool(match.get("responded")),
+                    "response_status": match.get("response_status"),
+                    "response_evidence": match.get("response_evidence"),
+                    "response_page": match.get("response_page"),
+                    "requirement_page": match.get("requirement_page"),
+                    "semantic_score": match.get("semantic_score"),
+                    "semantic_status": match.get("semantic_status"),
+                    "needs_manual": match.get("needs_manual"),
+                    "risk_level": match.get("risk_level"),
+                }
+            )
+        return items
 
     def _verification_attachment_lookup(self, raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
         lookup: dict[str, dict[str, Any]] = {}

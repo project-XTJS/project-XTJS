@@ -35,6 +35,7 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service import ocr_progress_publisher
 from app.service.cache_service import CacheUnavailableError, RedisCacheService, invalidate_project_cache
 from app.service.analysis.duplicate_merge import build_duplicate_merge_results
 from app.service.document_ingest_service import (
@@ -1262,45 +1263,73 @@ async def _recognize_existing_documents_batch(
     if not normalized_documents:
         return []
 
-    # OCR 共享同一个 OCRService / pdfium 运行时，当前固定串行执行更稳定。
-    _ = parallelism
-    items: list[dict] = []
-    for document_meta in normalized_documents:
-        cancel_check()
-        result = await recognize_existing_document(
-            document_identifier=document_meta["identifier_id"],
-            project_identifier=project_identifier,
-            cancel_check=cancel_check,
-            db_service=db_service,
-            oss_service=oss_service,
-            analysis_service=analysis_service,
-            raise_http_exception=False,
-        )
-        cancel_check()
-        if not result["ok"]:
-            logger.error(
-                "manual recognize existing document failed identifier=%s file_name=%s status_code=%s error=%s",
-                document_meta["identifier_id"],
-                document_meta.get("file_name"),
-                result["status_code"],
-                result["error"],
-            )
-            items.append({
+    # 并发度 = OCR 工作槽位：单卡=1(退化为串行,行为同前)；多卡=设备数×每卡在途数。
+    # 调度器(AnalysisServiceDispatcher)会把并发请求路由到不同 GPU,真正吃到多卡收益。
+    try:
+        slots = int(analysis_service.ocr_worker_slots())
+    except Exception:
+        slots = 1
+    slots = max(1, min(slots, len(normalized_documents)))
+    semaphore = asyncio.Semaphore(slots)
+
+    async def _recognize_one(document_meta: dict) -> dict:
+        async with semaphore:
+            cancel_check()
+            # 在本协程上下文登记当前文档(contextvar 隔离,并发安全),供逐页进度归属到该文件。
+            token = None
+            try:
+                token = ocr_progress_publisher.set_active_document(
+                    project_id=project_identifier,
+                    document_id=document_meta.get("identifier_id"),
+                    file_name=document_meta.get("file_name"),
+                    document_type=document_meta.get("document_type"),
+                )
+            except Exception:
+                token = None
+            try:
+                result = await recognize_existing_document(
+                    document_identifier=document_meta["identifier_id"],
+                    project_identifier=project_identifier,
+                    cancel_check=cancel_check,
+                    db_service=db_service,
+                    oss_service=oss_service,
+                    analysis_service=analysis_service,
+                    raise_http_exception=False,
+                )
+            finally:
+                try:
+                    ocr_progress_publisher.clear_active(
+                        token,
+                        project_id=project_identifier,
+                        document_id=document_meta.get("identifier_id"),
+                    )
+                except Exception:
+                    pass
+            cancel_check()
+            if not result["ok"]:
+                logger.error(
+                    "manual recognize existing document failed identifier=%s file_name=%s status_code=%s error=%s",
+                    document_meta["identifier_id"],
+                    document_meta.get("file_name"),
+                    result["status_code"],
+                    result["error"],
+                )
+                return {
+                    "identifier_id": document_meta["identifier_id"],
+                    "file_name": document_meta.get("file_name"),
+                    "status": "failed",
+                    "error": result["error"],
+                    "status_code": result["status_code"],
+                }
+            return {
                 "identifier_id": document_meta["identifier_id"],
                 "file_name": document_meta.get("file_name"),
-                "status": "failed",
-                "error": result["error"],
-                "status_code": result["status_code"],
-            })
-            continue
-        items.append({
-            "identifier_id": document_meta["identifier_id"],
-            "file_name": document_meta.get("file_name"),
-            "status": "success",
-            "document": result["document_summary"],
-        })
+                "status": "success",
+                "document": result["document_summary"],
+            }
 
-    return items
+    # asyncio.gather 保持与输入相同的顺序返回结果。
+    return list(await asyncio.gather(*[_recognize_one(meta) for meta in normalized_documents]))
 
 
 def _build_project_ocr_status_response(
@@ -1349,13 +1378,18 @@ async def get_project_ocr_status(
             project_identifier=project_identifier,
         )
 
-    return _cache_get_or_set_payload(
+    payload = _cache_get_or_set_payload(
         cache_service=cache_service,
         cache_key=cache_service.project_ocr_status_key(identifier_id),
         ttl_seconds=settings.XTJS_CACHE_OCR_STATUS_TTL_SECONDS,
         response=response,
         factory=_load_status,
     )
+    # 实时逐页进度不走 3s 缓存，新鲜读取后合并进响应（无活动文档则为 None）。
+    if isinstance(payload, dict) and isinstance(payload.get("ocr_progress"), dict):
+        project_identifier = str((payload.get("project") or {}).get("identifier_id") or identifier_id)
+        payload["ocr_progress"]["active"] = ocr_progress_publisher.read_live(project_identifier)
+    return payload
 
 
 @router.post("/projects/{identifier_id}/resume-ocr", summary="恢复项目 OCR（跳过已完成文档）")

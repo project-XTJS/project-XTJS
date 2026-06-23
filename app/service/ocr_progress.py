@@ -80,6 +80,16 @@ class OCRProgressMonitor:
         self._aggregates: dict[str, dict[str, float]] = {}
         self._last_emitted_at = 0.0
 
+        # 捕获当前文档身份（构造发生在已拷贝 contextvar 的线程里），用于逐页发布实时进度。
+        # 多卡并发时每个 OCR 文档各自一个监控器，互不串扰。
+        self._live_ctx: dict[str, Any] | None = None
+        try:
+            from app.service.ocr_progress_publisher import current_active
+
+            self._live_ctx = current_active()
+        except Exception:
+            self._live_ctx = None
+
     # ── 公共接口 ─────────────────────────────────
 
     def start(self) -> None:
@@ -136,6 +146,31 @@ class OCRProgressMonitor:
 
         if line:
             print(line, flush=True)
+        self._publish_live()
+
+    def _publish_live(self) -> None:
+        """把当前逐页进度最佳努力地发布到本文档的实时进度键；任何异常都不影响 OCR。"""
+        if not getattr(self, "_live_ctx", None):
+            return
+        try:
+            with self._lock:
+                if self._status != "running":
+                    return
+                stage = self._stage
+                current = max(self._predict_pages, self._postprocess_pages)
+                total = max(self.total_pages, current)
+                percent = round(self._progress * 100.0, 1)
+            from app.service.ocr_progress_publisher import publish_progress
+
+            publish_progress(
+                self._live_ctx,
+                stage=stage,
+                current_page=current,
+                total_pages=total,
+                percent=percent,
+            )
+        except Exception:
+            pass
 
     def finish(self, *, success: bool, error_message: str = "") -> dict[str, Any]:
         """任务结束，将状态置为完成或失败，停止心跳并返回汇总字典。"""
@@ -231,6 +266,7 @@ class OCRProgressMonitor:
                 line = self._emit_locked()
             if line:
                 print(line, flush=True)
+            self._publish_live()
 
     # ── 进度计算与阶段切换 ───────────────────────
 

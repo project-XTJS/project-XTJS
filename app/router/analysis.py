@@ -546,9 +546,10 @@ async def _run_selected_project_services(
             if service_name == "business_bid_format_review":
                 result = await _ensure_business_review_response()
             elif service_name == "deviation_check":
+                # 商务标 OCR 完成即可检查商务标偏离表；技术标就绪后重跑会自动并入技术标偏离。
                 _ensure_project_analysis_status(
                     project,
-                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                     analysis_name="偏离表检查",
                 )
                 result = await run_in_threadpool(
@@ -557,10 +558,10 @@ async def _run_selected_project_services(
                     db_service=db_service,
                 )
             elif service_name == "business_bid_duplicate_check":
-                # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
+                # 商务标查重限定 business_bid 文档，商务标 OCR 完成后即可运行。
                 _ensure_project_analysis_status(
                     project,
-                    required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                    required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                     analysis_name="商务标查重",
                 )
                 result = await run_in_threadpool(

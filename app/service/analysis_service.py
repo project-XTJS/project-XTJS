@@ -43,6 +43,10 @@ class AnalysisService:
         """返回支持的文件扩展名列表副本。"""
         return self.SUPPORTED_EXTENSIONS.copy()
 
+    def ocr_worker_slots(self) -> int:
+        """单设备：并行度为 1（OCR 串行）。"""
+        return 1
+
     def extract_text_result(
         self,
         file_path: str,
@@ -187,6 +191,10 @@ class AnalysisServiceDispatcher:
 
     def get_supported_extensions(self) -> list[str]:
         return self._services[0].get_supported_extensions()
+
+    def ocr_worker_slots(self) -> int:
+        """多设备：并行度为 设备数 × 每卡在途数（调度器据此放行并发请求）。"""
+        return len(self._services) * self._capacity
 
     def run_full_analysis(self, text: str, extraction_meta: dict) -> dict:
         # 文本分析无需特殊路由，直接使用第一台设备

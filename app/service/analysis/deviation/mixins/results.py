@@ -74,86 +74,91 @@ class ResultsMixin:
 
         requirements = star_requirements
         matches = [self._match_one_star(item, sections) for item in requirements]
+        # 对每个标记项做语义符合度打分（BGE，离线），每项都带 semantic_*/needs_manual。
+        self._apply_semantic_judgement(matches)
 
-        missing_items: list[dict[str, Any]] = []
-        negative_items: list[dict[str, Any]] = []
-        unclear_items: list[dict[str, Any]] = []
+        # 必须项(★)缺失/负偏离 → 失败；加分项(△)未达标 → 提示(不致失败)。
+        missing_items: list[dict[str, Any]] = []   # 仅必须项，驱动合规
+        negative_items: list[dict[str, Any]] = []  # 仅必须项
+        unclear_items: list[dict[str, Any]] = []   # 仅必须项
+        bonus_items: list[dict[str, Any]] = []     # 加分项中的缺失/负偏离/不明确，提示用
+        mandatory_total = 0
+        bonus_total = 0
         responded = 0
         positive = 0
         no_dev = 0
         listed = 0
+        bonus_responded = 0
 
         for item in matches:
+            is_bonus = item.get("requirement_kind") == "bonus"
             dev_type = str(item.get("deviation_type") or "unclear")
+            if is_bonus:
+                bonus_total += 1
+            else:
+                mandatory_total += 1
+
             if not item.get("responded"):
-                missing_items.append(
-                    {
-                        "requirement_id": item["requirement_id"],
-                        "requirement": item["requirement"],
-                        "requirement_page": item.get("requirement_page"),
-                        "requirement_bbox": item.get("requirement_bbox"),
-                        "response_page": item.get("response_page"),
-                        "response_bbox": item.get("response_bbox"),
-                        "response_document_role": item.get("response_document_role"),
-                        "response_status": "missing",
-                    }
-                )
                 item["response_status"] = "missing"
-                item["risk_level"] = "high"
+                if is_bonus:
+                    item["risk_level"] = "medium"
+                    bonus_items.append(self._summary_item(item, "missing"))
+                else:
+                    item["risk_level"] = "high"
+                    missing_items.append(self._summary_item(item, "missing"))
                 continue
 
-            responded += 1
+            if is_bonus:
+                bonus_responded += 1
+            else:
+                responded += 1
+
             if dev_type == "negative_deviation":
-                negative_items.append(
-                    {
-                        "requirement_id": item["requirement_id"],
-                        "requirement": item["requirement"],
-                        "response_evidence": item.get("response_evidence", ""),
-                        "response_page": item.get("response_page"),
-                        "response_bbox": item.get("response_bbox"),
-                        "response_document_role": item.get("response_document_role"),
-                        "requirement_page": item.get("requirement_page"),
-                        "requirement_bbox": item.get("requirement_bbox"),
-                    }
-                )
                 item["response_status"] = "negative_deviation"
-                item["risk_level"] = "high"
+                if is_bonus:
+                    item["risk_level"] = "medium"
+                    bonus_items.append(self._summary_item(item, "negative_deviation"))
+                else:
+                    item["risk_level"] = "high"
+                    negative_items.append(self._summary_item(item, "negative_deviation"))
             elif dev_type == "positive_deviation":
-                positive += 1
                 item["response_status"] = "positive_deviation"
                 item["risk_level"] = "low"
+                if not is_bonus:
+                    positive += 1
             elif dev_type == "no_deviation":
-                no_dev += 1
                 item["response_status"] = "no_deviation"
                 item["risk_level"] = "low"
+                if not is_bonus:
+                    no_dev += 1
             elif dev_type == "listed_response":
-                listed += 1
                 item["response_status"] = "listed_response"
                 item["risk_level"] = "low"
+                if not is_bonus:
+                    listed += 1
             else:
-                unclear_items.append(
-                    {
-                        "requirement_id": item["requirement_id"],
-                        "requirement": item["requirement"],
-                        "response_evidence": item.get("response_evidence", ""),
-                        "response_page": item.get("response_page"),
-                        "response_bbox": item.get("response_bbox"),
-                        "response_document_role": item.get("response_document_role"),
-                        "requirement_page": item.get("requirement_page"),
-                        "requirement_bbox": item.get("requirement_bbox"),
-                    }
-                )
                 item["response_status"] = "unclear_deviation"
-                item["risk_level"] = "high"
+                if is_bonus:
+                    item["risk_level"] = "medium"
+                    bonus_items.append(self._summary_item(item, "unclear_deviation"))
+                else:
+                    item["risk_level"] = "high"
+                    unclear_items.append(self._summary_item(item, "unclear_deviation"))
 
         total = len(requirements)
         missing = len(missing_items)
         negative = len(negative_items)
         unclear = len(unclear_items)
-        status, deviation_status, summary = self._overall_status(total, missing, negative, unclear)
+        bonus_flagged = len(bonus_items)
+        status, deviation_status, summary = self._overall_status(
+            mandatory_total, missing, negative, unclear, bonus_total, bonus_flagged
+        )
 
-        findings = [f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。"]
-        findings.append(f"已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
+        findings = [
+            f"在招标文件中检测到 {mandatory_total} 条 ★ 强制性要求、{bonus_total} 条 △ 加分项。"
+        ]
+        findings.append(f"★ 已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
+        findings.append(f"△ 已响应 {bonus_responded} 条，未达标 {bonus_flagged} 条（加分项，不计入合规失败）。")
         findings.append(f"合规响应数量（无偏离/正偏离/列明未负响应）：{no_dev + positive + listed} 条。")
 
         return {
@@ -161,9 +166,11 @@ class ResultsMixin:
             "summary": summary,
             "compliance_status": status,
             "deviation_status": deviation_status,
-            "requirement_extraction_mode": "star",
+            "requirement_extraction_mode": "star_triangle",
             "core_requirements_count": total,
-            "core_star_requirements_count": len(star_requirements),
+            "core_star_requirements_count": mandatory_total,
+            "mandatory_requirements_count": mandatory_total,
+            "bonus_requirements_count": bonus_total,
             "deviation_tables": {
                 "business_found": bool(sections["business"]),
                 "technical_found": bool(sections["technical"]),
@@ -179,6 +186,7 @@ class ResultsMixin:
             "missing_response_items": missing_items,
             "negative_deviation_items": negative_items,
             "unclear_response_items": unclear_items,
+            "bonus_flagged_items": bonus_items,
             "stats": {
                 "responded_count": responded,
                 "missing_count": missing,
@@ -188,6 +196,9 @@ class ResultsMixin:
                 "listed_response_count": listed,
                 "unclear_deviation_count": unclear,
                 "explicit_response_count": responded,
+                "bonus_total_count": bonus_total,
+                "bonus_responded_count": bonus_responded,
+                "bonus_flagged_count": bonus_flagged,
                 "covered_by_global_statement_count": 0,
                 "covered_by_deviation_table_count": 0,
             },
@@ -244,16 +255,22 @@ class ResultsMixin:
             "catalog_locations": [],
         }
         combined_text_parts: list[str] = []
+        table_start_pages: set[int] = set()
         for part in parts:
             for key in ("business", "technical", "rows", "catalog_locations"):
                 combined[key].extend(part.get(key) or [])
             for page in part.get("catalog_pages") or []:
                 if page not in combined["catalog_pages"]:
                     combined["catalog_pages"].append(page)
+            for page in part.get("table_start_pages") or []:
+                if isinstance(page, int):
+                    table_start_pages.add(page)
             text = str(part.get("combined_text") or "").strip()
             if text:
                 combined_text_parts.append(text)
         combined["catalog_pages"] = sorted(page for page in combined["catalog_pages"] if isinstance(page, int))
+        # 用于把"响应所在页"扩成整张偏离表跨度（下一张表起始页 - 1）
+        combined["table_start_pages"] = sorted(table_start_pages)
         combined["combined_text"] = "\n\n".join(combined_text_parts)
         return combined
 
@@ -594,20 +611,108 @@ class ResultsMixin:
                     return self._coerce_payload(container[tk]), self._coerce_payload(container[bk])
         return None
 
-    def _overall_status(self, total: int, missing: int, negative: int, unclear: int) -> tuple[str, str, str]:
-        """根据统计结果生成总体状态和摘要。"""
-        if total == 0:
+    def _overall_status(
+        self,
+        mandatory_total: int,
+        missing: int,
+        negative: int,
+        unclear: int,
+        bonus_total: int = 0,
+        bonus_flagged: int = 0,
+    ) -> tuple[str, str, str]:
+        """根据统计结果生成总体状态和摘要。
+
+        合规判定仅依据 ★ 必须项；△ 加分项未达标只做提示，不导致失败。
+        """
+        bonus_note = (
+            f"；另有 {bonus_total} 条 △ 加分项，其中 {bonus_flagged} 条未达标(缺失/负偏离/不明确)。"
+            if bonus_total
+            else ""
+        )
+        if mandatory_total == 0:
+            if bonus_total:
+                return "pass", "pass", f"未发现 ★ 强制性要求{bonus_note}"
             return "pass", "no_star_requirements", "未发现带 ★ 的强制性要求，已跳过比对。"
         if negative > 0:
             return (
                 "fail",
                 "fail",
-                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
+                f"共 {mandatory_total} 条 ★ 强制性要求；缺失={missing}，负偏离={negative}{bonus_note}",
             )
         if missing > 0:
             return (
                 "missing",
                 "missing_response",
-                f"共发现 {total} 条带 ★ 的强制性要求；缺失={missing}，负偏离={negative}。",
+                f"共 {mandatory_total} 条 ★ 强制性要求；缺失={missing}，负偏离={negative}{bonus_note}",
             )
-        return "pass", "pass", "偏离响应部分已覆盖全部带 ★ 的强制性要求，且未发现负偏离。"
+        return (
+            "pass",
+            "pass",
+            f"偏离响应已覆盖全部 {mandatory_total} 条 ★ 强制性要求，且未发现负偏离{bonus_note}",
+        )
+
+    def _summary_item(self, item: dict[str, Any], response_status: str) -> dict[str, Any]:
+        """构建缺失/负偏离/加分等摘要项的统一字段集（含标记类型与语义判定）。"""
+        return {
+            "requirement_id": item["requirement_id"],
+            "requirement": item["requirement"],
+            "marker_type": item.get("marker_type"),
+            "requirement_kind": item.get("requirement_kind"),
+            "response_status": response_status,
+            "response_evidence": item.get("response_evidence", ""),
+            "response_page": item.get("response_page"),
+            "response_bbox": item.get("response_bbox"),
+            "response_document_role": item.get("response_document_role"),
+            "requirement_page": item.get("requirement_page"),
+            "requirement_bbox": item.get("requirement_bbox"),
+            "semantic_score": item.get("semantic_score"),
+            "semantic_status": item.get("semantic_status"),
+            "needs_manual": item.get("needs_manual"),
+        }
+
+    def _apply_semantic_judgement(self, matches: list[dict[str, Any]]) -> None:
+        """对每个标记项做语义符合度判定。
+
+        已响应项用 BGE 向量计算「需求 ↔ 响应证据」相似度，≥阈值记为“符合”、
+        否则“存疑”；模型不可用、无证据或未响应一律标记为 needs_manual=True，
+        确保每个 ★/△ 项都能由人工或模型确认。
+        """
+        from app.config.settings import settings
+
+        threshold = float(getattr(settings, "DEVIATION_SEMANTIC_PASS_THRESHOLD", 0.70))
+        service = None
+        try:
+            from app.service.analysis.compliance.embedding_service import get_embedding_service
+
+            service = get_embedding_service()
+        except Exception:
+            service = None
+
+        for item in matches:
+            item.setdefault("semantic_score", None)
+            item.setdefault("semantic_status", None)
+            if not item.get("responded"):
+                item["needs_manual"] = True
+                continue
+            requirement = str(item.get("requirement") or "").strip()
+            evidence = str(item.get("response_evidence") or "").strip()
+            score: float | None = None
+            if service is not None and requirement and evidence:
+                try:
+                    scores = service.similarities(requirement, [evidence])
+                    if scores:
+                        score = round(float(scores[0]), 4)
+                except Exception:
+                    score = None
+            if score is None:
+                item["semantic_score"] = None
+                item["semantic_status"] = None
+                item["needs_manual"] = True
+                continue
+            item["semantic_score"] = score
+            if score >= threshold:
+                item["semantic_status"] = "符合"
+                item["needs_manual"] = False
+            else:
+                item["semantic_status"] = "存疑"
+                item["needs_manual"] = True

@@ -14,7 +14,7 @@ minio>=7.2.20
 
 # --- 认证与安全 ---
 python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.1
 
 # --- OCR 与图像处理 ---
 paddleocr[doc-parser]==3.4.0

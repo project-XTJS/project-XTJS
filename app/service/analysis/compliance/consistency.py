@@ -374,9 +374,43 @@ class ConsistencyChecker:
 
         return None
 
+    # 明确声明"格式自拟/自拟格式"的标记
+    SELF_DEFINED_FORMAT_MARKERS = ("格式自拟", "自拟格式", "格式自定", "自定格式")
+    # 占位粘贴类正文的提示词（投标人需用真实材料替换占位，无固定骨架可比）
+    PASTE_PLACEHOLDER_HINTS = ("粘贴", "黏贴", "贴此处", "此处粘贴", "粘附", "另附", "自行附")
+
     def _is_self_defined_format_template(self, title: str, text: str) -> bool:
-        """格式自拟附件不做固定正文逐字一致性检查。"""
-        return "格式自拟" in f"{title}\n{text}"
+        """无固定正文的附件（格式自拟，或正文仅为"粘贴X"占位）不做固定正文逐字一致性检查。"""
+        combined = f"{title}\n{text}"
+        if any(marker in combined for marker in self.SELF_DEFINED_FORMAT_MARKERS):
+            return True
+        # 正文实质只是"粘贴X凭证/材料"之类占位指示时，视同无固定正文，避免把投标人贴的真实材料误判为改写。
+        return self._is_paste_placeholder_body(title, text)
+
+    def _is_paste_placeholder_body(self, title: str, text: str) -> bool:
+        """判断模板正文是否实质只是占位粘贴指示（除标题/说明外，仅剩"粘贴…"占位）。"""
+        title_norm = self._normalize(title)
+        has_paste = False
+        for raw_line in str(text or "").splitlines():
+            norm = self._normalize(raw_line)
+            if not norm:
+                continue
+            # 附件标题行 / 与标题相同的行：忽略
+            if norm == title_norm:
+                continue
+            if "附件" in norm and any(ch.isdigit() for ch in norm):
+                continue
+            # 去括号后残留的"格式/如有"等说明性标记：忽略
+            if norm in ("格式", "如有", "格式如有", "样式"):
+                continue
+            if any(hint in norm for hint in self.PASTE_PLACEHOLDER_HINTS):
+                has_paste = True
+                continue
+            if norm.isdigit():
+                continue
+            # 出现实质性固定正文 → 不是纯占位附件，仍需逐字比对
+            return False
+        return has_paste
 
     def _self_defined_skip_reason(
         self, integrity_reason: dict | None = None, *, source: str = "attachment"

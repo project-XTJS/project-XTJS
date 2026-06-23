@@ -282,12 +282,17 @@ def _ensure_project_ocr_idle(project: dict[str, Any], *, analysis_name: str) -> 
 
 
 def _required_parsing_status_for_duplicate_scope(scope: DuplicateCheckScope) -> int:
-    # 商务标查重也要在技术标里回退查找技术偏离表，故任何查重范围都需技术标 OCR 完成。
+    # 商务标查重在商务标 OCR 完成后即可运行；涉及技术标的查重需技术标 OCR 完成。
+    if scope == DuplicateCheckScope.BUSINESS_BID:
+        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
 
 def _required_parsing_status_for_document_types(document_types: Optional[list[str]]) -> int:
-    # 商务标查重需读取配对技术标（技术偏离表回退），统一要求技术标 OCR 完成。
+    # 仅商务标范围在商务标 OCR 完成后即可；包含技术标时需技术标 OCR 完成。
+    types = {str(item).strip() for item in (document_types or []) if str(item).strip()}
+    if types and types <= {DOCUMENT_TYPE_BUSINESS_BID}:
+        return PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED
     return PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
 
@@ -504,11 +509,13 @@ def _load_or_create_raw_preview_payload(
     )
     image_bytes = bytes(raw_payload.pop("image_bytes"))
     object_name = _preview_cache_object_name(document, version, page)
+    # 预览图是确定性缓存路径：Redis 元信息丢失但 MinIO 图仍在时，复用已存在对象而非报 "Object already exists"。
     upload_result = oss_service.upload_bytes(
         image_bytes,
         filename=f"p{int(page)}.png",
         content_type="image/png",
         object_name=object_name,
+        if_exists="reuse",
     )
     meta = {
         "object_name": upload_result["object_name"],
@@ -652,17 +659,39 @@ def _preview_payload_from_source(
                 if document_kind == "tender":
                     tender_phrases = _normalize_preview_highlight_phrases(highlight_phrases or [])
                     if tender_phrases:
-                        direct_rects = _apply_pdf_text_highlights(
-                            pdf_page,
-                            highlight_phrases=tender_phrases,
-                            highlight_bbox=source_rects[0],
-                        )
-                        if not direct_rects:
-                            direct_rects = _apply_pdf_text_highlights(
+                        # 招标是文本 PDF：对每条要求的 OCR rect 各做一次 PDF 文本检索，
+                        # 贴到 pymupdf 识别的精确 PDF 文本行（用 PDF bbox，而非 OCR 近似 bbox），
+                        # 避免只用 source_rects[0] 导致一页多条要求只命中第一条。
+                        collected_rects = []
+                        seen_rect_keys = set()
+                        for src_rect in source_rects:
+                            for rect in _collect_pdf_highlight_rects(
+                                pdf_page,
+                                highlight_phrases=tender_phrases,
+                                highlight_bbox=src_rect,
+                            ):
+                                key = tuple(round(float(v), 2) for v in (rect.x0, rect.y0, rect.x1, rect.y1))
+                                if key in seen_rect_keys:
+                                    continue
+                                seen_rect_keys.add(key)
+                                collected_rects.append(rect)
+                        if not collected_rects:
+                            # 兜底：整页文本检索
+                            collected_rects = _collect_pdf_highlight_rects(
                                 pdf_page,
                                 highlight_phrases=tender_phrases,
                                 highlight_bbox=None,
                             )
+                        for rect in collected_rects:
+                            pdf_page.draw_rect(
+                                rect,
+                                color=(1.0, 0.91, 0.2),
+                                fill=(1.0, 0.91, 0.2),
+                                width=0.3,
+                                fill_opacity=0.28,
+                                overlay=True,
+                            )
+                        direct_rects = collected_rects
                         if direct_rects:
                             highlight_strategy = "tender_pdf_text"
                             highlight_refined = True
@@ -2526,9 +2555,10 @@ async def rerun_project_manual_review_results(
                         result_value=result_value,
                     )
                 elif service_name == "deviation_check":
+                    # 商务标 OCR 完成即可检查商务标偏离表；技术标就绪后重跑会自动并入技术标偏离。
                     _ensure_project_analysis_status(
                         project,
-                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                         analysis_name="偏离表重审",
                     )
                     result_payload = await run_in_threadpool(
@@ -2539,10 +2569,10 @@ async def rerun_project_manual_review_results(
                     )
                     result_value = result_payload.get("review") or {}
                 elif service_name == "business_bid_duplicate_check":
-                    # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
+                    # 商务标查重限定 business_bid 文档，商务标 OCR 完成后即可运行。
                     _ensure_project_analysis_status(
                         project,
-                        required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+                        required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                         analysis_name="商务标查重重审",
                     )
                     result_value = await run_in_threadpool(
@@ -4312,9 +4342,10 @@ async def project_deviation_check(
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
         _ensure_project_ocr_idle(project, analysis_name="偏离表检查")
+        # 商务标 OCR 完成即可检查商务标偏离表；技术标就绪后重跑会自动并入技术标偏离。
         _ensure_project_analysis_status(
             project,
-            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
             analysis_name="偏离表检查",
         )
         return await run_in_threadpool(
@@ -4344,10 +4375,10 @@ async def project_business_bid_duplicate_check(
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
         _ensure_project_ocr_idle(project, analysis_name="商务标查重")
-        # 技术偏离表可能在技术标里，商务标查重需技术标 OCR 完成后才能跑。
+        # 商务标查重限定 business_bid 文档，商务标 OCR 完成后即可运行。
         _ensure_project_analysis_status(
             project,
-            required_status=PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
             analysis_name="商务标查重",
         )
         return await run_in_threadpool(

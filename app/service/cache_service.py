@@ -159,6 +159,44 @@ class RedisCacheService:
     def project_ocr_status_key(self, identifier_id: str) -> str:
         return self.key("project", str(identifier_id), "ocr-status")
 
+    def project_ocr_live_doc_key(self, identifier_id: str, document_id: str) -> str:
+        """某个正在 OCR 的文档的逐页实时进度键（短 TTL，最佳努力）。"""
+        return self.key("project", str(identifier_id), "ocr-live", str(document_id))
+
+    def project_ocr_live_pattern(self, identifier_id: str) -> str:
+        """匹配某项目下所有正在 OCR 文档的实时进度键。"""
+        return self.key("project", str(identifier_id), "ocr-live", "*")
+
+    def scan_json(self, pattern: str) -> list[Any]:
+        """扫描匹配 pattern 的所有键并返回其 JSON 值列表（用于多活动文档进度聚合）。"""
+        values: list[Any] = []
+        try:
+            client = self._redis()
+            cursor = 0
+            while True:
+                cursor, keys = client.scan(
+                    cursor=cursor,
+                    match=pattern,
+                    count=max(1, int(settings.XTJS_CACHE_SCAN_BATCH_SIZE)),
+                )
+                for raw_key in keys or []:
+                    raw = client.get(raw_key)
+                    if not raw:
+                        continue
+                    try:
+                        values.append(json.loads(raw))
+                    except Exception:
+                        continue
+                if cursor == 0:
+                    break
+            return values
+        except CacheUnavailableError:
+            raise
+        except Exception as exc:
+            self._client = None
+            logger.exception("cache scan failed pattern=%s", pattern)
+            raise CacheUnavailableError("缓存扫描失败，请检查 Redis。") from exc
+
     def preview_meta_key(self, document_id: str, version: str, page: int) -> str:
         return self.key("preview", str(document_id), str(version), f"p{int(page)}")
 

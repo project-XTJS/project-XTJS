@@ -9,6 +9,8 @@ class StarExtractMixin:
 
     # 依赖常量
     STAR_RE: re.Pattern
+    TRIANGLE_RE: re.Pattern
+    MARKER_RE: re.Pattern
     ITEM_MARKER_RE: re.Pattern
     REQUIREMENT_CHAPTER_STRONG_HINTS: tuple
     REQUIREMENT_CHAPTER_WEAK_HINTS: tuple
@@ -54,10 +56,16 @@ class StarExtractMixin:
                 if self._should_exclude_star_requirement(req):
                     continue
                 seen.add(req_norm)
+                # 依据原始文本判断标记类型：★=必须项(mandatory)，△=加分项(bonus)。
+                marker_type = self._marker_kind(entry["text"]) or "star"
+                requirement_kind = "mandatory" if marker_type == "star" else "bonus"
+                prefix = "STAR" if marker_type == "star" else "TRI"
                 out.append(
                     {
-                        "requirement_id": f"STAR-{len(out)+1:03d}",
+                        "requirement_id": f"{prefix}-{len(out)+1:03d}",
                         "requirement": req,
+                        "marker_type": marker_type,
+                        "requirement_kind": requirement_kind,
                         "section_type": entry["section_type"],
                         "page": entry["page"],
                         "bbox": entry.get("bbox"),
@@ -278,8 +286,21 @@ class StarExtractMixin:
         return "unknown"
 
     def _has_star_marker(self, text: str) -> bool:
-        """检查文本中是否包含星标符号。"""
-        return bool(self.STAR_RE.search(text or ""))
+        """检查文本中是否包含 ★ 或 △ 标记（兼容旧命名）。"""
+        return self._has_marker(text)
+
+    def _has_marker(self, text: str) -> bool:
+        """检查文本中是否包含任一标记（★ 必须项 / △ 加分项）。"""
+        return bool(self.MARKER_RE.search(text or ""))
+
+    def _marker_kind(self, text: str) -> str | None:
+        """返回文本中的标记类型：star(★) / triangle(△) / None；★ 优先。"""
+        t = text or ""
+        if self.STAR_RE.search(t):
+            return "star"
+        if self.TRIANGLE_RE.search(t):
+            return "triangle"
+        return None
 
     def _is_boundary(self, line: str) -> bool:
         """判断当前行是否为章节/标题等边界。"""

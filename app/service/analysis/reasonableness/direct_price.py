@@ -8,6 +8,17 @@
 import re
 from typing import Any, Dict, List, Optional
 
+# 中文大写金额字符集
+_CAPITAL_NUM_CHARS = "零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆园"
+# 大写金额值（纯大写数字串）
+_CAPITAL_VALUE_RE = rf"([{_CAPITAL_NUM_CHARS}]+)"
+# 大写标签：容忍括号标签"（大写）"、"金额"后缀、冒号可选，以及金额前的"人民币/RMB/¥"前缀（不入捕获组）。
+# 修复点：原正则要求"大写："后紧跟大写数字，遇到"大写：人民币壹…"或无冒号/括号标签时整体不匹配，导致大写识别不到。
+_CAPITAL_LABEL_RE = r"[（(]?\s*大写(?:金额|金額)?\s*[)）]?\s*[：:]?\s*(?:人民币|RMB|rmb|[¥￥])?\s*"
+# 完整"大写金额"匹配（含一个捕获组：纯大写数字）
+_CAPITAL_AMOUNT_RE = _CAPITAL_LABEL_RE + _CAPITAL_VALUE_RE
+
+
 class DirectPriceMixin:
     # 依赖常量
     CAPITAL_NUM: dict
@@ -73,7 +84,9 @@ class DirectPriceMixin:
         s = capital_str.strip()
         s = re.sub(r"\s+", "", s)
         s = s.replace("人民币", "")
-        s = s.replace("圆", "元")
+        s = re.sub(r"(?i)rmb", "", s)
+        s = s.replace("￥", "").replace("¥", "")
+        s = s.replace("圆", "元").replace("园", "元")
         # 纯单位（如“万元”）不是有效金额，避免被误折算成 10000 元。
         if not any(ch in self.CAPITAL_NUM or ch in self.SMALL_UNITS for ch in s):
             return None
@@ -108,7 +121,7 @@ class DirectPriceMixin:
             inline_match = re.search(
                 r"小写[：:]\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)"
                 r".{0,50}?"
-                r"大写[：:]\s*([零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆]+)",
+                + _CAPITAL_AMOUNT_RE,
                 line,
             )
             if inline_match:
@@ -129,9 +142,7 @@ class DirectPriceMixin:
             if small_match:
                 current_small_str = small_match.group(1).strip()
                 current_small_val = self._clean_small_price(current_small_str)
-                capital_match_same_line = re.search(
-                    r"大写[：:]\s*([零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆]+)", line
-                )
+                capital_match_same_line = re.search(_CAPITAL_AMOUNT_RE, line)
                 if capital_match_same_line:
                     capital_str = capital_match_same_line.group(1).strip()
                     pairs.append({
@@ -143,9 +154,7 @@ class DirectPriceMixin:
                     current_small_str = None
                     current_small_val = None
                 continue
-            capital_match = re.search(
-                r"大写[：:]\s*([零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆]+)", line
-            )
+            capital_match = re.search(_CAPITAL_AMOUNT_RE, line)
             if capital_match and current_small_str is not None:
                 capital_str = capital_match.group(1).strip()
                 pairs.append({

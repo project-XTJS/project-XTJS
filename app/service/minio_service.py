@@ -242,8 +242,15 @@ class MinioService:
         filename: str,
         content_type: str = "application/octet-stream",
         object_name: str | None = None,
+        if_exists: str = "error",
     ) -> dict:
-        """Upload an in-memory payload to MinIO and return object metadata plus URLs."""
+        """Upload an in-memory payload to MinIO and return object metadata plus URLs.
+
+        if_exists 控制目标对象已存在时的行为：
+          - "error"（默认）：抛 "Object already exists"，避免覆盖用户文件；
+          - "reuse"：直接复用已存在对象（如预览图等确定性缓存路径），不再重复上传；
+          - "overwrite"：覆盖写入。
+        """
         size = len(data or b"")
         if size <= 0:
             raise ValueError("Upload content cannot be empty")
@@ -255,7 +262,24 @@ class MinioService:
 
         try:
             self.ensure_bucket()
-            object_name = self._resolve_upload_object_name(filename, object_name)
+            if object_name and if_exists in ("reuse", "overwrite") and self._object_exists(object_name):
+                if if_exists == "reuse":
+                    # 幂等复用：缓存类对象（如预览图）已存在则直接复用，避免 "Object already exists" 报错。
+                    presigned_url = self.get_presigned_url(object_name)
+                    file_url = self.build_file_url(object_name, self.bucket_name)
+                    self._audit(action="upload_bytes", status="reused", object_name=object_name)
+                    return {
+                        "object_name": object_name,
+                        "bucket_name": self.bucket_name,
+                        "file_url": file_url,
+                        "presigned_url": presigned_url,
+                        "size": size,
+                        "content_type": content_type,
+                        "reused": True,
+                    }
+                # if_exists == "overwrite": 沿用该对象名直接覆盖写入
+            else:
+                object_name = self._resolve_upload_object_name(filename, object_name)
             self.client.put_object(
                 bucket_name=self.bucket_name,
                 object_name=object_name,

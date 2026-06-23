@@ -8,6 +8,7 @@ from typing import Any
 class TextUtilsMixin:
     # 依赖常量
     STAR_RE: re.Pattern
+    MARKER_RE: re.Pattern
 
     def _normalize_markup_text(self, value: Any, *, preserve_lines: bool) -> str:
         """清洗 HTML 标记，保留换行或纯文本。"""
@@ -43,8 +44,8 @@ class TextUtilsMixin:
         return text
 
     def _norm(self, text: str) -> str:
-        """文本归一化：去星号、数学符号、标点、空白，转为小写。"""
-        t = self.STAR_RE.sub("", str(text or ""))
+        """文本归一化：去 ★/△ 标记、数学符号、标点、空白，转为小写。"""
+        t = self.MARKER_RE.sub("", str(text or ""))
         t = self._normalize_math_text(t)
         t = re.sub(r"[\s\u3000\xa0]+", "", t)
         t = t.replace("℃", "c").replace("°c", "c").replace("°C", "c").replace("°", "")
@@ -74,8 +75,8 @@ class TextUtilsMixin:
         return re.sub(r"\s+", " ", t).strip()
 
     def _clean_req(self, text: str) -> str:
-        """清洗星标条款文本：去掉星号、数学标记、编号前缀。"""
-        t = self.STAR_RE.sub("", str(text or ""))
+        """清洗标记条款文本：去掉 ★/△ 标记、数学标记、编号前缀。"""
+        t = self.MARKER_RE.sub("", str(text or ""))
         t = self._normalize_math_text(t)
         t = re.sub(
             r"^\s*(?:第[一二三四五六七八九十百]+[条章节项点]|[一二三四五六七八九十]+[、.．]|[0-9]+[、.．)]|[（(]\d{1,2}[)）])\s*",

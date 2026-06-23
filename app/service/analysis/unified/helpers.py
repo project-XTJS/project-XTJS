@@ -104,7 +104,8 @@ class HelpersMixin:
             "fail": "error",
             "unclear": "warning",
             "missing": "warning",
-        }[status]
+            "warning": "warning",
+        }.get(status, "warning")
         issue = {
             "status": status,
             "severity": severity,

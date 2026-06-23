@@ -862,14 +862,16 @@ class TemplateExtractor:
                 continue
             push_requirement(str(entry.get("content") or "").strip())
 
-        # 只有未能识别商务标组成范围时才回退全量附件；已识别范围时避免把技术标模板混入商务完整性。
-        if not scoped:
-            for attachment in response_attachments:
-                title = str(attachment.get("title") or "").strip()
-                if not title or attachment.get("is_composite"):
-                    continue
-                attachment_number = str(attachment.get("attachment_number") or "").strip()
-                push_requirement(title, [attachment_number] if attachment_number else None)
+        # 完整性需求取「目录(组成清单) ∪ 附件模板」并集：
+        # 识别到商务标组成时 response_attachments 已被过滤为商务范围（不会混入技术标模板），
+        # 未识别时回退全量附件。两种情况都对附件模板做并集补全，
+        # push_requirement 以归一化标题去重，保证每项只计一次。
+        for attachment in response_attachments:
+            title = str(attachment.get("title") or "").strip()
+            if not title or attachment.get("is_composite"):
+                continue
+            attachment_number = str(attachment.get("attachment_number") or "").strip()
+            push_requirement(title, [attachment_number] if attachment_number else None)
 
         return ordered_list, attachment_mapping
 

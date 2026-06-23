@@ -4,11 +4,15 @@ import re
 
 
 class DeviationConstants:
-    # 星标符号
+    # 星标符号（★=必须响应项）
     STAR_RE = re.compile(r"★")
-    # 条目标记
+    # 三角符号（△=加分项）
+    TRIANGLE_RE = re.compile(r"△")
+    # 任一标记（★ 或 △）
+    MARKER_RE = re.compile(r"[★△]")
+    # 条目标记（可带 ★/△ 前缀）
     ITEM_MARKER_RE = re.compile(
-        r"(?:★\s*)?[（(]\d{1,2}[)）]|(?:(?<=^)|(?<=\s))\d{1,2}[、.．](?!\d)"
+        r"(?:[★△]\s*)?[（(]\d{1,2}[)）]|(?:(?<=^)|(?<=\s))\d{1,2}[、.．](?!\d)"
     )
     # 表格行首标记
     TABLE_ROW_MARKER_RE = re.compile(
