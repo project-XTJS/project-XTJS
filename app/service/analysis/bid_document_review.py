@@ -37,6 +37,12 @@ _ERNIE_CSC_CORRECTOR: Any | None = None
 _ERNIE_CSC_ACTIVE_DEVICE: str | None = None
 _ERNIE_CSC_SIGNATURE: tuple[Any, ...] | None = None
 _ERNIE_CSC_INIT_LOCK = Lock()
+
+# 人名 NER(LAC)单例：作为规则抽取的“补漏”，懒加载、失败回退
+_PERSONNEL_NER: Any | None = None
+_PERSONNEL_NER_SIGNATURE: tuple[Any, ...] | None = None
+_PERSONNEL_NER_INIT_LOCK = Lock()
+_PERSONNEL_NER_DISABLED = False  # 初始化失败后置位，避免反复重试拖慢主流程
 _ERNIE_CSC_CHECK_LOCK = Lock()
 
 
@@ -98,6 +104,65 @@ class _PaddleNlpErnieCscCorrector:
 
         inputs["batch_results"] = batch_results
         return self._task._postprocess(inputs)
+
+
+class _PaddleNlpLacNer:
+    """PaddleNLP LAC 人名抽取（动态图驱动，绕开 paddle 3.x 静态导出不兼容）。
+
+    背景：paddle 3.x 把推理模型导出为 inference.json，而 paddlenlp 2.6 仍按
+    inference.pdmodel 查找，导致 Taskflow 的静态预测器一律加载失败（与项目里
+    ernie-csc 同源问题，那边也是手写动态封装绕开）。这里：
+      · monkey-patch 掉“构建静态预测器”，只保留“构建动态 BiGruCrf 模型”；
+      · 推理时用动态前向替代静态 predictor，再走任务自带的后处理拿 (词, 词性)；
+      · 只收 词性为 PER 的词作为人名。
+    """
+
+    def __init__(self, *, task: str, mode: str, device_id: int) -> None:
+        import paddle
+        from paddlenlp import Taskflow
+        from paddlenlp.taskflow.named_entity_recognition import NERLACTask
+
+        self._paddle = paddle
+        # 仅构建动态模型、跳过静态预测器加载（静态文件在 paddle3 下名不对、必失败）
+        original = NERLACTask._get_inference_model
+        NERLACTask._get_inference_model = lambda task_self: task_self._construct_model(task_self.model)
+        try:
+            tf = Taskflow(
+                "ner", mode="fast", entity_only=False,
+                device_id=device_id, batch_size=16,
+            )
+        finally:
+            NERLACTask._get_inference_model = original
+        self._task = tf.task_instance
+
+    def names(self, texts: list[str]) -> list[list[str]]:
+        if not texts:
+            return []
+        task = self._task
+        inputs = task._preprocess(list(texts))
+        results: list[Any] = []
+        lens: list[Any] = []
+        for batch in inputs["data_loader"]:
+            input_ids, seq_len = batch
+            with self._paddle.no_grad():
+                preds = task._model(input_ids, seq_len)  # 动态前向，返回 viterbi 标签id
+            results.extend(preds.numpy().tolist())
+            lens.extend(seq_len.numpy().tolist())
+        inputs["result"] = results
+        inputs["lens"] = lens
+        parsed = task._postprocess(inputs)  # list[list[(词,词性)]]，单条时为 list[(词,词性)]
+        if parsed and isinstance(parsed[0], tuple):
+            parsed = [parsed]
+        out: list[list[str]] = []
+        for item in parsed or []:
+            names: list[str] = []
+            for unit in item or []:
+                if isinstance(unit, (list, tuple)) and len(unit) >= 2 and str(unit[1]) == "PER":
+                    names.append(str(unit[0]))
+            out.append(names)
+        while len(out) < len(texts):
+            out.append([])
+        return out
 
 
 class _TableHTMLParser(HTMLParser):
@@ -281,6 +346,7 @@ class BidDocumentReviewService:
         "personnel_reverse_role": 70,
         "personnel_line": 65,
         "personnel_inline_role": 60,
+        "personnel_ner": 50,
         "personnel_public_credit_table": 30,
     }
     PERSONNEL_DISPLAY_SOURCE_PRIORITY = {
@@ -293,6 +359,7 @@ class BidDocumentReviewService:
         "personnel_reverse_role": 75,
         "personnel_line": 70,
         "personnel_inline_role": 65,
+        "personnel_ner": 55,
         "personnel_public_credit_table": 20,
     }
     PUBLIC_CREDIT_PERSONNEL_HINTS = (
@@ -453,6 +520,51 @@ class BidDocumentReviewService:
                 raise RuntimeError(f"ERNIE-CSC typo model init failed: {exc}") from exc
 
         return _ERNIE_CSC_CORRECTOR
+
+    @classmethod
+    def _resolve_personnel_ner_device_id(cls) -> int:
+        """把 PERSONNEL_NER_DEVICE 解析成 Taskflow 的 device_id（-1=CPU）。"""
+        requested = str(getattr(settings, "PERSONNEL_NER_DEVICE", "auto") or "auto").strip().lower()
+        if requested in ("", "auto"):
+            try:
+                import paddle
+
+                match = re.fullmatch(r".+:(\d+)", str(paddle.get_device()))
+                return int(match.group(1)) if match else -1
+            except Exception:
+                return -1
+        if requested == "cpu":
+            return -1
+        match = re.fullmatch(r"(?:gpu|cuda|xpu|npu):(\d+)", requested)
+        return int(match.group(1)) if match else -1
+
+    @classmethod
+    def _get_personnel_ner(cls) -> Any:
+        """延迟初始化人名 NER(LAC)；失败置位禁用并向上抛出，由调用方回退纯规则。"""
+        global _PERSONNEL_NER, _PERSONNEL_NER_SIGNATURE, _PERSONNEL_NER_DISABLED
+
+        if _PERSONNEL_NER_DISABLED:
+            raise RuntimeError("personnel NER previously failed to initialize")
+
+        task = str(getattr(settings, "PERSONNEL_NER_TASK", "ner") or "ner")
+        mode = str(getattr(settings, "PERSONNEL_NER_MODE", "fast") or "fast")
+        device_id = cls._resolve_personnel_ner_device_id()
+        signature = (task, mode, device_id)
+
+        if _PERSONNEL_NER is not None and _PERSONNEL_NER_SIGNATURE == signature:
+            return _PERSONNEL_NER
+
+        with _PERSONNEL_NER_INIT_LOCK:
+            if _PERSONNEL_NER is not None and _PERSONNEL_NER_SIGNATURE == signature:
+                return _PERSONNEL_NER
+            try:
+                logger.info("Initializing personnel NER(LAC) task=%s mode=%s device_id=%s", task, mode, device_id)
+                _PERSONNEL_NER = _PaddleNlpLacNer(task=task, mode=mode, device_id=device_id)
+                _PERSONNEL_NER_SIGNATURE = signature
+            except Exception as exc:  # pragma: no cover - 依赖模型下载/运行环境
+                _PERSONNEL_NER_DISABLED = True
+                raise RuntimeError(f"personnel NER init failed: {exc}") from exc
+        return _PERSONNEL_NER
 
     def _build_typo_check_notes(self) -> list[str]:
         return [
@@ -1965,6 +2077,13 @@ class BidDocumentReviewService:
             if section_entries:
                 entries.extend(section_entries)
 
+        # NER(LAC)补漏：把规则没命中的人名从“人员相关段落(目标页)”里补出来；
+        # 任何异常都吞掉、回退纯规则，绝不影响主流程。
+        try:
+            entries.extend(self._extract_personnel_names_via_ner(record, sections))
+        except Exception as exc:  # pragma: no cover - 模型/环境相关
+            logger.warning("人名 NER 抽取异常，已跳过(回退纯规则)：%s", exc)
+
         # 在去重前剔除营业执照/信用信息表等非项目人员来源：只来自这些板块的人名会被
         # 完全移除，同时出现在正式人员表的人名因正式来源仍在而保留。
         entries = [
@@ -1975,6 +2094,79 @@ class BidDocumentReviewService:
         ]
 
         return self._dedupe_personnel_entries_within_document(entries)
+
+    def _extract_personnel_names_via_ner(
+        self,
+        record: dict[str, Any],
+        sections: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """在“人员相关段落(目标页)”上用 LAC 抽人名，作为规则的补漏。
+
+        只抽人名、不判角色(角色置“待确认”)；输出 {人名, 页码} 形式的人员条目，
+        交给既有的去重与跨文档复用比对。为降噪与控成本：
+          · 只在含人员上下文/人员章节的段落上跑；
+          · 跳过营业执照/公共信用信息表区块(避免抽到非项目法人)；
+          · 复用 _clean_person_name 过滤占位/非人名。
+        """
+        if not bool(getattr(settings, "PERSONNEL_NER_ENABLED", False)):
+            return []
+
+        targets: list[dict[str, Any]] = []
+        for section in sections:
+            text = str(section.get("text") or "").strip()
+            if not text:
+                continue
+            compact = self._compact(self._normalize_personnel_evidence_text(text))
+            if not compact:
+                continue
+            if any(hint in compact for hint in self.PUBLIC_CREDIT_PERSONNEL_HINTS):
+                continue  # 营业执照/公共信用表：非项目人员，跳过
+            title = str(section.get("title") or "")
+            is_target = any(hint in compact for hint in self.PERSONNEL_CONTEXT_HINTS) or any(
+                hint in title for hint in self.PERSONNEL_SECTION_HINTS
+            )
+            if is_target:
+                targets.append(section)
+        if not targets:
+            return []
+
+        engine = self._get_personnel_ner()  # 失败抛出，由上层 try 回退
+        max_chars = int(getattr(settings, "PERSONNEL_NER_MAX_CHARS", 1500) or 1500)
+        batch_size = max(1, int(getattr(settings, "PERSONNEL_NER_BATCH_SIZE", 16) or 16))
+
+        entries: list[dict[str, Any]] = []
+        for start in range(0, len(targets), batch_size):
+            chunk = targets[start:start + batch_size]
+            texts = [
+                self._normalize_personnel_evidence_text(s.get("text"))[:max_chars]
+                for s in chunk
+            ]
+            try:
+                names_per_text = engine.names(texts)
+            except Exception as exc:  # pragma: no cover - 推理相关
+                logger.warning("人名 NER 推理失败，跳过该批：%s", exc)
+                continue
+            for section, raw_names in zip(chunk, names_per_text):
+                seen: set[str] = set()
+                for raw in raw_names:
+                    name = self._clean_person_name(raw)
+                    if not name or name in seen:
+                        continue
+                    seen.add(name)
+                    entries.append(
+                        self._build_personnel_entry(
+                            record=record,
+                            name=name,
+                            role="待确认",
+                            page=section.get("page"),
+                            bbox=section.get("bbox"),
+                            evidence_text=self._normalize_personnel_evidence_text(
+                                section.get("text")
+                            )[:200],
+                            source_type="personnel_ner",
+                        )
+                    )
+        return entries
 
     def _dedupe_personnel_entries_within_document(
         self,

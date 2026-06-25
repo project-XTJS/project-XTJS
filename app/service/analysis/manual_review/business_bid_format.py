@@ -528,6 +528,14 @@ def _compact_opening_amount_value(value: Any, *, tender_limit_value: Any = None)
         first_pair.get("capital_amount_yuan"),
         first_pair.get("capital_amount"),
     )
+    # 大写 OCR 原文（如“伍佰陆拾玖万陆仟元整”）：只读展示用，便于人工核对 OCR 与转换；
+    # 数字 capital_amount_yuan 仍用于大小写一致比对。
+    capital_raw_amount = _first_present_value(
+        value.get("capital_raw_amount"),
+        first_pair.get("capital_raw_amount"),
+        value.get("capital_price_str"),
+        first_pair.get("capital_price_str"),
+    )
     case_status = _first_present_value(
         value.get("case_consistency_status"),
         first_pair.get("case_consistency_status"),
@@ -540,6 +548,8 @@ def _compact_opening_amount_value(value: Any, *, tender_limit_value: Any = None)
         compact["small_amount_yuan"] = small_amount
     if capital_amount is not None:
         compact["capital_amount_yuan"] = capital_amount
+    if capital_raw_amount not in (None, ""):
+        compact["capital_raw_amount"] = str(capital_raw_amount).strip()
     if case_status is not None:
         compact["case_consistency_status"] = case_status
     if limit_status is not None:

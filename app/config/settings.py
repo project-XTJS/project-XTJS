@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     TYPO_ERNIE_CSC_TASK_PATH: str | None = None
     TYPO_CHECK_VISIBLE: bool = True
 
+    # 人员姓名 NER 抽取（PaddleNLP LAC）：作为规则抽取的“补漏”一路，
+    # 只在人员相关段落（目标页）跑，输出 {人名, 页码} 交给既有去重/复用比对。
+    # 失败/未安装时自动回退到纯规则，不影响主流程。
+    PERSONNEL_NER_ENABLED: bool = True
+    PERSONNEL_NER_TASK: str = "ner"          # PaddleNLP Taskflow 任务名
+    PERSONNEL_NER_MODE: str = "fast"         # fast=LAC(轻量,返回(词,PER)元组); accurate=wordtag(重)
+    PERSONNEL_NER_DEVICE: str = "gpu:0"
+    PERSONNEL_NER_MAX_CHARS: int = 1500      # 单段文本截断上限，防超长段落
+    PERSONNEL_NER_BATCH_SIZE: int = 16
+
     CONSISTENCY_EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-zh-v1.5"
     CONSISTENCY_EMBEDDING_MODEL_REVISION: str = (
         "7999e1d3359715c523056ef9478215996d62a620"
