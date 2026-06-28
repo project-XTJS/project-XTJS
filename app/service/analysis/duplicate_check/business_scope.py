@@ -229,6 +229,10 @@ def _segments_from_deviation_rows(
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
         )
+        # ★/▲ 强制响应项：各家本就按招标要求逐条响应（“满足/无偏离”），整行天然雷同，
+        # 不是串标线索。需求明确“除★强制响应部分外”，故整行剔除，不计入查重比对。
+        if star_matched:
+            continue
         template_matched = _matches_tender_template_requirement(
             requirement,
             deviation_checker=deviation_checker,
@@ -239,7 +243,8 @@ def _segments_from_deviation_rows(
         joined = " | ".join(
             part
             for part in (
-                "" if (star_matched or template_matched) else requirement,
+                # 非★行：要求列若是招标模板文本则置空（各家照抄不算雷同），保留各家自己的响应/偏离用于比对
+                "" if template_matched else requirement,
                 response,
                 deviation,
             )
@@ -543,7 +548,7 @@ def _strip_star_requirement_content(
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
 ) -> str:
-    """对偏离表原始行做轻量删减：命中招标★要求时，尽量只保留响应/偏离侧文本。"""
+    """偏离表原始行：命中招标 ★/▲ 强制要求时整行剔除（不计入查重），否则原样保留。"""
     text = normalize_plain_text(line)
     if not text:
         return ""
@@ -554,12 +559,7 @@ def _strip_star_requirement_content(
     ):
         return text
 
-    for token in ("投标文件的响应", "投标响应", "响应内容", "响应", "应答", "回复", "偏离说明", "偏离"):
-        index = text.find(token)
-        if index >= 0:
-            trimmed = normalize_plain_text(text[index:])
-            if compact_raw_text(trimmed):
-                return trimmed
+    # ★/▲ 强制响应行：整行剔除（各家照招标要求逐条响应，响应侧本就雷同，不是串标线索）。
     return ""
 
 

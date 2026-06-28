@@ -31,6 +31,7 @@ from app.service.analysis.location_utils import (
     normalize_locations,
 )
 from app.service.minio_service import MinioService
+from app.service import document_blob_store
 from app.service.manual_review_state import (
     MANUAL_REVIEW_RESULTS_KEY,
     build_manual_review_results,
@@ -439,22 +440,36 @@ class PostgreSQLService:
                         WHERE pd.project_id = p.identifier_id
                     ) rel ON TRUE
                     LEFT JOIN LATERAL (
+                        -- 结果外置后 result 列为 NULL：用轻量 result_keys 推导分析项统计；
+                        -- 兼容未迁移历史行（result_keys 为空时回退用 result 顶层键）。
                         SELECT
-                            (COALESCE(r.result, '{{}}'::jsonb) <> '{{}}'::jsonb) AS result_available,
-                            COALESCE(
-                                (
-                                    SELECT COUNT(*)
-                                    FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
-                                ),
-                                0
-                            ) AS analysis_result_count,
-                            COALESCE(
-                                (
-                                    SELECT jsonb_agg(result_key ORDER BY result_key)
-                                    FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
-                                ),
-                                '[]'::jsonb
-                            ) AS available_result_keys,
+                            (
+                                jsonb_typeof(COALESCE(r.result_keys, '[]'::jsonb)) = 'array'
+                                AND jsonb_array_length(COALESCE(r.result_keys, '[]'::jsonb)) > 0
+                            )
+                            OR (COALESCE(r.result, '{{}}'::jsonb) <> '{{}}'::jsonb) AS result_available,
+                            CASE
+                                WHEN jsonb_array_length(COALESCE(r.result_keys, '[]'::jsonb)) > 0
+                                    THEN jsonb_array_length(r.result_keys)
+                                ELSE COALESCE(
+                                    (
+                                        SELECT COUNT(*)
+                                        FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
+                                    ),
+                                    0
+                                )
+                            END AS analysis_result_count,
+                            CASE
+                                WHEN jsonb_array_length(COALESCE(r.result_keys, '[]'::jsonb)) > 0
+                                    THEN r.result_keys
+                                ELSE COALESCE(
+                                    (
+                                        SELECT jsonb_agg(result_key ORDER BY result_key)
+                                        FROM jsonb_object_keys(COALESCE(r.result, '{{}}'::jsonb)) AS result_key
+                                    ),
+                                    '[]'::jsonb
+                                )
+                            END AS available_result_keys,
                             r.update_time AS result_update_time
                         FROM xtjs_result r
                         WHERE r.project_identifier_id = p.identifier_id
@@ -951,11 +966,20 @@ class PostgreSQLService:
                     )
                 document = dict(cursor.fetchone())
 
+                # DB 瘦身：识别内容写 MinIO，库里只存对象键，content 置 NULL。
+                # MinIO 写失败会抛异常 → 事务回滚（连带 INSERT），不会留下坏记录。
+                content_object_key = document_blob_store.save_document_content(
+                    recognition_content,
+                    identifier_id=document["identifier_id"],
+                    file_name=normalized_file_name,
+                )
+
                 cursor.execute(
                     """
                     UPDATE xtjs_documents
                     SET
-                        content = %s,
+                        content = NULL,
+                        content_object_key = %s,
                         extracted = TRUE,
                         source_file_hash = COALESCE(%s, source_file_hash),
                         source_file_size = COALESCE(%s, source_file_size),
@@ -972,6 +996,7 @@ class PostgreSQLService:
                         file_url,
                         extracted,
                         content,
+                        content_object_key,
                         review_content,
                         source_file_hash,
                         source_file_size,
@@ -984,7 +1009,7 @@ class PostgreSQLService:
                         update_time
                     """,
                     (
-                        Json(recognition_content),
+                        content_object_key,
                         source_file_hash,
                         source_file_size,
                         ocr_cache_key,
@@ -995,6 +1020,8 @@ class PostgreSQLService:
                     ),
                 )
                 updated_document = dict(cursor.fetchone())
+                # 返回给上层时补回 content，保持既有契约（上层会 compact 剥离）。
+                updated_document["content"] = recognition_content
 
                 return {"document": updated_document}
 
@@ -1079,7 +1106,9 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                content_object_key,
                 review_content,
+                review_content_object_key,
                 source_file_hash,
                 source_file_size,
                 ocr_cache_key,
@@ -1098,7 +1127,11 @@ class PostgreSQLService:
                 resolved_identifier = self._resolve_document_identifier(cursor, identifier_id)
                 cursor.execute(query, (resolved_identifier,))
                 result = cursor.fetchone()
-                return dict(result) if result else None
+                if not result:
+                    return None
+                # content / review_content 外置后从 MinIO 取回填充，保持透明可用。
+                document = document_blob_store.hydrate_document_content(dict(result))
+                return document_blob_store.hydrate_document_review_content(document)
 
     def get_document_review_content(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """Return the normalized manual OCR working copy for a document."""
@@ -1133,7 +1166,8 @@ class PostgreSQLService:
                 normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
                 cursor.execute(
                     """
-                    SELECT identifier_id, content, review_content
+                    SELECT identifier_id, file_name, content, content_object_key,
+                           review_content, review_content_object_key
                     FROM xtjs_documents
                     WHERE identifier_id = %s AND deleted = FALSE
                     FOR UPDATE
@@ -1143,6 +1177,9 @@ class PostgreSQLService:
                 document = cursor.fetchone()
                 if not document:
                     return None
+                # content / review_content 外置后从 MinIO 取回，供工作副本基线与合并使用。
+                document = document_blob_store.hydrate_document_content(dict(document))
+                document = document_blob_store.hydrate_document_review_content(document)
                 existing = normalize_review_content(
                     document.get("review_content"),
                     content=document.get("content"),
@@ -1155,17 +1192,22 @@ class PostgreSQLService:
                     effective_content=effective_content,
                 )
                 review_content["inputs"] = next_inputs
+                # review_content 外置：写 MinIO，库里只存对象键、review_content 置 NULL。
+                review_object_key = document_blob_store.save_document_review_content(
+                    jsonable_encoder(review_content),
+                    identifier_id=normalized_identifier,
+                    file_name=document.get("file_name"),
+                )
                 cursor.execute(
                     """
                     UPDATE xtjs_documents
-                    SET review_content = %s, update_time = CURRENT_TIMESTAMP
+                    SET review_content = NULL,
+                        review_content_object_key = %s,
+                        update_time = CURRENT_TIMESTAMP
                     WHERE identifier_id = %s AND deleted = FALSE
-                    RETURNING identifier_id, content, review_content, update_time
+                    RETURNING identifier_id
                     """,
-                    (
-                        Json(jsonable_encoder(review_content)),
-                        normalized_identifier,
-                    ),
+                    (review_object_key, normalized_identifier),
                 )
                 updated = cursor.fetchone()
                 if not updated:
@@ -1173,8 +1215,8 @@ class PostgreSQLService:
                 return {
                     "identifier_id": str(updated["identifier_id"]),
                     "review_content": normalize_review_content(
-                        updated.get("review_content"),
-                        content=updated.get("content"),
+                        review_content,
+                        content=document.get("content"),
                     ),
                 }
 
@@ -1198,7 +1240,8 @@ class PostgreSQLService:
                 normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
                 cursor.execute(
                     """
-                    SELECT identifier_id, content, review_content
+                    SELECT identifier_id, file_name, content, content_object_key,
+                           review_content, review_content_object_key
                     FROM xtjs_documents
                     WHERE identifier_id = %s AND deleted = FALSE
                     FOR UPDATE
@@ -1208,6 +1251,9 @@ class PostgreSQLService:
                 document = cursor.fetchone()
                 if not document:
                     return None
+                # content / review_content 外置后从 MinIO 取回，供工作副本基线与合并使用。
+                document = document_blob_store.hydrate_document_content(dict(document))
+                document = document_blob_store.hydrate_document_review_content(document)
                 next_effective = (
                     effective_content
                     if effective_content is not None
@@ -1220,17 +1266,22 @@ class PostgreSQLService:
                     input_key=normalized_input_key,
                     input_value=input_value,
                 )
+                # review_content 外置：写 MinIO，库里只存对象键、review_content 置 NULL。
+                review_object_key = document_blob_store.save_document_review_content(
+                    jsonable_encoder(review_content),
+                    identifier_id=normalized_identifier,
+                    file_name=document.get("file_name"),
+                )
                 cursor.execute(
                     """
                     UPDATE xtjs_documents
-                    SET review_content = %s, update_time = CURRENT_TIMESTAMP
+                    SET review_content = NULL,
+                        review_content_object_key = %s,
+                        update_time = CURRENT_TIMESTAMP
                     WHERE identifier_id = %s AND deleted = FALSE
-                    RETURNING identifier_id, content, review_content, update_time
+                    RETURNING identifier_id
                     """,
-                    (
-                        Json(jsonable_encoder(review_content)),
-                        normalized_identifier,
-                    ),
+                    (review_object_key, normalized_identifier),
                 )
                 updated = cursor.fetchone()
                 if not updated:
@@ -1238,8 +1289,8 @@ class PostgreSQLService:
                 return {
                     "identifier_id": str(updated["identifier_id"]),
                     "review_content": normalize_review_content(
-                        updated.get("review_content"),
-                        content=updated.get("content"),
+                        review_content,
+                        content=document.get("content"),
                     ),
                 }
 
@@ -1311,7 +1362,8 @@ class PostgreSQLService:
         query = """
             UPDATE xtjs_documents
             SET
-                content = %s,
+                content = NULL,
+                content_object_key = %s,
                 extracted = TRUE,
                 source_file_hash = COALESCE(%s, source_file_hash),
                 source_file_size = COALESCE(%s, source_file_size),
@@ -1328,6 +1380,7 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                content_object_key,
                 review_content,
                 source_file_hash,
                 source_file_size,
@@ -1342,10 +1395,15 @@ class PostgreSQLService:
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                # DB 瘦身：识别内容写 MinIO，库里只存对象键。MinIO 失败抛错→事务回滚。
+                content_object_key = document_blob_store.save_document_content(
+                    recognition_content,
+                    identifier_id=normalized_identifier,
+                )
                 cursor.execute(
                     query,
                     (
-                        Json(recognition_content),
+                        content_object_key,
                         source_file_hash,
                         source_file_size,
                         ocr_cache_key,
@@ -1356,7 +1414,11 @@ class PostgreSQLService:
                     ),
                 )
                 updated = cursor.fetchone()
-                return dict(updated) if updated else None
+                if not updated:
+                    return None
+                updated = dict(updated)
+                updated["content"] = recognition_content
+                return updated
 
     def update_document_source_metadata(
         self,
@@ -1425,7 +1487,7 @@ class PostgreSQLService:
         conditions = [
             "deleted = FALSE",
             "extracted = TRUE",
-            "content IS NOT NULL",
+            "(content IS NOT NULL OR content_object_key IS NOT NULL)",
             "source_file_hash = %s",
             "document_type = %s",
             "ocr_engine_version = %s",
@@ -1450,6 +1512,7 @@ class PostgreSQLService:
                 file_url,
                 extracted,
                 content,
+                content_object_key,
                 review_content,
                 source_file_hash,
                 source_file_size,
@@ -1469,7 +1532,10 @@ class PostgreSQLService:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, tuple(values))
                 result = cursor.fetchone()
-                return dict(result) if result else None
+                if not result:
+                    return None
+                # OCR 缓存复用需要完整 content：外置后从 MinIO 取回。
+                return document_blob_store.hydrate_document_content(dict(result))
 
     def soft_delete_document(self, identifier_id: str) -> bool:
         """软删除文档。"""
@@ -2719,7 +2785,9 @@ class PostgreSQLService:
     @classmethod
     def _sanitize_project_result_record(cls, record: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(record)
-        if "result" in payload:
+        # result 外置后 DB 内联列为 NULL，按对象键从 MinIO 取回，保持 result 透明可用。
+        document_blob_store.hydrate_result_record(payload)
+        if "result" in payload or payload.get("result_object_key"):
             result_payload = cls._strip_legacy_project_file_urls(payload.get("result"))
             payload["result"] = result_payload if isinstance(result_payload, dict) else {}
         payload[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results_from_record(payload)
@@ -2793,6 +2861,34 @@ class PostgreSQLService:
             return preferred
         return fallback
 
+    @staticmethod
+    def _hydrate_duplicate_check_row(document: Dict[str, Any]) -> None:
+        """就地把查重行的原文 content 与人工复核 review_content（投标、招标）从 MinIO 取回。
+
+        content/review_content 外置后 DB 内联列为 NULL；仅在内联为空且有对象键时回填。
+        每个对象键只读一次。
+        """
+        for field, key_col in (
+            ("raw_content", "content_object_key"),
+            ("tender_raw_content", "tender_content_object_key"),
+            ("review_content", "review_content_object_key"),
+            ("tender_review_content", "tender_review_content_object_key"),
+        ):
+            if document_blob_store._is_present_json(document.get(field)):
+                continue
+            blob = document_blob_store.read_blob(document.get(key_col))
+            if blob is not None:
+                document[field] = blob
+
+    @staticmethod
+    def _effective_from_review(review_content: Any) -> Any:
+        """从 review_content 取 effective_content（等价原 SQL `review_content -> 'effective_content'`）。"""
+        if isinstance(review_content, dict):
+            effective = review_content.get("effective_content")
+            if isinstance(effective, dict):
+                return effective
+        return None
+
     def get_project_documents_for_duplicate_check(
         self,
         identifier_id: str,
@@ -2812,17 +2908,19 @@ class PostgreSQLService:
                 bbd.file_name,
                 bbd.file_url,
                 bbd.extracted,
-                COALESCE(bbd.review_content -> 'effective_content', bbd.content) AS content,
                 bbd.content AS raw_content,
+                bbd.content_object_key AS content_object_key,
                 bbd.review_content,
+                bbd.review_content_object_key AS review_content_object_key,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 td.extracted AS tender_extracted,
-                COALESCE(td.review_content -> 'effective_content', td.content) AS tender_content,
                 td.content AS tender_raw_content,
+                td.content_object_key AS tender_content_object_key,
                 td.review_content AS tender_review_content,
+                td.review_content_object_key AS tender_review_content_object_key,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
@@ -2844,17 +2942,19 @@ class PostgreSQLService:
                 tbd.file_name,
                 tbd.file_url,
                 tbd.extracted,
-                COALESCE(tbd.review_content -> 'effective_content', tbd.content) AS content,
                 tbd.content AS raw_content,
+                tbd.content_object_key AS content_object_key,
                 tbd.review_content,
+                tbd.review_content_object_key AS review_content_object_key,
                 td.identifier_id AS tender_identifier_id,
                 td.document_type AS tender_document_type,
                 td.file_name AS tender_file_name,
                 td.file_url AS tender_file_url,
                 td.extracted AS tender_extracted,
-                COALESCE(td.review_content -> 'effective_content', td.content) AS tender_content,
                 td.content AS tender_raw_content,
+                td.content_object_key AS tender_content_object_key,
                 td.review_content AS tender_review_content,
+                td.review_content_object_key AS tender_review_content_object_key,
                 pd.create_time
             FROM xtjs_project_documents pd
             JOIN xtjs_documents td
@@ -2873,12 +2973,15 @@ class PostgreSQLService:
                 documents: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
 
         for document in documents:
+            # content/review_content 外置后内联列为 NULL，按对象键从 MinIO 取回；
+            # 再在 Python 侧用 effective_content（人工修订）优先、否则原文，等价原 SQL COALESCE。
+            self._hydrate_duplicate_check_row(document)
             document["content"] = self._choose_duplicate_check_content(
-                document.get("content"),
+                self._effective_from_review(document.get("review_content")),
                 document.get("raw_content"),
             )
             document["tender_content"] = self._choose_duplicate_check_content(
-                document.get("tender_content"),
+                self._effective_from_review(document.get("tender_review_content")),
                 document.get("tender_raw_content"),
             )
 
@@ -2898,6 +3001,7 @@ class PostgreSQLService:
                 id,
                 project_identifier_id,
                 result,
+                result_object_key,
                 create_time,
                 update_time
             FROM xtjs_result
@@ -2943,6 +3047,7 @@ class PostgreSQLService:
                 r.project_identifier_id,
                 p.project_name,
                 r.result,
+                r.result_object_key,
                 r.create_time,
                 r.update_time
             FROM xtjs_result r
@@ -2967,6 +3072,53 @@ class PostgreSQLService:
             items=items,
         )
 
+    # 结果外置：把完整 result 写 MinIO，DB 行只留 result_object_key + 轻量 result_keys，
+    # result 列置 NULL。
+    _RESULT_UPSERT_SQL = """
+        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys)
+        VALUES (%s, NULL, %s, %s)
+        ON CONFLICT (project_identifier_id)
+        DO UPDATE
+        SET
+            result = NULL,
+            result_object_key = EXCLUDED.result_object_key,
+            result_keys = EXCLUDED.result_keys,
+            update_time = CURRENT_TIMESTAMP
+        RETURNING
+            id,
+            project_identifier_id,
+            result,
+            result_object_key,
+            create_time,
+            update_time
+    """
+
+    def _persist_project_result(
+        self,
+        cursor,
+        project: Dict[str, Any],
+        full_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """把完整 result 写 MinIO 并落库对象键（result 列置 NULL），返回规范化记录。
+
+        MinIO 写在 SQL 之前；若 MinIO 失败抛错→事务回滚，不会留下指向坏对象的行。
+        同时落一份轻量顶层键列表（result_keys），供项目列表统计分析项。
+        """
+        pid = str(project["identifier_id"])
+        encoded = jsonable_encoder(full_result)
+        result_object_key = document_blob_store.save_project_result(
+            encoded,
+            project_name=project.get("project_name"),
+            project_identifier_id=pid,
+        )
+        result_keys = sorted(k for k in (encoded or {}).keys()) if isinstance(encoded, dict) else []
+        cursor.execute(self._RESULT_UPSERT_SQL, (pid, result_object_key, Json(result_keys)))
+        record = dict(cursor.fetchone())
+        # 注入刚写入的内容，避免 _sanitize 立刻再读一次 MinIO。
+        record["result"] = encoded
+        record["result_object_key"] = result_object_key
+        return self._sanitize_project_result_record(record)
+
     def create_or_replace_project_result(
         self,
         project_identifier_id: str,
@@ -2984,31 +3136,9 @@ class PostgreSQLService:
             result,
         )
 
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result)
-            VALUES (%s, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result = EXCLUDED.result,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                create_time,
-                update_time
-        """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(persisted_result)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+                return self._persist_project_result(cursor, project, persisted_result)
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
         """删除项目分析结果记录。"""
@@ -3063,31 +3193,15 @@ class PostgreSQLService:
             normalized_project_identifier,
             {normalized_result_key: result_value},
         )
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result)
-            VALUES (%s, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result = (COALESCE(xtjs_result.result, '{}'::jsonb) - 'project_file_urls') || EXCLUDED.result,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                create_time,
-                update_time
-        """
+        # 结果外置后无法在 SQL 层做 JSONB 合并：读出完整既有结果→Python 浅合并→整体写回。
+        # 复刻原 SQL 语义 (COALESCE(existing,'{}') - 'project_file_urls') || EXCLUDED.result。
+        existing = self.get_project_result(normalized_project_identifier)
+        merged = dict(existing.get("result") or {}) if existing else {}
+        merged.pop("project_file_urls", None)
+        merged.update(payload)
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(payload)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+                return self._persist_project_result(cursor, project, merged)
 
     def update_project_manual_review_result(
         self,
@@ -3114,31 +3228,9 @@ class PostgreSQLService:
         )
         existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
 
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result)
-            VALUES (%s, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result = EXCLUDED.result,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                create_time,
-                update_time
-        """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(existing_result)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+                return self._persist_project_result(cursor, project, existing_result)
 
     def clear_project_manual_review_latest_result(
         self,
@@ -3169,31 +3261,9 @@ class PostgreSQLService:
         else:
             existing_result.pop(MANUAL_REVIEW_RESULTS_KEY, None)
 
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result)
-            VALUES (%s, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result = EXCLUDED.result,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                create_time,
-                update_time
-        """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(existing_result)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+                return self._persist_project_result(cursor, project, existing_result)
 
     def update_project_manual_review_workflow_scope(
         self,
@@ -3217,28 +3287,6 @@ class PostgreSQLService:
         )
         existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
 
-        query = """
-            INSERT INTO xtjs_result (project_identifier_id, result)
-            VALUES (%s, %s)
-            ON CONFLICT (project_identifier_id)
-            DO UPDATE
-            SET
-                result = EXCLUDED.result,
-                update_time = CURRENT_TIMESTAMP
-            RETURNING
-                id,
-                project_identifier_id,
-                result,
-                create_time,
-                update_time
-        """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    query,
-                    (
-                        normalized_project_identifier,
-                        Json(jsonable_encoder(existing_result)),
-                    ),
-                )
-                return self._sanitize_project_result_record(dict(cursor.fetchone()))
+                return self._persist_project_result(cursor, project, existing_result)

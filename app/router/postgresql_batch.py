@@ -35,6 +35,7 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service.analysis.author_check import check_project_author_conflicts
 from app.service import ocr_progress_publisher
 from app.service.cache_service import CacheUnavailableError, RedisCacheService, invalidate_project_cache
 from app.service.analysis.duplicate_merge import build_duplicate_merge_results
@@ -1247,6 +1248,279 @@ async def ingest_and_recognize_project_documents(
             "parsing_status_label": project.get("parsing_status_label"),
         },
     }
+
+# —— 文件夹上传：解析“一个项目一个文件夹”的目录树并自动绑定 ——
+_FOLDER_BUSINESS_KEYWORD = "商务"
+_FOLDER_TECHNICAL_KEYWORD = "技术"
+
+
+def _is_pdf_name(name: str) -> bool:
+    return str(name or "").strip().lower().endswith(".pdf")
+
+
+def _parse_project_folder_tree(paths: list[str]) -> dict:
+    """解析浏览器文件夹上传的相对路径树。
+
+    约定：
+      顶层文件夹名 = 项目名；顶层散落 PDF = 招标文件；
+      每个二级子文件夹名 = 公司名，子夹内 PDF 按文件名关键字分类
+      （含“商务”→商务标，含“技术”→技术标）。
+
+    返回 {project_name, tender, companies(有序), issues}；
+    tender = {"index","pdf_name"}；companies[name] = {"business":{...}|None,"technical":{...}|None}。
+    每个条目带 index（对应 files 列表下标）。
+    """
+    issues: list[dict] = []
+    project_names: set[str] = set()
+    tenders: list[dict] = []
+    companies: dict[str, dict] = {}
+
+    for index, raw_path in enumerate(paths or []):
+        segments = [seg for seg in str(raw_path or "").replace("\\", "/").split("/") if seg.strip()]
+        if not segments:
+            continue
+        project_names.add(segments[0])
+        if not _is_pdf_name(segments[-1]):
+            continue  # 仅处理 PDF，忽略缩略图等其它文件
+        depth = len(segments)
+        if depth == 2:
+            tenders.append({"index": index, "pdf_name": segments[1]})
+        elif depth >= 3:
+            company = segments[1]
+            pdf_name = segments[-1]
+            slot = companies.setdefault(company, {"business": None, "technical": None})
+            if _FOLDER_BUSINESS_KEYWORD in pdf_name:
+                role = "business"
+            elif _FOLDER_TECHNICAL_KEYWORD in pdf_name:
+                role = "technical"
+            else:
+                issues.append({
+                    "type": "unclassified_file",
+                    "company": company,
+                    "pdf_name": pdf_name,
+                    "message": f"公司「{company}」的文件「{pdf_name}」无法识别商务/技术（文件名需含“商务”或“技术”）。",
+                })
+                continue
+            if slot[role] is not None:
+                issues.append({
+                    "type": "duplicate_role_file",
+                    "company": company,
+                    "role": role,
+                    "pdf_name": pdf_name,
+                    "message": f"公司「{company}」存在多个{'商务标' if role == 'business' else '技术标'} PDF，无法确定。",
+                })
+                continue
+            slot[role] = {"index": index, "pdf_name": pdf_name}
+
+    project_name = next(iter(project_names)) if len(project_names) == 1 else ""
+    if not project_name:
+        issues.append({
+            "type": "ambiguous_project_name",
+            "message": "无法确定唯一的项目文件夹名，请只选择一个项目文件夹。",
+        })
+
+    if len(tenders) == 0:
+        issues.append({"type": "missing_tender", "message": "缺少招标文件（顶层文件夹下需有一个散落的 PDF 作为招标文件）。"})
+    elif len(tenders) > 1:
+        issues.append({
+            "type": "ambiguous_tender",
+            "candidates": [t["pdf_name"] for t in tenders],
+            "message": "顶层存在多个 PDF，无法确定唯一的招标文件。",
+        })
+
+    if not companies:
+        issues.append({"type": "missing_companies", "message": "未发现任何投标公司子文件夹。"})
+
+    for company, slot in companies.items():
+        if slot["business"] is None:
+            issues.append({"type": "missing_business", "company": company, "message": f"公司「{company}」缺少商务标 PDF。"})
+        if slot["technical"] is None:
+            issues.append({"type": "missing_technical", "company": company, "message": f"公司「{company}」缺少技术标 PDF。"})
+
+    return {
+        "project_name": project_name,
+        "tender": tenders[0] if len(tenders) == 1 else None,
+        "companies": companies,
+        "issues": issues,
+    }
+
+
+@router.post(
+    "/projects/upload-folder",
+    summary="上传整个项目文件夹并自动绑定（项目/招标/各公司商务·技术，后续手动 OCR）",
+)
+async def upload_project_folder(
+    files: list[UploadFile] = File(..., description="项目文件夹内全部文件，与 paths 顺序一一对应"),
+    paths: str = Form(..., description="各文件的相对路径(webkitRelativePath) JSON 数组，顺序与 files 一致"),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """解析文件夹结构 → 创建项目 → 上传招标/各公司商务·技术 → 自动绑定。OCR 仍由后续手动触发。"""
+    normalized_files = [f for f in (files or []) if f is not None]
+    try:
+        path_list = json.loads(paths) if paths else []
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"paths 不是合法的 JSON 数组：{exc}") from exc
+    if not isinstance(path_list, list):
+        raise HTTPException(status_code=400, detail="paths 必须是字符串数组。")
+    if len(path_list) != len(normalized_files):
+        raise HTTPException(
+            status_code=400,
+            detail=f"files 数量({len(normalized_files)})与 paths 数量({len(path_list)})不一致。",
+        )
+
+    parsed = _parse_project_folder_tree([str(p) for p in path_list])
+    # 解析阶段如有结构性问题：直接 400 返回全部问题，先不上传任何文件。
+    if parsed["issues"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "文件夹结构校验未通过，请修正后重试。",
+                "project_name": parsed["project_name"],
+                "issues": parsed["issues"],
+            },
+        )
+
+    project_name = parsed["project_name"]
+    try:
+        project, project_created = await ensure_upload_project(db_service, project_name)
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+    project_identifier = str(project["identifier_id"])
+
+    # 1) 招标文件
+    tender = parsed["tender"]
+    tender_pdf_name = tender["pdf_name"]
+    tender_result = await upload_and_create_document_without_ocr(
+        file=normalized_files[tender["index"]],
+        document_type=DOCUMENT_TYPE_TENDER,
+        db_service=db_service,
+        oss_service=oss_service,
+        document_name=tender_pdf_name,
+        object_name=MinioService.build_project_object_key(
+            project_name, role="tender", filename=tender_pdf_name,
+        ),
+        raise_http_exception=True,
+    )
+    tender_identifier = tender_result["document"]["identifier_id"]
+
+    # 2) 各公司商务标 + 技术标，命名 = 公司名 + PDF 名，对象键按分级布局
+    binding_items: list[dict] = []
+    for company, slot in parsed["companies"].items():
+        business = slot["business"]
+        technical = slot["technical"]
+        business_doc_name = f"{company}{business['pdf_name']}"
+        technical_doc_name = f"{company}{technical['pdf_name']}"
+        business_upload = await upload_and_create_document_without_ocr(
+            file=normalized_files[business["index"]],
+            document_type=DOCUMENT_TYPE_BUSINESS_BID,
+            db_service=db_service,
+            oss_service=oss_service,
+            document_name=business_doc_name,
+            object_name=MinioService.build_project_object_key(
+                project_name, role="business_bid", company=company, filename=business["pdf_name"],
+            ),
+            raise_http_exception=False,
+        )
+        technical_upload = await upload_and_create_document_without_ocr(
+            file=normalized_files[technical["index"]],
+            document_type=DOCUMENT_TYPE_TECHNICAL_BID,
+            db_service=db_service,
+            oss_service=oss_service,
+            document_name=technical_doc_name,
+            object_name=MinioService.build_project_object_key(
+                project_name, role="technical_bid", company=company, filename=technical["pdf_name"],
+            ),
+            raise_http_exception=False,
+        )
+        if not business_upload.get("ok") or not technical_upload.get("ok"):
+            binding_items.append({
+                "company": company,
+                "status": "failed",
+                "stage": "upload",
+                "error": (business_upload.get("error") or technical_upload.get("error")),
+            })
+            continue
+        try:
+            relation = await run_in_threadpool(
+                db_service.bind_project_documents,
+                project_identifier,
+                tender_identifier,
+                str(business_upload["document"]["identifier_id"]),
+                str(technical_upload["document"]["identifier_id"]),
+            )
+            binding_items.append({
+                "company": company,
+                "status": "success",
+                "business_document_name": business_doc_name,
+                "technical_document_name": technical_doc_name,
+                "relation": relation,
+            })
+        except (ValueError, PsycopgError) as exc:
+            binding_items.append({
+                "company": company,
+                "status": "failed",
+                "stage": "binding",
+                "error": str(exc),
+            })
+
+    if any(item.get("status") == "success" for item in binding_items):
+        refreshed = await run_in_threadpool(
+            db_service.update_project_parsing_status,
+            project_identifier,
+            PostgreSQLService.PARSING_STATUS_UPLOADED,
+        )
+        if refreshed:
+            project = refreshed
+
+    binding_summary = _summarize_batch_items(binding_items)
+    _invalidate_project_cache_or_error(project_identifier)
+    return {
+        "status": binding_summary["status"],
+        "project": project,
+        "project_created": project_created,
+        "project_name": project_name,
+        "tender": {
+            "status": "uploaded",
+            "document_identifier": tender_identifier,
+            "document_name": tender_pdf_name,
+        },
+        "companies": binding_summary,
+        "ocr_actions": {
+            "run_tender_ocr_endpoint": f"/api/postgresql/projects/{project_identifier}/run-tender-ocr",
+            "run_business_ocr_endpoint": f"/api/postgresql/projects/{project_identifier}/run-business-ocr",
+            "run_technical_ocr_endpoint": f"/api/postgresql/projects/{project_identifier}/continue-technical-ocr",
+            "run_full_ocr_endpoint": f"/api/postgresql/projects/{project_identifier}/run-full-ocr",
+            "author_check_endpoint": f"/api/postgresql/projects/{project_identifier}/author-check",
+            "parsing_status": project.get("parsing_status"),
+            "parsing_status_label": project.get("parsing_status_label"),
+        },
+    }
+
+
+@router.get(
+    "/projects/{identifier_id}/author-check",
+    summary="作者查重预警：检测不同公司投标 PDF 是否同一作者/创建人（OCR 前）",
+)
+async def check_project_author(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    """读取项目内各投标 PDF 元数据，返回跨公司作者/创建人冲突列表（warn-only）。"""
+    try:
+        report = await run_in_threadpool(
+            check_project_author_conflicts,
+            db_service,
+            oss_service,
+            identifier_id,
+        )
+    except PsycopgError as exc:
+        raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
+    if report is None:
+        raise HTTPException(status_code=404, detail="项目不存在。")
+    return report
+
 
 async def _recognize_existing_documents_batch(
     *,

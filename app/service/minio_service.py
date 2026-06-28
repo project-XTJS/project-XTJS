@@ -6,8 +6,11 @@ MinIO 对象存储服务模块。
 对象存在性检查、URL 解析等能力，并包含审计日志记录。
 """
 
+import gzip
 import io
+import json
 import os
+import re
 import logging
 from datetime import datetime, timedelta
 from mimetypes import guess_type
@@ -95,6 +98,50 @@ class MinioService:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
         unique_suffix = uuid4().hex[:8]
         return f"{name}_{timestamp}_{unique_suffix}{ext}"
+
+    @staticmethod
+    def _safe_segment(name: object, *, maxlen: int = 100) -> str:
+        """把项目名/公司名/文件名安全化为对象键的一段（去非法字符、限长）。"""
+        text = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", str(name or "").strip())
+        text = text.strip(". ")
+        return text[:maxlen] or "unnamed"
+
+    @staticmethod
+    def build_project_object_key(
+        project: object,
+        *,
+        role: str,
+        company: object | None = None,
+        filename: object | None = None,
+        kind: str = "original",
+    ) -> str:
+        """构建分级对象键。
+
+        role: tender / business_bid / technical_bid / result
+        kind: "original"(原件) / "json"(JSON 识别结果)
+          原件:   <项目>/招标文件/<file>            <项目>/投标文件/<公司>/{商务标|技术标}_<file>
+          JSON:   <项目>/JSON识别/招标文件/<file>.json.gz
+                  <项目>/JSON识别/投标文件/<公司>/{商务标|技术标}_<file>.json.gz
+                  <项目>/JSON识别/result.json.gz   (role=result)
+        """
+        proj = MinioService._safe_segment(project)
+        parts: list[str] = [proj]
+        if kind == "json":
+            parts.append("JSON识别")
+            if str(role or "").strip() == "result":
+                return "/".join(parts + ["result.json.gz"])
+        role = str(role or "").strip()
+        fname = MinioService._safe_segment(filename or "file", maxlen=140)
+        if kind == "json":
+            fname = f"{fname}.json.gz"
+        if role == "tender":
+            parts += ["招标文件", fname]
+        elif role in ("business_bid", "technical_bid"):
+            label = "商务标" if role == "business_bid" else "技术标"
+            parts += ["投标文件", MinioService._safe_segment(company or "未知公司"), f"{label}_{fname}"]
+        else:
+            parts += [role or "其它", fname]
+        return "/".join(parts)
 
     @staticmethod
     def build_file_url(object_name: str, bucket_name: str | None = None) -> str:
@@ -444,6 +491,50 @@ class MinioService:
                     response.release_conn()
                 except Exception:
                     pass
+
+    def put_json_gz(self, object_name: str, obj: object) -> dict:
+        """把 JSON 对象 gzip 压缩后写入 MinIO（覆盖写），用于把大 JSON 移出数据库。"""
+        if not object_name or not str(object_name).strip():
+            raise ValueError("Object name cannot be empty")
+        raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        data = gzip.compress(raw, compresslevel=6)
+        try:
+            self.ensure_bucket()
+            self.client.put_object(
+                bucket_name=self.bucket_name,
+                object_name=object_name,
+                data=io.BytesIO(data),
+                length=len(data),
+                content_type="application/gzip",
+            )
+            self._audit(action="put_json_gz", status="success", object_name=object_name)
+            return {
+                "object_name": object_name,
+                "bucket_name": self.bucket_name,
+                "file_url": self.build_file_url(object_name, self.bucket_name),
+                "size": len(data),
+                "raw_size": len(raw),
+            }
+        except S3Error as exc:
+            self._audit(action="put_json_gz", status="failed", object_name=object_name, detail=str(exc))
+            raise RuntimeError(f"MinIO put_json_gz failed: {exc}") from exc
+
+    def get_json_gz(self, object_name: str, bucket_name: str | None = None):
+        """读取 gzip JSON 对象并反序列化；对象不存在返回 None。"""
+        resolved_object = str(object_name or "").strip()
+        if not resolved_object:
+            return None
+        resolved_bucket = str(bucket_name or self.bucket_name or "").strip()
+        if resolved_bucket == self.bucket_name and not self._object_exists(resolved_object):
+            return None
+        data, _ = self.get_object_bytes(resolved_object, bucket_name)
+        if not data:
+            return None
+        try:
+            raw = gzip.decompress(data)
+        except (OSError, EOFError):
+            raw = data  # 兼容历史未压缩 JSON
+        return json.loads(raw.decode("utf-8"))
 
     # 预签名 URL 解析工具
     @staticmethod
