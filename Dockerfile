@@ -43,6 +43,10 @@ ENV CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH}
 ENV CONSISTENCY_EMBEDDING_DEVICE=${CONSISTENCY_EMBEDDING_DEVICE}
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_RETRIES=10
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -79,7 +83,8 @@ RUN set -eux; \
             "paddlepaddle-gpu==${PADDLE_VERSION}" \
             -i "${PADDLE_INDEX_URL}"; \
     fi
-RUN python -m pip install --no-cache-dir "paddleocr[${PADDLE_OCR_DEPENDENCY_GROUP}]==${PADDLE_OCR_PACKAGE_VERSION}"
+RUN python -m pip install --no-cache-dir --prefer-binary "PyYAML==6.0.2" \
+    && python -m pip install --no-cache-dir --prefer-binary "paddleocr[${PADDLE_OCR_DEPENDENCY_GROUP}]==${PADDLE_OCR_PACKAGE_VERSION}"
 RUN if [ "${INSTALL_HPI_DEPS}" = "true" ]; then python -m paddleocr install_hpi_deps gpu; fi
 
 COPY requirements.txt ./
