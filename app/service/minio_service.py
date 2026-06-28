@@ -134,6 +134,10 @@ class MinioService:
         fname = MinioService._safe_segment(filename or "file", maxlen=140)
         if kind == "json":
             fname = f"{fname}.json.gz"
+        elif kind == "original":
+            # 原件是物理文件，键需唯一以防同项目/公司同名文件互相覆盖（沿用时间戳+随机后缀）。
+            stem, ext = os.path.splitext(fname)
+            fname = f"{stem}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{uuid4().hex[:8]}{ext}"
         if role == "tender":
             parts += ["招标文件", fname]
         elif role in ("business_bid", "technical_bid"):

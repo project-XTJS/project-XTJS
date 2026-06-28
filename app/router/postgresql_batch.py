@@ -832,6 +832,17 @@ async def _build_async_ocr_response(
     }
 
 
+def _file_stem(name: object) -> str:
+    """取文件名去路径、去扩展名部分。"""
+    base = str(name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return base.rsplit(".", 1)[0].strip()
+
+
+def _bidder_company_label(business: UploadFile, technical: UploadFile) -> str:
+    """为一个投标方（商务标+技术标一组）推导公司目录名：优先商务标文件名（去扩展名）。"""
+    return _file_stem(getattr(business, "filename", "")) or _file_stem(getattr(technical, "filename", "")) or "投标方"
+
+
 # 批量上传文件（不执行 OCR）
 async def _upload_batch_documents_without_ocr(
     *,
@@ -841,8 +852,12 @@ async def _upload_batch_documents_without_ocr(
     parallelism: int,
     db_service: PostgreSQLService,
     oss_service: MinioService,
+    object_names: Optional[list[str]] = None,
 ) -> list[dict]:
-    """批量上传文件至 MinIO 并创建文档记录，但不触发 OCR 提取。"""
+    """批量上传文件至 MinIO 并创建文档记录，但不触发 OCR 提取。
+
+    object_names 与 files 顺序一一对应；传入时按分级对象键存储原件，缺省则用扁平命名。
+    """
     normalized_files = [upload for upload in (files or []) if upload is not None]
     if not normalized_files:
         return []
@@ -852,11 +867,13 @@ async def _upload_batch_documents_without_ocr(
     items: list[dict] = []
     for index, upload in enumerate(normalized_files, start=1):
         file_name = (upload.filename or "").strip() or f"{role_label}_{index}"
+        object_name = object_names[index - 1] if object_names and index - 1 < len(object_names) else None
         result = await upload_and_create_document_without_ocr(
             file=upload,
             document_type=document_type,
             db_service=db_service,
             oss_service=oss_service,
+            object_name=object_name,
             raise_http_exception=False,
         )
         if not result["ok"]:
@@ -1085,14 +1102,36 @@ async def ingest_and_recognize_project_documents(
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
+    # 原件按分级对象键存储：招标文件、各投标方（公司名取商务标文件名去扩展名）的商务/技术标。
     tender_result = await upload_and_create_document_without_ocr(
         file=tender_file,
         document_type=DOCUMENT_TYPE_TENDER,
         db_service=db_service,
         oss_service=oss_service,
+        object_name=MinioService.build_project_object_key(
+            normalized_project_name, role="tender", filename=tender_file.filename,
+        ),
         raise_http_exception=True,
     )
     tender_document_identifier = tender_result["document"]["identifier_id"]
+
+    # 按组（商务标[i] 与 技术标[i] 同属一个投标方）推导公司名 + 分级对象键。
+    bidder_companies = [
+        _bidder_company_label(biz, tech)
+        for biz, tech in zip(normalized_business_files, normalized_technical_files)
+    ]
+    business_object_names = [
+        MinioService.build_project_object_key(
+            normalized_project_name, role="business_bid", company=company, filename=upload.filename,
+        )
+        for company, upload in zip(bidder_companies, normalized_business_files)
+    ]
+    technical_object_names = [
+        MinioService.build_project_object_key(
+            normalized_project_name, role="technical_bid", company=company, filename=upload.filename,
+        )
+        for company, upload in zip(bidder_companies, normalized_technical_files)
+    ]
 
     # 当前统一退回串行，保留参数仅为兼容前端已有表单。
     effective_parallelism = 1
@@ -1104,6 +1143,7 @@ async def ingest_and_recognize_project_documents(
         parallelism=effective_parallelism,
         db_service=db_service,
         oss_service=oss_service,
+        object_names=business_object_names,
     )
     technical_results = await _upload_batch_documents_without_ocr(
         files=normalized_technical_files,
@@ -1112,6 +1152,7 @@ async def ingest_and_recognize_project_documents(
         parallelism=effective_parallelism,
         db_service=db_service,
         oss_service=oss_service,
+        object_names=technical_object_names,
     )
 
     # 绑定商务标与技术标文档关系
