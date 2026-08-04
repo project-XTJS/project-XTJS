@@ -91,6 +91,13 @@ def _badge(text: Any) -> str:
     return f"<span class='badge' style='background:{color};'>{_escape(label)}</span>"
 
 
+def _visible_result(result: dict[str, Any]) -> dict[str, Any]:
+    visible = dict(result or {})
+    if not settings.TYPO_CHECK_VISIBLE:
+        visible.pop("typo_check", None)
+    return visible
+
+
 def _project_ids_from_result(result: dict[str, Any]) -> list[str]:
     values: list[str] = []
     for item in result.values():
@@ -306,6 +313,12 @@ def _render_html(
         )
 
     observations_html = "".join(f"<li>{_escape(item)}</li>" for item in observations)
+    typo_stat_html = ""
+    if settings.TYPO_CHECK_VISIBLE:
+        typo_stat_html = (
+            "<div class=\"stat\"><div class=\"stat-label\">错别字问题数</div>"
+            f"<div class=\"stat-value\">{(result.get('typo_check') or {}).get('summary', {}).get('typo_issue_count', 0)}</div></div>"
+        )
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -352,7 +365,7 @@ def _render_html(
         <div class="stat"><div class="stat-label">顶层结果键数量</div><div class="stat-value">{len(result.keys())}</div></div>
         <div class="stat"><div class="stat-label">商务标投标人数量</div><div class="stat-value">{summary.get('bidder_count', 0)}</div></div>
         <div class="stat"><div class="stat-label">商务标总检查项</div><div class="stat-value">{summary.get('total_check_count', 0)}</div></div>
-        <div class="stat"><div class="stat-label">错别字问题数</div><div class="stat-value">{(result.get('typo_check') or {}).get('summary', {}).get('typo_issue_count', 0)}</div></div>
+        {typo_stat_html}
       </div>
       {mismatch_warning}
     </div>
@@ -400,6 +413,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     row_id, result_project_identifier_id, result, create_time, update_time = _fetch_result_row(args.result_id)
+    result = _visible_result(result)
     embedded_project_identifiers = _project_ids_from_result(result)
     business_review = result.get("business_bid_format_review") or {}
     observations = _build_observations(result, business_review)

@@ -33,6 +33,7 @@ from app.router.postgresql import (
 )
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
+from app.service.analysis import TenderComplianceChecker
 from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.postgresql_service import PostgreSQLService
 from app.service.table_parser import build_logical_tables, build_table_structure
@@ -761,6 +762,53 @@ async def _analyze_single_upload(
             enabled=save_json_to_source,
         )
         return payload
+    finally:
+        cleanup_temp_file(temp_file_path)
+
+
+@router.post("/tender-compliance-check", summary="招标文件规范检查")
+async def check_tender_compliance_file(
+    file: UploadFile = File(...),
+    analysis_service=Depends(get_text_analysis_service),
+):
+    """上传单份招标 PDF，OCR 后执行规则化规范检查，不写入项目结果。"""
+    filename = str(file.filename or "")
+    file_extension = os.path.splitext(filename)[1].lower().lstrip(".")
+    if file_extension != "pdf":
+        raise HTTPException(status_code=400, detail="招标文件规范检查仅支持 PDF 文件。")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传文件不能为空。")
+
+    temp_file_path = save_temp_file(content, ".pdf")
+    try:
+        extraction_result = await run_in_threadpool(
+            analysis_service.extract_text_result,
+            temp_file_path,
+            "pdf",
+        )
+        ocr_payload = _build_analyze_file_response(
+            file,
+            content=content,
+            file_extension="pdf",
+            extraction_result=extraction_result,
+        )
+        compliance_result = TenderComplianceChecker().check(ocr_payload)
+        return {
+            "filename": ocr_payload.get("filename") or filename,
+            "file_type": "pdf",
+            "file_size": ocr_payload.get("file_size"),
+            "text_length": ocr_payload.get("text_length"),
+            "page_count": ocr_payload.get("page_count"),
+            "metadata": ocr_payload.get("metadata") or {},
+            "recognition": ocr_payload.get("recognition") or {},
+            **compliance_result,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         cleanup_temp_file(temp_file_path)
 

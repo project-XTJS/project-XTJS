@@ -48,7 +48,7 @@ def _configure_console_encoding() -> None:
 CHECK_OPTIONS = (
     ("integrity_check", "完整性审查"),
     ("consistency_check", "一致性审查"),
-    ("pricing_check", "开标一览表审查"),
+    ("pricing_check", "报价合理性审查"),
     ("itemized_pricing_check", "分项报价表"),
     ("deviation_check", "偏离表审查"),
     ("verification_check", "签字盖章日期检查"),
@@ -71,6 +71,8 @@ CHECK_ALIASES = {
     "一致性审查": "consistency_check",
     "pricing": "pricing_check",
     "pricing_check": "pricing_check",
+    "报价合理性": "pricing_check",
+    "报价合理性审查": "pricing_check",
     "开标": "pricing_check",
     "开标一览表": "pricing_check",
     "开标一览表检查": "pricing_check",
@@ -650,7 +652,10 @@ def _build_typo_check_result(review_result: dict[str, Any]) -> dict[str, Any]:
         "config": {
             "document_types": config.get("document_types") or [],
             "typo_detection_engine": config.get("typo_detection_engine"),
-            "typo_stopword_dictionary_enabled": config.get("typo_stopword_dictionary_enabled"),
+            "typo_macbert_model_name": config.get("typo_macbert_model_name"),
+            "typo_macbert_device": config.get("typo_macbert_device"),
+            "typo_macbert_active_device": config.get("typo_macbert_active_device"),
+            "typo_filtering_enabled": config.get("typo_filtering_enabled"),
         },
         "groups": groups,
         "summary": {
@@ -691,7 +696,7 @@ def _build_selected_extra_results(
             document_types=[DOCUMENT_TYPE_TECHNICAL_BID],
         )
     if "personnel_reuse_check" in selected_checks:
-        personnel_review_result = bid_review_service.check_project_documents(
+        personnel_review_result = bid_review_service.check_project_personnel_reuse(
             project_identifier=project_identifier,
             project={"identifier_id": project_identifier},
             document_records=records,
@@ -699,7 +704,7 @@ def _build_selected_extra_results(
         )
         results["personnel_reuse_check"] = _build_personnel_reuse_result(personnel_review_result)
     if "typo_check" in selected_checks:
-        typo_review_result = bid_review_service.check_project_documents(
+        typo_review_result = bid_review_service.check_project_typos(
             project_identifier=project_identifier,
             project={"identifier_id": project_identifier},
             document_records=records,
