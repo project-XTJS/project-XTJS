@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -21,6 +21,7 @@ from app.router.dependencies import (
     get_bid_document_review_service,
     get_db_service,
     get_duplicate_check_service,
+    get_oss_service,
     get_text_analysis_service,
 )
 from app.router.postgresql import (
@@ -33,8 +34,11 @@ from app.router.postgresql import (
 )
 from app.schemas.analysis import TextAnalysisRequest
 from app.schemas.recognition import build_analyze_file_metadata
+from app.core.document_types import DOCUMENT_TYPE_TENDER
+from app.service import document_blob_store
 from app.service.analysis import TenderComplianceChecker
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service.document_ingest_service import upload_extract_and_create_document
 from app.service.postgresql_service import PostgreSQLService
 from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
@@ -766,51 +770,191 @@ async def _analyze_single_upload(
         cleanup_temp_file(temp_file_path)
 
 
-@router.post("/tender-compliance-check", summary="招标文件规范检查")
-async def check_tender_compliance_file(
+def _tender_review_summary_payload(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "overall_status": record.get("overall_status"),
+        "total": int(record.get("passed_count") or 0)
+        + int(record.get("failed_count") or 0)
+        + int(record.get("unclear_count") or 0),
+        "passed": int(record.get("passed_count") or 0),
+        "failed": int(record.get("failed_count") or 0),
+        "unclear": int(record.get("unclear_count") or 0),
+        "suspicious": int(record.get("failed_count") or 0) + int(record.get("unclear_count") or 0),
+        "page_count": int(record.get("page_count") or 0),
+    }
+
+
+def _tender_review_public_payload(
+    record: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result_payload = result if isinstance(result, dict) else {}
+    return {
+        "review_id": str(record.get("identifier_id") or ""),
+        "status": record.get("status"),
+        "error_message": record.get("error_message"),
+        "created_at": record.get("create_time"),
+        "updated_at": record.get("update_time"),
+        "document": {
+            "identifier_id": str(record.get("document_identifier_id") or ""),
+            "file_name": record.get("file_name"),
+            "file_size": record.get("source_file_size"),
+            "page_count": int(record.get("page_count") or 0),
+            "text_length": int(record.get("text_length") or 0),
+            "document_type": record.get("document_type") or DOCUMENT_TYPE_TENDER,
+        },
+        "summary": result_payload.get("summary") or _tender_review_summary_payload(record),
+        "schema_version": result_payload.get("schema_version"),
+        "checks": result_payload.get("checks") or [],
+        "extractions": result_payload.get("extractions") or {},
+    }
+
+
+async def _run_and_store_tender_review(
+    *,
+    review_record: dict[str, Any],
+    document: dict[str, Any],
+    db_service: PostgreSQLService,
+) -> dict[str, Any]:
+    content = document.get("content")
+    if not isinstance(content, dict):
+        raise RuntimeError("招标文件原生文字解析结果不存在，无法执行审查。")
+
+    result = await run_in_threadpool(TenderComplianceChecker().check, content)
+    review_id = str(review_record.get("identifier_id") or "")
+    file_name = str(document.get("file_name") or "")
+    object_key = await run_in_threadpool(
+        document_blob_store.save_tender_review_result,
+        result,
+        review_identifier_id=review_id,
+        file_name=file_name,
+    )
+    updated = await run_in_threadpool(
+        db_service.complete_tender_review,
+        review_id,
+        result_object_key=object_key,
+        summary=result.get("summary") or {},
+        page_count=int(content.get("page_count") or 0),
+        text_length=int(content.get("text_length") or 0),
+    )
+    updated.update(
+        {
+            "file_name": document.get("file_name"),
+            "source_file_size": document.get("source_file_size"),
+            "document_type": document.get("document_type"),
+        }
+    )
+    return _tender_review_public_payload(updated, result)
+
+
+@router.post("/tender-reviews", summary="上传并审查招标文件")
+async def create_tender_review(
     file: UploadFile = File(...),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service=Depends(get_oss_service),
     analysis_service=Depends(get_text_analysis_service),
 ):
-    """上传单份招标 PDF，OCR 后执行规则化规范检查，不写入项目结果。"""
-    filename = str(file.filename or "")
-    file_extension = os.path.splitext(filename)[1].lower().lstrip(".")
-    if file_extension != "pdf":
-        raise HTTPException(status_code=400, detail="招标文件规范检查仅支持 PDF 文件。")
-
-    content = await file.read()
-    if not content:
+    filename = str(file.filename or "").strip()
+    if os.path.splitext(filename)[1].lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="招标文件审查仅支持 PDF 文件。")
+    first_byte = await file.read(1)
+    await file.seek(0)
+    if not first_byte:
         raise HTTPException(status_code=400, detail="上传文件不能为空。")
 
-    temp_file_path = save_temp_file(content, ".pdf")
+    ingest_result = await upload_extract_and_create_document(
+        file=file,
+        document_type=DOCUMENT_TYPE_TENDER,
+        db_service=db_service,
+        oss_service=oss_service,
+        analysis_service=analysis_service,
+        raise_http_exception=True,
+    )
+    document = ingest_result["document"]
+    review_record = await run_in_threadpool(
+        db_service.create_tender_review,
+        str(document.get("identifier_id") or ""),
+    )
     try:
-        extraction_result = await run_in_threadpool(
-            analysis_service.extract_text_result,
-            temp_file_path,
-            "pdf",
+        return await _run_and_store_tender_review(
+            review_record=review_record,
+            document=document,
+            db_service=db_service,
         )
-        ocr_payload = _build_analyze_file_response(
-            file,
-            content=content,
-            file_extension="pdf",
-            extraction_result=extraction_result,
+    except Exception as exc:
+        await run_in_threadpool(
+            db_service.fail_tender_review,
+            str(review_record.get("identifier_id") or ""),
+            str(exc),
         )
-        compliance_result = TenderComplianceChecker().check(ocr_payload)
-        return {
-            "filename": ocr_payload.get("filename") or filename,
-            "file_type": "pdf",
-            "file_size": ocr_payload.get("file_size"),
-            "text_length": ocr_payload.get("text_length"),
-            "page_count": ocr_payload.get("page_count"),
-            "metadata": ocr_payload.get("metadata") or {},
-            "recognition": ocr_payload.get("recognition") or {},
-            **compliance_result,
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    finally:
-        cleanup_temp_file(temp_file_path)
+        raise HTTPException(status_code=500, detail=f"招标文件审查失败：{exc}") from exc
+
+
+@router.get("/tender-reviews", summary="查询招标文件审查历史")
+async def list_tender_reviews(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    listing = await run_in_threadpool(
+        db_service.list_tender_reviews,
+        page_size,
+        (page - 1) * page_size,
+    )
+    return {
+        **listing,
+        "items": [_tender_review_public_payload(item) for item in listing.get("items") or []],
+    }
+
+
+@router.get("/tender-reviews/{review_id}", summary="查询招标文件审查详情")
+async def get_tender_review(
+    review_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    record = await run_in_threadpool(db_service.get_tender_review, review_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="招标文件审查记录不存在。")
+    result = await run_in_threadpool(document_blob_store.get_tender_review_result, record)
+    if record.get("status") == "completed" and not isinstance(result, dict):
+        raise HTTPException(status_code=500, detail="招标文件审查结果不可用。")
+    return _tender_review_public_payload(record, result)
+
+
+@router.post("/tender-reviews/{review_id}/rerun", summary="重新执行招标文件审查")
+async def rerun_tender_review(
+    review_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    record = await run_in_threadpool(db_service.get_tender_review, review_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="招标文件审查记录不存在。")
+    document = await run_in_threadpool(
+        db_service.get_document_by_identifier,
+        str(record.get("document_identifier_id") or ""),
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="招标文件不存在。")
+    try:
+        return await _run_and_store_tender_review(
+            review_record=record,
+            document=document,
+            db_service=db_service,
+        )
+    except Exception as exc:
+        await run_in_threadpool(db_service.fail_tender_review, review_id, str(exc))
+        raise HTTPException(status_code=500, detail=f"重新审查失败：{exc}") from exc
+
+
+@router.delete("/tender-reviews/{review_id}", summary="删除招标文件审查记录")
+async def delete_tender_review(
+    review_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    deleted = await run_in_threadpool(db_service.soft_delete_tender_review, review_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="招标文件审查记录不存在。")
+    return {"status": "deleted", "review_id": review_id}
 
 
 # 接口：文档解析（抽取文本）

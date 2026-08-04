@@ -6,6 +6,7 @@ from .duplicate_check import DuplicateCheckService
 from .reasonableness import ReasonablenessChecker
 from .itemized import ItemizedPricingChecker
 from .bid_document_review import BidDocumentReviewService
+from .tender_compliance import TenderComplianceChecker
 from .verification import VerificationChecker
 
 TechnicalBidReviewService = BidDocumentReviewService
@@ -18,6 +19,7 @@ __all__ = [
     "ReasonablenessChecker",
     "ItemizedPricingChecker",
     "BidDocumentReviewService",
+    "TenderComplianceChecker",
     "TechnicalBidReviewService",
     "VerificationChecker",
 ]

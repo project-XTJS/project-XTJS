@@ -1569,6 +1569,189 @@ class PostgreSQLService:
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
+    # 独立招标文件审查
+    def create_tender_review(self, document_identifier_id: str) -> Dict[str, Any]:
+        """为一个独立招标文档创建审查记录。"""
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                document_id = self._resolve_document_identifier(cursor, document_identifier_id)
+                cursor.execute(
+                    """
+                    INSERT INTO xtjs_tender_reviews (document_identifier_id, status)
+                    VALUES (%s, 'running')
+                    RETURNING *
+                    """,
+                    (document_id,),
+                )
+                return dict(cursor.fetchone())
+
+    def complete_tender_review(
+        self,
+        review_identifier_id: str,
+        *,
+        result_object_key: str,
+        summary: Dict[str, Any],
+        page_count: int = 0,
+        text_length: int = 0,
+    ) -> Dict[str, Any]:
+        """写入最新审查汇总和结果对象键。"""
+        review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
+        query = """
+            UPDATE xtjs_tender_reviews
+            SET status = 'completed',
+                overall_status = %s,
+                passed_count = %s,
+                failed_count = %s,
+                unclear_count = %s,
+                page_count = %s,
+                text_length = %s,
+                result_object_key = %s,
+                error_message = NULL,
+                update_time = CURRENT_TIMESTAMP
+            WHERE identifier_id = %s AND deleted = FALSE
+            RETURNING *
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (
+                        str(summary.get("overall_status") or "unclear"),
+                        int(summary.get("passed") or 0),
+                        int(summary.get("failed") or 0),
+                        int(summary.get("unclear") or 0),
+                        max(0, int(page_count or 0)),
+                        max(0, int(text_length or 0)),
+                        str(result_object_key or "").strip(),
+                        review_id,
+                    ),
+                )
+                result = cursor.fetchone()
+                if not result:
+                    raise ValueError("招标文件审查记录不存在")
+                return dict(result)
+
+    def fail_tender_review(self, review_identifier_id: str, error_message: str) -> Optional[Dict[str, Any]]:
+        """记录审查失败，保留文档供用户重新审查。"""
+        review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    UPDATE xtjs_tender_reviews
+                    SET status = 'failed', error_message = %s, update_time = CURRENT_TIMESTAMP
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    RETURNING *
+                    """,
+                    (str(error_message or "审查失败")[:2000], review_id),
+                )
+                result = cursor.fetchone()
+                return dict(result) if result else None
+
+    def get_tender_review(self, review_identifier_id: str) -> Optional[Dict[str, Any]]:
+        """读取审查记录及其独立文档摘要。"""
+        review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
+        query = """
+            SELECT
+                r.*,
+                d.file_name,
+                d.file_url,
+                d.document_type,
+                d.extracted,
+                d.source_file_hash,
+                d.source_file_size,
+                d.create_time AS document_create_time
+            FROM xtjs_tender_reviews r
+            JOIN xtjs_documents d ON d.identifier_id = r.document_identifier_id
+            WHERE r.identifier_id = %s
+              AND r.deleted = FALSE
+              AND d.deleted = FALSE
+            LIMIT 1
+        """
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(query, (review_id,))
+                result = cursor.fetchone()
+                return dict(result) if result else None
+
+    def list_tender_reviews(self, limit: int = 20, offset: int = 0) -> Dict[str, Any]:
+        """分页读取所有登录用户共享的独立审查历史。"""
+        normalized_limit = max(1, min(int(limit or 20), 200))
+        normalized_offset = max(0, int(offset or 0))
+        where_clause = "r.deleted = FALSE AND d.deleted = FALSE"
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    f"""SELECT COUNT(*) AS total
+                        FROM xtjs_tender_reviews r
+                        JOIN xtjs_documents d ON d.identifier_id = r.document_identifier_id
+                        WHERE {where_clause}"""
+                )
+                total = int(cursor.fetchone()["total"])
+                cursor.execute(
+                    f"""
+                    SELECT
+                        r.identifier_id,
+                        r.document_identifier_id,
+                        r.status,
+                        r.overall_status,
+                        r.passed_count,
+                        r.failed_count,
+                        r.unclear_count,
+                        r.page_count,
+                        r.text_length,
+                        r.error_message,
+                        r.create_time,
+                        r.update_time,
+                        d.file_name,
+                        d.source_file_size
+                    FROM xtjs_tender_reviews r
+                    JOIN xtjs_documents d ON d.identifier_id = r.document_identifier_id
+                    WHERE {where_clause}
+                    ORDER BY r.update_time DESC, r.identifier_id DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (normalized_limit, normalized_offset),
+                )
+                items = [dict(item) for item in cursor.fetchall()]
+        return self._build_paginated_response(
+            total=total,
+            limit=normalized_limit,
+            offset=normalized_offset,
+            items=items,
+        )
+
+    def soft_delete_tender_review(self, review_identifier_id: str) -> bool:
+        """在同一事务内软删除审查记录及其独立文档。"""
+        review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    """
+                    SELECT document_identifier_id
+                    FROM xtjs_tender_reviews
+                    WHERE identifier_id = %s AND deleted = FALSE
+                    FOR UPDATE
+                    """,
+                    (review_id,),
+                )
+                record = cursor.fetchone()
+                if not record:
+                    return False
+                cursor.execute(
+                    """UPDATE xtjs_tender_reviews
+                       SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
+                       WHERE identifier_id = %s""",
+                    (review_id,),
+                )
+                cursor.execute(
+                    """UPDATE xtjs_documents
+                       SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
+                       WHERE identifier_id = %s AND deleted = FALSE""",
+                    (record["document_identifier_id"],),
+                )
+                return True
+
     # 项目-文档关系管理
     def bind_project_documents(
         self,
