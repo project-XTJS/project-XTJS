@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 CONTENT_OBJECT_PREFIX = "JSON识别/content"
 # review_content（人工复核工作副本）的对象键前缀
 REVIEW_OBJECT_PREFIX = "JSON识别/review"
+# 独立招标文件审查结果对象前缀
+TENDER_REVIEW_OBJECT_PREFIX = "JSON识别/tender-review"
 
 _minio_singleton: Optional[MinioService] = None
 
@@ -91,6 +93,18 @@ def build_result_object_key(project_name: Any, project_identifier_id: Any) -> st
     """
     name = _non_empty_str(project_name) or _non_empty_str(str(project_identifier_id or "")) or "project"
     return MinioService.build_project_object_key(name, role="result", kind="json")
+
+
+def build_tender_review_result_object_key(review_identifier_id: Any, file_name: Any = None) -> str:
+    """构建独立招标文件审查结果对象键。"""
+    review_id = MinioService._safe_segment(review_identifier_id or "review", maxlen=80)
+    stem = _non_empty_str(file_name)
+    if stem:
+        stem = MinioService._safe_segment(stem, maxlen=80)
+        leaf = f"{stem}_{review_id}.json.gz"
+    else:
+        leaf = f"{review_id}.json.gz"
+    return f"{TENDER_REVIEW_OBJECT_PREFIX}/{leaf}"
 
 
 # ----------------------------------------------------------------------------
@@ -245,3 +259,26 @@ def hydrate_result_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str
             if blob is not None:
                 record["result"] = blob
     return record
+
+
+# ----------------------------------------------------------------------------
+# tender review（独立招标文件审查结果）存取
+# ----------------------------------------------------------------------------
+
+def save_tender_review_result(
+    result: Dict[str, Any],
+    *,
+    review_identifier_id: Any,
+    file_name: Any = None,
+) -> str:
+    """保存独立招标文件审查结果并返回对象键。"""
+    key = build_tender_review_result_object_key(review_identifier_id, file_name)
+    _client().put_json_gz(key, result)
+    return key
+
+
+def get_tender_review_result(record: Optional[Dict[str, Any]]) -> Any:
+    """读取独立招标文件审查结果。"""
+    if not isinstance(record, dict):
+        return None
+    return read_blob(record.get("result_object_key"))

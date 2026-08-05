@@ -1408,8 +1408,43 @@ class TenderComplianceChecker:
             "severity": {"pass": "info", "fail": "error", "unclear": "warning"}.get(status, "warning"),
             "message": message,
             "values": values,
-            "evidence": evidence,
+            "evidence": self._normalize_evidence_items(evidence),
         }
+
+    def _normalize_evidence_items(self, evidence: Any) -> list[dict[str, Any]]:
+        """将内部 locations/contexts 证据统一为可直接定位预览的数组。"""
+        if isinstance(evidence, list):
+            raw_items = evidence
+        elif isinstance(evidence, dict):
+            raw_items = [
+                *(evidence.get("locations") or []),
+                *(evidence.get("contexts") or []),
+            ]
+        else:
+            raw_items = []
+
+        normalized: list[dict[str, Any]] = []
+        seen: set[tuple[Any, str, str]] = set()
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            bbox = item.get("bbox") or item.get("box")
+            text = self._trim(item.get("text") or item.get("context"), 320)
+            page = item.get("page") or item.get("page_number")
+            key = (page, str(bbox), text)
+            if key in seen or (page in (None, "") and not text):
+                continue
+            seen.add(key)
+            entry: dict[str, Any] = {
+                "page": page,
+                "text": text,
+                "section": item.get("section") or item.get("category") or item.get("source"),
+                "coordinate_system": item.get("coordinate_system") or "pdf_point",
+            }
+            if bbox is not None:
+                entry["bbox"] = bbox
+            normalized.append(entry)
+        return normalized
 
     def _summarize(self, checks: list[dict[str, Any]], *, payload: dict[str, Any], sections: list[dict[str, Any]]) -> dict[str, Any]:
         pass_count = sum(1 for check in checks if check.get("status") == "pass")
@@ -1615,6 +1650,8 @@ class TenderComplianceChecker:
             "text": self._trim(text if text is not None else section.get("text"), 240),
             "document": "tender",
             "document_role": "tender",
+            "section": section.get("category") or section.get("source"),
+            "coordinate_system": section.get("coordinate_system") or "pdf_point",
         }
         if section.get("bbox") is not None:
             location["bbox"] = section.get("bbox")
