@@ -7,6 +7,7 @@ from .reasonableness import ReasonablenessChecker
 from .itemized import ItemizedPricingChecker
 from .bid_document_review import BidDocumentReviewService
 from .verification import VerificationChecker
+from .tender_compliance import TenderComplianceChecker
 
 TechnicalBidReviewService = BidDocumentReviewService
 
@@ -20,4 +21,5 @@ __all__ = [
     "BidDocumentReviewService",
     "TechnicalBidReviewService",
     "VerificationChecker",
+    "TenderComplianceChecker",
 ]

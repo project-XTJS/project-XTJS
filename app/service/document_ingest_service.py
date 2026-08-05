@@ -11,6 +11,7 @@ import os
 import copy
 import hashlib
 import json
+import time
 from typing import Any, Callable, Optional
 
 from fastapi import HTTPException, UploadFile
@@ -755,7 +756,9 @@ async def upload_and_create_document_without_ocr(
     upload_result: Optional[dict] = None
     resolved_file_name = (document_name or "").strip() or (file.filename or "").strip()
     try:
+        stage_started_at = time.perf_counter()
         upload_result = await run_in_threadpool(oss_service.upload_file, file, object_name)
+        upload_elapsed = time.perf_counter() - stage_started_at
         resolved_file_name = (
             (document_name or "").strip()
             or (file.filename or "").strip()
@@ -768,6 +771,7 @@ async def upload_and_create_document_without_ocr(
         if not file_bytes:
             raise ValueError("uploaded file content is empty")
 
+        db_started_at = time.perf_counter()
         creation_result = await run_in_threadpool(
             db_service.create_document,
             resolved_file_name,
@@ -776,6 +780,13 @@ async def upload_and_create_document_without_ocr(
             identifier_id,
             _sha256_hex(file_bytes),
             len(file_bytes),
+        )
+        db_elapsed = time.perf_counter() - db_started_at
+        print(
+            "UploadStage: file_uploaded "
+            f"(name={resolved_file_name}, type={document_type}, size={len(file_bytes) / 1024 / 1024:.2f}MB, "
+            f"oss_upload={upload_elapsed:.3f}s, db_create={db_elapsed:.3f}s)",
+            flush=True,
         )
         return {
             "ok": True,
@@ -818,6 +829,7 @@ async def recognize_existing_document(
 ) -> dict[str, Any]:
     document: dict[str, Any] | None = None
     object_context: Optional[dict[str, Any]] = None
+    stage_started_at = time.perf_counter()
     try:
         if cancel_check is not None:
             cancel_check()
@@ -840,11 +852,15 @@ async def recognize_existing_document(
 
         if cancel_check is not None:
             cancel_check()
+        ocr_elapsed = 0.0
+        ocr_cache_hit = False
+        download_started_at = time.perf_counter()
         file_bytes, _ = await run_in_threadpool(
             oss_service.get_object_bytes,
             object_name,
             bucket_name,
         )
+        download_elapsed = time.perf_counter() - download_started_at
         ocr_cache_context = _resolve_ocr_cache_context(
             file_bytes=file_bytes,
             document_type=document.get("document_type"),
@@ -870,6 +886,7 @@ async def recognize_existing_document(
             exclude_identifier_id=document_identifier,
         )
         if reusable_document and isinstance(reusable_document.get("content"), dict):
+            ocr_cache_hit = True
             recognition_content = _attach_ocr_cache_metadata(
                 reusable_document["content"],
                 cache_hit=True,
@@ -880,6 +897,7 @@ async def recognize_existing_document(
             )
             ocr_cache_source_document_id = str(reusable_document.get("identifier_id") or "") or None
         else:
+            ocr_started_at = time.perf_counter()
             extracted_content = await run_in_threadpool(
                 _extract_recognition_content,
                 file_bytes,
@@ -888,6 +906,7 @@ async def recognize_existing_document(
                 cancel_check,
                 document_type=document.get("document_type"),
             )
+            ocr_elapsed = time.perf_counter() - ocr_started_at
             recognition_content = _attach_ocr_cache_metadata(
                 extracted_content,
                 cache_hit=False,
@@ -899,6 +918,7 @@ async def recognize_existing_document(
             ocr_cache_source_document_id = None
         if cancel_check is not None:
             cancel_check()
+        db_started_at = time.perf_counter()
         updated_document = await run_in_threadpool(
             db_service.update_document_content,
             document_identifier,
@@ -912,6 +932,15 @@ async def recognize_existing_document(
         )
         if not updated_document:
             raise ValueError(f"failed to update document content: {document_identifier}")
+        db_elapsed = time.perf_counter() - db_started_at
+        print(
+            "RecognizeStage: document_done "
+            f"(name={document.get('file_name')}, size={len(file_bytes) / 1024 / 1024:.2f}MB, "
+            f"oss_download={download_elapsed:.3f}s, "
+            f"ocr={ocr_elapsed:.3f}s, cache_hit={ocr_cache_hit}, "
+            f"db_update={db_elapsed:.3f}s, total={time.perf_counter() - stage_started_at:.3f}s)",
+            flush=True,
+        )
         return {
             "ok": True,
             "document": updated_document,

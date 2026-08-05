@@ -1,0 +1,27 @@
+services:
+  # vLLM 加速服务：为 PaddleOCR-VL-1.5 提供 OpenAI 兼容推理端点，
+  # 应用侧通过 PADDLE_VL_BACKEND=vllm-server + PADDLE_VL_SERVER_URL 接入。
+  xtjs-vllm:
+    image: xtjs-vllm:v0.22.1
+    container_name: xtjs-vllm
+    networks:
+      - app_network
+    volumes:
+      - ocr_runtime:/models:ro
+    # 不映射宿主端口：仅 Docker 内网可达（app 通过 xtjs-vllm:8000 访问），避免公网暴露无鉴权 API
+    gpus: all
+    shm_size: "8gb"
+    restart: unless-stopped
+    command:
+      - vllm
+      - serve
+      - /models/paddlex-cache/official_models/PaddleOCR-VL-1.5
+      - --trust-remote-code
+      - --served-model-name=PaddleOCR-VL-1.5-0.9B
+      - --max-num-batched-tokens=16384
+      - --max-model-len=16384
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb=0
+      - --gpu-memory-utilization=0.35
+      - --host=0.0.0.0
+      - --port=8000

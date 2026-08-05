@@ -394,6 +394,17 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             payload = self._attach_table_outputs(payload)
             progress_monitor.update(stage="tables", current=1, total=1, detail="logical tables ready", emit=False)
             progress_monitor.finish(success=True)
+            progress_summary = progress_monitor.build_summary()
+            stage_breakdown = progress_summary.get("stage_durations") or {}
+            stage_parts = " ".join(f"{key}={value}s" for key, value in sorted(stage_breakdown.items()))
+            print(
+                "OCRService: OCR completed "
+                f"({self._describe_document(file_path, file_type, total_pages)}, device={self.active_device}, "
+                f"total={progress_summary.get('total_elapsed_seconds')}s, "
+                f"pages={progress_summary.get('total_pages')}, "
+                f"speed={progress_summary.get('ocr_speed_pages_per_second')} p/s, stages={stage_parts})",
+                flush=True,
+            )
             return payload
             
         except Exception as exc:

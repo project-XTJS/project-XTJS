@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Set
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET_NAME: str = "update-file"
     MINIO_SECURE: bool = False
+    # 对象存储签名区域（OSS 时填 cn-hangzhou 等地域码；MinIO 可留空）
+    MINIO_REGION: str = ""
     MINIO_PRESIGNED_EXPIRES_DAYS: int = 7
     MINIO_MAX_FILE_SIZE: int = 500 * 1024 * 1024
     MINIO_ALLOWED_EXTENSIONS_STR: str = Field(
@@ -58,6 +60,20 @@ class Settings(BaseSettings):
     PADDLE_OCR_USE_DOC_UNWARPING: bool = True
 
     PADDLE_VL_PIPELINE_VERSION: str = "v1.5"
+    # VL 推理后端：native（本地 paddle 推理）/ vllm-server / sglang-server / fastdeploy-server
+    PADDLE_VL_BACKEND: str = "native"
+    PADDLE_VL_SERVER_URL: str = ""
+    PADDLE_VL_API_MODEL_NAME: str = ""
+    PADDLE_VL_MAX_PIXELS: int | None = None
+
+    @field_validator("PADDLE_VL_MAX_PIXELS", mode="before")
+    @classmethod
+    def _blank_max_pixels_to_none(cls, value):
+        """容忍环境变量为空字符串（compose 缺省注入 ''）。"""
+        if value is None or str(value).strip() == "":
+            return None
+        return value
+
     PADDLE_VL_USE_LAYOUT_DETECTION: bool = True
     PADDLE_VL_USE_CHART_RECOGNITION: bool = False
     PADDLE_VL_USE_SEAL_RECOGNITION: bool = True

@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
@@ -1397,6 +1398,7 @@ async def upload_project_folder(
     oss_service: MinioService = Depends(get_oss_service),
 ):
     """解析文件夹结构 → 创建项目 → 上传招标/各公司商务·技术 → 自动绑定。OCR 仍由后续手动触发。"""
+    route_started_at = time.perf_counter()
     normalized_files = [f for f in (files or []) if f is not None]
     try:
         path_list = json.loads(paths) if paths else []
@@ -1516,6 +1518,12 @@ async def upload_project_folder(
 
     binding_summary = _summarize_batch_items(binding_items)
     _invalidate_project_cache_or_error(project_identifier)
+    print(
+        "UploadFolderStage: completed "
+        f"(project={project_name}, identifier={project_identifier}, "
+        f"files={len(normalized_files)}, total={time.perf_counter() - route_started_at:.3f}s)",
+        flush=True,
+    )
     return {
         "status": binding_summary["status"],
         "project": project,

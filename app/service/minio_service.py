@@ -9,21 +9,74 @@ MinIO 对象存储服务模块。
 import gzip
 import io
 import json
+import urllib.request
 import os
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from mimetypes import guess_type
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from fastapi import UploadFile
 from minio import Minio
+from minio.credentials import Credentials, providers
 from minio.error import S3Error
 
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+class AlibabaEcsInstanceRoleProvider(providers.Provider):
+    """
+    阿里云 ECS 实例 RAM 角色凭证提供器。
+
+    不依赖任何静态 AK：运行时从实例元数据服务
+    http://100.100.100.200/latest/meta-data/ram/security-credentials/ 自动获取
+    临时 STS 凭证（含过期时间，到期后 SDK 自动刷新）。
+    仅在阿里云 ECS 且实例已绑定 RAM 角色时可用。
+    """
+
+    METADATA_BASE = "http://100.100.100.200/latest/meta-data/ram/security-credentials/"
+
+    def __init__(self, timeout_seconds: int = 5) -> None:
+        self._timeout_seconds = max(1, int(timeout_seconds))
+
+    def _fetch(self, url: str) -> str:
+        try:
+            with urllib.request.urlopen(url, timeout=self._timeout_seconds) as resp:
+                return resp.read().decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(
+                f"无法从 ECS 元数据服务获取实例角色凭证（请确认实例已绑定 RAM 角色）: {exc}"
+            ) from exc
+
+    def retrieve(self) -> Credentials:
+        # 第一步：查询实例绑定的角色名
+        role_name = self._fetch(self.METADATA_BASE).strip()
+        if not role_name:
+            raise RuntimeError("ECS 实例未绑定任何 RAM 角色")
+        # 第二步：获取该角色的临时凭证
+        payload = json.loads(self._fetch(self.METADATA_BASE + role_name))
+        access_key = str(payload.get("AccessKeyId") or "")
+        secret_key = str(payload.get("AccessKeySecret") or "")
+        session_token = str(payload.get("SecurityToken") or "")
+        if not access_key or not secret_key:
+            raise RuntimeError(f"实例角色凭证响应异常: {payload}")
+        expiration = None
+        raw_expiration = str(payload.get("Expiration") or "")
+        if raw_expiration:
+            try:
+                expiration = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                expiration = None
+        return Credentials(
+            access_key=access_key,
+            secret_key=secret_key,
+            session_token=session_token,
+            expiration=expiration,
+        )
 
 
 class MinioService:
@@ -34,11 +87,21 @@ class MinioService:
 
     def __init__(self) -> None:
         """初始化 MinIO 客户端，从全局配置读取连接信息和桶名。"""
+        access_key = str(settings.MINIO_ACCESS_KEY or "").strip()
+        secret_key = str(settings.MINIO_SECRET_KEY or "").strip()
+        # 配置了真实 AK 时使用静态凭证；否则回退到 ECS 实例 RAM 角色（零 AK 模式）
+        if access_key and "请填写" not in access_key and secret_key and "请填写" not in secret_key:
+            credential_provider = providers.StaticProvider(access_key, secret_key)
+        else:
+            credential_provider = AlibabaEcsInstanceRoleProvider()
+            logger.info(
+                "MinioService: 未配置静态 AK，使用阿里云 ECS 实例 RAM 角色临时凭证"
+            )
         self.client = Minio(
             endpoint=settings.MINIO_ENDPOINT,
-            access_key=settings.MINIO_ACCESS_KEY,
-            secret_key=settings.MINIO_SECRET_KEY,
             secure=settings.MINIO_SECURE,
+            region=settings.MINIO_REGION or None,
+            credentials=credential_provider,
         )
         self.bucket_name = settings.MINIO_BUCKET_NAME
 
@@ -216,7 +279,19 @@ class MinioService:
             raise RuntimeError("Fixed MinIO bucket name is empty")
 
         try:
-            exists = self.client.bucket_exists(self.bucket_name)
+            try:
+                exists = self.client.bucket_exists(self.bucket_name)
+            except S3Error as exc:
+                # 托管对象存储（如阿里云 OSS）常不允许 HEAD 桶探测，桶通常在控制台预创建：
+                # 探测被拒/桶不存在时按“已存在”继续，真实权限由后续对象操作验证。
+                if exc.code in {"AccessDenied", "Forbidden", "NoSuchBucket"}:
+                    self._audit(
+                        action="ensure_bucket",
+                        status="assumed_exists",
+                        detail=exc.code,
+                    )
+                    return
+                raise
             if exists:
                 self._audit(action="ensure_bucket", status="exists")
                 return
@@ -555,12 +630,32 @@ class MinioService:
 
     @staticmethod
     def bucket_and_object_from_presigned_url(file_url: str) -> tuple[str, str]:
-        """解析预签名 URL，返回 (桶名, 对象名)。"""
+        """解析预签名 URL，返回 (桶名, 对象名)。
+
+        兼容两种形态：
+        - 路径风格：https://<endpoint>/<bucket>/<object>?X-Amz-...（minio SDK 默认）
+        - 虚拟主机风格：https://<bucket>.<endpoint>/<object>?X-Amz-...（OSS 原生/部分 S3 兼容）
+        """
         parsed = urlparse(file_url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("Invalid MinIO presigned URL")
 
+        host = str(parsed.hostname or "").strip().lower()
         path = parsed.path.lstrip("/")
+
+        # 虚拟主机风格：host = <bucket>.<endpoint>，与当前配置端点比对以避免误判
+        endpoint = str(settings.MINIO_ENDPOINT or "").strip()
+        if endpoint and "://" not in endpoint:
+            endpoint = f"//{endpoint}"
+        endpoint_host = str(urlparse(endpoint).hostname or "").strip().lower()
+        if (
+            endpoint_host
+            and host.endswith(f".{endpoint_host}")
+            and len(host) > len(endpoint_host) + 1
+        ):
+            return host[: -len(endpoint_host) - 1], path
+
+        # 路径风格：host 是存储端点，path 首段是桶名
         parts = path.split("/", 1)
         if len(parts) != 2 or not parts[0] or not parts[1]:
             raise ValueError("Invalid MinIO presigned URL: missing bucket/object")

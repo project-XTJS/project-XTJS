@@ -8,20 +8,15 @@ services:
     container_name: project-xtjs
     ports:
       - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      minio:
-        condition: service_started
-      redis:
-        condition: service_healthy
     environment:
-      - DATABASE_URL=${DATABASE_URL:-postgresql://admin:password@postgres:5432/xtjs_db}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      # 数据库已迁至阿里云 RDS（实际密码在 .env 的 DATABASE_URL 中配置）
+      - DATABASE_URL=${DATABASE_URL:-postgresql://xtjs_admin:CHANGE_ME@pgm-bp1gk147oe9t4h05.pg.rds.aliyuncs.com:5432/xtjs_db}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-oss-cn-hangzhou-internal.aliyuncs.com}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-update-file}
       - MINIO_SECURE=${MINIO_SECURE:-false}
+      - MINIO_REGION=${MINIO_REGION:-}
       - MINIO_ALLOWED_EXTENSIONS=${MINIO_ALLOWED_EXTENSIONS:-pdf}
       # —— 认证与账号安全（务必在宿主机 .env 覆盖密钥与初始管理员口令）——
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE_ME_IN_ENV_use_a_long_random_secret}
@@ -40,6 +35,10 @@ services:
       - PADDLE_OCR_USE_DOC_ORIENTATION=${PADDLE_OCR_USE_DOC_ORIENTATION:-true}
       - PADDLE_OCR_USE_DOC_UNWARPING=${PADDLE_OCR_USE_DOC_UNWARPING:-true}
       - PADDLE_VL_PIPELINE_VERSION=${PADDLE_VL_PIPELINE_VERSION:-v1.5}
+      - PADDLE_VL_BACKEND=${PADDLE_VL_BACKEND:-native}
+      - PADDLE_VL_SERVER_URL=${PADDLE_VL_SERVER_URL:-}
+      - PADDLE_VL_API_MODEL_NAME=${PADDLE_VL_API_MODEL_NAME:-}
+      - PADDLE_VL_MAX_PIXELS=${PADDLE_VL_MAX_PIXELS:-}
       - PADDLE_VL_USE_LAYOUT_DETECTION=${PADDLE_VL_USE_LAYOUT_DETECTION:-true}
       - PADDLE_VL_USE_CHART_RECOGNITION=${PADDLE_VL_USE_CHART_RECOGNITION:-false}
       - PADDLE_VL_USE_SEAL_RECOGNITION=${PADDLE_VL_USE_SEAL_RECOGNITION:-true}
@@ -60,7 +59,10 @@ services:
       - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
       - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
       - XTJS_CACHE_REQUIRED=${XTJS_CACHE_REQUIRED:-true}
-      - XTJS_CACHE_REDIS_URL=${XTJS_CACHE_REDIS_URL:-redis://redis:6379/1}
+      # 缓存已迁至云数据库 Redis（实际账号密码在 .env 中配置）
+      - XTJS_CACHE_REDIS_URL=${XTJS_CACHE_REDIS_URL:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
       - XTJS_CACHE_KEY_PREFIX=${XTJS_CACHE_KEY_PREFIX:-xtjs}
       - XTJS_CACHE_PROJECT_LIST_TTL_SECONDS=${XTJS_CACHE_PROJECT_LIST_TTL_SECONDS:-30}
       - XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS=${XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS:-120}
@@ -75,80 +77,9 @@ services:
       - app_network
     restart: always
 
-  # PostgreSQL 服务
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=admin
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=xtjs_db
-    networks:
-      - app_network
-    restart: always
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d xtjs_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    container_name: redis
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - app_network
-    restart: always
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  # MinIO 服务
-  minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: minio
-    command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
-    volumes:
-      - minio_data:/data
-    networks:
-      - app_network
-    restart: always
-
-  # Flyway 服务
-  flyway:
-    image: flyway/flyway:latest
-    container_name: flyway
-    volumes:
-      - ./db/migration:/flyway/sql
-    command: -url=jdbc:postgresql://postgres:5432/xtjs_db -user=admin -password=password migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - app_network
-
 networks:
   app_network:
     driver: bridge
 
 volumes:
-  postgres_data:
-  minio_data:
-  redis_data:
   ocr_runtime:

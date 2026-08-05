@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build:
+      context: ../XTJS-frontend
+      dockerfile: Dockerfile.frontend
+    container_name: xtjs-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - app
+    networks:
+      - app_network

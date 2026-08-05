@@ -1,0 +1,43 @@
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+# FlashInfer JIT 编译需要 nvcc：指向 pip 安装的 CUDA 工具链
+ENV CUDA_HOME=/usr/local/lib/python3.12/site-packages/nvidia/cu13
+ENV PATH=/usr/local/lib/python3.12/site-packages/nvidia/cu13/bin:${PATH}
+
+# 本机访问 deb.debian.org 极慢，apt 源切换清华镜像（与 Dockerfile.lean 一致）
+RUN sed -i 's@deb.debian.org@mirrors.tuna.tsinghua.edu.cn@g; s@security.debian.org@mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list.d/debian.sources
+
+# 系统依赖：vLLM 运行时需要 gcc 编译 flash-attn 相关扩展的备选路径 + 常用库
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libgomp1 \
+        libaio-dev \
+        gcc \
+        g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# vLLM 0.22.1：官方支持 PaddleOCR-VL 系列（PR #46698），走清华 PyPI
+RUN pip install --no-cache-dir vllm==0.22.1 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# FlashInfer 采样器 JIT 编译与本机 nvcc 版本不匹配，关闭以使用 torch 采样器（注意力仍走 FlashAttention）
+ENV VLLM_USE_FLASHINFER_SAMPLER=0
+
+EXPOSE 8000
+
+# PaddleOCR-VL-1.5 完整 HF 权重由 ocr_runtime 卷挂载到 /models/paddlex-cache/official_models/PaddleOCR-VL-1.5
+CMD ["vllm", "serve", \
+     "/models/paddlex-cache/official_models/PaddleOCR-VL-1.5", \
+     "--trust-remote-code", \
+     "--max-num-batched-tokens", "16384", \
+     "--max-model-len", "16384", \
+     "--no-enable-prefix-caching", \
+     "--mm-processor-cache-gb", "0", \
+     "--gpu-memory-utilization", "0.35", \
+     "--host", "0.0.0.0", \
+     "--port", "8000"]

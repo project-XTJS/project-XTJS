@@ -164,7 +164,7 @@ class OCREngineMixin:
 
     def _build_pipeline_kwargs(self, device: str) -> dict[str, Any]:
         """组装 PaddleOCRVL 所需的实例化配置字典。"""
-        return {
+        kwargs: dict[str, Any] = {
             "device": device, "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION,
             "use_doc_orientation_classify": settings.PADDLE_OCR_USE_DOC_ORIENTATION,
             "use_doc_unwarping": settings.PADDLE_OCR_USE_DOC_UNWARPING,
@@ -177,6 +177,17 @@ class OCREngineMixin:
             "merge_layout_blocks": settings.PADDLE_VL_MERGE_LAYOUT_BLOCKS,
             "use_queues": settings.PADDLE_VL_USE_QUEUES,
         }
+        # 外部推理服务后端（vLLM / SGLang / FastDeploy 等 OpenAI 兼容服务）
+        backend = str(getattr(settings, "PADDLE_VL_BACKEND", "native") or "native").strip()
+        if backend and backend.lower() != "native":
+            kwargs["vl_rec_backend"] = backend.lower()
+            server_url = str(getattr(settings, "PADDLE_VL_SERVER_URL", "") or "").strip()
+            if server_url:
+                kwargs["vl_rec_server_url"] = server_url
+            api_model_name = str(getattr(settings, "PADDLE_VL_API_MODEL_NAME", "") or "").strip()
+            if api_model_name:
+                kwargs["vl_rec_api_model_name"] = api_model_name
+        return kwargs
 
     def _extract_unknown_argument(self, exc: Exception) -> str | None:
         match = re.search(r"Unknown argument:\s*([A-Za-z0-9_]+)", str(exc or ""))
@@ -325,7 +336,11 @@ class OCREngineMixin:
         with self._predictor_lock:
             if progress_monitor is not None: progress_monitor.update(stage="predict", current=max(progress_page_offset, 0), total=max(int(progress_total_pages or total_pages or 1), 1), detail="starting pipeline.predict_iter", emit=False)
             results = []
-            for index, item in enumerate(self.pipeline.predict_iter(input_path), start=1):
+            predict_kwargs: dict[str, Any] = {}
+            max_pixels = getattr(settings, "PADDLE_VL_MAX_PIXELS", None)
+            if max_pixels:
+                predict_kwargs["max_pixels"] = int(max_pixels)
+            for index, item in enumerate(self.pipeline.predict_iter(input_path, **predict_kwargs), start=1):
                 if cancel_check is not None:
                     cancel_check()
                 results.append(item)

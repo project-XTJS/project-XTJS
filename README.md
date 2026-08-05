@@ -39,3 +39,10 @@
 数据库：用户表由 Flyway 迁移 `db/migration/V20260617120000__create_xtjs_users.sql` 自动创建（`make run` 时 flyway 容器会自动执行；本地开发需自行执行迁移）。
 
 接口：登录 `POST /api/auth/login`、当前用户 `GET /api/auth/me`、改密 `POST /api/auth/change-password`；管理员用户管理位于 `/api/auth/users`。除 `/health`、`/`、登录接口外的业务接口均需携带 `Authorization: Bearer <token>`。
+
+---
+
+## 云化部署
+
+生产环境采用「本机应用 + 阿里云托管服务」架构：数据库 RDS、文件存储 OSS（ECS 实例 RAM 角色零密钥）、缓存云数据库 Redis/Tair。
+完整部署步骤、`.env` 配置与运维命令见 [docs/部署指南.md](docs/部署指南.md)。
