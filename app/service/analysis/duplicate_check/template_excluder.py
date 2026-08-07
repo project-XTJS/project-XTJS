@@ -5,7 +5,7 @@
 import re
 from typing import Any
 
-from .text_utils import normalize_plain_text, compact_raw_text
+from .text_utils import normalize_plain_text
 
 
 def exclude_template_content(

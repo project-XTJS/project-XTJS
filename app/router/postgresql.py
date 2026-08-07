@@ -634,10 +634,6 @@ def _preview_payload_from_source(
         highlight_bbox=highlight_bbox,
         highlight_rects=highlight_rects,
     )
-    explicit_source_rects = _collect_preview_source_rects(
-        highlight_bbox=None,
-        highlight_rects=highlight_rects,
-    )
 
     if source_kind == "pdf":
         import fitz
@@ -5180,4 +5176,3 @@ async def _build_document_page_preview_response(
         raise HTTPException(status_code=503, detail=f"预览加载失败，请检查 MinIO：{exc}") from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc    # ???????
-

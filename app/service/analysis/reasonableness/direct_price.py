@@ -6,7 +6,7 @@
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 # 中文大写金额字符集
 _CAPITAL_NUM_CHARS = "零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆园"

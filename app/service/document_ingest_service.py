@@ -469,64 +469,6 @@ def _log_document_pipeline_exception(
     )
 
 
-def _extract_recognition_content(
-    file_bytes: bytes,
-    file_name: str,
-    analysis_service,
-    cancel_check: Callable[[], None] | None = None,
-    *,
-    document_type: Any = None,
-) -> dict:
-    """对单文件执行识别，并输出用于存储的精简识别结果。"""
-    file_extension = os.path.splitext(file_name)[1].lower().lstrip(".")
-    if _is_tender_document_type(document_type):
-        if file_extension != "pdf":
-            raise ValueError("Tender documents must be PDF files when OCR fallback is disabled.")
-        temp_file_path = save_temp_file(file_bytes, ".pdf")
-        try:
-            if cancel_check is not None:
-                cancel_check()
-            recognition_result = _extract_pdf_text_layer_result(
-                temp_file_path,
-                file_name,
-                cancel_check=cancel_check,
-            )
-            if cancel_check is not None:
-                cancel_check()
-            recognition_result.pop("content", None)
-            recognition_result.pop("pages", None)
-            recognition_result["filename"] = file_name
-            return recognition_result
-        finally:
-            cleanup_temp_file(temp_file_path)
-
-    allowed_extensions = set(analysis_service.get_supported_extensions())
-    if file_extension not in allowed_extensions:
-        raise ValueError(
-            f"Unsupported file type: {file_extension}. "
-            f"Supported types: {', '.join(sorted(allowed_extensions))}."
-        )
-
-    temp_file_path = save_temp_file(file_bytes, f".{file_extension}")
-    try:
-        if cancel_check is not None:
-            cancel_check()
-        recognition_result = analysis_service.extract_text_result(
-            temp_file_path,
-            file_extension,
-            cancel_check=cancel_check,
-        )
-        if cancel_check is not None:
-            cancel_check()
-        # 去掉大字段，避免把完整文本和分页内容直接写入数据库。
-        recognition_result.pop("content", None)
-        recognition_result.pop("pages", None)
-        recognition_result["filename"] = file_name
-        return recognition_result
-    finally:
-        cleanup_temp_file(temp_file_path)
-
-
 def _format_upload_create_error(exc: Exception, rollback_error: Optional[str]) -> tuple[int, str]:
     """
     将上传/识别/入库过程中抛出的异常统一映射为 (HTTP 状态码, 错误描述)，

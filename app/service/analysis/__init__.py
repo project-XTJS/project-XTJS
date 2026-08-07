@@ -8,7 +8,6 @@ from .itemized import ItemizedPricingChecker
 from .bid_document_review import BidDocumentReviewService
 from .tender_compliance import TenderComplianceChecker
 from .verification import VerificationChecker
-from .tender_compliance import TenderComplianceChecker
 
 TechnicalBidReviewService = BidDocumentReviewService
 

@@ -224,7 +224,6 @@ class ClusterEngineMixin:
             families = {str(cluster.get("family") or "block")}
         cluster["family"] = next(iter(families)) if len(families) == 1 else "mixed"
 
-        mode = str(cluster.get("mode") or "exact")
         metrics = {
             "exact_section_count": 0,
             "similar_section_count": 0,

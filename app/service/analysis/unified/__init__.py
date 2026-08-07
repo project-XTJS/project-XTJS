@@ -7,11 +7,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID
 from app.service.analysis.compliance.consistency import ConsistencyChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.compliance.integrity import IntegrityChecker

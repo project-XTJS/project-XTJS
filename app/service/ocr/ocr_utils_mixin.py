@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 import html
 import re
+import threading
 from typing import Any
+
+# pypdfium2 非线程安全：并发 OCR 时对 PDF 页面的访问需要全局串行化
+PDFIUM_IO_LOCK = threading.Lock()
 
 class OCRUtilsMixin:
     """
@@ -157,31 +161,31 @@ class OCRUtilsMixin:
             import pypdfium2 as pdfium
         except Exception:
             return {}
-            
-        document = pdfium.PdfDocument(file_path)
-        page_sizes: dict[int, tuple[float, float]] = {}
-        try:
-            for page_index in range(len(document)):
-                page = document[page_index]
-                try:
-                    width = float(page.get_width())
-                    height = float(page.get_height())
-                except Exception:
+        with PDFIUM_IO_LOCK:
+            document = pdfium.PdfDocument(file_path)
+            page_sizes: dict[int, tuple[float, float]] = {}
+            try:
+                for page_index in range(len(document)):
+                    page = document[page_index]
                     try:
-                        width, height = page.get_size()
-                        width = float(width)
-                        height = float(height)
+                        width = float(page.get_width())
+                        height = float(page.get_height())
                     except Exception:
-                        continue
-                if width > 0 and height > 0:
-                    page_sizes[page_index + 1] = (width, height)
-                close_page = getattr(page, "close", None)
-                if callable(close_page):
-                    close_page()
-        finally:
-            close_document = getattr(document, "close", None)
-            if callable(close_document):
-                close_document()
+                        try:
+                            width, height = page.get_size()
+                            width = float(width)
+                            height = float(height)
+                        except Exception:
+                            continue
+                    if width > 0 and height > 0:
+                        page_sizes[page_index + 1] = (width, height)
+                    close_page = getattr(page, "close", None)
+                    if callable(close_page):
+                        close_page()
+            finally:
+                close_document = getattr(document, "close", None)
+                if callable(close_document):
+                    close_document()
         return page_sizes
 
     def _scale_bbox_to_pdf(self, bbox: Any, ocr_image_size: tuple[int, int] | None, pdf_page_size: tuple[float, float] | None) -> Any:

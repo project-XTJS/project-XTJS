@@ -6,7 +6,6 @@
 
 from decimal import Decimal
 
-from .html_parser import _TableHTMLParser
 from .utils import UtilsMixin
 from .document_parser import DocumentParserMixin
 from .table_extractor import TableExtractorMixin

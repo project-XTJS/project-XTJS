@@ -18,7 +18,6 @@ from .text_utils import (
 )
 from .constants import (
     SPLIT_LINE_PATTERN,
-    BUSINESS_SIMILARITY_MIN_KEY_LENGTH,
 )
 
 

@@ -9,9 +9,8 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from . import constants
 
 
 class DocumentLoaderMixin:

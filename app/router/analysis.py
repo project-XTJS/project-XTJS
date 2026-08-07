@@ -11,7 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from psycopg2 import Error as PsycopgError
@@ -527,7 +527,6 @@ async def _run_selected_project_services(
     # 整个项目分析批次只取一次最新项目状态，后续各服务共用这份门槛判断。
     project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
     _ensure_project_ocr_idle(project, analysis_name="项目业务分析")
-    typo_document_types: list[str] | None = None
 
     async def _ensure_business_review_response() -> dict[str, Any]:
         nonlocal business_review_response

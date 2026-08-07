@@ -12,7 +12,6 @@ from app.service.analysis.location_utils import normalize_bbox
 from .text_utils import (
     normalize_plain_text,
     compact_raw_text,
-    hash_text,
     similarity_ratio,
 )
 from .constants import (

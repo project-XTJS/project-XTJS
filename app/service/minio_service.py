@@ -13,7 +13,7 @@ import urllib.request
 import os
 import re
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from mimetypes import guess_type
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4

@@ -8,8 +8,7 @@
 
 from __future__ import annotations
 
-import time
-from typing import Any, Callable
+from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
 

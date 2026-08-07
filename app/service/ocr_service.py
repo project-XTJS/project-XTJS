@@ -5,7 +5,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from app.config.settings import settings
-from app.service.ocr_progress import OCRProgressMonitor
 # 注意这里引入的包路径改为了 app.service.ocr
 from app.service.ocr.ocr_utils_mixin import OCRUtilsMixin
 from app.service.ocr.ocr_engine_mixin import OCREngineMixin

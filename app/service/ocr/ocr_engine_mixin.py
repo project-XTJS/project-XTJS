@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 from app.config.settings import settings
 from app.service.ocr_progress import OCRProgressMonitor
+from app.service.ocr.ocr_utils_mixin import PDFIUM_IO_LOCK
 
 class OCREngineMixin:
     """
@@ -255,10 +256,11 @@ class OCREngineMixin:
         if normalized_type != "pdf": return 0
         try:
             import pypdfium2 as pdfium
-            document = pdfium.PdfDocument(file_path)
-            try: return len(document)
-            finally:
-                if callable(getattr(document, "close", None)): document.close()
+            with PDFIUM_IO_LOCK:
+                document = pdfium.PdfDocument(file_path)
+                try: return len(document)
+                finally:
+                    if callable(getattr(document, "close", None)): document.close()
         except Exception: return 0
 
     def _build_progress_monitor(self, *, file_path: str, file_type: str, total_pages: int) -> OCRProgressMonitor:

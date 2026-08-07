@@ -8,7 +8,6 @@ from ..text_utils import (
     clip,
     business_similarity_key,
     similarity_ratio,
-    normalize_plain_text,
     compact_raw_text,
 )
 from ..constants import (

@@ -37,7 +37,8 @@ hanlp>=2.1.3
 pycorrector==1.1.3
 pypinyin>=0.55
 huggingface-hub>=0.23,<2
-torch>=2.2,<3
+# 与 Dockerfile.lean 保持一致的固定版本：torch 2.13 会与 paddle 3.3.0 cu130 争抢 nvidia-cudnn-cu13 导致装不上
+torch==2.5.1
 transformers>=4.41,<6
 
 PyMuPDF>=1.24,<2

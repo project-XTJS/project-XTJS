@@ -27,6 +27,8 @@ class TenderComplianceChecker:
         "最高控制价",
         "控制价",
         "最高总价",
+        "总限价",
+        "报价上限",
     ]
     BUDGET_KEYWORDS = [
         "项目预算",
@@ -38,7 +40,10 @@ class TenderComplianceChecker:
         "预算",
     ]
     GUARANTEE_EXCLUDE_KEYWORDS = ["履约保证金", "质量保证金", "质保金"]
-    NO_GUARANTEE_KEYWORDS = ["不收取", "免收", "无需缴纳", "不需缴纳", "不要求提交", "无需提交", "不提交"]
+    NO_GUARANTEE_KEYWORDS = [
+        "不收取", "免收", "无需缴纳", "不需缴纳", "无须缴纳", "不缴纳", "不设置",
+        "不要求提交", "无需提交", "无须提交", "不提交",
+    ]
     PAYMENT_KEYWORDS = ["付款方式", "支付方式", "付款", "支付", "预付款", "进度款", "尾款", "质保金"]
     SCORE_CATEGORY_HEADERS = ["评分大类", "评分类别", "评审类别", "评分部分", "评审项目", "类别", "大类"]
     SCORE_ITEM_HEADERS = ["评分项", "评分项目", "评审因素", "评审项", "评审内容", "评分因素", "项目"]
@@ -71,6 +76,29 @@ class TenderComplianceChecker:
                 ],
             ),
         }
+        # "最高投标限价 同预算/等于预算" 这类声明没有具体数字：用预算金额作为限价。
+        if not context["limit_candidates"] and context["budget_candidates"]:
+            same_budget_section = next(
+                (
+                    section
+                    for section in sections
+                    if re.search(
+                        r"(?:最高投标限价|最高限价|招标控制价|最高控制价|控制价)[^。；\n]{0,20}(?:同|等于|与|按|即)[^。；\n]{0,8}(?:预算|概算)",
+                        str(section.get("text") or ""),
+                    )
+                ),
+                None,
+            )
+            if same_budget_section:
+                best_budget = self._best_candidate(context["budget_candidates"])
+                if best_budget:
+                    context["limit_candidates"].append(
+                        {
+                            **best_budget,
+                            "keyword": "最高投标限价(同预算)",
+                            "context": str(same_budget_section.get("text") or "")[:220],
+                        }
+                    )
 
         checks = [
             self._check_budget_vs_limit(context),
@@ -102,12 +130,12 @@ class TenderComplianceChecker:
         budget = self._best_candidate(context["budget_candidates"])
         limit = self._best_candidate(context["limit_candidates"])
 
-        if not budget or not limit:
+        if not budget and not limit:
             return self._make_check(
                 "budget_vs_limit",
                 "项目预算与最高限价",
                 "unclear",
-                "未同时识别到项目预算和最高限价，需人工复核。",
+                "未识别到项目预算或最高限价，需人工复核。",
                 values={
                     "budget": self._serialize_candidate(budget),
                     "highest_limit": self._serialize_candidate(limit),
@@ -115,17 +143,37 @@ class TenderComplianceChecker:
                 evidence=self._evidence_from_candidates([budget, limit]),
             )
 
-        budget_amount = float(budget["amount_yuan"])
-        limit_amount = float(limit["amount_yuan"])
-        passed = budget_amount + self.AMOUNT_TOLERANCE_YUAN >= limit_amount
+        # 业务约定：预算与最高限价视为同一概念（同义词）。
+        # 因此"预算≥限价"不再要求两者同时出现；单一来源即视为该值。
+        if budget and limit:
+            budget_amount = float(budget["amount_yuan"])
+            limit_amount = float(limit["amount_yuan"])
+            passed = budget_amount + self.AMOUNT_TOLERANCE_YUAN >= limit_amount
+            message = (
+                f"项目预算 {self._format_yuan(budget_amount)} "
+                f"{'不低于' if passed else '低于'}最高限价 {self._format_yuan(limit_amount)}。"
+            )
+            if not passed:
+                message = "预算与限价视为同义，但文档中预算低于最高限价，存在矛盾：" + message
+        elif budget:
+            budget_amount = float(budget["amount_yuan"])
+            passed = True
+            message = (
+                f"识别到项目预算 {self._format_yuan(budget_amount)}，"
+                "预算与最高限价视为同一概念，未发现矛盾。"
+            )
+        else:
+            limit_amount = float(limit["amount_yuan"])
+            passed = True
+            message = (
+                f"识别到最高限价 {self._format_yuan(limit_amount)}，"
+                "预算与最高限价视为同一概念，未发现矛盾。"
+            )
         return self._make_check(
             "budget_vs_limit",
             "项目预算与最高限价",
             "pass" if passed else "fail",
-            (
-                f"项目预算 {self._format_yuan(budget_amount)} "
-                f"{'不低于' if passed else '低于'}最高限价 {self._format_yuan(limit_amount)}。"
-            ),
+            message,
             values={
                 "budget": self._serialize_candidate(budget),
                 "highest_limit": self._serialize_candidate(limit),
@@ -138,6 +186,9 @@ class TenderComplianceChecker:
         if analysis["conflicts"]:
             status = "fail"
             message = "最高限价存在冲突：" + "；".join(analysis["conflicts"])
+        elif analysis["multi_lot"]:
+            status = "unclear"
+            message = "识别到多包件/多标段限价（" + "、".join(analysis["multi_lot"]) + "），需按包件人工核对一致性。"
         elif analysis["missing"]:
             status = "unclear"
             message = f"未完整识别最高限价来源：{', '.join(analysis['missing'])}，需人工复核。"
@@ -164,6 +215,7 @@ class TenderComplianceChecker:
         all_candidates: list[dict[str, Any]] = []
         missing: list[str] = []
         conflicts: list[str] = []
+        multi_lot: list[str] = []
         values: dict[str, Any] = {}
 
         for key, label, category_keywords in categories:
@@ -190,17 +242,33 @@ class TenderComplianceChecker:
                 values[key] = None
                 continue
             if len(amount_groups) > 1:
-                conflicts.append(
-                    f"{label}出现多个金额："
-                    + "、".join(self._format_yuan(amount) for amount in sorted(amount_groups))
-                )
-                values[key] = {
-                    "status": "conflict",
-                    "candidates": [
-                        self._serialize_candidate(self._best_candidate(items))
-                        for _, items in sorted(amount_groups.items())
-                    ],
-                }
+                # 多包件/多标段项目各包件限价不同是正常现象，不应直接判冲突；
+                # 交由人工按包件核对。无包件结构的多金额才视为真实冲突。
+                if any(
+                    self._contains_any(str(candidate.get("context") or ""), ["包件", "标段", "分包"])
+                    for items in amount_groups.values()
+                    for candidate in items
+                ):
+                    multi_lot.append(label)
+                    values[key] = {
+                        "status": "multi_lot",
+                        "candidates": [
+                            self._serialize_candidate(self._best_candidate(items))
+                            for _, items in sorted(amount_groups.items())
+                        ],
+                    }
+                else:
+                    conflicts.append(
+                        f"{label}出现多个金额："
+                        + "、".join(self._format_yuan(amount) for amount in sorted(amount_groups))
+                    )
+                    values[key] = {
+                        "status": "conflict",
+                        "candidates": [
+                            self._serialize_candidate(self._best_candidate(items))
+                            for _, items in sorted(amount_groups.items())
+                        ],
+                    }
                 continue
             best = self._best_candidate(next(iter(amount_groups.values())))
             if best:
@@ -219,19 +287,16 @@ class TenderComplianceChecker:
             "all_candidates": all_candidates,
             "missing": missing,
             "conflicts": list(dict.fromkeys(conflicts)),
+            "multi_lot": list(dict.fromkeys(multi_lot)),
             "values": values,
         }
 
     def _check_bid_security_ratio(self, context: dict[str, Any]) -> dict[str, Any]:
         sections = context["sections"]
-        keywords = ["投标保证金", "响应保证金", "报价保证金"]
-        none_context = self._first_context(
-            sections,
-            keywords,
-            include_keywords=self.NO_GUARANTEE_KEYWORDS,
-            exclude_keywords=self.GUARANTEE_EXCLUDE_KEYWORDS,
-        )
-        if none_context:
+        keywords = ["投标保证金", "响应保证金", "应答保证金", "报价保证金"]
+        none_context_index = self._first_not_required_index(sections, keywords)
+        if none_context_index is not None and self._window_is_not_required(sections, none_context_index):
+            none_context = sections[none_context_index]
             return self._make_check(
                 "bid_security_ratio",
                 "投标保证金比例",
@@ -300,12 +365,31 @@ class TenderComplianceChecker:
                 evidence=self._evidence_from_candidates([amount, limit]),
             )
         if amount and not limit:
+            # 预算与限价视为同义：无最高限价时，用预算金额作分母计算比例。
+            budget = self._best_candidate(context["budget_candidates"])
+            if budget:
+                ratio = float(amount["amount_yuan"]) / max(float(budget["amount_yuan"]), 1)
+                passed = ratio <= 0.02 + 1e-9
+                return self._make_check(
+                    "bid_security_ratio",
+                    "投标保证金比例",
+                    "pass" if passed else "fail",
+                    f"投标保证金约为预算（限价同义）的 {ratio * 100:.2f}%，{'未超过' if passed else '超过'} 2%。",
+                    values={
+                        "bid_security": self._serialize_candidate(amount),
+                        "budget": self._serialize_candidate(budget),
+                        "ratio": round(ratio, 6),
+                        "ratio_percent": round(ratio * 100, 4),
+                        "denominator": "budget",
+                    },
+                    evidence=self._evidence_from_candidates([amount, budget]),
+                )
             return self._make_check(
                 "bid_security_ratio",
                 "投标保证金比例",
                 "unclear",
-                "识别到投标保证金金额，但未识别到最高限价，无法计算比例。",
-                values={"bid_security": self._serialize_candidate(amount), "highest_limit": None},
+                "识别到投标保证金金额，但未识别到最高限价或预算，无法计算比例。",
+                values={"bid_security": self._serialize_candidate(amount), "highest_limit": None, "budget": None},
                 evidence=self._evidence_from_candidates([amount]),
             )
         return self._make_check(
@@ -318,6 +402,23 @@ class TenderComplianceChecker:
         )
 
     def _check_performance_security_consistency(self, context: dict[str, Any]) -> dict[str, Any]:
+        # 文档明确"不设置/免收/无需缴纳"履约保证金时，直接判定一致（pass），无需再找前附表与合同描述。
+        # 搜索履约保证金时不能排除"履约保证金"本身（排除词表默认含它，专用于投标保证金场景）。
+        not_required_index = self._first_not_required_index(
+            context["sections"],
+            ["履约保证金"],
+            exclude_keywords=["质量保证金", "质保金"],
+        )
+        if not_required_index is not None and self._window_is_not_required(context["sections"], not_required_index):
+            not_required_context = context["sections"][not_required_index]
+            return self._make_check(
+                "performance_security_consistency",
+                "履约保证金一致性",
+                "pass",
+                "识别到履约保证金不收取/免收/不设置描述。",
+                values={"mode": "not_required"},
+                evidence=self._evidence_from_sections([not_required_context]),
+            )
         schedule = self._clause_signature(
             context["sections"],
             ["履约保证金"],
@@ -431,11 +532,39 @@ class TenderComplianceChecker:
 
         category_sum = sum(category_scores.values()) if category_scores else None
         if total_score is None:
-            unclear.append("未识别总分")
-        if not {"business", "technical", "price"}.issubset(category_scores):
-            unclear.append("未完整识别商务分、技术分、价格分")
+            if category_sum is not None:
+                total_score = category_sum
+                unclear.append(f"未识别显式总分，按大类合计 {category_sum:g} 分核对")
+            else:
+                unclear.append("未识别总分")
+        missing_categories = [
+            label
+            for key, label in (("business", "商务"), ("technical", "技术"), ("price", "价格"))
+            if key not in category_scores
+        ]
+        if missing_categories:
+            if (
+                total_score is not None
+                and category_sum is not None
+                and abs(category_sum - total_score) <= 0.01
+                and category_scores
+            ):
+                # 部分项目只有商务+技术两类（价格以权值/系数计分，不设价格分大类），
+                # 已识别大类合计与总分一致时不因缺类判 unclear，仅提示。
+                unclear.append(
+                    f"未识别到{'、'.join(missing_categories)}大类"
+                    f"（已识别大类合计 {category_sum:g} 分与总分一致，可能为两类计分或价格按权值计）"
+                )
+            else:
+                unclear.append("未完整识别商务分、技术分、价格分")
         if total_score is not None and category_sum is not None and abs(category_sum - total_score) > 0.01:
-            issues.append(f"商务分+技术分+价格分={category_sum:g}，不等于总分 {total_score:g}")
+            if missing_categories:
+                # 大类识别不完整时无法可靠核对"大类合计=总分"，按修订原则判待复核而非不通过。
+                unclear.append(
+                    f"大类识别不完整，已识别大类合计 {category_sum:g} 分无法与总分 {total_score:g} 分可靠核对，需人工复核"
+                )
+            else:
+                issues.append(f"商务分+技术分+价格分={category_sum:g}，不等于总分 {total_score:g}")
 
         category_sums: dict[str, float | None] = {}
         detail_sums: dict[str, dict[str, Any]] = {}
@@ -465,14 +594,42 @@ class TenderComplianceChecker:
                     }
                     expected = category_scores.get(category)
                     if expected is not None and abs(item_sum - float(expected)) > 0.01:
-                        issues.append(
-                            f"{self._category_label(category)}细项满分合计 {item_sum:g}，不等于大类分值 {float(expected):g}"
+                        generic_name = re.compile(r"^(?:序号|编号|评分项目|设置分值|\d+(?:\.\d+)?)$")
+                        # 评分表跨页/跨表拆分时，同一大类细项来自多张表，多半存在漏行，
+                        # 按修订原则"解析不完整→待复核"，不据此判不通过。
+                        cross_table_count = len(
+                            {
+                                table_id
+                                for item in category_items
+                                for table_id in (item.get("evidence") or {}).get("table_ids") or []
+                            }
                         )
+                        incomplete = (
+                            any(
+                                generic_name.match(str(item.get("item_name") or "").strip())
+                                or "未命名评分项" in str(item.get("item_name") or "")
+                                or (item.get("anomalies"))
+                                for item in category_items
+                            )
+                            or (len(category_items) == 1 and float(expected) > 2 * item_sum)
+                            or cross_table_count >= 2
+                        )
+                        if incomplete:
+                            unclear.append(
+                                f"{self._category_label(category)}评分细项解析不完整"
+                                f"（仅识别 {len(category_items)} 项、合计 {item_sum:g} 分），"
+                                "无法可靠校验细项合计，需人工复核"
+                            )
+                        else:
+                            issues.append(
+                                f"{self._category_label(category)}细项满分合计 {item_sum:g}，不等于大类分值 {float(expected):g}"
+                            )
                 for item in category_items:
-                    item_anomalies = [str(value) for value in item.get("anomalies") or []]
-                    anomalies.extend(item_anomalies)
                     if item.get("status") == "unclear":
                         unclear.append(f"评分项“{item.get('item_name') or '未命名'}”规则需复核")
+                        continue
+                    item_anomalies = [str(value) for value in item.get("anomalies") or []]
+                    anomalies.extend(item_anomalies)
             issues.extend(anomalies)
         else:
             detail_sums = self._extract_category_detail_sums(combined_text, category_scores)
@@ -573,6 +730,21 @@ class TenderComplianceChecker:
         except Exception:
             tender_limit = None
         if tender_limit:
+            limit_keyword = str(tender_limit.get("keyword") or "")
+            limit_context = str(tender_limit.get("context") or "")
+            if candidates:
+                # 关键词法已命中真实限价声明，兜底提取（reasonableness）可能把预算/控制价等
+                # 非限价金额带入，直接丢弃，避免"预算当限价"的误判。
+                tender_limit = None
+            elif "预算" in limit_keyword and not re.search(
+                r"预算[^。；\n]{0,20}(?:即|就是|作为|等于|同于|视为|按)[^。；\n]{0,10}最高限价"
+                r"|最高限价[^。；\n]{0,20}(?:即|就是|等于|同于|按|为)[^。；\n]{0,10}预算",
+                self._normalize(limit_context),
+            ):
+                # 文档只有预算、没有最高限价声明，也没有"预算=限价"的明确表述：
+                # 不能把预算当作限价，否则"预算≥限价"恒真。
+                tender_limit = None
+        if tender_limit:
             candidates.append(
                 {
                     "raw_amount": tender_limit.get("raw_amount"),
@@ -627,6 +799,10 @@ class TenderComplianceChecker:
                     continue
                 if normalized_excludes and any(keyword in normalized_local for keyword in normalized_excludes):
                     if keyword_distance is None or exclude_distance is None or exclude_distance <= keyword_distance:
+                        continue
+                    # 排除"为最高限价的 X%，即 ¥金额"这类由保证金比例推导出的金额：
+                    # 金额与排除关键词（保证金等）同句且句内出现百分比时，视为衍生金额而非独立限价/金额声明。
+                    if re.search(r"\d+(?:\.\d+)?\s*%", normalized_local):
                         continue
                 if section_has_excluded_signal and not any(keyword in normalized_local for keyword in normalized_keywords):
                     continue
@@ -758,15 +934,29 @@ class TenderComplianceChecker:
             return None
         combined = "；".join(section["text"][:300] for section in contexts[:4])
         stages = self._payment_stages_from_text(combined)
+        # 同一类目下多段重复条款（如合同条款前后两处相同描述）只保留一份，避免自我不一致。
+        seen_stages: set[str] = set()
+        unique_stages: list[dict[str, Any]] = []
+        for stage in stages:
+            stage_key = str(stage.get("canonical") or "")
+            if stage_key in seen_stages:
+                continue
+            seen_stages.add(stage_key)
+            unique_stages.append(stage)
+        stages = unique_stages
         percentages = sorted({value for stage in stages for value in stage.get("percentages") or []})
         milestones = sorted({trigger for stage in stages for trigger in stage.get("triggers") or []})
         canonical = "||".join(stage["canonical"] for stage in stages)
         if not canonical:
             canonical = self._normalize_clause(combined)
+        # 付款方式签名须包含 1~5 个百分比（付款节点比例）。0 个说明只抓到标题/交付期描述；
+        # 超过 5 个通常是把中标服务费阶梯费率表等非付款方式内容误当成了付款节点。
+        # 此时视为无法可靠解析，交由检查逻辑按 unclear 处理，而非参与一致性比对。
+        structured = bool(stages) and 1 <= len(percentages) <= 5
         return {
             "label": label,
             "canonical": canonical,
-            "structured": bool(stages),
+            "structured": structured,
             "percentages": percentages,
             "milestones": milestones,
             "stages": stages,
@@ -817,9 +1007,11 @@ class TenderComplianceChecker:
                 continue
             if not triggers and self._contains_any(segment, self.PAYMENT_KEYWORDS):
                 triggers = ["payment"]
+            # "合同签订后" 属于付款方式的前置修饰，不参与一致性比对，避免措辞差异导致误报。
+            canonical_triggers = [trigger for trigger in triggers if trigger != "contract_signing"]
             canonical = ":".join(
                 [
-                    "+".join(triggers) or "payment",
+                    "+".join(canonical_triggers) or "payment",
                     ",".join(f"{value:g}" for value in percentages) or "-",
                     ",".join(str(value) for value in days) or "-",
                 ]
@@ -872,11 +1064,21 @@ class TenderComplianceChecker:
     # ------------------------------------------------------------------
     def _evaluation_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        keywords = ["评标办法", "评审办法", "评分标准", "评分细则", "综合评分", "评审因素"]
+        keywords = [
+            "评标办法", "评审办法", "评分标准", "评分细则", "综合评分", "评审因素",
+            "商务标评审", "技术标评审", "价格标评审", "商务评审", "技术评审", "评分表",
+        ]
+        # 目录行（"第三章 评标办法 ........."）不能当作正文来源，否则抓到的是一串目录。
+        toc_pattern = re.compile(r"第[一二三四五六七八九十0-9]+[章节][^。；\n]{0,40}(?:[.．·]{3,}|\.{3,})")
         for index, section in enumerate(sections):
             text = str(section.get("text") or "")
+            if toc_pattern.search(text):
+                continue
             if self._contains_any(text, keywords):
-                result.extend(sections[index:index + 12])
+                for extra in sections[index:index + 12]:
+                    extra_text = str(extra.get("text") or "")
+                    if not toc_pattern.search(extra_text):
+                        result.append(extra)
         if result:
             deduped: list[dict[str, Any]] = []
             seen: set[tuple[Any, str]] = set()
@@ -890,7 +1092,10 @@ class TenderComplianceChecker:
         return [
             section
             for section in sections
-            if self._contains_any(str(section.get("text") or ""), ["商务分", "技术分", "价格分", "总分", "满分"])
+            if self._contains_any(
+                str(section.get("text") or ""),
+                ["商务分", "技术分", "价格分", "总分", "满分", "合计", "商务标评审", "技术标评审"],
+            )
         ]
 
     def _extract_structured_scoring(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -903,6 +1108,10 @@ class TenderComplianceChecker:
         raw_items: list[dict[str, Any]] = []
         declared_category_scores: dict[str, float] = {}
         table_text_parts: list[str] = []
+        # OCR 常把跨页的大评分表拆成多个逻辑表：类别归属需要跨表延续，
+        # 否则后续分表（如"样品情况/质量保证"等细项）会因无类别信息而被丢弃。
+        last_category_across_tables: str | None = None
+        last_column_map: dict[str, int | None] | None = None
 
         for table_index, table in enumerate(tables):
             headers = [str(value or "").strip() for value in table.get("headers") or []]
@@ -914,6 +1123,14 @@ class TenderComplianceChecker:
             ).strip()
             column_map = self._score_table_column_map(headers)
             if not self._looks_like_scoring_table(table_text, column_map):
+                # 跨页续表：表头可能被 OCR 截断（如只剩"…意一种情形)"），
+                # 若数据行与上一张评分表的列结构吻合，则沿用其列映射继续解析。
+                if last_column_map is not None and self._table_matches_column_map(table, last_column_map):
+                    column_map = last_column_map
+                else:
+                    continue
+            last_column_map = column_map
+            if not self._looks_like_scoring_table(table_text, column_map):
                 continue
             table_text_parts.append(table_text)
 
@@ -921,6 +1138,7 @@ class TenderComplianceChecker:
             data_rows = rows[header_row_count:] if header_row_count < len(rows) else rows
             current_category_text = ""
             current_item_name = ""
+            last_category: str | None = last_category_across_tables
             pages = [page for page in table.get("pages") or [] if isinstance(page, int)]
             table_id = str(table.get("id") or f"table_{table_index + 1}")
 
@@ -941,7 +1159,13 @@ class TenderComplianceChecker:
                 if category is None:
                     category = self._score_category_from_text(row_text)
                 if category is None:
+                    # 无类别列且当前行无类别信息时，延续上一行已识别的类别，
+                    # 避免漏掉表格中紧随其后的细项行（如"技术水平评价 20"之后的"… 10"）。
+                    category = last_category
+                if category is None:
                     continue
+                last_category = category
+                last_category_across_tables = category
 
                 declared_score = self._declared_category_score(category_source, category)
                 if declared_score is not None:
@@ -949,7 +1173,19 @@ class TenderComplianceChecker:
                     if existing is None or abs(existing - declared_score) <= 0.01:
                         declared_category_scores[category] = declared_score
 
+                # 类别总分行（如"（二）技术部分得分 | 75"）：该行分值就是大类分值，
+                # 不应再作为评分细项累计（否则会重复计数）。
+                if re.search(
+                    r"(?:商务|资信|技术|价格|报价|经济)\s*部分\s*(?:得分|满分|分)",
+                    self._normalize(item_cell or category_cell or ""),
+                ) or self._normalize(item_cell or "") in ("序号", "编号", "评分项目", "设置分值"):
+                    continue
+
                 max_text = self._cell_at(padded, column_map.get("max"))
+                # 跨页续表可能残留被截断的表头行（如"…意一种情形)"）：
+                # 无分值且整行无数字的行按表头处理，不当作评分细项。
+                if not max_text and not any(re.search(r"\d+", cell) for cell in padded):
+                    continue
                 criteria_parts = [
                     self._cell_at(padded, column_map.get("criteria")),
                     self._cell_at(padded, column_map.get("deduction")),
@@ -959,7 +1195,11 @@ class TenderComplianceChecker:
                     criteria_text = row_text
 
                 item_name = item_cell or current_item_name
-                if not item_name or self._looks_like_score_category_label(item_name):
+                if (
+                    not item_name
+                    or self._looks_like_score_category_label(item_name)
+                    or re.fullmatch(r"\d+(?:\.\d+)?", item_name or "")
+                ):
                     item_name = self._fallback_score_item_name(padded, column_map)
                 if not item_name:
                     if self._contains_any(row_text, ["合计", "小计", "总分"]):
@@ -1011,6 +1251,23 @@ class TenderComplianceChecker:
             "deduction": deduction_index,
         }
 
+    def _table_matches_column_map(self, table: dict[str, Any], column_map: dict[str, int | None]) -> bool:
+        """判断表格的数据行是否与给定列映射吻合（用于跨页续表识别）。"""
+        item_index = column_map.get("item")
+        max_index = column_map.get("max")
+        if item_index is None and max_index is None:
+            return False
+        for row in (table.get("rows") or []):
+            if not isinstance(row, (list, tuple)):
+                continue
+            padded = [str(cell or "").strip() for cell in row]
+            max_text = padded[max_index] if max_index is not None and max_index < len(padded) else ""
+            if not re.fullmatch(r"(?:\d+(?:\.\d+)?|\d+\s*分)", max_text):
+                continue
+            if item_index is not None and item_index < len(padded) and padded[item_index]:
+                return True
+        return False
+
     def _looks_like_scoring_table(self, table_text: str, column_map: dict[str, int | None]) -> bool:
         normalized = self._normalize(table_text)
         if not any(keyword in normalized for keyword in ("评分", "评审", "得分", "分值", "满分")):
@@ -1049,14 +1306,16 @@ class TenderComplianceChecker:
 
     def _declared_category_score(self, text: str, category: str) -> float | None:
         label_patterns = {
-            "business": r"(?:商务|资信)(?:部分|评分|分)?",
-            "technical": r"技术(?:部分|评分|分)?",
-            "price": r"(?:价格|报价|经济)(?:部分|评分|分)?",
+            "business": r"(?:商务|资信)(?:部分|标|评分|分)",
+            "technical": r"技术(?:部分|标|评分|分)",
+            "price": r"(?:价格|报价|经济)(?:部分|标|评分|分)",
         }
         pattern = label_patterns.get(category)
         if not pattern:
             return None
-        match = re.search(rf"{pattern}[^\d]{{0,12}}(\d+(?:\.\d+)?)\s*分", str(text or ""))
+        # 仅当来源包含"类别级"标签（如"技术部分得分/技术标/技术评分"）时才视为大类声明，
+        # 避免把细项行（"1 | 技术参数响应情况 | …满分38分"）误当成技术大类分值。
+        match = re.search(rf"{pattern}[^\d]{{0,20}}(\d+(?:\.\d+)?)\s*分", str(text or ""))
         return float(match.group(1)) if match else None
 
     def _fallback_score_item_name(self, row: list[str], column_map: dict[str, int | None]) -> str:
@@ -1156,6 +1415,7 @@ class TenderComplianceChecker:
         for current in grouped.values():
             anomalies: list[str] = []
             max_candidates = sorted({round(float(value), 4) for value in current.pop("max_candidates", [])})
+            merged_multiple_max = len(max_candidates) > 1
             if len(max_candidates) > 1:
                 anomalies.append(
                     f"评分项“{current['item_name']}”出现多个单项满分："
@@ -1182,8 +1442,13 @@ class TenderComplianceChecker:
                     "deduct_to_zero": any(rule.get("deduct_to_zero") for rule in deduction_rules),
                     "text": "；".join(dict.fromkeys(rule.get("text") for rule in deduction_rules if rule.get("text"))),
                 }
-            anomalies.extend(self._score_range_anomalies(current["item_name"], current.get("ranges") or []))
-            if anomalies:
+            # 多个不同满分合并到同一评分项，说明多个细项行被归并（常见于缺失细项名），
+            # 此时区间/重叠分析不可靠，整体标记为 unclear 交人工复核，而非直接判 fail。
+            if not merged_multiple_max:
+                anomalies.extend(self._score_range_anomalies(current["item_name"], current.get("ranges") or []))
+            if merged_multiple_max:
+                current["status"] = "unclear"
+            elif anomalies:
                 current["status"] = "fail"
             elif current.get("item_max_score") is None:
                 current["status"] = "unclear"
@@ -1282,7 +1547,7 @@ class TenderComplianceChecker:
                 anomalies.append(
                     f"评分项“{item_name}”分值区间 {current[0]:g}-{current[1]:g} 与 {following[0]:g}-{following[1]:g} 重叠"
                 )
-            elif following[0] > current[1]:
+            elif following[0] > current[1] + 1:
                 anomalies.append(
                     f"评分项“{item_name}”分值区间 {current[0]:g}-{current[1]:g} 与 {following[0]:g}-{following[1]:g} 存在断层"
                 )
@@ -1290,7 +1555,7 @@ class TenderComplianceChecker:
 
     def _extract_total_score(self, text: str) -> float | None:
         patterns = [
-            r"(?:总分|满分|总评分|合计)[为：:\s]*([0-9]+(?:\.[0-9]+)?)\s*分",
+            r"(?:总分|总评分|满分)[为：:\s]*([0-9]+(?:\.[0-9]+)?)\s*分",
             r"([0-9]+(?:\.[0-9]+)?)\s*分[，,。\s]*(?:总分|满分)",
         ]
         for pattern in patterns:
@@ -1301,26 +1566,30 @@ class TenderComplianceChecker:
 
     def _extract_category_scores(self, text: str) -> dict[str, float]:
         categories = {
-            "business": ["商务分", "商务部分", "商务评分", "商务"],
-            "technical": ["技术分", "技术部分", "技术评分", "技术"],
-            "price": ["价格分", "报价分", "投标报价", "价格评分", "报价"],
+            "business": r"(?:商务|资信)",
+            "technical": r"技术",
+            "price": r"(?:价格|报价|经济)",
         }
         scores: dict[str, float] = {}
-        for key, labels in categories.items():
-            for label in labels:
-                escaped = re.escape(label)
-                patterns = [
-                    rf"{escaped}[^\d]{{0,12}}([0-9]+(?:\.[0-9]+)?)\s*分",
-                    rf"{escaped}[（(]\s*([0-9]+(?:\.[0-9]+)?)\s*分\s*[）)]",
-                    rf"([0-9]+(?:\.[0-9]+)?)\s*分[^\n，,；;]{{0,8}}{escaped}",
-                ]
-                for pattern in patterns:
-                    match = re.search(pattern, text)
-                    if match:
-                        scores[key] = float(match.group(1))
-                        break
-                if key in scores:
-                    break
+        for key, category_pattern in categories.items():
+            # 1) 类别级声明："商务部分…满分 30 分" / "（二）技术部分得分 | 类型 | 满分 70 分"
+            match = re.search(
+                rf"{category_pattern}(?:部分|标|评分)[^\d]{{0,20}}(?:满分|合计|得分)[为：:\s]*([0-9]+(?:\.[0-9]+)?)\s*分",
+                text,
+            )
+            if match is None:
+                match = re.search(
+                    rf"{category_pattern}(?:部分|标|评分)[^\d]{{0,12}}([0-9]+(?:\.[0-9]+)?)\s*分",
+                    text,
+                )
+            if match is None:
+                # 2) 兜底：仅当没有类别级声明时，才接受"X…N分"的宽松匹配。
+                match = re.search(
+                    rf"{category_pattern}[^\d]{{0,12}}([0-9]+(?:\.[0-9]+)?)\s*分",
+                    text,
+                )
+            if match:
+                scores[key] = float(match.group(1))
         return scores
 
     def _extract_category_detail_sums(self, text: str, category_scores: dict[str, float]) -> dict[str, dict[str, Any]]:
@@ -1362,29 +1631,38 @@ class TenderComplianceChecker:
 
     def _detect_score_range_anomalies(self, text: str) -> list[str]:
         anomalies: list[str] = []
-        global_seen: set[tuple[float, float]] = set()
         range_pattern = re.compile(
+            r"(?<![0-9A-Za-z])"
             r"([0-9]+(?:\.[0-9]+)?)\s*(?:-|－|—|–|~|～|至|到)\s*([0-9]+(?:\.[0-9]+)?)\s*分?"
         )
         lines = [line.strip() for line in re.split(r"[\n\r。；;]", text) if line.strip()]
         for line in lines:
+            # 重复检测按"行"（单个评分项）内比较，避免不同评分项使用相同区间时误报重复。
+            line_seen: set[tuple[float, float]] = set()
             ranges: list[tuple[float, float]] = []
             for match in range_pattern.finditer(line):
                 start = float(match.group(1))
                 end = float(match.group(2))
+                after = line[match.end():]
+                # 排除年份/编号/日期等非分值区间：如"2025-2027年度"、"XTJS2025-263"、
+                # "2024年5月-2024年6月"（4 位年份，或紧跟"年/年度"）。
+                if start >= 1000 and end >= 1000:
+                    continue
+                if re.match(r"^\s*(?:年|年度)", after):
+                    continue
                 if start > end:
                     anomalies.append(f"分值区间 {start:g}-{end:g} 反向")
                     continue
                 pair = (start, end)
-                if pair in global_seen:
+                if pair in line_seen:
                     anomalies.append(f"分值区间 {start:g}-{end:g} 重复")
-                global_seen.add(pair)
+                line_seen.add(pair)
                 ranges.append(pair)
             ranges.sort()
             for current, following in zip(ranges, ranges[1:]):
                 if following[0] < current[1]:
                     anomalies.append(f"分值区间 {current[0]:g}-{current[1]:g} 与 {following[0]:g}-{following[1]:g} 重叠")
-                elif following[0] > current[1]:
+                elif following[0] > current[1] + 1:
                     anomalies.append(f"分值区间 {current[0]:g}-{current[1]:g} 与 {following[0]:g}-{following[1]:g} 存在断层")
         return list(dict.fromkeys(anomalies))
 
@@ -1674,6 +1952,61 @@ class TenderComplianceChecker:
             if self._contains_any(text, include_keywords):
                 return section
         return None
+
+    def _first_not_required_index(
+        self,
+        sections: list[dict[str, Any]],
+        keywords: list[str],
+        *,
+        exclude_keywords: list[str] | None = None,
+    ) -> int | None:
+        """定位首个含"免收/不设置"描述的保证金条款所在 section 下标。"""
+        exclude_keywords = list(exclude_keywords or self.GUARANTEE_EXCLUDE_KEYWORDS)
+        for index, section in enumerate(sections):
+            text = str(section.get("text") or "")
+            if not self._contains_any(text, keywords):
+                continue
+            if exclude_keywords and self._contains_any(text, exclude_keywords):
+                continue
+            if self._contains_any(text, self.NO_GUARANTEE_KEYWORDS):
+                return index
+        return None
+
+    def _window_is_not_required(self, sections: list[dict[str, Any]], start_index: int) -> bool:
+        """判断免收描述是否为最终勾选项。
+
+        OCR 会把复选框拆成相邻多个段落（"□无须提交"和"■设置保证金"各成一段），
+        因此需要合并匹配段及后续段落一起判断：
+        - 存在勾选标记（■/√/☑）时，看勾选项后面的选项是免收还是收取；
+        - 无勾选标记时，出现免收词且无非否定形式的收取/设置侧，才判免收。
+        """
+        window_text = " ".join(
+            str(section.get("text") or "")
+            for section in sections[start_index:start_index + 3]
+        )
+        checked = [match for match in re.finditer(r"[■√☑]", window_text)]
+        if checked:
+            # 勾选项的文本范围：从勾选标记到下一个复选框标记（□/■/√/☑）为止。
+            marker_end = checked[-1].end()
+            next_marker = re.search(r"[□■√☑]", window_text[marker_end:])
+            span = next_marker.start() if next_marker else 25
+            option = window_text[marker_end:marker_end + span]
+            nr = re.search(
+                r"(?:不收取|免收|无须提交|无需提交|不要求提交|不设置|无须缴纳|无需缴纳|不需缴纳|不缴纳)",
+                option,
+            )
+            setw = re.search(r"(?<!无)(?<!不)(?:收取|缴纳|提交|设置)", option)
+            if nr and not setw:
+                return True
+            if setw and not nr:
+                return False
+            if nr:
+                return True
+            if setw:
+                return False
+        has_not_required = self._contains_any(window_text, self.NO_GUARANTEE_KEYWORDS)
+        has_set_side = re.search(r"(?<!无)(?<!不)(?:收取|缴纳|提交|设置)", window_text) is not None
+        return has_not_required and not has_set_side
 
     def _percent_values_from_text(self, text: str) -> list[float]:
         values: list[float] = []

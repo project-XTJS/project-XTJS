@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal
-from typing import Any
 
 
 class StructuredExtractorMixin:

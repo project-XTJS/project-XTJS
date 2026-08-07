@@ -276,8 +276,6 @@ class ResultsMixin:
 
     def _single_doc_result(self, payload: dict) -> dict:
         """单文档输入时生成提示结果。"""
-        star_requirements = self._extract_star_requirements(payload)
-        requirements = star_requirements
         sections = self._extract_bid_deviation_sections(payload)
         return self._build_empty_star_result(sections, self._detect_global_no_deviation(sections["combined_text"]), self._collect_table_coverage(sections))
 
