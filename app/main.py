@@ -17,6 +17,7 @@ from fastapi.openapi.utils import get_openapi
 
 # 核心响应机制
 from app.core.response import UnifiedResponse, configure_exception_handlers
+from app.core.logging_config import setup_logging
 # 路由模块
 from app.router.analysis import router as analysis_router
 from app.router.auth import router as auth_router
@@ -324,12 +325,22 @@ app.openapi = custom_openapi
 logger = logging.getLogger(__name__)
 
 
+# 模块加载即配置日志；启动事件再次应用，避免被 uvicorn 启动时的默认日志配置覆盖。
+setup_logging()
+
+
 @app.on_event("startup")
 def verify_required_cache() -> None:
     """Fail fast when production cache is required but unavailable."""
     if not settings.XTJS_CACHE_ENABLED or not settings.XTJS_CACHE_REQUIRED:
         return
     get_cache_service().ping()
+
+
+@app.on_event("startup")
+def apply_runtime_logging() -> None:
+    """在 uvicorn 完成自身日志配置后，重新挂载统一的 JSON 日志处理器。"""
+    setup_logging()
 
 
 @app.on_event("startup")

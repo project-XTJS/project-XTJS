@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import logging
 import threading
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Callable
 
 from app.config.settings import settings
@@ -10,6 +12,8 @@ from app.service.ocr.ocr_utils_mixin import OCRUtilsMixin
 from app.service.ocr.ocr_engine_mixin import OCREngineMixin
 from app.service.ocr.ocr_signature_mixin import OCRSignatureMixin
 from app.service.ocr.ocr_layout_mixin import OCRLayoutMixin
+
+logger = logging.getLogger(__name__)
 
 class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixin):
     """
@@ -74,10 +78,9 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             )
             self._fine_text_pipeline = pipeline
             if disabled_args:
-                print(
-                    "OCRService: fine text OCR loaded with compatibility fallback "
-                    f"(device={device}, disabled_args={disabled_args})",
-                    flush=True,
+                logger.info(
+                    "fine text OCR loaded with compatibility fallback",
+                    extra={"extra_fields": {"event": "ocr_fine_text_fallback", "device": device, "disabled_args": disabled_args}},
                 )
             return self._fine_text_pipeline
 
@@ -275,7 +278,18 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
         if cancel_check is not None:
             cancel_check()
         total_pages = self._estimate_total_pages(file_path, file_type)
-        print(f"OCRService: OCR inference started ({self._describe_document(file_path, file_type, total_pages)}, device={self.active_device})", flush=True)
+        logger.info(
+            "OCR inference started",
+            extra={
+                "extra_fields": {
+                    "event": "ocr_started",
+                    "file": Path(file_path).name,
+                    "file_type": file_type,
+                    "pages": total_pages,
+                    "device": self.active_device,
+                }
+            },
+        )
         
         progress_monitor = self._build_progress_monitor(file_path=file_path, file_type=file_type, total_pages=total_pages)
         progress_monitor.start()
@@ -284,7 +298,16 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
         pdf_page_sizes = self._load_pdf_page_sizes(file_path, file_type)
         
         if len(pipeline_inputs) > 1:
-            print(f"OCRService: predict chunking enabled (chunks={len(pipeline_inputs)}, chunk_pages={max((int(i.get('page_count', 0) or 0) for i in pipeline_inputs), default=0)}, total_pages={total_pages})", flush=True)
+            logger.info(
+                "OCR predict chunking enabled",
+                extra={
+                    "extra_fields": {
+                        "event": "ocr_chunking",
+                        "chunks": len(pipeline_inputs),
+                        "pages": total_pages,
+                    }
+                },
+            )
 
         try:
             # 第一阶段：推理（预测）
@@ -396,13 +419,19 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             progress_summary = progress_monitor.build_summary()
             stage_breakdown = progress_summary.get("stage_durations") or {}
             stage_parts = " ".join(f"{key}={value}s" for key, value in sorted(stage_breakdown.items()))
-            print(
-                "OCRService: OCR completed "
-                f"({self._describe_document(file_path, file_type, total_pages)}, device={self.active_device}, "
-                f"total={progress_summary.get('total_elapsed_seconds')}s, "
-                f"pages={progress_summary.get('total_pages')}, "
-                f"speed={progress_summary.get('ocr_speed_pages_per_second')} p/s, stages={stage_parts})",
-                flush=True,
+            logger.info(
+                "OCR completed",
+                extra={
+                    "extra_fields": {
+                        "event": "ocr_completed",
+                        "file": Path(file_path).name,
+                        "file_type": file_type,
+                        "pages": progress_summary.get("total_pages"),
+                        "total_seconds": progress_summary.get("total_elapsed_seconds"),
+                        "speed_pages_per_second": progress_summary.get("ocr_speed_pages_per_second"),
+                        "stage_durations": progress_summary.get("stage_durations"),
+                    }
+                },
             )
             return payload
             

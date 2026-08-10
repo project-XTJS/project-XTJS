@@ -1518,11 +1518,17 @@ async def upload_project_folder(
 
     binding_summary = _summarize_batch_items(binding_items)
     _invalidate_project_cache_or_error(project_identifier)
-    print(
-        "UploadFolderStage: completed "
-        f"(project={project_name}, identifier={project_identifier}, "
-        f"files={len(normalized_files)}, total={time.perf_counter() - route_started_at:.3f}s)",
-        flush=True,
+    logger.info(
+        "upload folder completed",
+        extra={
+            "extra_fields": {
+                "event": "upload_folder_done",
+                "project": project_name,
+                "project_identifier": project_identifier,
+                "files": len(normalized_files),
+                "total_seconds": round(time.perf_counter() - route_started_at, 3),
+            }
+        },
     )
     return {
         "status": binding_summary["status"],

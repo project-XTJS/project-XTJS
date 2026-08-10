@@ -724,11 +724,18 @@ async def upload_and_create_document_without_ocr(
             len(file_bytes),
         )
         db_elapsed = time.perf_counter() - db_started_at
-        print(
-            "UploadStage: file_uploaded "
-            f"(name={resolved_file_name}, type={document_type}, size={len(file_bytes) / 1024 / 1024:.2f}MB, "
-            f"oss_upload={upload_elapsed:.3f}s, db_create={db_elapsed:.3f}s)",
-            flush=True,
+        logger.info(
+            "file uploaded",
+            extra={
+                "extra_fields": {
+                    "event": "file_uploaded",
+                    "file": resolved_file_name,
+                    "document_type": document_type,
+                    "size_mb": round(len(file_bytes) / 1024 / 1024, 2),
+                    "oss_upload_seconds": round(upload_elapsed, 3),
+                    "db_create_seconds": round(db_elapsed, 3),
+                }
+            },
         )
         return {
             "ok": True,
@@ -875,13 +882,20 @@ async def recognize_existing_document(
         if not updated_document:
             raise ValueError(f"failed to update document content: {document_identifier}")
         db_elapsed = time.perf_counter() - db_started_at
-        print(
-            "RecognizeStage: document_done "
-            f"(name={document.get('file_name')}, size={len(file_bytes) / 1024 / 1024:.2f}MB, "
-            f"oss_download={download_elapsed:.3f}s, "
-            f"ocr={ocr_elapsed:.3f}s, cache_hit={ocr_cache_hit}, "
-            f"db_update={db_elapsed:.3f}s, total={time.perf_counter() - stage_started_at:.3f}s)",
-            flush=True,
+        logger.info(
+            "document recognized",
+            extra={
+                "extra_fields": {
+                    "event": "document_done",
+                    "file": document.get("file_name"),
+                    "size_mb": round(len(file_bytes) / 1024 / 1024, 2),
+                    "oss_download_seconds": round(download_elapsed, 3),
+                    "ocr_seconds": round(ocr_elapsed, 3),
+                    "cache_hit": ocr_cache_hit,
+                    "db_update_seconds": round(db_elapsed, 3),
+                    "total_seconds": round(time.perf_counter() - stage_started_at, 3),
+                }
+            },
         )
         return {
             "ok": True,

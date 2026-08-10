@@ -91,9 +91,9 @@ class MinioService:
         secret_key = str(settings.MINIO_SECRET_KEY or "").strip()
         # 配置了真实 AK 时使用静态凭证；否则回退到 ECS 实例 RAM 角色（零 AK 模式）
         if access_key and "请填写" not in access_key and secret_key and "请填写" not in secret_key:
-            credential_provider = providers.StaticProvider(access_key, secret_key)
+            self._credential_provider = providers.StaticProvider(access_key, secret_key)
         else:
-            credential_provider = AlibabaEcsInstanceRoleProvider()
+            self._credential_provider = AlibabaEcsInstanceRoleProvider()
             logger.info(
                 "MinioService: 未配置静态 AK，使用阿里云 ECS 实例 RAM 角色临时凭证"
             )
@@ -101,9 +101,33 @@ class MinioService:
             endpoint=settings.MINIO_ENDPOINT,
             secure=settings.MINIO_SECURE,
             region=settings.MINIO_REGION or None,
-            credentials=credential_provider,
+            credentials=self._credential_provider,
         )
         self.bucket_name = settings.MINIO_BUCKET_NAME
+        self.public_endpoint = self._resolve_public_endpoint()
+        self._public_client: Minio | None = None
+
+    @staticmethod
+    def _resolve_public_endpoint() -> str:
+        """解析公网预签名端点：优先配置项，其次从内网端点推导（去掉 -internal）。"""
+        configured = str(settings.MINIO_PUBLIC_ENDPOINT or "").strip()
+        if configured:
+            return configured
+        endpoint = str(settings.MINIO_ENDPOINT or "").strip()
+        if "-internal." in endpoint:
+            return endpoint.replace("-internal.", ".")
+        return endpoint
+
+    def _get_public_client(self) -> Minio:
+        """懒创建基于公网端点的客户端（同一套凭证），用于生成浏览器可访问的预签名 URL。"""
+        if self._public_client is None:
+            self._public_client = Minio(
+                endpoint=self.public_endpoint,
+                secure=settings.MINIO_SECURE,
+                region=settings.MINIO_REGION or None,
+                credentials=self._credential_provider,
+            )
+        return self._public_client
 
     def _audit(
         self,
@@ -457,7 +481,10 @@ class MinioService:
             if resolved_bucket_name == self.bucket_name:
                 self.ensure_bucket()
             expires_days = max(1, min(int(settings.MINIO_PRESIGNED_EXPIRES_DAYS), 7))
-            presigned_url = self.client.presigned_get_object(
+            # 预签名 URL 是给浏览器/前端用的，必须用公网端点生成，
+            # 否则内网端点（oss-cn-hangzhou-internal...）在公网不可达，下载会超时。
+            presign_client = self._get_public_client()
+            presigned_url = presign_client.presigned_get_object(
                 resolved_bucket_name,
                 object_name,
                 expires=timedelta(days=expires_days),

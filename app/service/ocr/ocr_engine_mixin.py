@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import copy
+import logging
 import re
 import shutil
 import threading
@@ -10,6 +11,8 @@ from typing import Any, Callable
 from app.config.settings import settings
 from app.service.ocr_progress import OCRProgressMonitor
 from app.service.ocr.ocr_utils_mixin import PDFIUM_IO_LOCK
+
+logger = logging.getLogger(__name__)
 
 class OCREngineMixin:
     """
@@ -210,7 +213,10 @@ class OCREngineMixin:
                 if not unknown_arg or unknown_arg not in kwargs: raise
                 kwargs.pop(unknown_arg, None)
                 disabled_args.append(unknown_arg)
-                print(f"OCRService: retrying model load without unsupported argument {unknown_arg!r} (device={device})", flush=True)
+                logger.info(
+                    "retrying model load without unsupported argument",
+                    extra={"extra_fields": {"event": "ocr_model_retry", "argument": unknown_arg, "device": device}},
+                )
 
     def _instantiate_pipeline(self, pipeline_cls: Any, device: str) -> tuple[Any, list[str]]:
         return self._instantiate_pipeline_with_kwargs(
@@ -223,31 +229,42 @@ class OCREngineMixin:
         """核心初始化函数，按优先级轮询设备并加载模型。"""
         if os.name == "nt":
             try: import torch  # noqa: F401
-            except Exception as exc: print(f"OCRService: optional torch preload skipped on Windows (reason: {exc})", flush=True)
+            except Exception as exc:
+                logger.warning("optional torch preload skipped on Windows", extra={"extra_fields": {"reason": str(exc)}})
         try:
             self._patch_paddle_tensor_int()
             from paddleocr import PaddleOCRVL
         except Exception as exc:
-            print(f"OCRService bootstrap failed: {exc}", flush=True)
+            logger.error("OCR bootstrap failed", extra={"extra_fields": {"error": str(exc)}})
             return
             
         last_error = None
         for device in self._candidate_devices():
             try:
-                print(f"OCRService: model loading started (device={device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})", flush=True)
+                logger.info(
+                    "model loading started",
+                    extra={"extra_fields": {"event": "ocr_model_loading", "device": device, "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION}},
+                )
                 self.pipeline, disabled_args = self._instantiate_pipeline(PaddleOCRVL, device)
                 # 模型加载完毕后注入 numpy 补丁
                 self._patch_paddlex_paddleocr_vl_processor()
                 self.available, self.active_device = True, device
-                if disabled_args: print(f"OCRService: model loading completed with compatibility fallback (device={self.active_device}, disabled_args={disabled_args})", flush=True)
-                print(f"OCRService: model loading completed (device={self.active_device}, pipeline_version={settings.PADDLE_VL_PIPELINE_VERSION})", flush=True)
+                if disabled_args:
+                    logger.info(
+                        "model loading completed with compatibility fallback",
+                        extra={"extra_fields": {"event": "ocr_model_ready", "device": self.active_device, "disabled_args": disabled_args}},
+                    )
+                logger.info(
+                    "model loading completed",
+                    extra={"extra_fields": {"event": "ocr_model_ready", "device": self.active_device, "pipeline_version": settings.PADDLE_VL_PIPELINE_VERSION}},
+                )
                 return
             except Exception as exc:
                 last_error = exc
-                print(f"OCRService: model loading failed (device={device}): {exc}", flush=True)
+                logger.error("model loading failed", extra={"extra_fields": {"device": device, "error": str(exc)}})
                 
         self.pipeline, self.available = None, False
-        print(f"OCRService bootstrap failed: {last_error}", flush=True)
+        logger.error("OCR bootstrap failed", extra={"extra_fields": {"error": str(last_error)}})
 
     def _estimate_total_pages(self, file_path: str, file_type: str) -> int:
         """在推理前快速预估文档总页数。"""

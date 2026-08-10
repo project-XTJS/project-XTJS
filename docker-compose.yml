@@ -9,6 +9,11 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # —— 日志：JSON 结构化，按天/大小滚动，保留 90 天 ——
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-/app/logs}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
+      - LOG_MAX_BYTES=${LOG_MAX_BYTES:-209715200}
       # 数据库已迁至阿里云 RDS（实际密码在 .env 的 DATABASE_URL 中配置）
       - DATABASE_URL=${DATABASE_URL:-postgresql://xtjs_admin:CHANGE_ME@pgm-bp1gk147oe9t4h05.pg.rds.aliyuncs.com:5432/xtjs_db}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-oss-cn-hangzhou-internal.aliyuncs.com}
@@ -17,6 +22,7 @@ services:
       - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-update-file}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - MINIO_REGION=${MINIO_REGION:-}
+      - MINIO_PUBLIC_ENDPOINT=${MINIO_PUBLIC_ENDPOINT:-}
       - MINIO_ALLOWED_EXTENSIONS=${MINIO_ALLOWED_EXTENSIONS:-pdf}
       # —— 认证与账号安全（务必在宿主机 .env 覆盖密钥与初始管理员口令）——
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-CHANGE_ME_IN_ENV_use_a_long_random_secret}
@@ -73,6 +79,7 @@ services:
       - XTJS_CACHE_SCAN_BATCH_SIZE=${XTJS_CACHE_SCAN_BATCH_SIZE:-500}
     volumes:
       - ocr_runtime:/app/.ocr_runtime
+      - app_logs:/app/logs
     networks:
       - app_network
     restart: always
@@ -83,3 +90,4 @@ networks:
 
 volumes:
   ocr_runtime:
+  app_logs:

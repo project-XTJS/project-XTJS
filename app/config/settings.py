@@ -24,6 +24,12 @@ def _default_ocr_storage_root() -> Path:
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://admin:password@localhost:5432/xtjs_db"
 
+    # —— 日志：JSON 结构化输出，文件按天/大小滚动并保留 N 天 ——
+    LOG_LEVEL: str = "INFO"
+    LOG_DIR: str = "/app/logs"
+    LOG_RETENTION_DAYS: int = 90
+    LOG_MAX_BYTES: int = 200 * 1024 * 1024
+
     MINIO_ENDPOINT: str = "127.0.0.1:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
@@ -31,6 +37,9 @@ class Settings(BaseSettings):
     MINIO_SECURE: bool = False
     # 对象存储签名区域（OSS 时填 cn-hangzhou 等地域码；MinIO 可留空）
     MINIO_REGION: str = ""
+    # 公网预签名端点：为空时自动从 MINIO_ENDPOINT 推导（去掉 "-internal"）。
+    # 服务端读写走内网端点，但给浏览器/前端的预签名 URL 必须用公网端点，否则公网无法访问。
+    MINIO_PUBLIC_ENDPOINT: str = ""
     MINIO_PRESIGNED_EXPIRES_DAYS: int = 7
     MINIO_MAX_FILE_SIZE: int = 500 * 1024 * 1024
     MINIO_ALLOWED_EXTENSIONS_STR: str = Field(
