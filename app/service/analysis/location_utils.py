@@ -134,6 +134,7 @@ def normalize_locations(
 ) -> list[dict[str, Any]]:
     """Normalize a list of locations and fill missing document defaults."""
     normalized: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
     if isinstance(locations, dict):
         raw_locations = [locations]
     elif isinstance(locations, list):
@@ -194,13 +195,14 @@ def normalize_locations(
                 value = item.get(source_key)
                 if value not in (None, "", []):
                     location[target_key] = value
-        append_location(normalized, location)
+        append_location(normalized, location, seen=seen_keys)
     return normalized
 
 
 def collect_locations(*values: Any) -> list[dict[str, Any]]:
     """Collect standard locations from arbitrary nested values."""
     collected: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
 
     def visit(value: Any) -> None:
         if isinstance(value, list):
@@ -212,7 +214,7 @@ def collect_locations(*values: Any) -> list[dict[str, Any]]:
 
         nested_locations = normalize_locations(value.get("locations"))
         for location in nested_locations:
-            append_location(collected, location)
+            append_location(collected, location, seen=seen_keys)
         if nested_locations:
             return
 
@@ -253,18 +255,33 @@ def collect_locations(*values: Any) -> list[dict[str, Any]]:
                 extra = value.get(source_key)
                 if extra not in (None, "", []):
                     direct[target_key] = extra
-        append_location(collected, direct)
+        append_location(collected, direct, seen=seen_keys)
 
     for raw in values:
         visit(raw)
     return collected
 
 
-def append_location(locations: list[dict[str, Any]], location: dict[str, Any] | None) -> None:
-    """Append a location only once."""
+def append_location(
+    locations: list[dict[str, Any]],
+    location: dict[str, Any] | None,
+    *,
+    seen: set[str] | None = None,
+) -> None:
+    """Append a location only once.
+
+    高频循环请传入共享的 ``seen`` 集合，避免对已有元素反复 json.dumps，
+    把去重从 O(n²) 降为 O(1) 均摊；不传时退化为逐元素线性比较（小列表可用）。
+    """
     if not location:
         return
     key = json.dumps(location, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if seen is not None:
+        if key in seen:
+            return
+        seen.add(key)
+        locations.append(location)
+        return
     for existing in locations:
         existing_key = json.dumps(existing, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if existing_key == key:

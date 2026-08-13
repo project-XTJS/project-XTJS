@@ -107,6 +107,11 @@ TEXT_LAYER_TEXT_RE = re.compile(
 TEXT_LAYER_DANGLING_PREFIX_RE = re.compile(
     r"\$?\s*\\underline\s*\{\s*(?:\\text\s*\{\s*)?"
 )
+# 承诺书等附件开头的“致：××公司：”抬头：比对时必须材料一致性时过滤，
+# 避免招标/投标两侧抬头（含填空的公司名）差异被误判为模板改写。
+SALUTATION_RE = re.compile(
+    r"(?:^|[\n\r。；;])[\s　]*致[:：]?\s*[^：:\n\r]{0,60}[:：]"
+)
 
 
 def strip_text_layer_noise(value: Any) -> str:
@@ -134,6 +139,7 @@ def strip_text_layer_noise(value: Any) -> str:
     cleaned = cleaned.replace("\\underline", "").replace("\\text", "")
     cleaned = cleaned.replace("$", "").replace("{", "").replace("}", "")
     cleaned = cleaned.replace("\\", "")
+    cleaned = SALUTATION_RE.sub("", cleaned)
     cleaned = re.sub(r"[ \t\f\v]+", " ", cleaned)
     cleaned = re.sub(r" *\n *", "\n", cleaned)
     return cleaned.strip()

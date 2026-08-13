@@ -155,6 +155,28 @@ class TenderComplianceRegressionTest(unittest.TestCase):
         self.assertEqual(values.get("category_scores", {}).get("technical"), 70.0)
         self.assertNotIn("商务分+技术分+价格分=68", evaluation["message"])
 
+    def test_evaluation_fixed_and_interval_rules(self):
+        """技术标表格：固定分值取最高值与右侧比对、区间断档提示、正常区间不误报。"""
+        payload = {"logical_tables": [{
+            "headers": ["评审因素", "", "分值范围", "评分性质"],
+            "rows": [
+                ["技术方案", "方案完善得15-20分；方案合理的得7-14分；方案一般得0-6分", "20", "主观分"],
+                ["技术固定项", "每提供一个得3分", "5", "客观分"],
+                ["技术断档项", "得0-1分；得3-5分", "5", "客观分"],
+                ["技术正常项", "优秀得8-10分；良好得5-7分；一般得0-4分", "10", "主观分"],
+            ],
+        }]}
+        result = TenderComplianceChecker().check(payload)
+        evaluation = {c["code"]: c for c in result["checks"]}["evaluation_method"]
+        anomalies = [
+            anomaly
+            for item in (evaluation["values"].get("scoring_items") or [])
+            for anomaly in (item.get("anomalies") or [])
+        ]
+        self.assertTrue(any("固定分值最高 3 与右侧分值 5 不一致" in a for a in anomalies))
+        self.assertTrue(any("0-1 与 3-5 存在断层" in a for a in anomalies))
+        self.assertFalse(any("技术方案" in a for a in anomalies))
+
     def test_bid_security_ratio_uses_budget_as_denominator(self):
         """无最高限价但有预算时（预算与限价同义），用预算作分母计算保证金比例。"""
         checks = _check(

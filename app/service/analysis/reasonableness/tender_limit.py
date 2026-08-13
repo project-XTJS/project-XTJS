@@ -547,6 +547,11 @@ class TenderLimitMixin:
     # 投标总价提取
     def _extract_bid_total_amount(self, bid_source: Any) -> Optional[Dict]:
         parsed = self._parse_input(bid_source)
+        # 显式“投标总价/参选总价”标签（报价函等位置）权威性最高，优先采用。
+        explicit_total = self._extract_bid_total_fallback(parsed)
+        if explicit_total:
+            return explicit_total
+
         bid_page, bid_opening_text = self._locate_bid_opening_page_and_text(parsed)
 
         if not bid_opening_text or not bid_opening_text.strip():
@@ -565,14 +570,14 @@ class TenderLimitMixin:
 
         label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
         direct_total_patterns = [
-            rf"({label_pattern})[^\n\d]{{0,20}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            rf"({label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
-            r"小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            rf"({label_pattern})[^\n\d]{{0,12}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            rf"({label_pattern})[^\n]{{0,24}}?小写[^：:\d]{{0,6}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            r"小写[^：:\d]{0,6}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
         ]
         annual_label_pattern = r"(?:%s)" % "|".join(self._annual_total_label_patterns())
         annual_total_patterns = [
-            rf"({annual_label_pattern})[^\n\d]{{0,20}}([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
-            rf"({annual_label_pattern})[^\n]{{0,20}}?小写[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
+            rf"({annual_label_pattern})[^\n\d]{{0,12}}([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
+            rf"({annual_label_pattern})[^\n]{{0,24}}?小写[^：:\d]{{0,6}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?)",
         ]
 
         search_texts = [normalized_opening_text]
@@ -587,6 +592,8 @@ class TenderLimitMixin:
                         if len(m.groups()) >= 2
                         else m.group(1).strip()
                     )
+                    if "大写" in m.group(0) or "人民币" in m.group(0):
+                        continue
                     amount = self._clean_small_price(raw_amount)
                     if amount is None:
                         continue
@@ -640,6 +647,41 @@ class TenderLimitMixin:
                             "raw_amount": raw_amount,
                             "context": normalized_opening_text[:400] or bid_opening_text[:400],
                         }
+
+        return None
+
+    def _extract_bid_total_fallback(self, parsed: Dict) -> Optional[Dict]:
+        """兜底：开标页定位失败或信号未命中时，直接扫描全部区段中的总价标签
+        （报价函等位置的“投标总价（小写）：567018”不带“元”也可能漏掉）。"""
+        label_pattern = r"(?:%s)" % "|".join(self._bid_total_label_patterns())
+        fallback_patterns = [
+            rf"({label_pattern})[^\n]{{0,24}}?小写[^：:\d]{{0,6}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+            rf"({label_pattern})[^\n\d]{{0,12}}[：:]?\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)",
+        ]
+        for sec in parsed.get("sections") or []:
+            sec_text = str(sec.get("text") or "")
+            if not sec_text.strip():
+                continue
+            normalized_sec = self._strip_price_markup(sec_text)
+            if not re.search(r"投标总价|参选总价|投标报价总价|报价总价|总报价", normalized_sec):
+                continue
+            for pattern in fallback_patterns:
+                match = re.search(pattern, normalized_sec)
+                if not match:
+                    continue
+                # 窗口内若出现“大写/人民币”，说明匹配到的是大写金额行后的散落数字，跳过。
+                if "大写" in match.group(0) or "人民币" in match.group(0):
+                    continue
+                raw_amount = match.group(2).strip()
+                amount = self._clean_small_price(raw_amount)
+                if amount is None:
+                    continue
+                return {
+                    "page": sec.get("page"),
+                    "amount_yuan": round(amount, 2),
+                    "raw_amount": raw_amount,
+                    "context": normalized_sec[:400],
+                }
 
         return None
 

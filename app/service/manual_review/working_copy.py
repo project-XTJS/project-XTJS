@@ -11,6 +11,25 @@ BUSINESS_BID_FORMAT_REVIEW_KEY = "business_bid_format_review"
 PERSONNEL_REUSE_CHECK_KEY = "personnel_reuse_check"
 
 
+def _is_personnel_entry_name_acceptable(entry: dict[str, Any]) -> bool:
+    """人员条目姓名是否可接受：黑名单/占位符人名（其他内容、基础信息等）拒绝写入。
+
+    延迟导入避免与 app.service.analysis.bid_document_review 产生循环依赖。
+    """
+    name = (
+        entry.get("name")
+        or entry.get("person_name")
+        or entry.get("personnel_name")
+        or entry.get("display_name")
+    )
+    if not name:
+        # 无姓名的条目不做判断，原样保留（前端展示层会自行过滤）。
+        return True
+    from app.service.analysis.bid_document_review import BidDocumentReviewService
+
+    return BidDocumentReviewService()._clean_person_name(name) is not None
+
+
 class DocumentWorkingCopyService:
     """Central writer for document-level manual recognition working copies."""
 
@@ -188,12 +207,20 @@ class DocumentWorkingCopyService:
         documents = DocumentWorkingCopyService._payload_documents(normalized)
         entries: list[dict[str, Any]] = []
         for document in documents:
-            for entry in document.get("personnel_entries") or []:
-                if isinstance(entry, dict):
+            doc_entries = document.get("personnel_entries") or []
+            if isinstance(doc_entries, list):
+                # 写入工作副本前过滤黑名单人名（其他内容/基础信息等），防止旧脏数据回流。
+                document["personnel_entries"] = [
+                    entry
+                    for entry in doc_entries
+                    if isinstance(entry, dict) and _is_personnel_entry_name_acceptable(entry)
+                ]
+            for entry in doc_entries:
+                if isinstance(entry, dict) and _is_personnel_entry_name_acceptable(entry):
                     entries.append(deepcopy(entry))
         if not entries:
             for entry in normalized.get("personnel_entries") or []:
-                if isinstance(entry, dict):
+                if isinstance(entry, dict) and _is_personnel_entry_name_acceptable(entry):
                     entries.append(deepcopy(entry))
 
         normalized["documents"] = documents

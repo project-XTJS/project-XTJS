@@ -278,6 +278,11 @@ class IntegrityChecker:
         r'^\s*\d+[)）]\s*',
     )
 
+    # 要求项开头的引导动词（“提供X承诺书”→“X承诺书”），不参与标题判定
+    LEADING_TITLE_VERB_RE = re.compile(
+        r'^(?:需提供|须提供|应提供|应附|后附|提供|提交|具备|具有|出具|开具|携带)\s*'
+    )
+
     def __init__(self):
         # 预编译合法的标题前缀正则
         self.VALID_PREFIX = re.compile(
@@ -305,7 +310,20 @@ class IntegrityChecker:
     # 文本归一化：仅保留字母数字和中文
     def _normalize_title_text(self, name: str) -> str:
         text = self._strip_heading_prefix(name)
+        # 大标题后括号内容不参与标题存在性判断：
+        # “中小企业声明函（工程）”与“中小企业声明函（格式）”视同同一标题。
+        text = self._strip_parenthetical_content(text)
         return ''.join(ch for ch in text if ch.isalnum() or '\u4e00' <= ch <= '\u9fff')
+
+    @staticmethod
+    def _strip_parenthetical_content(text: str) -> str:
+        """迭代剥离全/半角括号内容，嵌套括号也能完全去除（如“声明函（工程（一））”）。"""
+        pattern = re.compile(r"[（(][^（）()]*[）)]")
+        while True:
+            stripped = pattern.sub("", text)
+            if stripped == text:
+                return text
+            text = stripped
 
     # 根据关键词扩展候选标题列表
     def _candidate_titles(self, keyword: str) -> list[str]:
@@ -316,7 +334,30 @@ class IntegrityChecker:
             if keyword_norm == key_norm or keyword_norm in key_norm or key_norm in keyword_norm:
                 titles.extend([key, *aliases])
                 break
+        # 合并要求项（如“中小企业声明函（格式） 中小企业声明函（工程）”）：
+        # 整串无法命中时，按空格拆出的子标题（通常是大标题的括号变体）也参与匹配。
+        for part in self._keyword_parts(keyword):
+            part_norm = self._normalize_title_text(part)
+            if part_norm and part_norm != keyword_norm:
+                titles.append(part)
+                titles.extend(attachment_title_variants(part))
+        # 要求项带“提供/提交”等引导动词时，去动词后的干净标题也作为候选：
+        # 招标“提供强制采购节能产品承诺书（格式）”可命中投标“强制采购节能产品承诺书”。
+        verb_stripped = self.LEADING_TITLE_VERB_RE.sub('', str(keyword or "").strip()).strip()
+        if verb_stripped and self._normalize_title_text(verb_stripped) != keyword_norm:
+            titles.append(verb_stripped)
+            titles.extend(attachment_title_variants(verb_stripped))
         return list(dict.fromkeys(titles))
+
+    @staticmethod
+    def _keyword_parts(keyword: str) -> list[str]:
+        """把合并要求项按空白拆成多个子标题（如“声明函（格式） 声明函（工程）”）。"""
+        parts: list[str] = []
+        for chunk in re.split(r"\s+", str(keyword or "").strip()):
+            chunk = chunk.strip("。；，,;:.．、 ")
+            if chunk and chunk not in parts:
+                parts.append(chunk)
+        return parts
 
     def _body_evidence_titles(self, keyword: str) -> list[str]:
         keyword_norm = self._normalize_title_text(keyword)
@@ -334,7 +375,7 @@ class IntegrityChecker:
 
         cleaned_titles = []
         for title in titles:
-            clean = re.sub(r"[（(][^()（）]{0,40}[）)]", "", self._strip_heading_prefix(title)).strip()
+            clean = self._strip_parenthetical_content(self._strip_heading_prefix(title)).strip()
             if clean and clean not in cleaned_titles:
                 cleaned_titles.append(clean)
         return cleaned_titles
@@ -457,6 +498,9 @@ class IntegrityChecker:
             '',
             stripped_name,
         )
+        # 去掉“提供/提交/具备/出具/开具/携带”等引导动词，只保留实际标题：
+        # 招标要求“提供强制采购节能产品承诺书（格式）”→ 投标标题“强制采购节能产品承诺书”视为同一标题。
+        stripped_name = self.LEADING_TITLE_VERB_RE.sub('', stripped_name)
         return stripped_name.strip('。，；;,. ')
 
     # 基于字典的模糊匹配
@@ -480,11 +524,19 @@ class IntegrityChecker:
         normalized = str(item or "").strip()
         # 完整性阶段只有标题本身带“如有”才允许缺失。
         compact = re.sub(r"\s+", "", normalized)
-        return (
+        if (
             "如有" in normalized
             or "认为需要补充" in compact
             or ("其他内容" in compact and "前附表规定" in compact)
-        )
+        ):
+            return True
+        # “其他材料”等兜底类目不认定为必须材料，无需在投标文件中查找。
+        stripped = self._strip_heading_prefix(normalized).strip().rstrip("。；，;,. ")
+        if "其他材料" in compact or "其它材料" in compact:
+            return True
+        if stripped in ("其他", "其它"):
+            return True
+        return False
 
     # 从 section 中提取位置信息
     def _location_from_section(self, section: dict | None) -> dict[str, Any] | None:

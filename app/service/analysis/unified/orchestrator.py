@@ -8,9 +8,16 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
+import logging
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
+from .parallel_worker import run_business_bidder_review
+
+logger = logging.getLogger(__name__)
 
 
 class OrchestratorMixin:
@@ -156,6 +163,7 @@ class OrchestratorMixin:
         bidder_sources: list[dict[str, Any]] = []
         used_bidder_keys: set[str] = set()
         seen_business_documents: set[str] = set()
+        bidder_tasks: list[dict[str, Any]] = []
 
         for record in document_records:
             if self._normalize_project_document_role(record.get("relation_role")) != DOCUMENT_TYPE_BUSINESS_BID:
@@ -196,21 +204,25 @@ class OrchestratorMixin:
                     },
                 }
             )
-            bidders.append(
-                self._review_business_bidder(
-                    tender_payload=tender_payload,
-                    tender_meta=tender_meta,
-                    bidder_key=bidder_key,
-                    business_payload=business_payload,
-                    business_meta=business_meta,
-                )
+            bidder_tasks.append(
+                {
+                    "tender_payload": tender_payload,
+                    "tender_meta": tender_meta,
+                    "bidder_key": bidder_key,
+                    "business_payload": business_payload,
+                    "business_meta": business_meta,
+                }
             )
 
-        if not bidders:
+        if not bidder_tasks:
             return self._build_empty_project_business_review(
                 project_identifier=project_identifier,
                 reason=f"project has no business bid documents: {project_identifier}",
             )
+
+        # 各投标方审查相互独立，用多进程并行执行，充分利用多核 CPU；
+        # 进程池不可用时（如环境限制）回退为串行。
+        bidders = self._parallel_review_bidders(bidder_tasks)
 
         extraction_tables = self._build_review_extraction_tables(
             tender_payload=tender_payload,
@@ -575,6 +587,35 @@ class OrchestratorMixin:
         }
 
     # 单个投标人审查（仅商务标）
+    def _parallel_review_bidders(self, bidder_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """多进程并行审查各投标方；单个任务或进程池不可用时回退串行。"""
+        if len(bidder_tasks) <= 1:
+            return [
+                self._review_business_bidder(**task)
+                for task in bidder_tasks
+            ]
+
+        # 取可用核数的一半（上限 8），既充分利用多核，又给其他容器/任务留余量。
+        workers = min(
+            len(bidder_tasks),
+            max(1, (os.cpu_count() or 2) // 2),
+            8,
+        )
+        try:
+            # 用 fork：子进程继承内存、不重跑主模块（spawn 在 uvicorn 下会再次启动服务）。
+            context = multiprocessing.get_context("fork")
+            with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
+                return list(pool.map(run_business_bidder_review, bidder_tasks))
+        except Exception as exc:  # pragma: no cover - 环境/平台限制时降级
+            logger.warning(
+                "商务标审查多进程并行失败，回退串行执行：%s",
+                exc,
+            )
+            return [
+                self._review_business_bidder(**task)
+                for task in bidder_tasks
+            ]
+
     def _review_business_bidder(
         self,
         *,

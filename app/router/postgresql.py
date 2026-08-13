@@ -1824,12 +1824,15 @@ def _normalize_personnel_draft_documents(
 
         entries = normalized.get("personnel_entries")
         if isinstance(entries, list):
-            normalized["personnel_entries"] = [
-                _normalize_personnel_draft_entry_metadata(entry, normalized)
-                if isinstance(entry, dict)
-                else entry
-                for entry in entries
-            ]
+            cleaned_entries: list[Any] = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    cleaned_entries.append(entry)
+                    continue
+                cleaned = _normalize_personnel_draft_entry_metadata(entry, normalized)
+                if cleaned is not None:
+                    cleaned_entries.append(cleaned)
+            normalized["personnel_entries"] = cleaned_entries
         return normalized
 
     return [
@@ -1841,8 +1844,17 @@ def _normalize_personnel_draft_documents(
 def _normalize_personnel_draft_entry_metadata(
     entry: dict[str, Any],
     document: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     normalized = deepcopy(entry)
+    name = (
+        normalized.get("name")
+        or normalized.get("person_name")
+        or normalized.get("personnel_name")
+        or normalized.get("display_name")
+    )
+    if name and BidDocumentReviewService()._clean_person_name(name) is None:
+        # 黑名单人名（其他内容/基础信息等）不入库，防止草稿/确认路径带回脏数据。
+        return None
     document_id = str(document.get("document_identifier_id") or document.get("identifier_id") or "").strip()
     if document_id:
         normalized["document_identifier_id"] = str(normalized.get("document_identifier_id") or document_id)

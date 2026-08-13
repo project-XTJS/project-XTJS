@@ -500,8 +500,16 @@ class TenderComplianceChecker:
         )
 
     def _check_evaluation_method(self, context: dict[str, Any]) -> dict[str, Any]:
-        evaluation_sections = self._evaluation_sections(context["sections"])
-        structured = self._extract_structured_scoring(context["payload"])
+        sections = context["sections"]
+        start_index, end_index = self._locate_evaluation_range(sections)
+        evaluation_sections = self._evaluation_sections(sections)
+        page_range = None
+        if start_index < end_index and 0 < end_index <= len(sections):
+            start_page = sections[start_index].get("page")
+            end_page = sections[end_index - 1].get("page")
+            if isinstance(start_page, int) and isinstance(end_page, int):
+                page_range = (start_page, end_page)
+        structured = self._extract_structured_scoring(context["payload"], page_range=page_range)
         scoring_items = structured["items"]
         if not evaluation_sections and not scoring_items:
             return self._make_check(
@@ -631,6 +639,29 @@ class TenderComplianceChecker:
                     item_anomalies = [str(value) for value in item.get("anomalies") or []]
                     anomalies.extend(item_anomalies)
             issues.extend(anomalies)
+
+            # 技术标各评分项右侧分值合计 + 商务标分值 = 总分（通常 100）校验。
+            technical_right_items = [item for item in scoring_items if item.get("category") == "technical"]
+            technical_right_sum = None
+            if technical_right_items and all(
+                item.get("item_max_score") is not None for item in technical_right_items
+            ):
+                technical_right_sum = round(
+                    sum(float(item.get("item_max_score") or 0) for item in technical_right_items),
+                    4,
+                )
+            business_value = category_scores.get("business")
+            if (
+                technical_right_sum is not None
+                and business_value is not None
+                and total_score is not None
+                and abs(round(technical_right_sum + float(business_value), 4) - float(total_score)) > 0.01
+            ):
+                combined = round(technical_right_sum + float(business_value), 4)
+                issues.append(
+                    f"技术标右侧分值合计 {technical_right_sum:g} + 商务标分值 {business_value:g} "
+                    f"= {combined:g}，不等于总分 {total_score:g}"
+                )
         else:
             detail_sums = self._extract_category_detail_sums(combined_text, category_scores)
             for key, detail in detail_sums.items():
@@ -1062,7 +1093,70 @@ class TenderComplianceChecker:
     # ------------------------------------------------------------------
     # Evaluation method parsing
     # ------------------------------------------------------------------
+    def _locate_evaluation_range(self, sections: list[dict[str, Any]]) -> tuple[int, int]:
+        """定位正文"评标办法/评审办法"大标题（排除目录），返回其在 sections 中的 [start, end) 下标。
+
+        - 目录行（带点点线、或"第X章 ………"）一律不算；
+        - 大标题要求：短文本（≤20 字）且含"评标办法/评审办法/评分办法/综合评分法"，
+          优先"第X章 + 办法"形式；
+        - 范围结束于下一个章节/部分/附则标题或文档末尾。
+        """
+        toc_pattern = re.compile(r"第[一二三四五六七八九十0-9]+[章节][^。；\n]{0,40}(?:[.．·]{3,}|\.{3,})")
+        toc_dots_pattern = re.compile(r"[.．·]{4,}\s*\d*\s*$")
+        chapter_pattern = re.compile(r"^(?:第[一二三四五六七八九十百零0-9]+[章节部分篇]|附则|附录)")
+        heading_pattern = re.compile(r"(?:评标办法|评审办法|评分办法|综合评分法)")
+
+        start_index = None
+        end_index = len(sections)
+
+        def _is_toc(text: str) -> bool:
+            return bool(toc_pattern.search(text) or toc_dots_pattern.search(text))
+
+        # 优先：正文"第X章 + 评标办法/评审办法"形式的大标题（如"第三章\n评审办法"）。
+        for index, section in enumerate(sections):
+            text = str(section.get("text") or "").strip()
+            if _is_toc(text):
+                continue
+            compact = re.sub(r"\s+", "", text)
+            if re.match(r"^第[一二三四五六七八九十百零0-9]+章(?:评标办法|评审办法|评分办法|综合评分法)", compact):
+                start_index = index
+                break
+
+        # 兜底：无"第X章"形式时，取短标题（排除"（3）评审办法；"这类编号引用/关联描述）。
+        if start_index is None:
+            for index, section in enumerate(sections):
+                text = str(section.get("text") or "").strip()
+                if _is_toc(text):
+                    continue
+                compact = re.sub(r"\s+", "", text)
+                if re.match(r"^[（(]?\s*\d+[）)]", compact):
+                    continue
+                if re.search(r"(详见|按|依照|参见|以及|；)", compact):
+                    continue
+                if heading_pattern.search(compact) and len(compact) <= 12:
+                    start_index = index
+                    break
+
+        if start_index is not None:
+            for index in range(start_index + 1, len(sections)):
+                text = str(sections[index].get("text") or "").strip()
+                compact = re.sub(r"\s+", "", text)
+                if chapter_pattern.match(compact) and len(compact) <= 30:
+                    end_index = index
+                    break
+        return (start_index if start_index is not None else 0, end_index)
+
     def _evaluation_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        start_index, end_index = self._locate_evaluation_range(sections)
+        located = start_index > 0 or end_index < len(sections)
+        if located:
+            # 已定位正文"评标办法"大标题：整章范围即评标办法内容，直接返回该区间全部 section。
+            return [
+                section
+                for section in sections[start_index:end_index]
+                if str(section.get("text") or "").strip()
+            ]
+
         result: list[dict[str, Any]] = []
         keywords = [
             "评标办法", "评审办法", "评分标准", "评分细则", "综合评分", "评审因素",
@@ -1070,9 +1164,11 @@ class TenderComplianceChecker:
         ]
         # 目录行（"第三章 评标办法 ........."）不能当作正文来源，否则抓到的是一串目录。
         toc_pattern = re.compile(r"第[一二三四五六七八九十0-9]+[章节][^。；\n]{0,40}(?:[.．·]{3,}|\.{3,})")
+        # 不带"第X章"前缀的目录行（如"评审办法........20"）同样过滤。
+        toc_dots_pattern = re.compile(r"[.．·]{4,}\s*\d*\s*$")
         for index, section in enumerate(sections):
             text = str(section.get("text") or "")
-            if toc_pattern.search(text):
+            if toc_pattern.search(text) or toc_dots_pattern.search(text):
                 continue
             if self._contains_any(text, keywords):
                 for extra in sections[index:index + 12]:
@@ -1098,13 +1194,27 @@ class TenderComplianceChecker:
             )
         ]
 
-    def _extract_structured_scoring(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _extract_structured_scoring(
+        self,
+        payload: dict[str, Any],
+        page_range: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
         tables = [
             table
             for table in data.get("logical_tables") or []
             if isinstance(table, dict)
         ]
+        if page_range is not None:
+            start_page, end_page = page_range
+
+            def _table_in_range(table: dict[str, Any]) -> bool:
+                pages = [page for page in table.get("pages") or [] if isinstance(page, int)]
+                if not pages:
+                    return True
+                return any(start_page <= page <= end_page for page in pages)
+
+            tables = [table for table in tables if _table_in_range(table)]
         raw_items: list[dict[str, Any]] = []
         declared_category_scores: dict[str, float] = {}
         table_text_parts: list[str] = []
@@ -1117,24 +1227,44 @@ class TenderComplianceChecker:
             headers = [str(value or "").strip() for value in table.get("headers") or []]
             rows = [list(row) for row in table.get("rows") or [] if isinstance(row, list)]
             title = str(table.get("title") or "").strip()
+            header_row_count = max(0, int(table.get("header_row_count") or 0))
+
+            column_map = self._score_table_column_map(headers)
+            if not self._cmap_usable(column_map):
+                # 表头可能是标题行（"1.技术文件评审（0分—80分）"），
+                # 真实列名（评审因素/评分说明/分值范围…）在后续行：精确定位评标办法表格。
+                detected_header = self._find_scoring_header_row(rows)
+                if detected_header is not None:
+                    headers = [str(cell or "").strip() for cell in rows[detected_header]]
+                    header_row_count = detected_header + 1
+                    column_map = self._score_table_column_map(headers)
+            used_inferred_map = False
+            if not self._cmap_usable(column_map):
+                # 无别名表头的评分表（如"自报工期 | … | 0-5 分 | 客观分"）按列分布推断。
+                inferred = self._infer_scoring_column_map(rows)
+                if inferred:
+                    column_map = inferred
+                    used_inferred_map = True
+
             table_text = "\n".join(
                 [title, " | ".join(headers)]
                 + [" | ".join(str(cell or "") for cell in row) for row in rows]
             ).strip()
-            column_map = self._score_table_column_map(headers)
             if not self._looks_like_scoring_table(table_text, column_map):
+                # 推断列映射 + 至少两行分值单元格：视为跨页续评标表（正文可能不含评分关键词）。
+                if used_inferred_map and self._cmap_usable(column_map):
+                    pass
                 # 跨页续表：表头可能被 OCR 截断（如只剩"…意一种情形)"），
                 # 若数据行与上一张评分表的列结构吻合，则沿用其列映射继续解析。
-                if last_column_map is not None and self._table_matches_column_map(table, last_column_map):
+                elif last_column_map is not None and self._table_matches_column_map(table, last_column_map):
                     column_map = last_column_map
                 else:
                     continue
             last_column_map = column_map
-            if not self._looks_like_scoring_table(table_text, column_map):
+            if not self._looks_like_scoring_table(table_text, column_map) and not used_inferred_map:
                 continue
             table_text_parts.append(table_text)
 
-            header_row_count = max(0, int(table.get("header_row_count") or 0))
             data_rows = rows[header_row_count:] if header_row_count < len(rows) else rows
             current_category_text = ""
             current_item_name = ""
@@ -1154,13 +1284,15 @@ class TenderComplianceChecker:
                 if item_cell:
                     current_item_name = item_cell
 
-                category_source = category_cell or current_category_text or row_text
+                # 类别推断优先使用细项名称单元格：整行拼接可能混入正文中的
+                # “报价情况汇总表”等字样，导致类别误判（如技术表被判成 price）。
+                # 类别推断只使用类别/细项名称单元格：
+                # 整行拼接会混入正文中的“报价情况汇总表”等字样，导致类别误判。
+                category_source = category_cell or item_cell or current_category_text
                 category = self._score_category_from_text(category_source)
                 if category is None:
-                    category = self._score_category_from_text(row_text)
-                if category is None:
-                    # 无类别列且当前行无类别信息时，延续上一行已识别的类别，
-                    # 避免漏掉表格中紧随其后的细项行（如"技术水平评价 20"之后的"… 10"）。
+                    # 无类别信息时延续上一行/上一张表已识别的类别，
+                    # 避免漏掉跨页续表（如"技术水平评价 20"之后的"… 10"）中的细项行。
                     category = last_category
                 if category is None:
                     continue
@@ -1249,6 +1381,83 @@ class TenderComplianceChecker:
             "max": max_index,
             "criteria": criteria_index,
             "deduction": deduction_index,
+        }
+
+    def _find_scoring_header_row(self, rows: list[list[Any]]) -> int | None:
+        """从表格行中探测真实表头行。
+
+        部分评分表的第一行是标题（如"1.技术文件评审（0分—80分）"），
+        列名（评审因素/评分说明/分值范围等）在后续行；据此精确定位评分表。
+        探测词排除过于通用的"项目/类别"，并至少命中 2 个列名关键词。
+        """
+        detect_tokens = [
+            "评审因素", "评分项", "评分项目", "评审项", "评审内容", "评分因素",
+            "单项满分", "满分", "分值", "权重", "最高分", "标准分", "配分", "得分",
+            "评分标准", "评审标准", "评分细则", "计分方法", "评分说明", "评分内容",
+            "评分大类", "评分类别", "评审类别", "评分部分", "评审项目", "大类",
+        ]
+        for index, row in enumerate(rows):
+            cells = [str(cell or "").strip() for cell in row]
+            joined = "".join(cells)
+            if len(joined) > 80:
+                continue
+            hits = sum(1 for token in detect_tokens if token in joined)
+            if hits >= 2:
+                return index
+        return None
+
+    def _cmap_usable(self, column_map: dict[str, int | None]) -> bool:
+        """列映射可用：同时具备分值列与细项/标准列。"""
+        return (
+            column_map.get("max") is not None
+            and (column_map.get("item") is not None or column_map.get("criteria") is not None)
+        )
+
+    def _infer_scoring_column_map(self, rows: list[list[Any]]) -> dict[str, int | None]:
+        """按数据分布推断评分表列映射（无标准表头时兜底）。
+
+        分值列 = 含"X-Y 分 / X分"范围单元格最多的列；
+        名称列 = 非空文本单元格最多的列。
+        用于"自报工期 | … | 0-5 分 | 客观分"这类无别名表头的评分表。
+        """
+        width = max((len(row) for row in rows), default=0)
+        if width == 0:
+            return {}
+        score_count = [0] * width
+        text_count = [0] * width
+        for row in rows:
+            for index in range(width):
+                cell = str(row[index] or "").strip() if index < len(row) else ""
+                if not cell:
+                    continue
+                if re.search(r"\d+\s*[-—~～至到]\s*\d+\s*分|\d+\s*分", cell):
+                    score_count[index] += 1
+                elif not re.fullmatch(r"\d+(?:\.\d+)?", cell):
+                    # 评分性质列（主观分/客观分等）不是细项名称，不参与名称列统计。
+                    if cell in ("主观分", "客观分", "主观", "客观", "定性", "定量", "评分性质"):
+                        continue
+                    # 名称列优先短文本：短单元格（≤12 字符）更像“细项名”，权重更高。
+                    text_count[index] += 2 if len(cell) <= 12 else 1
+        max_index = None
+        best_score_count = 0
+        for index, count in enumerate(score_count):
+            if count > best_score_count:
+                best_score_count = count
+                max_index = index
+        item_index = None
+        best_text_count = 0
+        for index, count in enumerate(text_count):
+            if count > best_text_count:
+                best_text_count = count
+                item_index = index
+        if max_index is None or best_score_count < 2:
+            return {}
+        return {
+            "category": None,
+            "item": item_index,
+            "max": max_index,
+            "criteria": None,
+            "deduction": None,
         }
 
     def _table_matches_column_map(self, table: dict[str, Any], column_map: dict[str, int | None]) -> bool:
@@ -1345,6 +1554,7 @@ class TenderComplianceChecker:
         combined = "；".join(value for value in (max_text, criteria_text) if value)
         ranges = self._score_ranges_from_text(criteria_text)
         deduction_rule = self._deduction_rule_from_text(criteria_text, max_text=max_text)
+        fixed_scores = self._fixed_scores_from_text(combined)
         explicit_max = self._explicit_item_max(max_text)
         if explicit_max is None:
             explicit_max = self._explicit_item_max(criteria_text, require_label=True)
@@ -1358,7 +1568,6 @@ class TenderComplianceChecker:
             score_type = "interval"
             item_max = explicit_max if explicit_max is not None else max(value["end"] for value in ranges)
         else:
-            fixed_scores = self._fixed_scores_from_text(combined)
             score_type = "fixed" if explicit_max is not None or fixed_scores else "unknown"
             item_max = explicit_max if explicit_max is not None else (max(fixed_scores) if fixed_scores else None)
 
@@ -1369,6 +1578,8 @@ class TenderComplianceChecker:
             "score_type": score_type,
             "item_max_score": round(float(item_max), 4) if item_max is not None else None,
             "ranges": ranges,
+            "fixed_scores": sorted(set(fixed_scores)),
+            "explicit_max": explicit_max,
             "deduction_rule": deduction_rule,
             "status": "pending",
             "anomalies": [],
@@ -1394,6 +1605,8 @@ class TenderComplianceChecker:
                     "criteria_parts": [item.get("criteria")] if item.get("criteria") else [],
                     "evidence_list": [item.get("evidence")] if item.get("evidence") else [],
                     "max_candidates": [item.get("item_max_score")] if item.get("item_max_score") is not None else [],
+                    "fixed_scores": list(item.get("fixed_scores") or []),
+                    "explicit_maxes": [item.get("explicit_max")] if item.get("explicit_max") is not None else [],
                     "deduction_rules": [item.get("deduction_rule")] if item.get("deduction_rule") else [],
                 }
                 grouped[key] = current
@@ -1405,6 +1618,9 @@ class TenderComplianceChecker:
                 current["evidence_list"].append(item.get("evidence"))
             if item.get("item_max_score") is not None:
                 current["max_candidates"].append(item.get("item_max_score"))
+            current["fixed_scores"].extend(item.get("fixed_scores") or [])
+            if item.get("explicit_max") is not None:
+                current["explicit_maxes"].append(item.get("explicit_max"))
             if item.get("deduction_rule"):
                 current["deduction_rules"].append(item.get("deduction_rule"))
             precedence = {"unknown": 0, "fixed": 1, "interval": 2, "deduction": 3}
@@ -1422,6 +1638,33 @@ class TenderComplianceChecker:
                     + "、".join(f"{value:g}" for value in max_candidates)
                 )
             current["item_max_score"] = max_candidates[-1] if max_candidates else None
+            fixed_scores = sorted(set(current.pop("fixed_scores", [])))
+            has_explicit_max = bool(current.pop("explicit_maxes", []))
+            # 固定分值：取“得X分”的最大值与右侧分值比对（用户规则）。
+            if (
+                current.get("score_type") == "fixed"
+                and has_explicit_max
+                and current.get("item_max_score") is not None
+                and fixed_scores
+            ):
+                max_fixed = max(fixed_scores)
+                if abs(float(max_fixed) - float(current["item_max_score"])) > 0.01:
+                    anomalies.append(
+                        f"评分项“{current['item_name']}”固定分值最高 {max_fixed:g} 与右侧分值 {current['item_max_score']:g} 不一致"
+                    )
+            # 区间分值：最高区间上限与右侧分值比对（断档由区间异常检查处理）。
+            if (
+                current.get("score_type") == "interval"
+                and has_explicit_max
+                and current.get("item_max_score") is not None
+                and current.get("ranges")
+            ):
+                max_range_end = max(float(value["end"]) for value in current["ranges"])
+                if abs(max_range_end - float(current["item_max_score"])) > 0.01:
+                    anomalies.append(
+                        f"评分项“{current['item_name']}”区间最高分 {max_range_end:g} 与右侧分值 {current['item_max_score']:g} 不一致"
+                    )
+            current["fixed_scores"] = fixed_scores
             current["criteria"] = "；".join(dict.fromkeys(current.pop("criteria_parts", [])))
             evidence_list = [value for value in current.pop("evidence_list", []) if value]
             pages = [page for evidence in evidence_list for page in evidence.get("pages") or [] if isinstance(page, int)]

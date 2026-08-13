@@ -2764,6 +2764,7 @@ class PostgreSQLService:
             single_ref,
         )
         locations: list[dict[str, Any]] = []
+        seen_location_keys: set[str] = set()
         raw_locations = enriched.get("locations")
         if isinstance(raw_locations, dict):
             raw_location_items = [raw_locations]
@@ -2780,7 +2781,7 @@ class PostgreSQLService:
                 context,
             )
             for location in normalize_locations(raw_location, defaults=location_defaults):
-                append_location(locations, location)
+                append_location(locations, location, seen=seen_location_keys)
         for raw_location in collect_locations(original.get("evidence")):
             location_defaults = cls._location_defaults_for_location(
                 defaults,
@@ -2788,7 +2789,7 @@ class PostgreSQLService:
                 context,
             )
             for location in normalize_locations(raw_location, defaults=location_defaults):
-                append_location(locations, location)
+                append_location(locations, location, seen=seen_location_keys)
         if not locations and cls._is_location_issue_node(original):
             append_location(
                 locations,
@@ -2799,6 +2800,7 @@ class PostgreSQLService:
                     bbox=defaults.get("bbox"),
                     text=defaults.get("text"),
                 ),
+                seen=seen_location_keys,
             )
         if locations:
             enriched["locations"] = locations
