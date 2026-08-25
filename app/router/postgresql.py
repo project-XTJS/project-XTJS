@@ -14,6 +14,7 @@ import hashlib
 import logging
 import re
 import tempfile
+import zipfile
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -24,7 +25,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, Pt, RGBColor
 from psycopg2 import Error as PsycopgError
 from starlette.concurrency import run_in_threadpool
 
@@ -46,6 +48,7 @@ from app.router.dependencies import (
     get_oss_service,
     get_text_analysis_service,
 )
+from app.router.auth_dependencies import get_current_user
 from app.router.uploaded_json_support import (
     build_uploaded_project_document_records,
     load_uploaded_bid_json_documents,
@@ -92,6 +95,7 @@ from app.service.analysis.manual_review.business_bid_format import (
     _save_business_manual_inputs,
 )
 from app.service.analysis.project_input_loader import ProjectAnalysisInputLoader
+from app.service import document_blob_store
 from app.service.manual_review_state import (
     MANUAL_REVIEW_RESULTS_KEY,
     WORKFLOW_SCOPE_KEY,
@@ -2670,7 +2674,7 @@ _REPORT_RESULT_LABELS: tuple[tuple[str, str], ...] = (
 )
 _REPORT_RESULT_LABEL_BY_KEY = dict(_REPORT_RESULT_LABELS)
 _REPORT_ISSUE_TABLE_HEADERS = ["问题项目", "对应文件", "页码", "问题描述"]
-_REPORT_WORD_LATIN_FONT = "宋体"
+_REPORT_WORD_LATIN_FONT = "Times New Roman"
 _REPORT_WORD_EAST_ASIA_FONT = "宋体"
 # 中文字号：二号=22pt（标题，加粗），四号=14pt（正文）。
 _REPORT_HEADING_FONT_SIZE_PT = 22
@@ -2857,14 +2861,20 @@ def _apply_report_document_fonts(document: Document) -> None:
         for run in paragraph.runs:
             if is_heading:
                 _set_word_run_fonts(run, size_pt=_REPORT_HEADING_FONT_SIZE_PT, bold=True)
-            else:
+            elif run.font.size is None:
                 _set_word_run_fonts(run, size_pt=_REPORT_BODY_FONT_SIZE_PT)
+            else:
+                # 已显式设置字号（如文件头大标题/字段行），仅补充字体名，不改字号。
+                _set_word_run_fonts(run)
     for table in document.tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
                     for run in paragraph.runs:
-                        _set_word_run_fonts(run, size_pt=_REPORT_BODY_FONT_SIZE_PT)
+                        if run.font.size is None:
+                            _set_word_run_fonts(run, size_pt=_REPORT_BODY_FONT_SIZE_PT)
+                        else:
+                            _set_word_run_fonts(run)
 
 
 def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] = None) -> None:
@@ -2873,15 +2883,56 @@ def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] =
     _set_word_run_fonts(run)
 
 
-def _set_word_cell_text(cell: Any, text: Any, *, bold: bool = False) -> None:
+def _add_centered_title(document: Document, text: str, *, level: int = 0) -> None:
+    paragraph = document.add_heading(str(text or ""), level=level)
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
+def _add_header_text(
+    document: Document,
+    text: str,
+    *,
+    size_pt: int = 14,
+    bold: bool = False,
+    align: str = "left",
+) -> None:
+    """添加文件头专用文本（显式字号/加粗/对齐，_apply_report_document_fonts 会尊重已有字号）。"""
+    paragraph = document.add_paragraph()
+    paragraph.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER
+        if align == "center"
+        else WD_ALIGN_PARAGRAPH.LEFT
+    )
+    run = paragraph.add_run(str(text or ""))
+    run.bold = bold
+    run.font.size = Pt(size_pt)
+    _set_word_run_fonts(run)
+
+
+def _set_word_cell_text(
+    cell: Any,
+    text: Any,
+    *,
+    bold: bool = False,
+    color: RGBColor | None = None,
+) -> None:
     cell.text = ""
     paragraph = cell.paragraphs[0]
     run = paragraph.add_run(str(text or ""))
     run.bold = bold
+    if color is not None:
+        run.font.color.rgb = color
     _set_word_run_fonts(run)
 
 
-def _add_word_table(document: Document, headers: list[str], rows: list[list[str]]) -> None:
+def _add_word_table(
+    document: Document,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    row_colors: list[RGBColor | None] | None = None,
+    column_widths: list[Cm] | None = None,
+) -> None:
     if not headers:
         return
     table = document.add_table(rows=1, cols=len(headers))
@@ -2892,13 +2943,23 @@ def _add_word_table(document: Document, headers: list[str], rows: list[list[str]
     for index, header in enumerate(headers):
         cell = table.rows[0].cells[index]
         _set_word_cell_text(cell, header, bold=True)
-    for row in rows:
+    for row_index, row in enumerate(rows):
         cells = table.add_row().cells
         normalized = list(row[: len(headers)])
         if len(normalized) < len(headers):
             normalized.extend([""] * (len(headers) - len(normalized)))
+        row_color = None
+        if row_colors and row_index < len(row_colors):
+            row_color = row_colors[row_index]
         for index, value in enumerate(normalized):
-            _set_word_cell_text(cells[index], value)
+            _set_word_cell_text(cells[index], value, color=row_color)
+    if column_widths:
+        for index, width in enumerate(column_widths):
+            if index >= len(table.columns):
+                break
+            table.columns[index].width = width
+            for cell in table.columns[index].cells:
+                cell.width = width
     document.add_paragraph()
 
 
@@ -2917,6 +2978,9 @@ _REPORT_DUPLICATE_RESULT_KEYS = frozenset({
     "technical_bid_duplicate_clusters",
 })
 
+# 查重与人员复用的“无问题”总结：结果存在但没有问题时，也导出一句话“没有问题”。
+_PASSED_SUMMARY_KEYS = _REPORT_DUPLICATE_RESULT_KEYS | {"personnel_reuse_check"}
+
 
 def _add_report_issue_table(
     document: Document,
@@ -2924,11 +2988,13 @@ def _add_report_issue_table(
     *,
     include_description: bool = True,
 ) -> None:
+    row_colors = [_report_row_color(row) for row in rows]
     if include_description:
         _add_word_table(
             document,
             _REPORT_ISSUE_TABLE_HEADERS,
             [_report_issue_table_row(row) for row in rows],
+            row_colors=row_colors,
         )
         return
     # 查重导出不展示「问题描述」列。
@@ -2936,13 +3002,102 @@ def _add_report_issue_table(
         document,
         ["问题项目", "对应文件", "页码"],
         [_report_issue_table_row(row)[:3] for row in rows],
+        row_colors=row_colors,
     )
+
+
+def _report_row_color(row: list[str]) -> RGBColor | None:
+    """审查明细行着色：通过=绿色，不通过=红色，人工复核=黄色，其他=黑色。"""
+    status = str(row[5] if len(row) > 5 else "").strip().lower()
+    if status in {"pass", "passed"}:
+        return RGBColor(0x00, 0x80, 0x00)
+    if status in {"fail", "failed", "missing", "error"}:
+        return RGBColor(0xC0, 0x00, 0x00)
+    if status in {"unclear", "warning", "pending", "review", "待复核"}:
+        return RGBColor(0xFF, 0xCC, 0x00)
+    return None
 
 
 def _report_project_name(project: Optional[dict[str, Any]]) -> str:
     if not isinstance(project, dict):
         return ""
     return str(project.get("project_name") or project.get("identifier_id") or "").strip()
+
+
+def _format_chinese_date(value: datetime) -> str:
+    """导出时间格式化为“2026年08月12日”。"""
+    return value.strftime("%Y年%m月%d日")
+
+
+def _report_operator_name(current_user: Optional[dict[str, Any]]) -> str:
+    """实际操作者姓名（登录用户）；取不到时回退为空（由上层兜底到单位）。"""
+    if not isinstance(current_user, dict):
+        return ""
+    name = str(current_user.get("display_name") or "").strip()
+    if name:
+        return name
+    username = str(current_user.get("username") or "").strip()
+    if username:
+        return username
+    return ""
+
+
+def _set_report_core_properties(
+    document: Document,
+    *,
+    header: Optional[dict[str, Any]],
+    project_name: str,
+    exported_at: Optional[datetime],
+    operator_name: str = "",
+) -> None:
+    """写入真实、像人工操作的文档属性（作者/标题/主题/关键字/创建与修改时间）。"""
+    when = exported_at or datetime.now()
+    author = operator_name.strip()  # 仅实际操作者；取不到则留空，不默认代理机构
+    project_title = project_name or "项目审查报告"
+    cp = document.core_properties
+    cp.title = f"{project_title} 单位关联情况表"
+    cp.subject = f"{project_title} 项目审查报告"
+    cp.author = author
+    cp.last_modified_by = author
+    cp.keywords = "招标, 投标, 审查, 单位关联, 评标, 联系人"
+    cp.comments = "项目审查报告"
+    cp.category = "项目审查"
+    cp.created = when
+    cp.modified = when
+    cp.revision = 1
+
+
+def _set_report_app_properties(
+    docx_bytes: bytes,
+    *,
+    application: str = "Microsoft Office Word",
+    app_version: str = "16.0",
+) -> bytes:
+    """改写 docProps/app.xml 的创建程序/制作工具，隐藏 python-docx 等生成痕迹。"""
+    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zin:
+        names = zin.namelist()
+        payload = {name: zin.read(name) for name in names}
+    app_xml = payload.get("docProps/app.xml")
+    if app_xml is not None:
+        text = app_xml.decode("utf-8")
+        text = re.sub(
+            r"<Application>.*?</Application>",
+            f"<Application>{application}</Application>",
+            text,
+        )
+        text = re.sub(
+            r"<AppVersion>.*?</AppVersion>",
+            f"<AppVersion>{app_version}</AppVersion>",
+            text,
+        )
+        text = re.sub(r"<Company\s*/>", "<Company/>", text)
+        text = re.sub(r"<Company>.*?</Company>", "<Company/>", text)
+        payload["docProps/app.xml"] = text.encode("utf-8")
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in payload.items():
+            zout.writestr(name, data)
+    return out.getvalue()
 
 
 def _report_bound_document_rows(project_detail: Optional[dict[str, Any]]) -> list[list[str]]:
@@ -2977,12 +3132,14 @@ def _report_issue_row(
     description: Any = "",
     file_name: Any = "",
     page: Any = "",
+    status: Any = "",
 ) -> None:
     problem_text = _report_compact_text(problem, max_length=260)
     description_text = _report_compact_text(description, max_length=700)
     reason_text = _report_compact_text(reason, max_length=500)
     file_text = _report_compact_text(file_name, max_length=260)
     page_text = _report_compact_text(page, max_length=120)
+    status_text = _report_compact_text(status, max_length=30)
     if not any((problem_text, description_text, reason_text, file_text, page_text)):
         return
     rows.append([
@@ -2991,61 +3148,92 @@ def _report_issue_row(
         reason_text or "-",
         file_text or "-",
         page_text or "-",
+        status_text,
     ])
 
 
 def _collect_personnel_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
-    """人员复用导出只列名单：每个复用人名的每处出现一行（姓名｜文件｜页码｜角色）。"""
-    rows: list[list[str]] = []
-    items = payload.get("issues") if isinstance(payload.get("issues"), list) else []
-    # 兼容存储结构：payload 本身带 documents 时也按一条 item 处理。
-    if not items and (payload.get("documents") or payload.get("names")):
-        items = [payload]
+    """人员复用导出只列“确认重名”的人名：每个确认重名人名的每处出现一行（姓名｜文件｜页码｜角色）。
 
-    for item in items:
+    未确认（pending/draft）时不输出；只有确认后的重名条目才进入报告。
+    """
+    rows: list[list[str]] = []
+    entries: list[dict[str, Any]] = []
+    frontend_items = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    for item in frontend_items:
+        if isinstance(item, dict):
+            entries.append(item)
+    if not entries:
+        combined = payload.get("combined_personnel_reuse_check")
+        if isinstance(combined, dict):
+            for item in combined.get("issues") or []:
+                if isinstance(item, dict):
+                    entries.append(item)
+    # 兼容旧存储结构：payload 本身带 documents/names 时按一条 item 处理。
+    if not entries and (payload.get("documents") or payload.get("names")):
+        entries.append(payload)
+
+    for item in entries:
         if not isinstance(item, dict):
             continue
-        # 仅保留被判为复用（跨文件同名）的人名；缺失时退而列出全部抽取到的人名。
-        reused_names = {
-            str(name).strip()
-            for name in (item.get("names") or [])
-            if str(name).strip()
-        }
+        entry_name = str(
+            item.get("name")
+            or item.get("person_name")
+            or item.get("personnel_name")
+            or ""
+        ).strip()
+        if not entry_name:
+            # 只有确认重名条目才导出；无确认名单（如 pending）一律不输出。
+            continue
+        # 确认重名条目：按每处出现展开（姓名｜文件｜页码｜角色）。
+        description = (
+            "确认重名：同名人员跨多份投标文件出现"
+            if not str(item.get("roles") or "").strip()
+            else f"确认重名：角色 {'、'.join(str(r) for r in (item.get('roles') or []) if str(r).strip())}"
+        )
         emitted = 0
-        for document in item.get("documents") or []:
-            if not isinstance(document, dict):
+        for occurrence in item.get("occurrences") or []:
+            if not isinstance(occurrence, dict):
                 continue
-            doc_file = document.get("file_name")
-            for entry in document.get("personnel_entries") or []:
-                if not isinstance(entry, dict):
-                    continue
-                name = str(entry.get("name") or "").strip()
-                if not name:
-                    continue
-                if reused_names and name not in reused_names:
-                    continue
-                page = entry.get("page")
-                role = str(entry.get("role") or "").strip()
+            page = occurrence.get("page")
+            role = str(occurrence.get("role") or "").strip()
+            _report_issue_row(
+                rows,
+                problem=entry_name,
+                description=role or description,
+                reason="人员复用（确认重名）",
+                file_name=occurrence.get("file_name") or "",
+                page=(f"第 {page} 页" if isinstance(page, int) and page > 0 else ""),
+                status="fail",
+            )
+            emitted += 1
+        if emitted == 0:
+            for file_name, pages in (item.get("pages_by_file") or {}).items():
+                page_text = "、".join(
+                    f"第 {page} 页"
+                    for page in (pages or [])
+                    if isinstance(page, int) and page > 0
+                )
                 _report_issue_row(
                     rows,
-                    problem=name,
-                    description=role or "同名人员跨文件出现，疑似一人多用",
-                    reason="人员复用",
-                    file_name=entry.get("file_name") or doc_file or "",
-                    page=(f"第 {page} 页" if isinstance(page, int) and page > 0 else ""),
+                    problem=entry_name,
+                    description=description,
+                    reason="人员复用（确认重名）",
+                    file_name=file_name,
+                    page=page_text,
+                    status="fail",
                 )
                 emitted += 1
-        # 没有 personnel_entries 明细时，至少把复用名单列出来。
         if emitted == 0:
-            for name in sorted(reused_names):
-                _report_issue_row(
-                    rows,
-                    problem=name,
-                    description="同名人员跨文件出现，疑似一人多用",
-                    reason="人员复用",
-                    file_name="",
-                    page="",
-                )
+            _report_issue_row(
+                rows,
+                problem=entry_name,
+                description=description,
+                reason="人员复用（确认重名）",
+                file_name=item.get("file_name") or "",
+                page="",
+                status="fail",
+            )
     return rows
 
 
@@ -3074,6 +3262,7 @@ def _collect_business_format_issue_rows(payload: dict[str, Any]) -> list[list[st
                 ]),
                 file_name=file_name or issue_file,
                 page=page or issue_page,
+                status=issue.get("status") or item.get("frontend_review_status") or "",
             )
         return rows
 
@@ -3095,6 +3284,7 @@ def _collect_business_format_issue_rows(payload: dict[str, Any]) -> list[list[st
                     reason=_report_join_parts([status_key, issue.get("severity"), _report_issue_message(issue)]),
                     file_name=file_name,
                     page=page,
+                    status=issue.get("status") or status_key,
                 )
     return rows
 
@@ -3138,6 +3328,7 @@ def _collect_duplicate_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
                     f"右：{right_page}" if right_page else "",
                     _report_page_text(item),
                 ], max_length=180),
+                status="fail",
             )
     return rows
 
@@ -3195,6 +3386,7 @@ def _collect_duplicate_cluster_issue_rows(payload: dict[str, Any]) -> list[list[
             ]),
             file_name=cluster.get("files"),
             page=_report_ranges_by_file(cluster.get("doc_ranges_by_file")),
+            status="fail",
         )
     return rows
 
@@ -3210,7 +3402,7 @@ def _collect_generic_issue_rows(section_key: str, payload: Any) -> list[list[str
             return
         if not isinstance(value, dict):
             if parent_key in {"issues", "failed", "missing", "unclear"}:
-                _report_issue_row(rows, problem=label, reason=value)
+                _report_issue_row(rows, problem=label, reason=value, status=parent_key)
             return
 
         has_issue_key = any(
@@ -3239,6 +3431,7 @@ def _collect_generic_issue_rows(section_key: str, payload: Any) -> list[list[str
                 reason=_report_issue_message(value) or label,
                 file_name=file_name,
                 page=page,
+                status=value.get("status") or parent_key,
             )
             return
 
@@ -3297,10 +3490,10 @@ def _report_bidder_from_file(name: Any) -> str:
 
 
 def _is_passed_export_item(item: dict[str, Any]) -> bool:
-    """判断该结果项是否为「通过/符合项」（不应进入问题清单报告）。
+    """判断该结果项是否为「通过/符合项」（导出时标注“XXX的具体内容正确无误”）。
 
     人工复核优先：被人为「归为有错误项」(frontend_review_status=flagged) 的符合项
-    仍作为问题导出；被「确认无误」(passed) 的问题项不导出。
+    仍作为问题导出；其余通过/符合项导出并标注正确无误。
     """
     review_status = str(item.get("frontend_review_status") or "").strip().lower()
     if review_status == "flagged":
@@ -3314,6 +3507,70 @@ def _is_passed_export_item(item: dict[str, Any]) -> bool:
     if result_key.endswith("_passed") or result_key == "business_bid_format_review_passed":
         return True
     return False
+
+
+def _mark_export_item_correct(item: dict[str, Any]) -> None:
+    """把通过/正确无误项标记为“XXX的具体内容正确无误”，供报告行生成使用。"""
+    issue = item.get("issue") if isinstance(item.get("issue"), dict) else item
+    problem = _report_join_parts(
+        [
+            item.get("bidder_name"),
+            item.get("check_name"),
+            _report_issue_title(issue),
+        ]
+    )
+    if not problem:
+        problem = str(
+            item.get("review_item") or item.get("title") or "该项"
+        ).strip() or "该项"
+    passed_text = f"{problem}的具体内容正确无误"
+    if isinstance(issue, dict):
+        issue["message"] = passed_text
+        issue["status"] = "pass"
+        issue["severity"] = "info"
+    item["export_marked_correct"] = True
+    item["export_correct_text"] = passed_text
+
+
+def _passed_summary_rows(items: list[dict[str, Any]]) -> list[list[str]]:
+    """查重/人员复用无问题项：导出一句话“没有问题”（绿色通过行）。"""
+    rows: list[list[str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        issue = item.get("issue") if isinstance(item.get("issue"), dict) else item
+        title = str(
+            item.get("title")
+            or item.get("check_name")
+            or item.get("review_item")
+            or ""
+        ).strip()
+        problem = _report_join_parts(
+            [
+                item.get("bidder_name"),
+                item.get("check_name"),
+                title or _report_issue_title(issue),
+            ]
+        )
+        if not problem:
+            problem = title or "该项"
+        correct_text = (
+            item.get("export_correct_text")
+            or f"{problem}的具体内容正确无误"
+        )
+        if str(problem).startswith("未发现"):
+            correct_text = f"{problem}，没有问题"
+        file_name, page = _report_file_and_page(item)
+        _report_issue_row(
+            rows,
+            problem=problem,
+            description=correct_text,
+            reason="通过",
+            file_name=file_name,
+            page=page,
+            status="pass",
+        )
+    return rows
 
 
 def _item_company_label(item: dict[str, Any]) -> str:
@@ -3365,9 +3622,9 @@ def _collect_frontend_result_issue_sections(
     for item in items:
         if not isinstance(item, dict):
             continue
-        # 导出报告是「问题清单」，通过/符合项不导出。
+        # 通过/符合项也导出，并标注“XXX的具体内容正确无误”。
         if _is_passed_export_item(item):
-            continue
+            _mark_export_item_correct(item)
         key = str(item.get("result_key") or item.get("source_result_key") or item.get("type") or "result").strip()
         if not key:
             key = "result"
@@ -3380,11 +3637,20 @@ def _collect_frontend_result_issue_sections(
 
     sections: list[tuple[str, str, list[tuple[str, list[list[str]]]]]] = []
     for key in order:
+        key_items = grouped[key]
+        if key in _PASSED_SUMMARY_KEYS:
+            passed_items = [item for item in key_items if _is_passed_export_item(item)]
+            issue_items = [item for item in key_items if not _is_passed_export_item(item)]
+        else:
+            passed_items = []
+            issue_items = key_items
+
         # 查重段不按公司分组（整段一张表，不显示公司小标题）。
         if key in _REPORT_DUPLICATE_RESULT_KEYS:
             rows = _dedupe_report_issue_rows(
-                _collect_report_section_issue_rows(key, {"issues": grouped[key]})
+                _collect_report_section_issue_rows(key, {"issues": issue_items})
             )
+            rows = _passed_summary_rows(passed_items) + rows
             if rows:
                 rows.sort(key=_report_row_page_key)
                 sections.append((key, _REPORT_RESULT_LABEL_BY_KEY.get(key, "自定义审查项"), [("", rows)]))
@@ -3402,9 +3668,17 @@ def _collect_frontend_result_issue_sections(
 
         company_groups: list[tuple[str, list[list[str]]]] = []
         for company_label in sorted(company_order):
+            company_all = company_items[company_label]
+            if key in _PASSED_SUMMARY_KEYS:
+                company_passed = [item for item in company_all if _is_passed_export_item(item)]
+                company_issues = [item for item in company_all if not _is_passed_export_item(item)]
+            else:
+                company_passed = []
+                company_issues = company_all
             rows = _dedupe_report_issue_rows(
-                _collect_report_section_issue_rows(key, {"issues": company_items[company_label]})
+                _collect_report_section_issue_rows(key, {"issues": company_issues})
             )
+            rows = _passed_summary_rows(company_passed) + rows
             if not rows:
                 continue
             rows.sort(key=_report_row_page_key)
@@ -3450,32 +3724,291 @@ def _collect_report_issue_rows(result_payload: dict[str, Any]) -> list[list[str]
     return _flatten_report_issue_sections(_collect_report_issue_sections(result_payload))
 
 
+def _load_payload_by_identifier(db_service: PostgreSQLService, identifier_id: Any) -> dict[str, Any] | None:
+    """按文档标识加载 OCR JSON（含 layout_sections/logical_tables）。"""
+    doc_id = str(identifier_id or "").strip()
+    if not doc_id:
+        return None
+    with db_service._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT content_object_key FROM xtjs_documents WHERE identifier_id = %s AND deleted = FALSE",
+                (doc_id,),
+            )
+            row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    obj = document_blob_store.read_blob(row[0])
+    if not isinstance(obj, dict):
+        return None
+    node = obj.get("data") if isinstance(obj.get("data"), dict) else obj
+    return obj if isinstance(node, dict) and (node.get("layout_sections") or node.get("logical_tables")) else None
+
+
+def _payload_text(payload: Any) -> str:
+    """从 OCR JSON 递归收集全部 text。"""
+    parts: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            text = value.get("text")
+            if text:
+                parts.append(str(text))
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(payload)
+    return "\n".join(parts)
+
+
+_TENDER_HEADER_LABELS = {
+    "项目名称": "project_name",
+    "采购人": "purchaser",
+    "招标人": "purchaser",
+    "采购代理机构": "agency",
+    "招标代理机构": "agency",
+    "代理机构": "agency",
+}
+
+
+def _clean_party_name(text: str) -> str:
+    """从“单位名称：xxx 地址：…”提取单位名（容忍“名 称/地 址”内部空格）。"""
+    match = re.search(
+        r"(?:招标\s*代理\s*机构|采购\s*代理\s*机构|招标\s*机构|单位\s*名称|公司\s*名称|名\s*称|采购人|招标人)[：:]\s*([^\s：:；;，,。]{2,60})",
+        str(text or ""),
+        re.S,
+    )
+    if not match:
+        return ""
+    name = match.group(1)
+    name = re.sub(r"(?:地\s*址|联系人|联系电话|电话|邮箱|电子邮件|电子邮箱|传真|邮编).*$", "", name)
+    name = re.sub(r"[（(]?\s*(?:盖章|公章|签章|签字)[）)]?\s*$", "", name)
+    return name.strip("：:，,。 ")
+
+
+def _parse_tender_header(payload: dict[str, Any]) -> dict[str, str]:
+    """从招标文件“投标人须知前附表”解析 项目名称/采购人/采购代理机构。"""
+    node = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    best: dict[str, str] = {}
+    for table in node.get("logical_tables") or []:
+        if not isinstance(table, dict):
+            continue
+        for row in table.get("rows") or []:
+            if not isinstance(row, list):
+                continue
+            cells = [str(cell or "").strip() for cell in row]
+            label_index = None
+            label = ""
+            for index, cell in enumerate(cells):
+                for key in _TENDER_HEADER_LABELS:
+                    if key in cell and len(cell) <= 20:
+                        label_index = index
+                        label = key
+                        break
+                if label_index is not None:
+                    break
+            if label_index is None:
+                continue
+            content = ""
+            for index, cell in enumerate(cells):
+                if index != label_index and len(cell) > len(content):
+                    content = cell
+            if not content:
+                continue
+            field = _TENDER_HEADER_LABELS[label]
+            value = content.strip()
+            if field == "project_name":
+                value = re.sub(r"\s+", "", value)
+                # 过滤“偏离表/清单”等表头行，避免把“项目名称”列的列头当作项目名。
+                if (
+                    len(value) < 4
+                    or value in {"采购文件要求", "响应文件响应", "偏离", "合同金额", "委托内容", "序号", "年份", "金额"}
+                    or "所在页码" in value
+                ):
+                    continue
+            else:
+                value = _clean_party_name(value)
+            if value and (field not in best or len(value) > len(best[field])):
+                best[field] = value
+    return best
+
+
+_COMPANY_SUFFIXES = (
+    "公司", "集团", "厂", "院", "社", "中心", "银行", "电信", "联通", "移动",
+    "传媒", "科技", "文化", "广告", "工程", "建设", "网络", "信息", "咨询",
+    "实业", "商贸", "报", "大学", "工作室", "事务所", "有限", "股份", "责任", "合伙",
+)
+_GENERIC_UNIT_NAMES = {
+    "室内装修", "单位名称", "公司名称", "企业名称", "项目名称",
+    "序号", "单位", "名称", "备注", "金额", "数量", "合计",
+}
+
+
+def _parse_bid_unit(payload: dict[str, Any]) -> tuple[str, str]:
+    """从投标文件提取 (单位名称, 联系人=项目负责人)。联系人取不到时为空字符串。"""
+    full = _payload_text(payload)
+    unit = ""
+    for pattern in ("单位名称", "参选人名称", "投标人名称", "公司名称", "企业名称"):
+        match = re.search(r"%s[：:]\s*([^：:\s\n]{2,40})" % pattern, full)
+        if not match:
+            continue
+        candidate = re.sub(
+            r"[（(]\s*(?:盖章|公章|签章|签字)[）)]\s*$",
+            "",
+            match.group(1),
+        ).strip()
+        if not candidate or candidate in _GENERIC_UNIT_NAMES:
+            continue
+        if re.search(r"盖章|公章|签章", candidate):
+            continue
+        if candidate.endswith(_COMPANY_SUFFIXES) or len(candidate) >= 8:
+            unit = candidate
+            break
+
+    contact = ""
+    blocked = {
+        "已签字", "已签", "签字", "签名", "盖章", "签章", "负责人", "项目",
+        "资格", "证明", "情况表", "正常", "无", "待定", "项目经理", "项目负责",
+        "签字或盖章", "或盖章", "或授权代表", "或授权", "授权代表", "委托代理人",
+        "委托", "单位名称",
+    }
+    contact_patterns = (
+        # “拟派项目负责人情况表 … 姓名 xxx”（拟任职务为项目经理/项目负责人）
+        (r"(?:拟[派定投]?|投标)?项目负责人(?:情况|基本(?:情况))?表.{0,500}?姓名\s*([\u4e00-\u9fa5]{2,4})", re.S),
+        # “项目经理简历表 … 姓名 xxx”（项目经理即项目负责人）
+        (r"项目经理简历表.{0,500}?姓名\s*([\u4e00-\u9fa5]{2,4})", re.S),
+        (r"主要人员简历表.{0,500}?姓名\s*([\u4e00-\u9fa5]{2,4})", re.S),
+        # “项目负责人 1. 王骥飞 47 男” 列表/表格格式（姓名后跟年龄+性别）
+        (r"项目负责人[^\n]{0,20}?\d+[.、]?\s*([\u4e00-\u9fa5]{2,4})(?=\s*\d+\s*[男女])", re.S),
+        (r"项目负责人[^：:]{0,6}?[：:]\s*([\u4e00-\u9fa5]{2,4})", 0),
+        (r"项目负责人姓名[：:]\s*([\u4e00-\u9fa5]{2,4})", 0),
+        (r"拟派项目负责人[：:]\s*([\u4e00-\u9fa5]{2,4})", 0),
+    )
+    for pattern, flags in contact_patterns:
+        for match in re.finditer(pattern, full, flags):
+            candidate = match.group(1)
+            if candidate in blocked:
+                continue
+            if any(
+                token in candidate
+                for token in (
+                    "责任", "会计", "地址", "电话", "邮箱", "资格", "证明", "情况",
+                    "负责", "项目", "名称", "单位", "公司", "联系", "上海", "江苏",
+                    "普陀", "基础", "信息", "中国",
+                )
+            ):
+                continue
+            following = full[match.end():match.end() + 1]
+            if following and re.match(r"[\u4e00-\u9fa5]", following):
+                continue
+            contact = candidate
+            break
+        if contact:
+            break
+    return unit, contact
+
+
+def _build_report_header(project_identifier_id: str, db_service: PostgreSQLService) -> dict[str, Any] | None:
+    """构建导出文件头：项目名称/采购人/采购代理机构 + 查询单位名单。"""
+    detail = db_service.get_project_detail(project_identifier_id)
+    if not detail:
+        return None
+    project = detail.get("project") or {}
+    header: dict[str, Any] = {
+        "project_name": str(project.get("project_name") or "").strip(),
+        "purchaser": "",
+        "agency": "",
+        "units": [],
+    }
+    tender_id = ""
+    for relation in detail.get("relations") or []:
+        if not tender_id:
+            tender_id = str(relation.get("tender_identifier_id") or "").strip()
+    if tender_id:
+        tender_payload = _load_payload_by_identifier(db_service, tender_id)
+        if tender_payload:
+            header.update(_parse_tender_header(tender_payload))
+    # 查询单位名单（按商务投标文件去重）
+    seen_units: set[str] = set()
+    for relation in detail.get("relations") or []:
+        bid_id = str(relation.get("business_bid_identifier_id") or "").strip()
+        if not bid_id:
+            continue
+        bid_payload = _load_payload_by_identifier(db_service, bid_id)
+        unit = ""
+        contact = ""
+        if bid_payload:
+            unit, contact = _parse_bid_unit(bid_payload)
+        if not unit:
+            # 内容识别不到单位名时，用文件名推导投标人名称兜底，避免遗漏。
+            unit = _report_bidder_from_file(relation.get("business_bid_file_name"))
+            contact = contact or "-"
+        if not unit:
+            continue
+        if not unit or unit in seen_units:
+            continue
+        seen_units.add(unit)
+        header["units"].append({"name": unit, "contact": contact or "-"})
+    return header
+
+
 def _render_result_word_report(
     result_payload: dict[str, Any],
     *,
     project: Optional[dict[str, Any]] = None,
     project_detail: Optional[dict[str, Any]] = None,
+    header: Optional[dict[str, Any]] = None,
+    operator_name: str = "",
     exported_at: Optional[datetime] = None,
 ) -> bytes:
     document = Document()
     resolved_project = project or (project_detail or {}).get("project") or {}
     issue_sections = _collect_report_issue_sections(result_payload)
-    document.add_heading("项目审查报告", level=0)
-    _add_word_table(
-        document,
-        ["项目", "内容"],
-        [
-            ["导出时间", (exported_at or datetime.now()).isoformat(timespec="seconds")],
-            ["导出项目", _report_project_name(resolved_project) or "-"],
-            ["审查项数量", str(len(issue_sections))],
-        ],
-    )
+    export_time = (exported_at or datetime.now()).isoformat(timespec="seconds")
+    query_time_display = _format_chinese_date(exported_at or datetime.now())
+    header_project_name = str((header or {}).get("project_name") or "").strip() or _report_project_name(resolved_project)
+    if header and (header_project_name or header.get("units")):
+        # 文件头：大标题 → 单位关联情况表 → 字段（左对齐正文）→ 查询单位名单。
+        _add_header_text(document, header_project_name, size_pt=22, bold=True, align="center")
+        _add_header_text(document, "单位关联情况表", size_pt=22, bold=True, align="center")
+        _add_header_text(document, f"项目名称：{header_project_name or '-'}", size_pt=14, bold=False, align="left")
+        _add_header_text(document, f"采购人：{(header.get('purchaser') or '').strip() or '-'}", size_pt=14, bold=False, align="left")
+        _add_header_text(document, f"采购代理机构：{(header.get('agency') or '').strip() or '-'}", size_pt=14, bold=False, align="left")
+        _add_header_text(document, f"查询时间：{query_time_display}", size_pt=14, bold=False, align="left")
+        _add_header_text(document, "查询单位名单", size_pt=14, bold=True, align="center")
+        units = header.get("units") or []
+        if units:
+            _add_word_table(
+                document,
+                ["序号", "单位名称", "联系人"],
+                [
+                    [str(index + 1), str(unit.get("name") or "-"), str(unit.get("contact") or "-")]
+                    for index, unit in enumerate(units)
+                ],
+                column_widths=[Cm(1.5), Cm(12.5), Cm(2.5)],
+            )
+        else:
+            _add_header_text(document, "无", size_pt=14, bold=False, align="left")
+    else:
+        document.add_heading("项目审查报告", level=0)
+        _add_word_table(
+            document,
+            ["项目", "内容"],
+            [
+                ["导出时间", export_time],
+                ["导出项目", header_project_name or "-"],
+                ["审查项数量", str(len(issue_sections))],
+            ],
+        )
 
     document.add_heading("总览", level=1)
     if issue_sections:
         _add_word_table(
             document,
-            ["审查项", "问题数"],
+            ["审查项", "项数"],
             [[label, str(_section_total_rows(company_groups))] for _key, label, company_groups in issue_sections],
         )
     else:
@@ -3488,7 +4021,7 @@ def _render_result_word_report(
     else:
         _add_word_paragraph(document, "无")
 
-    document.add_heading("问题清单", level=1)
+    document.add_heading("审查明细", level=1)
     if issue_sections:
         for key, label, company_groups in issue_sections:
             include_description = key not in _REPORT_DUPLICATE_RESULT_KEYS
@@ -3501,9 +4034,18 @@ def _render_result_word_report(
         _add_word_paragraph(document, "无")
 
     _apply_report_document_fonts(document)
+    _set_report_core_properties(
+        document,
+        header=header,
+        project_name=header_project_name,
+        exported_at=exported_at,
+        operator_name=operator_name,
+    )
     output = io.BytesIO()
     document.save(output)
-    return output.getvalue()
+    return _set_report_app_properties(
+        output.getvalue(),
+    )
 
 
 def _safe_report_file_name(raw_name: Optional[str]) -> str:
@@ -3539,6 +4081,8 @@ async def _upload_result_word_report(
     project: dict[str, Any],
     project_detail: Optional[dict[str, Any]] = None,
     result_payload: dict[str, Any],
+    header: Optional[dict[str, Any]] = None,
+    operator_name: str = "",
     oss_service: MinioService,
 ) -> dict[str, Any]:
     report_name = f"{project.get('project_name') or project['identifier_id']}_最终导出报告"
@@ -3546,6 +4090,8 @@ async def _upload_result_word_report(
         result_payload,
         project=project,
         project_detail=project_detail,
+        header=header,
+        operator_name=operator_name,
     )
     upload = await _upload_word_report(
         report_bytes=report_bytes,
@@ -3587,6 +4133,7 @@ async def _export_result_word_report(
     *,
     project_identifier_id: str,
     result_payload: dict[str, Any],
+    operator_name: str = "",
     db_service: PostgreSQLService,
     oss_service: MinioService,
 ) -> dict[str, Any]:
@@ -3595,10 +4142,13 @@ async def _export_result_word_report(
         raise ValueError(f"项目不存在：{project_identifier_id}")
     project = project_detail.get("project") or {}
 
+    header = _build_report_header(project_identifier_id, db_service)
     report = await _upload_result_word_report(
         project=project,
         project_detail=project_detail,
         result_payload=result_payload,
+        header=header,
+        operator_name=operator_name,
         oss_service=oss_service,
     )
     response = {"project_identifier_id": str(project["identifier_id"])}
@@ -4063,14 +4613,17 @@ async def update_result_record(
 async def export_project_result_report(
     project_identifier_id: str,
     payload: ProjectReportExportRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
 ):
     """基于本次请求的展示结果生成 Word 报告，不持久化前端删减副本。"""
+    operator_name = _report_operator_name(current_user)
     try:
         return await _export_result_word_report(
             project_identifier_id=project_identifier_id,
             result_payload=payload.result,
+            operator_name=operator_name,
             db_service=db_service,
             oss_service=oss_service,
         )
