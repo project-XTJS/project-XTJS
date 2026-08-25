@@ -139,12 +139,18 @@ PACKAGE_OPTION_GROUP_RE = re.compile(
 
 
 def strip_attachment_title_parenthetical_noise(title: str) -> str:
-    """Remove common package-option suffixes like （包件一/包件二） from titles."""
+    """Remove parenthetical suffixes from titles.
+
+    大标题后括号内容不参与标题判定：既移除“（包件一/包件二）”类选项后缀，
+    也移除“（工程）/（货物）/（格式）”等任意括号内容（含嵌套），
+    保证“中小企业声明函（工程）”与“中小企业声明函（格式）”视为同一标题。
+    """
     value = str(title or "").strip()
     previous = None
     while value != previous:
         previous = value
         value = PACKAGE_OPTION_GROUP_RE.sub("", value)
+        value = re.sub(r"[（(][^（）()]*[）)]", "", value)
         value = re.sub(r"\s+", " ", value).strip()
     return value
 

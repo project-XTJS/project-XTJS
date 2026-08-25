@@ -104,6 +104,9 @@ class VerificationChecker:
         r'及被授权人身份证',
         r'及身份证',
         r'如为分支机构投标则须总公司唯一授权函',
+        # 引导动词不参与标题判定：招标“提供强制采购节能产品承诺书（格式）”
+        # 与投标标题“强制采购节能产品承诺书”视为同一标题。
+        r'^(?:需提供|须提供|应提供|应附|后附|提供|提交|具备|具有|出具|开具|携带)',
     )
     GENERIC_UNNUMBERED_ATTACHMENT_TITLE_KEYS = {
         "承诺函",
@@ -595,6 +598,12 @@ class VerificationChecker:
         raw_title = self._strip_attachment_title_prefix(self._attachment_title(text))
         raw_title = re.split(r"[；;。]", raw_title, maxsplit=1)[0]
         keys = {self._attachment_title_key(raw_title)}
+        # 合并要求项（如“中小企业声明函（格式） 中小企业声明函（工程）”）：
+        # 按空白拆出的子标题也各自生成 key，任一命中即视为匹配。
+        for part in re.split(r"\s+", raw_title):
+            part_key = self._attachment_title_key(part)
+            if part_key:
+                keys.add(part_key)
         if "或" in raw_title:
             for part in re.split(r"\s*或\s*", raw_title):
                 part_key = self._attachment_title_key(part)

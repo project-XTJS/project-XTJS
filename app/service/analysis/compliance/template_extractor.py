@@ -142,6 +142,22 @@ class SectionClassifier:
         return bool(cls.RE_TOC_TRAILING_PAGE.search(raw_text))
 
 
+def is_consistency_template_optional(title: str) -> bool:
+    """一致性模板是否可选项：带“如有”，或“其他材料/其它材料/其他内容/其它内容”兜底类目。
+
+    招标文件要求其他材料等兜底类目时，不认定其为必须材料，
+    投标文件未提供不报错（与完整性检查口径一致）。
+    """
+    compact = re.sub(r"\s+", "", str(title or ""))
+    return (
+        "如有" in str(title or "")
+        or "其他材料" in compact
+        or "其它材料" in compact
+        or "其他内容" in compact
+        or "其它内容" in compact
+    )
+
+
 class TemplateExtractor:
     """招标文件模板提取器，负责提取要求清单和一致性模板基准。"""
 
@@ -976,7 +992,9 @@ class TemplateExtractor:
                     # 一致性预览应定位到当前附件标题页；整段正文 locations 在 OCR
                     # 切块跨页或混入下一附件时容易把预览带到下一份模板。
                     "locations": list(attachment.get("title_locations") or attachment.get("locations") or []),
-                    "is_optional": "如有" in normalized_title,
+                    # 招标文件要求“其他材料/其它材料/其他内容”等兜底类目时，
+                    # 不认定其为必须材料，投标文件未提供不报错（与完整性口径一致）。
+                    "is_optional": is_consistency_template_optional(normalized_title),
                 }
             )
 

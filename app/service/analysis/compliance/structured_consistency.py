@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from app.config.settings import settings
 from app.service.manual_review.working_copy import MANUAL_EXTRACTIONS_KEY
 
+from ..attachment_synonyms import strip_attachment_title_parenthetical_noise
 from .embedding_service import get_embedding_service
 from .template_extractor import TemplateExtractor
 
@@ -44,6 +45,20 @@ OBLIGATION_MARKERS = (
     "负责",
     "确认",
     "符合",
+)
+
+# 招标文件格式附件里的参考/注解性段落（如中小企业划型标准说明），
+# 属于给投标人的填写指引，不要求投标文件复述，不参与缺失判定。
+REFERENCE_NOTE_MARKERS = (
+    "划型",
+    "划分标准",
+    "工信部联企业",
+    "信部联企业",
+    "参照本规定",
+    "适用于所有在中国境内",
+    "不属于中小企业划型",
+    "各行业划型标准",
+    "填写上述声明",
 )
 TABLE_HEADER_MARKERS = (
     "序号",
@@ -289,7 +304,10 @@ class StructuredConsistencyEngine:
         model_attachment_index: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         title = str(template.get("title") or "").strip()
-        content_lines = self._clean_lines(template.get("content") or [])
+        content_lines = self._truncate_at_next_attachment_heading(
+            self._clean_lines(template.get("content") or []),
+            title=title,
+        )
         attachment_number = self.checker._verification_checker._attachment_number(title)
         attachment_key = self._attachment_key(attachment_number, title)
         locations = [
@@ -357,6 +375,52 @@ class StructuredConsistencyEngine:
             "is_self_defined": self_defined,
             "items": deduped,
         }
+
+    @classmethod
+    def _truncate_at_next_attachment_heading(
+        cls,
+        lines: list[str],
+        *,
+        title: str,
+    ) -> list[str]:
+        """把模板内容截断到下一个附件标题之前。
+
+        招标文件格式附件（如中小企业声明函）的 OCR 段落可能把下一份附件
+        （《投标项目负责人基本情况表》、供应商书面声明）吸进同一模板，
+        这些内容不属于当前附件，投标文件无需复述。
+        """
+        title_norms = {
+            normalize_text(strip_attachment_title_parenthetical_noise(part))
+            for part in re.split(r"\s+", title)
+            if part.strip()
+        }
+        result: list[str] = []
+        for line in lines:
+            compact = normalize_text(strip_attachment_title_parenthetical_noise(line))
+            # 当前附件自己的标题行（如“7.中小企业声明函（格式）”）不截断、也不生成子项。
+            if compact and any(
+                (norm and (norm in compact or compact in norm))
+                for norm in title_norms
+            ):
+                continue
+            if cls._is_next_attachment_heading(line):
+                break
+            result.append(line)
+        return result
+
+    @staticmethod
+    def _is_next_attachment_heading(line: str) -> bool:
+        """判断是否为下一份附件的标题行（编号 + 书名号标题，或编号 + （格式）短标题）。"""
+        text = str(line or "").strip()
+        if not text:
+            return False
+        if re.match(r"^\s*附件\s*\d+", text):
+            return True
+        if re.match(r"^\s*\d+\s*[.、)）]\s*《", text):
+            return True
+        if re.match(r"^\s*\d+\s*[.、)）]\s*.{1,24}[（(]格式[）)]\s*$", text):
+            return True
+        return False
 
     def _is_fillable_table_title(self, text: str) -> bool:
         """判断段落是否为“可填写表格”的题注（如“项目管理机构人员情况表”）。"""
@@ -474,6 +538,9 @@ class StructuredConsistencyEngine:
     ) -> list[dict[str, Any]]:
         compact = re.sub(r"\s+", "", text)
         if not compact:
+            return []
+        # 招标文件格式附件里的参考/注解段落（划型标准等）不要求投标文件复述。
+        if any(marker in compact for marker in REFERENCE_NOTE_MARKERS):
             return []
         if any(marker in compact for marker in SIGNATURE_MARKERS):
             return [self._make_item(attachment_key, "signature", "签字要求", text, True, locations, "auto")]
