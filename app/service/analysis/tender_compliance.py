@@ -521,7 +521,17 @@ class TenderComplianceChecker:
                 evidence={},
             )
 
-        evaluation_text = "\n".join(section["text"] for section in evaluation_sections if section.get("text"))
+        # 总分/大类声明（如“总得分=商务文件得分20分+技术文件得分80分”）常在总则部分，
+        # 需要整章文本提取；表格定位与证据展示则用收窄后的“商务文件和技术文件评审”小节。
+        chapter_start = self._locate_evaluation_chapter_start(sections, start_index)
+        text_source = (
+            sections[chapter_start:end_index]
+            if chapter_start is not None
+            else evaluation_sections
+        )
+        evaluation_text = "\n".join(
+            section["text"] for section in text_source if section.get("text")
+        )
         table_text = structured.get("table_text") or ""
         combined_text = "\n".join(item for item in (evaluation_text, table_text) if item)
         total_score = self._extract_total_score(combined_text)
@@ -701,7 +711,8 @@ class TenderComplianceChecker:
                 "anomalies": list(dict.fromkeys(anomalies)),
                 "range_anomalies": list(dict.fromkeys(anomalies)),
             },
-            evidence=self._evidence_from_sections(evaluation_sections[:5]),
+            # 评标办法只保留最上面一个定位（评分小节标题），避免多条/重复定位。
+            evidence=evaluation_sections[:1],
         )
 
     # ------------------------------------------------------------------
@@ -1138,6 +1149,15 @@ class TenderComplianceChecker:
                     break
 
         if start_index is not None:
+            # 章节内进一步收窄到“商务文件和技术文件评审”小节（评分表所在位置），
+            # 避免把总则/资格审查/符合性检查等前置内容当作评分来源（定位更精准、不宽泛）。
+            scoring_start = self._locate_scoring_subsection(
+                sections,
+                start_index,
+                end_index,
+            )
+            if scoring_start is not None:
+                start_index = scoring_start
             for index in range(start_index + 1, len(sections)):
                 text = str(sections[index].get("text") or "").strip()
                 compact = re.sub(r"\s+", "", text)
@@ -1145,6 +1165,86 @@ class TenderComplianceChecker:
                     end_index = index
                     break
         return (start_index if start_index is not None else 0, end_index)
+
+    @staticmethod
+    def _locate_scoring_subsection(
+        sections: list[dict[str, Any]],
+        start_index: int,
+        end_index: int,
+    ) -> int | None:
+        """在评标办法章节内定位“商务文件和技术文件评审”小节标题。
+
+        该小节才是评分表的正文位置（如“四、商务文件和技术文件评审
+        （商务得分和技术得分，分数保留两位小数）”），找不到时返回 None 回退整章。
+        """
+        # 优先定位“详细评审及打分细则”（评分表的直接前置标题），
+        # 其次回退到“商务文件和技术文件评审”（九亭镇等文件的小节标题）。
+        patterns = (
+            re.compile(r"详细评审.{0,6}打分细则"),
+            re.compile(r"详细评审.{0,6}打分"),
+            re.compile(r"详细评审细则"),
+            re.compile(r"商务文件.{0,8}技术文件.{0,8}评审"),
+            re.compile(r"商务.{0,4}技术文件评审"),
+            re.compile(r"商务文件.{0,10}评审"),
+        )
+        for index in range(start_index, end_index):
+            compact = re.sub(
+                r"\s+",
+                "",
+                str(sections[index].get("text") or ""),
+            )
+            if not compact or len(compact) > 60:
+                continue
+            if any(pattern.search(compact) for pattern in patterns):
+                return index
+        return None
+
+    @staticmethod
+    def _locate_evaluation_chapter_start(
+        sections: list[dict[str, Any]],
+        narrowed_start: int,
+    ) -> int | None:
+        """从收窄后的评分小节起点向前回找评标办法章首。
+
+        用于总分/大类声明的文本提取（“总得分=20+80”常在总则部分，
+        收窄后不在评分小节范围内）。
+        """
+        chapter_pattern = re.compile(
+            r"^第[一二三四五六七八九十百零0-9]+章(?:评标办法|评审办法|评分办法|综合评分法)"
+        )
+        split_chapter_pattern = re.compile(
+            r"^第[一二三四五六七八九十百零0-9]+章$"
+        )
+        method_pattern = re.compile(
+            r"^(?:评标办法|评审办法|评分办法|综合评分法)"
+        )
+        for index in range(narrowed_start - 1, -1, -1):
+            page = sections[index].get("page")
+            if not isinstance(page, int) or page < 4:
+                continue  # 目录页（通常前 1-3 页）不算正文章首
+            compact = re.sub(
+                r"\s+",
+                "",
+                str(sections[index].get("text") or ""),
+            )
+            if not compact:
+                continue
+            if chapter_pattern.match(compact):
+                return index
+            # OCR/拆块把章标题拆成“第三章”+“评审办法”两条时：
+            # 章号块后相邻的办法名块确认是评标办法章首。
+            if split_chapter_pattern.match(compact):
+                for j in range(index + 1, min(index + 4, len(sections))):
+                    next_compact = re.sub(
+                        r"\s+",
+                        "",
+                        str(sections[j].get("text") or ""),
+                    )
+                    if next_compact and method_pattern.match(next_compact):
+                        return index
+            if method_pattern.match(compact) and len(compact) <= 12:
+                return index
+        return None
 
     def _evaluation_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         start_index, end_index = self._locate_evaluation_range(sections)
@@ -1556,8 +1656,11 @@ class TenderComplianceChecker:
         deduction_rule = self._deduction_rule_from_text(criteria_text, max_text=max_text)
         fixed_scores = self._fixed_scores_from_text(combined)
         explicit_max = self._explicit_item_max(max_text)
+        # 评分配方文字里的“满分X分”（如“每提供一个得1分，满分3分”）单独提取，
+        # 用于固定分值比对时优先于“得X分”的具体分数（用户规则）。
+        criteria_explicit_max = self._explicit_item_max(criteria_text, require_label=True)
         if explicit_max is None:
-            explicit_max = self._explicit_item_max(criteria_text, require_label=True)
+            explicit_max = criteria_explicit_max
 
         if deduction_rule:
             score_type = "deduction"
@@ -1580,6 +1683,7 @@ class TenderComplianceChecker:
             "ranges": ranges,
             "fixed_scores": sorted(set(fixed_scores)),
             "explicit_max": explicit_max,
+            "criteria_explicit_max": criteria_explicit_max,
             "deduction_rule": deduction_rule,
             "status": "pending",
             "anomalies": [],
@@ -1607,6 +1711,11 @@ class TenderComplianceChecker:
                     "max_candidates": [item.get("item_max_score")] if item.get("item_max_score") is not None else [],
                     "fixed_scores": list(item.get("fixed_scores") or []),
                     "explicit_maxes": [item.get("explicit_max")] if item.get("explicit_max") is not None else [],
+                    "criteria_explicit_maxes": (
+                        [item.get("criteria_explicit_max")]
+                        if item.get("criteria_explicit_max") is not None
+                        else []
+                    ),
                     "deduction_rules": [item.get("deduction_rule")] if item.get("deduction_rule") else [],
                 }
                 grouped[key] = current
@@ -1621,6 +1730,8 @@ class TenderComplianceChecker:
             current["fixed_scores"].extend(item.get("fixed_scores") or [])
             if item.get("explicit_max") is not None:
                 current["explicit_maxes"].append(item.get("explicit_max"))
+            if item.get("criteria_explicit_max") is not None:
+                current["criteria_explicit_maxes"].append(item.get("criteria_explicit_max"))
             if item.get("deduction_rule"):
                 current["deduction_rules"].append(item.get("deduction_rule"))
             precedence = {"unknown": 0, "fixed": 1, "interval": 2, "deduction": 3}
@@ -1639,23 +1750,36 @@ class TenderComplianceChecker:
                 )
             current["item_max_score"] = max_candidates[-1] if max_candidates else None
             fixed_scores = sorted(set(current.pop("fixed_scores", [])))
-            has_explicit_max = bool(current.pop("explicit_maxes", []))
-            # 固定分值：取“得X分”的最大值与右侧分值比对（用户规则）。
+            explicit_maxes = sorted(
+                {round(float(value), 4) for value in current.pop("explicit_maxes", [])}
+            )
+            criteria_explicit_maxes = sorted(
+                {
+                    round(float(value), 4)
+                    for value in current.pop("criteria_explicit_maxes", [])
+                }
+            )
+            # 固定分值：评分配方里的“满分X”优先于“得X分”的具体分数（用户规则）。
+            # 例如“每提供一个得1分，满分3分”按满分 3 与右侧分值比对，而不是按 1。
             if (
                 current.get("score_type") == "fixed"
-                and has_explicit_max
                 and current.get("item_max_score") is not None
-                and fixed_scores
             ):
-                max_fixed = max(fixed_scores)
-                if abs(float(max_fixed) - float(current["item_max_score"])) > 0.01:
+                compare_value = (
+                    max(criteria_explicit_maxes)
+                    if criteria_explicit_maxes
+                    else (max(fixed_scores) if fixed_scores else None)
+                )
+                if compare_value is not None and abs(
+                    float(compare_value) - float(current["item_max_score"])
+                ) > 0.01:
                     anomalies.append(
-                        f"评分项“{current['item_name']}”固定分值最高 {max_fixed:g} 与右侧分值 {current['item_max_score']:g} 不一致"
+                        f"评分项“{current['item_name']}”固定分值 {compare_value:g} 与右侧分值 {current['item_max_score']:g} 不一致"
                     )
             # 区间分值：最高区间上限与右侧分值比对（断档由区间异常检查处理）。
             if (
                 current.get("score_type") == "interval"
-                and has_explicit_max
+                and bool(explicit_maxes)
                 and current.get("item_max_score") is not None
                 and current.get("ranges")
             ):
@@ -1716,7 +1840,7 @@ class TenderComplianceChecker:
             match = re.search(r"\d+(?:\.\d+)?", raw)
             return float(match.group(0)) if match else None
         patterns = [
-            r"(?:单项满分|满分|最高得分|最高分|分值|配分|本项)[为：:\s]*(\d+(?:\.\d+)?)\s*分",
+            r"(?:单项满分|满分|最高得分|最高分|最高|分值|配分|本项)[为：:\s]*(\d+(?:\.\d+)?)\s*分",
             r"(\d+(?:\.\d+)?)\s*分[（(]?(?:满分|最高)[）)]?",
         ]
         for pattern in patterns:

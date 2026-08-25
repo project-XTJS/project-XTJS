@@ -173,9 +173,28 @@ class TenderComplianceRegressionTest(unittest.TestCase):
             for item in (evaluation["values"].get("scoring_items") or [])
             for anomaly in (item.get("anomalies") or [])
         ]
-        self.assertTrue(any("固定分值最高 3 与右侧分值 5 不一致" in a for a in anomalies))
+        self.assertTrue(any("固定分值 3 与右侧分值 5 不一致" in a for a in anomalies))
         self.assertTrue(any("0-1 与 3-5 存在断层" in a for a in anomalies))
         self.assertFalse(any("技术方案" in a for a in anomalies))
+
+    def test_evaluation_fixed_prefers_full_score_over_per_item_points(self):
+        """评分配方同时出现“每提供一个得X分”与“满分Y分”时，满分Y优先于得X分。"""
+        payload = {"logical_tables": [{
+            "headers": ["评审因素", "", "分值范围", "评分性质"],
+            "rows": [
+                ["技术类似业绩", "近三年具有类似项目业绩，每提供一个得1分，满分3分", "3", "客观分"],
+                ["技术类似业绩冲突", "每提供一个得1分，满分3分", "6", "客观分"],
+            ],
+        }]}
+        result = TenderComplianceChecker().check(payload)
+        evaluation = {c["code"]: c for c in result["checks"]}["evaluation_method"]
+        anomalies = [
+            anomaly
+            for item in (evaluation["values"].get("scoring_items") or [])
+            for anomaly in (item.get("anomalies") or [])
+        ]
+        self.assertFalse(any("评分项“技术类似业绩”固定分值" in a for a in anomalies))
+        self.assertTrue(any("固定分值 3 与右侧分值 6 不一致" in a for a in anomalies))
 
     def test_bid_security_ratio_uses_budget_as_denominator(self):
         """无最高限价但有预算时（预算与限价同义），用预算作分母计算保证金比例。"""
