@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt, RGBColor
 from psycopg2 import Error as PsycopgError
@@ -2955,6 +2956,13 @@ def _add_word_table(
         for index, value in enumerate(normalized):
             _set_word_cell_text(cells[index], value, color=row_color)
     if column_widths:
+        table.autofit = False
+        table_properties = table._tbl.tblPr
+        table_layout = table_properties.find(qn("w:tblLayout"))
+        if table_layout is None:
+            table_layout = OxmlElement("w:tblLayout")
+            table_properties.append(table_layout)
+        table_layout.set(qn("w:type"), "fixed")
         for index, width in enumerate(column_widths):
             if index >= len(table.columns):
                 break
@@ -4071,8 +4079,13 @@ def _render_result_word_report(
             ],
         )
 
-    # 源 PDF 属性紧跟封面的投标人名单展示，便于直接比对不同文件
-    # 的作者、创建程序和制作工具，不再放到报告后续章节。
+    # 八列属性表使用独立的 A4 横向页面，避免纵向页面把文件名压成逐字换行。
+    metadata_section = document.add_section(WD_SECTION.NEW_PAGE)
+    metadata_section.orientation = WD_ORIENT.LANDSCAPE
+    metadata_section.page_width, metadata_section.page_height = (
+        metadata_section.page_height,
+        metadata_section.page_width,
+    )
     document.add_heading("源文件属性", level=1)
     source_properties = (header or {}).get("source_file_properties") or []
     if source_properties:
@@ -4092,9 +4105,18 @@ def _render_result_word_report(
                 ]
                 for item in source_properties
             ],
+            column_widths=[Cm(2.0), Cm(6.2), Cm(3.4), Cm(2.2), Cm(2.4), Cm(2.4), Cm(3.0), Cm(3.0)],
         )
     else:
         _add_word_paragraph(document, "无")
+
+    # 后续审查正文恢复 A4 纵向版式。
+    body_section = document.add_section(WD_SECTION.NEW_PAGE)
+    body_section.orientation = WD_ORIENT.PORTRAIT
+    body_section.page_width, body_section.page_height = (
+        body_section.page_height,
+        body_section.page_width,
+    )
 
     document.add_heading("总览", level=1)
     if issue_sections:
