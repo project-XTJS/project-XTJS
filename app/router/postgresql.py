@@ -4071,23 +4071,8 @@ def _render_result_word_report(
             ],
         )
 
-    document.add_heading("总览", level=1)
-    if issue_sections:
-        _add_word_table(
-            document,
-            ["审查项", "项数"],
-            [[label, str(_section_total_rows(company_groups))] for _key, label, company_groups in issue_sections],
-        )
-    else:
-        _add_word_paragraph(document, "无")
-
-    document.add_heading("对应文件", level=1)
-    document_rows = _report_bound_document_rows(project_detail)
-    if document_rows:
-        _add_word_table(document, ["文件类型", "文件名称"], document_rows)
-    else:
-        _add_word_paragraph(document, "无")
-
+    # 源 PDF 属性紧跟封面的投标人名单展示，便于直接比对不同文件
+    # 的作者、创建程序和制作工具，不再放到报告后续章节。
     document.add_heading("源文件属性", level=1)
     source_properties = (header or {}).get("source_file_properties") or []
     if source_properties:
@@ -4108,6 +4093,23 @@ def _render_result_word_report(
                 for item in source_properties
             ],
         )
+    else:
+        _add_word_paragraph(document, "无")
+
+    document.add_heading("总览", level=1)
+    if issue_sections:
+        _add_word_table(
+            document,
+            ["审查项", "项数"],
+            [[label, str(_section_total_rows(company_groups))] for _key, label, company_groups in issue_sections],
+        )
+    else:
+        _add_word_paragraph(document, "无")
+
+    document.add_heading("对应文件", level=1)
+    document_rows = _report_bound_document_rows(project_detail)
+    if document_rows:
+        _add_word_table(document, ["文件类型", "文件名称"], document_rows)
     else:
         _add_word_paragraph(document, "无")
 
