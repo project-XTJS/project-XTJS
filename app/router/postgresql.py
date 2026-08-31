@@ -78,6 +78,7 @@ from app.schemas.postgresql import (
     ProjectUpdateRequest,
 )
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
+from app.service.analysis.author_check import REPORT_META_FIELDS, read_pdf_metadata
 from app.service.cache_service import CacheUnavailableError, RedisCacheService
 from app.service.analysis.duplicate_merge import (
     DOC_TYPE_BY_MERGED_RESULT_KEY,
@@ -3053,10 +3054,10 @@ def _set_report_core_properties(
     """写入真实、像人工操作的文档属性（作者/标题/主题/关键字/创建与修改时间）。"""
     when = exported_at or datetime.now()
     author = operator_name.strip()  # 仅实际操作者；取不到则留空，不默认代理机构
-    project_title = project_name or "项目审查报告"
+    project_title = project_name or ""
     cp = document.core_properties
-    cp.title = f"{project_title} 单位关联情况表"
-    cp.subject = f"{project_title} 项目审查报告"
+    cp.title = f"{project_title} 项目审查报告".strip()
+    cp.subject = f"{project_title} 项目审查报告".strip()
     cp.author = author
     cp.last_modified_by = author
     cp.keywords = "招标, 投标, 审查, 单位关联, 评标, 联系人"
@@ -3911,8 +3912,73 @@ def _parse_bid_unit(payload: dict[str, Any]) -> tuple[str, str]:
     return unit, contact
 
 
-def _build_report_header(project_identifier_id: str, db_service: PostgreSQLService) -> dict[str, Any] | None:
-    """构建导出文件头：项目名称/采购人/采购代理机构 + 查询单位名单。"""
+def _report_bidder_from_relation(relation: dict[str, Any]) -> str:
+    """从项目绑定关系推导投标人。
+
+    新版上传路径为“项目/投标文件/公司/商务标_...”，其中的公司目录
+    来自上传时的投标方分组，比从 OCR 全文搜索“单位名称”更可靠。
+    旧数据没有分级对象路径时，回退到商务标文件名。
+    """
+    file_url = str(relation.get("business_bid_file_url") or "").strip()
+    if file_url:
+        try:
+            if file_url.startswith("minio://"):
+                _bucket, object_name = MinioService.bucket_and_object_from_file_url(file_url)
+            elif MinioService.is_presigned_url(file_url):
+                _bucket, object_name = MinioService.bucket_and_object_from_presigned_url(file_url)
+            else:
+                object_name = ""
+            parts = [part.strip() for part in str(object_name or "").split("/") if part.strip()]
+            marker_index = parts.index("投标文件")
+            company = parts[marker_index + 1].strip() if marker_index + 1 < len(parts) else ""
+            if company and company != "未知公司":
+                return company
+        except (ValueError, IndexError):
+            pass
+
+    return _report_bidder_from_file(relation.get("business_bid_file_name"))
+
+
+def _build_report_source_file_properties(
+    project_detail: dict[str, Any],
+    oss_service: MinioService,
+) -> list[dict[str, str]]:
+    """读取项目绑定的源 PDF 文档属性，同一文档只读取一次。"""
+    role_fields = (
+        ("招标文件", "tender_identifier_id", "tender_file_name", "tender_file_url"),
+        ("商务标文件", "business_bid_identifier_id", "business_bid_file_name", "business_bid_file_url"),
+        ("技术标文件", "technical_bid_identifier_id", "technical_bid_file_name", "technical_bid_file_url"),
+    )
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for relation in project_detail.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        for role, identifier_field, name_field, url_field in role_fields:
+            identifier = str(relation.get(identifier_field) or "").strip()
+            file_name = str(relation.get(name_field) or "").strip()
+            file_url = str(relation.get(url_field) or "").strip()
+            if not identifier and not file_url:
+                continue
+            key = (role, identifier or file_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            metadata = read_pdf_metadata(oss_service, file_url, REPORT_META_FIELDS) if file_url else {}
+            rows.append({
+                "file_type": role,
+                "file_name": file_name or identifier or "-",
+                **{field: str(metadata.get(field) or "-").strip() or "-" for field in REPORT_META_FIELDS},
+            })
+    return rows
+
+
+def _build_report_header(
+    project_identifier_id: str,
+    db_service: PostgreSQLService,
+    oss_service: MinioService | None = None,
+) -> dict[str, Any] | None:
+    """构建导出文件头：项目名称/采购人/采购代理机构 + 投标人名单。"""
     detail = db_service.get_project_detail(project_identifier_id)
     if not detail:
         return None
@@ -3922,6 +3988,7 @@ def _build_report_header(project_identifier_id: str, db_service: PostgreSQLServi
         "purchaser": "",
         "agency": "",
         "units": [],
+        "source_file_properties": [],
     }
     tender_id = ""
     for relation in detail.get("relations") or []:
@@ -3931,27 +3998,28 @@ def _build_report_header(project_identifier_id: str, db_service: PostgreSQLServi
         tender_payload = _load_payload_by_identifier(db_service, tender_id)
         if tender_payload:
             header.update(_parse_tender_header(tender_payload))
-    # 查询单位名单（按商务投标文件去重）
+    # 投标人名单（按商务投标文件去重）
     seen_units: set[str] = set()
     for relation in detail.get("relations") or []:
         bid_id = str(relation.get("business_bid_identifier_id") or "").strip()
         if not bid_id:
             continue
-        bid_payload = _load_payload_by_identifier(db_service, bid_id)
-        unit = ""
+        # 优先使用项目绑定时已确定的公司目录/文件名，避免商务标中的
+        # 历史合同、业绩材料等其他单位名称被 OCR 正则误当成投标人。
+        unit = _report_bidder_from_relation(relation)
         contact = ""
+        bid_payload = _load_payload_by_identifier(db_service, bid_id)
         if bid_payload:
-            unit, contact = _parse_bid_unit(bid_payload)
-        if not unit:
-            # 内容识别不到单位名时，用文件名推导投标人名称兜底，避免遗漏。
-            unit = _report_bidder_from_file(relation.get("business_bid_file_name"))
-            contact = contact or "-"
+            parsed_unit, contact = _parse_bid_unit(bid_payload)
+            unit = unit or parsed_unit
         if not unit:
             continue
         if not unit or unit in seen_units:
             continue
         seen_units.add(unit)
         header["units"].append({"name": unit, "contact": contact or "-"})
+    if oss_service is not None:
+        header["source_file_properties"] = _build_report_source_file_properties(detail, oss_service)
     return header
 
 
@@ -3971,14 +4039,13 @@ def _render_result_word_report(
     query_time_display = _format_chinese_date(exported_at or datetime.now())
     header_project_name = str((header or {}).get("project_name") or "").strip() or _report_project_name(resolved_project)
     if header and (header_project_name or header.get("units")):
-        # 文件头：大标题 → 单位关联情况表 → 字段（左对齐正文）→ 查询单位名单。
+        # 文件头：项目名称 → 项目审查报告 → 基本字段 → 投标人名单表。
         _add_header_text(document, header_project_name, size_pt=22, bold=True, align="center")
-        _add_header_text(document, "单位关联情况表", size_pt=22, bold=True, align="center")
+        _add_header_text(document, "项目审查报告", size_pt=22, bold=True, align="center")
         _add_header_text(document, f"项目名称：{header_project_name or '-'}", size_pt=14, bold=False, align="left")
         _add_header_text(document, f"采购人：{(header.get('purchaser') or '').strip() or '-'}", size_pt=14, bold=False, align="left")
         _add_header_text(document, f"采购代理机构：{(header.get('agency') or '').strip() or '-'}", size_pt=14, bold=False, align="left")
         _add_header_text(document, f"查询时间：{query_time_display}", size_pt=14, bold=False, align="left")
-        _add_header_text(document, "查询单位名单", size_pt=14, bold=True, align="center")
         units = header.get("units") or []
         if units:
             _add_word_table(
@@ -4018,6 +4085,29 @@ def _render_result_word_report(
     document_rows = _report_bound_document_rows(project_detail)
     if document_rows:
         _add_word_table(document, ["文件类型", "文件名称"], document_rows)
+    else:
+        _add_word_paragraph(document, "无")
+
+    document.add_heading("源文件属性", level=1)
+    source_properties = (header or {}).get("source_file_properties") or []
+    if source_properties:
+        _add_word_table(
+            document,
+            ["文件类型", "文件名称", "标题", "作者", "主题", "关键字", "创建程序", "制作工具"],
+            [
+                [
+                    item.get("file_type") or "-",
+                    item.get("file_name") or "-",
+                    item.get("title") or "-",
+                    item.get("author") or "-",
+                    item.get("subject") or "-",
+                    item.get("keywords") or "-",
+                    item.get("creator") or "-",
+                    item.get("producer") or "-",
+                ]
+                for item in source_properties
+            ],
+        )
     else:
         _add_word_paragraph(document, "无")
 
@@ -4142,7 +4232,12 @@ async def _export_result_word_report(
         raise ValueError(f"项目不存在：{project_identifier_id}")
     project = project_detail.get("project") or {}
 
-    header = _build_report_header(project_identifier_id, db_service)
+    header = await run_in_threadpool(
+        _build_report_header,
+        project_identifier_id,
+        db_service,
+        oss_service,
+    )
     report = await _upload_result_word_report(
         project=project,
         project_detail=project_detail,

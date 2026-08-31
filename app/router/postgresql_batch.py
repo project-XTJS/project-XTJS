@@ -1099,7 +1099,11 @@ async def ingest_and_recognize_project_documents(
         )
 
     try:
-        project, project_created = await ensure_upload_project(db_service, normalized_project_name)
+        project, project_created = await ensure_upload_project(
+            db_service,
+            normalized_project_name,
+            reject_existing=True,
+        )
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
@@ -1426,7 +1430,11 @@ async def upload_project_folder(
 
     project_name = parsed["project_name"]
     try:
-        project, project_created = await ensure_upload_project(db_service, project_name)
+        project, project_created = await ensure_upload_project(
+            db_service,
+            project_name,
+            reject_existing=True,
+        )
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
     project_identifier = str(project["identifier_id"])

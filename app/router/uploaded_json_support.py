@@ -147,8 +147,14 @@ async def load_uploaded_bid_json_documents(
 async def ensure_upload_project(
     db_service: PostgreSQLService,
     project_name: Optional[str],
+    *,
+    reject_existing: bool = False,
 ) -> tuple[dict[str, Any], bool]:
-    """根据项目名称查找项目，若不存在则创建，UUID 由数据库自动生成。"""
+    """根据项目名称查找项目，若不存在则创建，UUID 由数据库自动生成。
+
+    完整项目文件上传应传入 reject_existing=True，防止同名文件夹的
+    不同招标项目被追加到同一个项目。
+    """
     normalized_project_name = (project_name or "").strip()
     if normalized_project_name:
         existing = await run_in_threadpool(
@@ -156,6 +162,14 @@ async def ensure_upload_project(
             normalized_project_name,
         )
         if existing:
+            if reject_existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"项目“{normalized_project_name}”已存在，"
+                        "请修改最外层项目文件夹名称后重新提交。"
+                    ),
+                )
             return existing, False
         try:
             created = await run_in_threadpool(
@@ -170,6 +184,14 @@ async def ensure_upload_project(
                     normalized_project_name,
                 )
                 if existing:
+                    if reject_existing:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"项目“{normalized_project_name}”已存在，"
+                                "请修改最外层项目文件夹名称后重新提交。"
+                            ),
+                        ) from exc
                     return existing, False
             raise
 

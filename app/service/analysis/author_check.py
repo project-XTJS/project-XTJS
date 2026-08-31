@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 # 默认比对的元数据字段；producer 常被排版软件统一写入，误报高，默认不参与。
 DEFAULT_META_FIELDS = ("author", "creator")
+# 报告展示用的 PDF 文档属性（展示不等于参与关联冲突判定）。
+REPORT_META_FIELDS = ("title", "author", "subject", "keywords", "creator", "producer")
 
 
 def _resolve_object_location(file_url: str) -> Optional[tuple[str, str]]:
@@ -39,7 +41,11 @@ def _resolve_object_location(file_url: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _read_pdf_meta(oss_service: MinioService, file_url: str, fields: tuple) -> Dict[str, str]:
+def read_pdf_metadata(
+    oss_service: MinioService,
+    file_url: str,
+    fields: tuple = REPORT_META_FIELDS,
+) -> Dict[str, str]:
     """读取 PDF 元数据中的指定字段（小写归一、去空白）。失败返回空字典。"""
     location = _resolve_object_location(file_url)
     if not location:
@@ -105,7 +111,7 @@ def check_project_author_conflicts(
             file_name = relation.get(f"{role_prefix}_file_name")
             if not file_url:
                 continue
-            meta = _read_pdf_meta(oss_service, file_url, fields)
+            meta = read_pdf_metadata(oss_service, file_url, fields)
             documents.append({
                 "relation_id": relation_id,
                 "company": company,
