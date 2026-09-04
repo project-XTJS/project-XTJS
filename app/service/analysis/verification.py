@@ -83,7 +83,7 @@ class VerificationChecker:
     )
     ATTACHMENT_RE = re.compile(r"^\s*(?:[（(]?\d+(?:\s*[-－]\s*\d+)?[)）\.、]?\s*)?附件\s*(?P<number>\d+(?:\s*[-－]\s*\d+)*)")
     ATTACHMENT_TITLE_PREFIX_PATTERNS = (
-        r'^\s*(?:附件|附表)\s*[A-Z\d]+(?:\s*[-－]\s*[A-Z\d]+)*[、.)）．]?\s*',
+        r'^\s*(?:附件|附表)\s*[A-Z\d一二三四五六七八九十百零]+(?:\s*[-－]\s*[A-Z\d一二三四五六七八九十百零]+)*[、.)）．]?\s*',
         r'^\s*第[一二三四五六七八九十百零\d]+[章节部分篇项]\s*',
         # 兼容 8-2 / 8-5 / 8-1-2 这类子编号标题
         r'^\s*\d+(?:\s*[-－]\s*\d+)+(?:[、.)）．]?\s*)',
@@ -665,6 +665,21 @@ class VerificationChecker:
         # 只有标题 key 缺失时，才退回纯附件编号匹配。
         if attachment_number and not title_key:
             return matched_by_number
+        # 标题 key 不兼容但词法相近（表/介绍、一拆多等变体）也对应同一提示——与完整性口径一致。
+        if matched_by_title is None and matched_by_number is None:
+            from app.service.analysis.compliance.structured_consistency import lexical_similarity
+
+            best, best_score = None, 0.0
+            target = self._strip_attachment_title_prefix(self._attachment_title(text))
+            for item in expected_attachments or []:
+                expected_title = str(item.get("title") or item.get("title_key") or "")
+                if not expected_title:
+                    continue
+                score = lexical_similarity(expected_title, text)
+                if score >= 0.5 and score > best_score:
+                    best_score, best = score, item
+            if best is not None:
+                return best
         return None
 
     def _is_attachment_heading(self, section: dict, expected_attachments: list[dict] | None = None) -> bool:
@@ -988,9 +1003,13 @@ class VerificationChecker:
             matched_expected = self._expected_attachment(title, expected_attachments)
             attachment_number = self._attachment_number(title)
             normalized_title = self._attachment_title(title)
-            if matched_expected is not None and attachment_number is None:
-                attachment_number = matched_expected.get("attachment_number")
-                normalized_title = matched_expected.get("title") or normalized_title
+            expected_title = None
+            expected_attachment_number = None
+            if matched_expected is not None:
+                expected_title = matched_expected.get("title")
+                expected_attachment_number = matched_expected.get("attachment_number")
+                if attachment_number is None:
+                    attachment_number = expected_attachment_number
             pages = list(dict.fromkeys(x["page"] for x in chunk if x.get("page") is not None))
             check_chunk = self._effective_attachment_check_chunk(chunk, expected_attachments)
             check_pages = list(dict.fromkeys(x["page"] for x in check_chunk if x.get("page") is not None))
@@ -1006,6 +1025,8 @@ class VerificationChecker:
                 {
                     "attachment_number": attachment_number,
                     "title": normalized_title,
+                    "expected_title": expected_title,
+                    "expected_attachment_number": expected_attachment_number,
                     "pages": pages,
                     "check_pages": check_pages,
                     "text": "\n".join(x["text"] for x in chunk if x["type"] != "seal"),
@@ -1115,6 +1136,8 @@ class VerificationChecker:
 
     def _match_attachment(self, attachment: dict, bid_by_no: dict[str, list[dict]], all_sections: list[dict]) -> dict | None:
         # 先按标题精确匹配，再在同号候选里兜底，避免后文同号附件串到前面的正式表单。
+        from app.service.analysis.compliance.structured_consistency import lexical_similarity
+
         attachment_number = attachment.get("attachment_number")
         title_key = self._attachment_title_key(attachment.get("title") or "")
 
@@ -1151,12 +1174,34 @@ class VerificationChecker:
 
             return min(candidates, key=score)
 
+        # 标题/词法兜底候选：按词法相似度选最优段（表/介绍、一拆多等变体）。
+        def best_lexical_match(candidates: list[dict]) -> dict | None:
+            if not candidates:
+                return None
+            title = str(attachment.get("title") or "")
+
+            def score(section: dict) -> float:
+                first = str(section.get("title") or section.get("text") or "").splitlines()[0]
+                return lexical_similarity(title, first)
+
+            return max(candidates, key=score)
+
         title_matches = []
         if title_key:
             title_matches = [
                 section
                 for section in all_sections
                 if self._attachment_titles_compatible(attachment.get("title") or "", section.get("title") or "")
+            ]
+        if not title_matches:
+            # 标题 key 不兼容但词法相近（表/介绍、一拆多等变体）也视为命中——与完整性口径一致。
+            title_matches = [
+                section
+                for section in all_sections
+                if lexical_similarity(
+                    str(attachment.get("title") or ""),
+                    str(section.get("title") or section.get("text") or "").splitlines()[0],
+                ) >= 0.5
             ]
         if attachment_number in bid_by_no:
             candidates = bid_by_no.get(attachment_number) or []
@@ -1174,6 +1219,19 @@ class VerificationChecker:
         # 此时仅在标题 key 唯一精确命中时回退到标题匹配，避免将不同附件串错。
         if title_key and len(title_matches) == 1:
             return title_matches[0]
+        # 优先标题 key 严格兼容的候选，避免词法回退在多候选时串到无关段。
+        strict = [
+            section
+            for section in title_matches
+            if self._attachment_titles_compatible(
+                str(attachment.get("title") or ""),
+                str(section.get("title") or section.get("text") or "").splitlines()[0],
+            )
+        ]
+        if strict:
+            return best_title_match(strict)
+        if title_matches:
+            return best_lexical_match(title_matches)
         if attachment_number:
             return None
         if not attachment_number and title_matches:

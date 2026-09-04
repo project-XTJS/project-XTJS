@@ -13,6 +13,7 @@ from ..attachment_synonyms import (
     attachment_title_variants,
     canonicalize_attachment_title,
 )
+from ..verification import VerificationChecker
 
 
 class IntegrityChecker:
@@ -284,6 +285,8 @@ class IntegrityChecker:
     )
 
     def __init__(self):
+        # 用于完整性命中时的“标题 key 兼容/词法相似度”判定（覆盖“或”备选、同义、编号差异）。
+        self._verification_checker = VerificationChecker(None)
         # 预编译合法的标题前缀正则
         self.VALID_PREFIX = re.compile(
             r'^\s*(?:'
@@ -510,6 +513,18 @@ class IntegrityChecker:
             normalized_candidate = self._normalize_title_text(candidate)
             if normalized_candidate and normalized_candidate in normalized_text:
                 return True
+        # 标题 key 兼容：覆盖“生产厂家授权书或投标人为生产厂家的证明”这类“或”备选、
+        # 同义词（承诺函/承诺书）、编号差异（附件2-1 开标一览表 vs 2 开标一览表）等。
+        if self._verification_checker._attachment_titles_compatible(keyword, text):
+            return True
+        # 词法相似度兜底：标题相近（如去掉“或”字后主体一致）也视为命中。
+        try:
+            from app.service.analysis.compliance.structured_consistency import lexical_similarity
+
+            if lexical_similarity(keyword, text) >= 0.5:
+                return True
+        except Exception:  # pragma: no cover - 依赖缺失时退化为仅子串/兼容匹配
+            pass
         return False
 
     # 判断是否为子项（如 A.、B. 或 (1) 等）
@@ -682,6 +697,10 @@ class IntegrityChecker:
                 is_short_heading_title = sec.get('type') == 'heading' and len(compact) <= 36
                 if is_exempt or self.VALID_PREFIX.search(text) or is_short_text_title or is_short_heading_title:
                     score = self._heading_match_score(text, keyword)
+                    # 标题 key 兼容/词法相似度已命中（如“或”备选、同义、编号差异），
+                    # 但 _heading_match_score 只认整串导致得分为 0：给基础分避免被拦截。
+                    if score <= 0:
+                        score = 1
                     if score > best_score:
                         best_section = sec
                         best_score = score

@@ -167,11 +167,28 @@ def normalize_attachment_title_token(text: str) -> str:
 def _matches_alias(target_norm: str, candidate_norm: str) -> bool:
     if not target_norm or not candidate_norm:
         return False
-    return (
-        target_norm == candidate_norm
-        or target_norm in candidate_norm
-        or candidate_norm in target_norm
-    )
+    if target_norm == candidate_norm:
+        return True
+    # 伞形核心词（承诺函/承诺书/声明函/证明书/证书等）只允许完全相等，
+    # 避免“付款要求承诺函”被“承诺函”这类泛化词子串误归入“供应商承诺声明函”组。
+    if _is_generic_title_core(target_norm) or _is_generic_title_core(candidate_norm):
+        return False
+    return target_norm in candidate_norm or candidate_norm in target_norm
+
+
+_GENERIC_TITLE_CORES = frozenset({
+    "承诺函", "声明函", "承诺书", "声明书", "证明书", "证书",
+    "证明", "声明", "承诺", "函", "书", "表", "单",
+})
+
+
+def _is_generic_title_core(word: str) -> bool:
+    """判断是否为伞形核心词：整个标题就是这一类（承诺函/声明函/承诺书…）。
+
+    这类词不能作为子串去归类别的“XX承诺函”，否则会把“付款要求承诺函”误归到
+    “供应商承诺声明函”。完整标题（如“付款要求承诺函”）不视为核心词。
+    """
+    return word in _GENERIC_TITLE_CORES
 
 
 def _dedupe_titles(values: Iterable[str]) -> list[str]:
