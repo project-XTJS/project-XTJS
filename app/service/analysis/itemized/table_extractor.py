@@ -67,13 +67,20 @@ class TableExtractorMixin:
             if not anchor_text:
                 continue
 
-            matched_anchor = next(
-                (anchor for anchor in anchors if anchor in anchor_text), None
-            )
-            if not matched_anchor or not self._is_anchor_line(
-                anchor_text, matched_anchor
-            ):
-                continue
+            title_match = None
+            if anchors == self.ITEM_SECTION_ANCHORS:
+                title_match = self._match_item_section_title(anchor_text)
+                if title_match is None:
+                    continue
+                matched_anchor = title_match["anchor"]
+            else:
+                matched_anchor = next(
+                    (anchor for anchor in anchors if anchor in anchor_text), None
+                )
+                if not matched_anchor or not self._is_anchor_line(
+                    anchor_text, matched_anchor
+                ):
+                    continue
 
             anchor_page = (
                 int(section.get("page"))
@@ -159,24 +166,32 @@ class TableExtractorMixin:
                 dict.fromkeys(str(ref) for ref in logical_table_refs if ref)
             )
 
-            sections.append(
-                {
-                    "anchor": matched_anchor,
-                    "lines": lines,
-                    "start": idx,
-                    "end": idx + len(lines),
-                    "score": len(lines),
-                    "source": "layout_table_sequence",
-                    "pages": deduped_pages,
-                    "bbox": self._merge_table_bboxes(bboxes),
-                    "logical_table_refs": deduped_table_refs,
-                    "section_id": (
-                        f"layout:{matched_anchor}:{idx}:{'-'.join(str(page) for page in deduped_pages)}"
-                        if deduped_pages
-                        else f"layout:{matched_anchor}:{idx}"
-                    ),
-                }
-            )
+            item = {
+                "anchor": matched_anchor,
+                "lines": lines,
+                "start": idx,
+                "end": idx + len(lines),
+                "score": len(lines),
+                "source": "layout_table_sequence",
+                "pages": deduped_pages,
+                "bbox": self._merge_table_bboxes(bboxes),
+                "logical_table_refs": deduped_table_refs,
+                "section_id": (
+                    f"layout:{matched_anchor}:{idx}:{'-'.join(str(page) for page in deduped_pages)}"
+                    if deduped_pages
+                    else f"layout:{matched_anchor}:{idx}"
+                ),
+            }
+            if title_match is not None:
+                item.update(
+                    {
+                        "item_title_matched": True,
+                        "title_match_text": anchor_text,
+                        "title_match_score": title_match["score"],
+                        "title_match_method": title_match["method"],
+                    }
+                )
+            sections.append(item)
 
         sections.sort(key=lambda item: item.get("start", 0))
         return self._dedupe_sections(sections)

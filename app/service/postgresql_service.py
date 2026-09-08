@@ -32,6 +32,7 @@ from app.service.analysis.location_utils import (
 )
 from app.service.minio_service import MinioService
 from app.service import document_blob_store
+from app.service.project_result_summary import build_project_result_summary
 from app.service.manual_review_state import (
     MANUAL_REVIEW_RESULTS_KEY,
     build_manual_review_results,
@@ -409,11 +410,12 @@ class PostgreSQLService:
                         COALESCE(res.result_available, FALSE) AS result_available,
                         COALESCE(res.analysis_result_count, 0) AS analysis_result_count,
                         COALESCE(res.available_result_keys, '[]'::jsonb) AS available_result_keys,
-                        res.result_update_time
+                        res.result_update_time,
+                        res.result_summary
                     FROM xtjs_projects p
                     LEFT JOIN LATERAL (
                         SELECT
-                            COUNT(*) AS relation_count,
+                            COUNT(DISTINCT pd.id) AS relation_count,
                             COUNT(DISTINCT pd.tender_document_id) AS tender_count,
                             COUNT(DISTINCT pd.business_bid_document_id) AS business_bid_count,
                             COUNT(DISTINCT pd.technical_bid_document_id) AS technical_bid_count,
@@ -470,7 +472,8 @@ class PostgreSQLService:
                                     '[]'::jsonb
                                 )
                             END AS available_result_keys,
-                            r.update_time AS result_update_time
+                            r.update_time AS result_update_time,
+                            r.result_summary
                         FROM xtjs_result r
                         WHERE r.project_identifier_id = p.identifier_id
                         LIMIT 1
@@ -3260,14 +3263,15 @@ class PostgreSQLService:
     # 结果外置：把完整 result 写 MinIO，DB 行只留 result_object_key + 轻量 result_keys，
     # result 列置 NULL。
     _RESULT_UPSERT_SQL = """
-        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys)
-        VALUES (%s, NULL, %s, %s)
+        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys, result_summary)
+        VALUES (%s, NULL, %s, %s, %s)
         ON CONFLICT (project_identifier_id)
         DO UPDATE
         SET
             result = NULL,
             result_object_key = EXCLUDED.result_object_key,
             result_keys = EXCLUDED.result_keys,
+            result_summary = EXCLUDED.result_summary,
             update_time = CURRENT_TIMESTAMP
         RETURNING
             id,
@@ -3297,7 +3301,9 @@ class PostgreSQLService:
             project_identifier_id=pid,
         )
         result_keys = sorted(k for k in (encoded or {}).keys()) if isinstance(encoded, dict) else []
-        cursor.execute(self._RESULT_UPSERT_SQL, (pid, result_object_key, Json(result_keys)))
+        cursor.execute(self._RESULT_UPSERT_SQL, (
+            pid, result_object_key, Json(result_keys), Json(build_project_result_summary(encoded)),
+        ))
         record = dict(cursor.fetchone())
         # 注入刚写入的内容，避免 _sanitize 立刻再读一次 MinIO。
         record["result"] = encoded

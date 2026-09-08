@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 
@@ -73,6 +74,7 @@ class DocumentParserMixin:
     ZERO_AMOUNT_KEYWORDS: tuple
     MONEY_TOLERANCE: Any
     PRIMARY_ITEM_SECTION_NEARBY_PAGE_GAP: int
+    ITEM_TITLE_SIMILARITY_THRESHOLD: float
 
     def _prepare_document(self, payload: object) -> dict:
         """统一整理输入，抽取文本、分项段落、总价段落和候选检查区间。"""
@@ -193,7 +195,7 @@ class DocumentParserMixin:
         return isolated or [best_section]
 
     def _filter_real_item_sections(self, sections: list[dict]) -> list[dict]:
-        """过滤仅在合同条款/目录式清单中提到“分项报价表”的伪区段。"""
+        """保留标题已确认或包含真实列项的分项报价区段。"""
         return [
             section
             for section in sections or []
@@ -206,6 +208,11 @@ class DocumentParserMixin:
             return False
         if self._looks_like_opening_sheet_section(lines):
             return False
+
+        # 标题定位已经排除了目录、说明文字和报价一览表。标题相似度命中后，
+        # 即认定分项报价表存在；金额和算术关系仍由后续提取器独立校验。
+        if section.get("item_title_matched"):
+            return True
 
         has_table_header = any(self._is_table_header_line(line) for line in lines)
         data_row_count = sum(
@@ -331,9 +338,16 @@ class DocumentParserMixin:
         """在纯文本中按锚点定位可能的报价区段。"""
         sections = []
         for idx, line in enumerate(lines):
-            matched_anchor = next((anchor for anchor in anchors if anchor in line), None)
-            if not matched_anchor or not self._is_anchor_line(line, matched_anchor):
-                continue
+            title_match = None
+            if anchors == self.ITEM_SECTION_ANCHORS:
+                title_match = self._match_item_section_title(line)
+                if title_match is None:
+                    continue
+                matched_anchor = title_match["anchor"]
+            else:
+                matched_anchor = next((anchor for anchor in anchors if anchor in line), None)
+                if not matched_anchor or not self._is_anchor_line(line, matched_anchor):
+                    continue
 
             end = min(len(lines), idx + window)
             # 遇到下一个大标题提前结束
@@ -349,15 +363,23 @@ class DocumentParserMixin:
             if require_score and score <= 0:
                 continue
 
-            sections.append(
-                {
-                    "anchor": matched_anchor,
-                    "start": idx,
-                    "end": end,
-                    "score": score,
-                    "lines": section_lines,
-                }
-            )
+            section = {
+                "anchor": matched_anchor,
+                "start": idx,
+                "end": end,
+                "score": score,
+                "lines": section_lines,
+            }
+            if title_match is not None:
+                section.update(
+                    {
+                        "item_title_matched": True,
+                        "title_match_text": line,
+                        "title_match_score": title_match["score"],
+                        "title_match_method": title_match["method"],
+                    }
+                )
+            sections.append(section)
 
         sections.sort(key=lambda item: (-item["score"], item["start"]))
         deduped = []
@@ -367,17 +389,92 @@ class DocumentParserMixin:
             if key in seen:
                 continue
             seen.add(key)
-            deduped.append(
-                {
-                    "anchor": section["anchor"],
-                    "lines": section["lines"],
-                    "start": section["start"],
-                    "end": section["end"],
-                    "source": "text_section",
-                    "section_id": f"text:{section['anchor']}:{section['start']}:{section['end']}",
-                }
-            )
+            normalized_section = {
+                "anchor": section["anchor"],
+                "lines": section["lines"],
+                "start": section["start"],
+                "end": section["end"],
+                "source": "text_section",
+                "section_id": f"text:{section['anchor']}:{section['start']}:{section['end']}",
+            }
+            for field in (
+                "item_title_matched",
+                "title_match_text",
+                "title_match_score",
+                "title_match_method",
+            ):
+                if field in section:
+                    normalized_section[field] = section[field]
+            deduped.append(normalized_section)
         return deduped
+
+    def _match_item_section_title(self, line: str) -> dict | None:
+        """按既有附件标题的词法相似度口径识别分项报价标题。"""
+        text = str(line or "").strip()
+        compact = re.sub(r"\s+", "", text)
+        if not compact or "目录" in compact or "..." in text or ".." in text:
+            return None
+
+        candidate = self._normalize_item_section_title(text)
+        if not candidate or len(candidate) > 24:
+            return None
+        if any(
+            hint in candidate
+            for hint in ("须与", "不一致", "计入", "中标价", "量化", "要求", "说明")
+        ):
+            return None
+
+        exact_anchor = next(
+            (
+                anchor
+                for anchor in self.ITEM_SECTION_ANCHORS
+                if self._normalize_item_section_title(anchor) == candidate
+            ),
+            None,
+        )
+        if exact_anchor:
+            return {"anchor": exact_anchor, "score": 1.0, "method": "exact_title"}
+
+        primary_anchors = tuple(self.PRIMARY_ITEM_SECTION_ANCHORS)
+        best_anchor, best_score = max(
+            (
+                (anchor, self._item_title_similarity(anchor, candidate))
+                for anchor in primary_anchors
+            ),
+            key=lambda item: item[1],
+        )
+        total_score = max(
+            self._item_title_similarity(anchor, candidate)
+            for anchor in self.TOTAL_SECTION_ANCHORS
+        )
+        threshold = float(
+            getattr(self, "ITEM_TITLE_SIMILARITY_THRESHOLD", 0.5) or 0.5
+        )
+        if best_score < threshold or total_score >= best_score:
+            return None
+        return {
+            "anchor": best_anchor,
+            "score": round(best_score, 4),
+            "method": "lexical_similarity",
+        }
+
+    @staticmethod
+    def _normalize_item_section_title(value: str) -> str:
+        text = re.sub(r"\s+", "", str(value or ""))
+        text = re.sub(r"^(?:附件|附表)[A-Z0-9一二三四五六七八九十百零-]*[、.)）．]?", "", text)
+        text = re.sub(r"^第[一二三四五六七八九十百零\d]+[章节部分篇项]", "", text)
+        text = re.sub(r"^(?:[（(]?[一二三四五六七八九十百零\d]+[)）.、．])", "", text)
+        return re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", text).lower()
+
+    @classmethod
+    def _item_title_similarity(cls, left: str, right: str) -> float:
+        a = cls._normalize_item_section_title(left)
+        b = cls._normalize_item_section_title(right)
+        if not a or not b:
+            return 0.0
+        if a in b or b in a:
+            return min(len(a), len(b)) / max(len(a), len(b))
+        return SequenceMatcher(None, a, b).ratio()
 
     def _is_anchor_line(self, line: str, anchor: str) -> bool:
         """过滤目录或说明文字中的锚点。"""

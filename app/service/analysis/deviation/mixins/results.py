@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """检查结果构建 Mixin"""
+import re
 from typing import Any
 
 
@@ -53,16 +54,38 @@ class ResultsMixin:
         sections = self._extract_combined_bid_deviation_sections(bid_payload, technical_bid_payload)
         global_stmt = self._detect_global_no_deviation(sections["combined_text"])
         table_coverage = self._collect_table_coverage(sections)
+        self_declared_items = self._extract_self_declared_deviation_items(sections)
 
         if not star_requirements and not tender_template_requirements:
+            if self_declared_items:
+                return self._build_self_declared_deviation_result(
+                    sections,
+                    global_stmt,
+                    table_coverage,
+                    self_declared_items,
+                )
             return self._build_empty_star_result(sections, global_stmt, table_coverage)
         if not star_requirements and not sections.get("technical"):
+            if self_declared_items:
+                return self._build_self_declared_deviation_result(
+                    sections,
+                    global_stmt,
+                    table_coverage,
+                    self_declared_items,
+                )
             return self._build_missing_technical_deviation_table_result(
                 tender_template_requirements,
                 sections,
                 table_coverage,
             )
         if not star_requirements:
+            if self_declared_items:
+                return self._build_self_declared_deviation_result(
+                    sections,
+                    global_stmt,
+                    table_coverage,
+                    self_declared_items,
+                )
             return self._build_empty_star_result(sections, global_stmt, table_coverage)
         bid_texts = [self._extract_text(bid_payload)]
         if technical_bid_payload is not None:
@@ -145,7 +168,18 @@ class ResultsMixin:
                     item["risk_level"] = "high"
                     unclear_items.append(self._summary_item(item, "unclear_deviation"))
 
-        total = len(requirements)
+        extra_declared_items = self._exclude_declared_items_covered_by_matches(
+            self_declared_items,
+            matches,
+        )
+        for item in extra_declared_items:
+            matches.append(item)
+            if item.get("deviation_type") == "negative_deviation":
+                negative_items.append(self._summary_item(item, "negative_deviation"))
+            else:
+                unclear_items.append(self._summary_item(item, "unclear_deviation"))
+
+        total = len(requirements) + len(extra_declared_items)
         missing = len(missing_items)
         negative = len(negative_items)
         unclear = len(unclear_items)
@@ -160,6 +194,26 @@ class ResultsMixin:
         findings.append(f"★ 已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
         findings.append(f"△ 已响应 {bonus_responded} 条，未达标 {bonus_flagged} 条（加分项，不计入合规失败）。")
         findings.append(f"合规响应数量（无偏离/正偏离/列明未负响应）：{no_dev + positive + listed} 条。")
+        declared_negative_count = sum(
+            1
+            for item in extra_declared_items
+            if item.get("deviation_type") == "negative_deviation"
+        )
+        declared_unclear_count = len(extra_declared_items) - declared_negative_count
+        if extra_declared_items:
+            findings.append(
+                f"偏离表另有投标人主动声明的负偏离 {declared_negative_count} 条、"
+                f"需复核偏离 {declared_unclear_count} 条。"
+            )
+            if declared_negative_count:
+                status, deviation_status = "fail", "fail"
+                summary = (
+                    f"{summary}；偏离表主动声明负偏离 {declared_negative_count} 条"
+                    f"、需复核偏离 {declared_unclear_count} 条。"
+                )
+            elif status == "pass":
+                status, deviation_status = "unclear", "unclear_response"
+                summary = f"{summary}；偏离表主动填写了 {declared_unclear_count} 条偏离说明，需人工复核。"
 
         return {
             "mode": "tender_technical_bid_json",
@@ -171,6 +225,9 @@ class ResultsMixin:
             "core_star_requirements_count": mandatory_total,
             "mandatory_requirements_count": mandatory_total,
             "bonus_requirements_count": bonus_total,
+            "self_declared_deviation_count": len(extra_declared_items),
+            "self_declared_negative_count": declared_negative_count,
+            "self_declared_unclear_count": declared_unclear_count,
             "deviation_tables": {
                 "business_found": bool(sections["business"]),
                 "technical_found": bool(sections["technical"]),
@@ -188,14 +245,14 @@ class ResultsMixin:
             "unclear_response_items": unclear_items,
             "bonus_flagged_items": bonus_items,
             "stats": {
-                "responded_count": responded,
+                "responded_count": responded + len(extra_declared_items),
                 "missing_count": missing,
                 "negative_deviation_count": negative,
                 "positive_deviation_count": positive,
                 "no_deviation_count": no_dev,
                 "listed_response_count": listed,
                 "unclear_deviation_count": unclear,
-                "explicit_response_count": responded,
+                "explicit_response_count": responded + len(extra_declared_items),
                 "bonus_total_count": bonus_total,
                 "bonus_responded_count": bonus_responded,
                 "bonus_flagged_count": bonus_flagged,
@@ -203,7 +260,277 @@ class ResultsMixin:
                 "covered_by_deviation_table_count": 0,
             },
             "key_findings": findings,
-            "extracted_parameters": [x["requirement"] for x in requirements],
+            "extracted_parameters": [x["requirement"] for x in requirements]
+            + [x["requirement"] for x in extra_declared_items],
+        }
+
+    def _extract_self_declared_deviation_items(
+        self,
+        sections: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """提取偏离表中投标人主动填写的负偏离或待复核偏离。
+
+        该检查独立于招标文件是否存在 ★ 条款。优先使用逻辑表格的列级结果，
+        只有对应页没有逻辑表格行时才使用纯文本回退，避免把表尾“对不满足项应
+        如实填写”的模板说明误当作投标人的负偏离声明。
+        """
+        rows = [row for row in (sections.get("rows") or []) if isinstance(row, dict)]
+        logical_pages = {
+            (str(row.get("document_role") or ""), row.get("page"))
+            for row in rows
+            if row.get("source") == "logical_table" and self._is_deviation_table_row(row)
+        }
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, int | None, str]] = set()
+
+        for row in rows:
+            if not self._is_deviation_table_row(row):
+                continue
+            if row.get("source") == "section_text" and (
+                str(row.get("document_role") or ""), row.get("page")
+            ) in logical_pages:
+                continue
+
+            deviation_type = self._self_declared_deviation_type(row)
+            if deviation_type not in {"negative_deviation", "unclear_deviation"}:
+                continue
+
+            requirement = self._clip(
+                str(row.get("requirement_text") or "").strip() or "偏离表主动声明",
+                260,
+            )
+            evidence_parts: list[str] = []
+            for value in (row.get("response_text"), row.get("deviation_text")):
+                text = str(value or "").strip()
+                if text and text not in evidence_parts:
+                    evidence_parts.append(text)
+            response_evidence = self._clip("；".join(evidence_parts), 320)
+            page = row.get("page") if isinstance(row.get("page"), int) else None
+            key = (
+                self._norm(requirement)[:180],
+                self._norm(response_evidence)[:180],
+                page,
+                str(row.get("document_role") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            item_index = len(items) + 1
+            items.append(
+                {
+                    "requirement_id": f"SELF-DECLARED-DEVIATION-{item_index:03d}",
+                    "requirement": requirement,
+                    "source_type": "self_declared_deviation",
+                    "marker_type": "self_declared",
+                    "requirement_kind": "declared_deviation",
+                    "requirement_page": None,
+                    "requirement_bbox": None,
+                    "section_type": str(row.get("group") or "unknown"),
+                    "responded": True,
+                    "explicit_response": True,
+                    "response_status": deviation_type,
+                    "response_evidence": response_evidence,
+                    "response_section": str(row.get("group") or "unknown"),
+                    "response_section_title": str(row.get("title") or "偏离表"),
+                    "response_page": page,
+                    "response_page_end": self._deviation_table_end_page(sections, page),
+                    "response_bbox": row.get("bbox"),
+                    "response_document_role": row.get("document_role") or "business_bid",
+                    "response_line_number": None,
+                    "material_text": row.get("material_text") or "",
+                    "material_locations": row.get("material_locations") or [],
+                    "match_score": 1.0 if deviation_type == "negative_deviation" else 0.6,
+                    "deviation_type": deviation_type,
+                    "risk_level": "high" if deviation_type == "negative_deviation" else "medium",
+                    "semantic_score": None,
+                    "semantic_status": (
+                        "投标人主动声明"
+                        if deviation_type == "negative_deviation"
+                        else "待人工复核"
+                    ),
+                    "needs_manual": deviation_type != "negative_deviation",
+                }
+            )
+        return items
+
+    def _is_deviation_table_row(self, row: dict[str, Any]) -> bool:
+        """限制在真正的商务/技术偏离表内，避免扫描普通业务表格。"""
+        title = re.sub(r"\s+", "", str(row.get("title") or ""))
+        return bool(
+            "偏离表" in title
+            or any(token in title for token in self.BUSINESS_TITLES + self.TECH_TITLES)
+        )
+
+    def _self_declared_deviation_type(self, row: dict[str, Any]) -> str | None:
+        """按偏离说明列、响应列判定主动声明的偏离类型。"""
+        deviation_text = str(row.get("deviation_text") or "").strip()
+        response_text = str(row.get("response_text") or "").strip()
+        classifications = [
+            self._classify_self_declared_text(text)
+            for text in (deviation_text, response_text)
+            if text
+        ]
+        if "negative_deviation" in classifications:
+            return "negative_deviation"
+        if any(value in {"no_deviation", "positive_deviation"} for value in classifications):
+            return None
+        if row.get("source") == "logical_table" and self._meaningful_deviation_explanation(deviation_text):
+            return "unclear_deviation"
+        return None
+
+    def _classify_self_declared_text(self, text: str) -> str | None:
+        """识别明确负偏离，并让“无偏离+模板提示”优先按无偏离处理。"""
+        value = str(text or "").strip()
+        if not value:
+            return None
+        partial_patterns = (
+            r"部\s*分\s*(?:满足|响应|符合)",
+            r"未\s*完全\s*(?:满足|响应|符合)",
+        )
+        if self._match_patterns(value, partial_patterns):
+            return "negative_deviation"
+        compact = re.sub(r"\s+", "", value)
+        negated_negative = bool(
+            re.search(r"(?:无|没有|不存在|未发现|不构成)(?:任何)?负偏离", compact)
+        )
+        if "负偏离" in compact and not negated_negative:
+            return "negative_deviation"
+        if negated_negative:
+            return "no_deviation"
+        if self._match_patterns(value, self.NO_DEV_PATTERNS):
+            return "no_deviation"
+        if self._match_patterns(value, self.NEG_DEV_PATTERNS):
+            return "negative_deviation"
+        if self._match_patterns(value, self.POS_DEV_PATTERNS):
+            return "positive_deviation"
+        return None
+
+    def _meaningful_deviation_explanation(self, text: str) -> bool:
+        """偏离说明列有实质填写但未标明正/负时，作为待复核偏离输出。"""
+        value = re.sub(r"\s+", "", str(text or ""))
+        if not value or value in {"/", "-", "—", "无", "不适用", "无偏离"}:
+            return False
+        if re.fullmatch(
+            r"(?:(?:详见|见)?(?:技术|商务|响应|投标)?文件)?(?:第|P)?\d{1,4}(?:页)?",
+            value,
+            re.IGNORECASE,
+        ):
+            return False
+        if all(token in value for token in ("偏离说明", "响应文件")) and len(value) <= 40:
+            return False
+        return len(self._norm(value)) >= 4
+
+    def _exclude_declared_items_covered_by_matches(
+        self,
+        declared_items: list[dict[str, Any]],
+        matches: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """星标条款已命中同一偏离行时不重复输出主动声明项。"""
+        result: list[dict[str, Any]] = []
+        for declared in declared_items:
+            declared_req = self._norm(declared.get("requirement") or "")
+            declared_evidence = self._norm(declared.get("response_evidence") or "")
+            covered = False
+            for match in matches:
+                if match.get("response_page") != declared.get("response_page"):
+                    continue
+                match_req = self._norm(match.get("requirement") or "")
+                match_evidence = self._norm(match.get("response_evidence") or "")
+                requirement_overlap = bool(
+                    min(len(declared_req), len(match_req)) >= 8
+                    and (declared_req in match_req or match_req in declared_req)
+                )
+                evidence_overlap = bool(
+                    min(len(declared_evidence), len(match_evidence)) >= 6
+                    and (declared_evidence in match_evidence or match_evidence in declared_evidence)
+                )
+                if requirement_overlap or evidence_overlap:
+                    covered = True
+                    break
+            if not covered:
+                result.append(declared)
+        return result
+
+    def _build_self_declared_deviation_result(
+        self,
+        sections: dict[str, Any],
+        global_stmt: dict[str, Any],
+        table_coverage: dict[str, Any],
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """无 ★ 条款时，仍以偏离表中的主动声明生成可定位审查结果。"""
+        negative_items = [
+            self._summary_item(item, "negative_deviation")
+            for item in items
+            if item.get("deviation_type") == "negative_deviation"
+        ]
+        unclear_items = [
+            self._summary_item(item, "unclear_deviation")
+            for item in items
+            if item.get("deviation_type") == "unclear_deviation"
+        ]
+        negative_count = len(negative_items)
+        unclear_count = len(unclear_items)
+        if negative_count:
+            compliance_status = "fail"
+            deviation_status = "self_declared_negative_deviation"
+        else:
+            compliance_status = "unclear"
+            deviation_status = "self_declared_deviation_unclear"
+        summary = (
+            "招标文件中未发现有效 ★ 强制性要求；"
+            f"但偏离表主动声明负偏离 {negative_count} 条、需复核偏离 {unclear_count} 条。"
+        )
+        return {
+            "mode": "tender_technical_bid_json",
+            "summary": summary,
+            "compliance_status": compliance_status,
+            "deviation_status": deviation_status,
+            "requirement_extraction_mode": "self_declared_deviation",
+            "core_requirements_count": len(items),
+            "core_star_requirements_count": 0,
+            "mandatory_requirements_count": 0,
+            "bonus_requirements_count": 0,
+            "self_declared_deviation_count": len(items),
+            "self_declared_negative_count": negative_count,
+            "self_declared_unclear_count": unclear_count,
+            "deviation_tables": {
+                "business_found": bool(sections["business"]),
+                "technical_found": bool(sections["technical"]),
+                "business_section_count": len(sections["business"]),
+                "technical_section_count": len(sections["technical"]),
+            },
+            "business_catalog_pages": sections.get("catalog_pages") or [],
+            "business_catalog_locations": sections.get("catalog_locations") or [],
+            "table_coverage": table_coverage,
+            "global_response_statement": global_stmt,
+            "star_requirements": [],
+            "match_results": items,
+            "missing_response_items": [],
+            "negative_deviation_items": negative_items,
+            "unclear_response_items": unclear_items,
+            "bonus_flagged_items": [],
+            "stats": {
+                "responded_count": len(items),
+                "missing_count": 0,
+                "negative_deviation_count": negative_count,
+                "positive_deviation_count": 0,
+                "no_deviation_count": 0,
+                "listed_response_count": 0,
+                "unclear_deviation_count": unclear_count,
+                "explicit_response_count": len(items),
+                "bonus_total_count": 0,
+                "bonus_responded_count": 0,
+                "bonus_flagged_count": 0,
+                "covered_by_global_statement_count": 0,
+                "covered_by_deviation_table_count": len(items),
+            },
+            "key_findings": [
+                "招标文件中未发现有效 ★ 强制性要求，已继续检查投标人偏离表。",
+                f"定位到主动声明负偏离 {negative_count} 条、需复核偏离 {unclear_count} 条。",
+            ],
+            "extracted_parameters": [item["requirement"] for item in items],
         }
 
     def _technical_deviation_template_requirements(self, tender_payload: dict) -> list[dict[str, Any]]:
@@ -656,11 +983,17 @@ class ResultsMixin:
             "requirement": item["requirement"],
             "marker_type": item.get("marker_type"),
             "requirement_kind": item.get("requirement_kind"),
+            "source_type": item.get("source_type"),
             "response_status": response_status,
             "response_evidence": item.get("response_evidence", ""),
             "response_page": item.get("response_page"),
+            "response_page_end": item.get("response_page_end"),
             "response_bbox": item.get("response_bbox"),
             "response_document_role": item.get("response_document_role"),
+            "response_section": item.get("response_section"),
+            "response_section_title": item.get("response_section_title"),
+            "material_text": item.get("material_text"),
+            "material_locations": item.get("material_locations") or [],
             "requirement_page": item.get("requirement_page"),
             "requirement_bbox": item.get("requirement_bbox"),
             "semantic_score": item.get("semantic_score"),

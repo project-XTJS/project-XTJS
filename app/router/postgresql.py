@@ -118,6 +118,7 @@ from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
+from app.service.project_result_summary import is_result_key_visible
 from app.service.project_runtime import (
     active_project_runtime_identifiers,
     cancel_project_runtime,
@@ -178,14 +179,7 @@ def _invalidate_project_cache_by_identifier(identifier_id: Optional[str] = None)
 
 
 def _is_result_key_visible(result_key: str) -> bool:
-    if result_key == MANUAL_REVIEW_RESULTS_KEY:
-        return False
-    if result_key in {"business_itemized_duplicate_check", "bid_response_duplicate_check"}:
-        return False
-    if result_key == "typo_check":
-        # 独立错别字检查已下线，历史结果不再展示。
-        return False
-    return True
+    return is_result_key_visible(result_key)
 
 
 def _filter_visible_result_keys(results: dict[str, Any]) -> dict[str, Any]:

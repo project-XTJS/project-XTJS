@@ -18,6 +18,6 @@ class DeviationChecker(
     MatchMixin,
     ResultsMixin,
 ):
-    """偏离条款检查器，核心功能为检测投标文件对招标文件星号条款的响应情况。"""
+    """检查星号条款响应，并识别偏离表中投标人主动声明的偏离。"""
 
     pass

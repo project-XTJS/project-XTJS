@@ -73,6 +73,7 @@ class ItemizedPricingChecker(
     LAYOUT_TABLE_START_PAGE_GAP = 2
     STRUCTURED_FALLBACK_NEARBY_PAGE_GAP = 3
     LOW_CONFIDENCE_UNRESOLVED_THRESHOLD = 3
+    ITEM_TITLE_SIMILARITY_THRESHOLD = 0.5
 
     # 主入口方法（保留在原类中，因为它不属于某个特定 Mixin）
     def check_itemized_logic(self, text: object, tender_text: object | None = None) -> dict:

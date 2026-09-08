@@ -494,6 +494,13 @@ class VerificationChecker:
                 return True
         return False
 
+    def _is_ocr_damaged_date_field_line(self, text: str) -> bool:
+        """识别印章遮挡后“日期”仅剩“期”的落款行。"""
+        plain = str(text or "").strip()
+        if not re.match(r"^期\s*[:：]", plain):
+            return False
+        return bool(self._date_candidates(plain))
+
     def _is_blocked_sign_date_context(self, text: str) -> bool:
         compact = self._compact(text)
         if not compact:
@@ -1768,20 +1775,67 @@ class VerificationChecker:
         if bid_section is None:
             return {"status": "missing_date", "sign_date": None, "deadline_date": deadline_date_iso, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline_text, "matched_deadline_page": deadline_page, "deadline_locations": deadline_locations}
         bid_section = self._scoped_bid_section_for_checks(bid_section) or bid_section
-        sign_date = self._section_date(bid_section.get("text") or "", bid_section.get("sections") or [])
+        section_text = bid_section.get("text") or ""
+        section_nodes = bid_section.get("sections") or []
+        all_dates = self._section_date_candidates(section_text, section_nodes)
+        distinct_dates = {candidate["date"] for candidate in all_dates}
+        if len(distinct_dates) == 1:
+            # 附件范围内只有一个唯一日期时，不再要求“日期”字段或签章上下文。
+            # 优先沿用严格规则的定位信息；严格规则未命中时使用唯一候选。
+            sign_date = self._section_date(section_text, section_nodes) or all_dates[0]
+            date_match_method = "single_date_fallback"
+        elif len(distinct_dates) > 1:
+            # 多个不同日期仍按原规则定位落款日期，避免把成立、合同、打印等日期混入。
+            sign_date = self._section_date(section_text, section_nodes)
+            date_match_method = "contextual_date"
+        else:
+            sign_date = None
+            date_match_method = None
         if deadline is None:
             return {"status": "missing_deadline", "sign_date": None, "deadline_date": None, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": None, "matched_deadline_page": None, "deadline_locations": []}
         if sign_date is None:
             return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations}
         ok = sign_date["date"] <= deadline["date"]
-        return {"status": "pass" if ok else "late", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations, "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days}
+        return {"status": "pass" if ok else "late", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations, "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days, "match_method": date_match_method}
+
+    def _section_date_candidates(
+        self,
+        text: str,
+        sections: list[dict] | None = None,
+    ) -> list[dict]:
+        """提取附件检查范围内的日期，并按日期、页码去重。"""
+        items: list[dict] = []
+        seen: set[tuple[date, int | None]] = set()
+        for section in sections or []:
+            section_text = str(section.get("text") or "").strip()
+            if not section_text:
+                continue
+            page = section.get("page") if isinstance(section.get("page"), int) else None
+            for candidate in self._date_candidates(section_text):
+                key = (candidate["date"], page)
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append({**candidate, "page": page})
+        if items:
+            return items
+        for candidate in self._date_candidates(text):
+            key = (candidate["date"], None)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({**candidate, "page": None})
+        return items
 
     def _section_date(self, text: str, sections: list[dict] | None = None) -> dict | None:
         items, lines = [], self._lines(text)
         for i, line in enumerate(lines):
             if self._is_blocked_sign_date_context(line):
                 continue
-            if not self._is_date_requirement_line(line):
+            if not (
+                self._is_date_requirement_line(line)
+                or self._is_ocr_damaged_date_field_line(line)
+            ):
                 continue
             line_items = self._date_candidates(line)
             items.extend(line_items)

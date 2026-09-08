@@ -845,21 +845,31 @@ class ResultNormalizerMixin:
             )
         for item in negative_items:
             evidence = self._deviation_issue_evidence(item, raw)
+            is_self_declared = item.get("marker_type") == "self_declared"
             failed.append(
                 self._issue(
                     status="fail",
                     title=item.get("requirement") or "负偏离条款",
-                    message=f"检测到负偏离：{item.get('response_evidence') or '未提供详细证据'}",
+                    message=(
+                        "偏离表主动声明负偏离："
+                        if is_self_declared
+                        else "检测到负偏离："
+                    ) + str(item.get("response_evidence") or "未提供详细证据"),
                     evidence=evidence,
                 )
             )
         for item in unclear_items:
             evidence = self._deviation_issue_evidence(item, raw)
+            is_self_declared = item.get("marker_type") == "self_declared"
             unclear.append(
                 self._issue(
                     status="unclear",
                     title=item.get("requirement") or "响应不明确条款",
-                    message=f"响应内容不明确：{item.get('response_evidence') or '未提供详细证据'}",
+                    message=(
+                        "偏离表已填写偏离说明，需确认偏离性质："
+                        if is_self_declared
+                        else "响应内容不明确："
+                    ) + str(item.get("response_evidence") or "未提供详细证据"),
                     evidence=evidence,
                 )
             )
@@ -916,16 +926,25 @@ class ResultNormalizerMixin:
         if not isinstance(total_requirements, int):
             total_requirements = len(missing_items) + len(negative_items) + len(unclear_items)
         covered_count = max(0, int(total_requirements or 0) - len(missing_items))
-        review_summary = (
-            f"共核验 {int(total_requirements or 0)} 条带★要求，"
-            f"已明确响应 {covered_count}/{int(total_requirements or 0)} 条，"
-            f"负偏离 {len(negative_items)} 条，不明确 {len(unclear_items)} 条。"
-        )
+        self_declared_count = int(raw.get("self_declared_deviation_count") or 0)
+        star_count = int(raw.get("core_star_requirements_count") or 0)
+        if self_declared_count:
+            review_summary = (
+                f"共核验 {star_count} 条★要求，并检查到投标人主动填写偏离 "
+                f"{self_declared_count} 条；负偏离 {len(negative_items)} 条，"
+                f"需复核 {len(unclear_items)} 条。"
+            )
+        else:
+            review_summary = (
+                f"共核验 {int(total_requirements or 0)} 条带★要求，"
+                f"已明确响应 {covered_count}/{int(total_requirements or 0)} 条，"
+                f"负偏离 {len(negative_items)} 条，不明确 {len(unclear_items)} 条。"
+            )
 
         return {
             "validation": {
                 "status": "correct",
-                "reason": "模块返回了星标条款抽取、响应匹配和偏离分类结果。",
+                "reason": "模块返回了星标条款响应及投标人主动声明偏离的分类与定位结果。",
             },
             "review": {
                 "status": review_status,
@@ -935,6 +954,9 @@ class ResultNormalizerMixin:
                 "core_requirements_count": raw.get("core_requirements_count"),
                 "mandatory_requirements_count": raw.get("mandatory_requirements_count"),
                 "bonus_requirements_count": raw.get("bonus_requirements_count"),
+                "self_declared_deviation_count": self_declared_count,
+                "self_declared_negative_count": raw.get("self_declared_negative_count", 0),
+                "self_declared_unclear_count": raw.get("self_declared_unclear_count", 0),
                 "missing_count": len(missing_items),
                 "negative_deviation_count": len(negative_items),
                 "unclear_deviation_count": len(unclear_items),

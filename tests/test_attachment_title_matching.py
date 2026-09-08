@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
 
 from app.service.analysis.compliance.structured_consistency import (
     StructuredConsistencyEngine,
@@ -48,6 +49,95 @@ class AttachmentTitleMatchingTests(unittest.TestCase):
             strip_attachment_title_parenthetical_noise("中小企业声明函（工程（一期））"),
             "中小企业声明函",
         )
+
+
+class AttachmentDateCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.verifier = VerificationChecker(None)
+        self.attachment = {"requirements": {"requires_date": True}}
+        self.deadline = {
+            "date": date(2026, 9, 9),
+            "text": "投标截止时间：2026年09月09日",
+            "page": 1,
+            "locations": [],
+        }
+
+    @staticmethod
+    def _bid_section(*section_texts: str) -> dict:
+        sections = [
+            {"type": "text", "text": value, "page": 3}
+            for value in section_texts
+        ]
+        return {
+            "text": "\n".join(section_texts),
+            "sections": sections,
+            "pages": [3],
+        }
+
+    def test_single_date_passes_without_complete_date_label(self) -> None:
+        result = self.verifier._date_check(
+            self.attachment,
+            self._bid_section("期：2026年09月08日"),
+            self.deadline,
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["sign_date"], "2026-09-08")
+        self.assertEqual(result["match_method"], "single_date_fallback")
+
+    def test_single_date_after_deadline_is_late(self) -> None:
+        result = self.verifier._date_check(
+            self.attachment,
+            self._bid_section("期：2026年09月10日"),
+            self.deadline,
+        )
+
+        self.assertEqual(result["status"], "late")
+        self.assertEqual(result["sign_date"], "2026-09-10")
+
+    def test_multiple_dates_still_use_contextual_date_rule(self) -> None:
+        result = self.verifier._date_check(
+            self.attachment,
+            self._bid_section(
+                "成立日期：2020年01月01日",
+                "日期：2026年09月08日",
+            ),
+            self.deadline,
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["sign_date"], "2026-09-08")
+        self.assertEqual(result["match_method"], "contextual_date")
+
+    def test_multiple_dates_accept_ocr_damaged_date_field_context(self) -> None:
+        result = self.verifier._date_check(
+            self.attachment,
+            self._bid_section(
+                "最终交付时间为2026年09月30日",
+                "期：2026年09月08日",
+            ),
+            self.deadline,
+        )
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["sign_date"], "2026-09-08")
+        self.assertEqual(result["match_method"], "contextual_date")
+
+    def test_quality_period_is_not_treated_as_damaged_date_field(self) -> None:
+        self.assertFalse(
+            self.verifier._is_ocr_damaged_date_field_line(
+                "质保期：2026年09月08日",
+            )
+        )
+
+    def test_multiple_dates_without_context_are_not_forced_to_match(self) -> None:
+        result = self.verifier._date_check(
+            self.attachment,
+            self._bid_section("2026年09月07日", "2026年09月08日"),
+            self.deadline,
+        )
+
+        self.assertEqual(result["status"], "missing_date")
 
 
 class ConsistencyOptionalAndReferenceTests(unittest.TestCase):
