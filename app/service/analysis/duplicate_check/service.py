@@ -485,13 +485,6 @@ class DuplicateCheckService:
             self._minio_service = MinioService()
         return self._minio_service
 
-    # 区块/区段构建辅助
-    def _build_sentence_unit_map(
-        self,
-        ordered_blocks: list[dict[str, Any]],
-    ) -> dict[str, dict[str, Any]]:
-        """将区块划分为句子并建立精确哈希映射。"""
-        return self._build_sentence_unit_index(ordered_blocks)[1]
 
     def _build_sentence_unit_index(
         self,

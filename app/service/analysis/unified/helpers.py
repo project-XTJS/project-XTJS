@@ -117,6 +117,9 @@ class HelpersMixin:
             locations = self._issue_locations_from_evidence(evidence)
             page = self._issue_page_from_evidence(evidence, locations=locations)
             bbox = self._issue_bbox_from_evidence(evidence, locations=locations)
+            if isinstance(evidence, dict) and evidence.get('bid_content_found') is False:
+                # Tender locations remain role-tagged evidence, never an inferred bid page.
+                page = bbox = None
             if page:
                 issue["page"] = page
                 issue["source_page"] = page

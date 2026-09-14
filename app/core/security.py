@@ -55,7 +55,7 @@ def validate_password_strength(password: str) -> Optional[str]:
     return None
 
 
-def create_access_token(subject: str, role_level: int) -> str:
+def create_access_token(subject: str, role_level: int, token_version: int = 0) -> str:
     """
     签发 JWT 访问令牌。
 
@@ -68,6 +68,7 @@ def create_access_token(subject: str, role_level: int) -> str:
     payload = {
         "sub": str(subject),
         "role_level": int(role_level),
+        "token_version": token_version,
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }

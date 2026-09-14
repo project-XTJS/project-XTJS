@@ -721,18 +721,6 @@ class NormalModeMixin:
             return "发现疑似重项。"
         if sum_status == "fail":
             return "分项汇总与声明总价不一致。"
-        if False:
-            details.append(
-                "当前分项报价结构化可信度较低，已将原本可能的硬性异常降级为待人工复核。"
-            )
-            for reason in confidence.get("reasons") or []:
-                details.append(f"低置信度原因：{reason}")
-        if False:
-            details.append(
-                "当前分项报价结构化可信度较低，已将原本可能的硬性异常降级为待人工复核。"
-            )
-            for reason in confidence.get("reasons") or []:
-                details.append(f"低置信度原因：{reason}")
         if unresolved_rows:
             return (
                 "已识别到报价内容，但存在未完整识别的分项行，"

@@ -7,6 +7,8 @@
 """
 
 from dataclasses import dataclass
+from fastapi import Request
+from app.core.consistency import ConsistencyConflict
 
 from app.service.analysis import BidDocumentReviewService, DuplicateCheckService
 from app.service.analysis_service import get_analysis_service
@@ -36,9 +38,15 @@ def get_query_recognition_options() -> RecognitionOptions:
 
 
 # 数据库与存储服务
-def get_db_service() -> PostgreSQLService:
-    """获取 PostgreSQL 服务实例。"""
-    return PostgreSQLService()
+def get_db_service(request: Request) -> PostgreSQLService:
+    service = PostgreSQLService()
+    revision = request.headers.get("X-XTJS-Input-Revision")
+    identifier = request.path_params.get("identifier_id") or request.path_params.get("project_identifier_id")
+    if revision is not None and identifier and "/projects/" in request.url.path:
+        if not revision.isdigit():
+            raise ConsistencyConflict("无效的材料版本，请刷新项目")
+        service.expect_input_revision(identifier, int(revision))
+    return service
 
 
 def get_oss_service() -> MinioService:

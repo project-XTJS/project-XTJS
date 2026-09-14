@@ -73,7 +73,7 @@ def login(
         raise HTTPException(status_code=401, detail=_LOGIN_FAILED_MESSAGE)
 
     user_service.record_login_success(record["identifier_id"])
-    token = create_access_token(record["identifier_id"], record["role_level"])
+    token = create_access_token(record["identifier_id"], record["role_level"], record["token_version"])
     return {
         "access_token": token,
         "token_type": "bearer",

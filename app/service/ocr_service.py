@@ -417,8 +417,6 @@ class OCRService(OCREngineMixin, OCRSignatureMixin, OCRLayoutMixin, OCRUtilsMixi
             progress_monitor.update(stage="tables", current=1, total=1, detail="logical tables ready", emit=False)
             progress_monitor.finish(success=True)
             progress_summary = progress_monitor.build_summary()
-            stage_breakdown = progress_summary.get("stage_durations") or {}
-            stage_parts = " ".join(f"{key}={value}s" for key, value in sorted(stage_breakdown.items()))
             logger.info(
                 "OCR completed",
                 extra={

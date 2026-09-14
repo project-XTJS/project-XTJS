@@ -26,8 +26,8 @@ from app.router.file import router as file_router
 from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
 from app.service.user_service import UserService
+from app.service.document_blob_store import BlobReadError
 # 服务层（用于获取项目列表）
-from app.service.postgresql_service import PostgreSQLService
 from app.service.cache_service import CacheUnavailableError, get_cache_service
 from app.service.analysis.compliance.embedding_service import (
     get_embedding_model_status,
@@ -59,6 +59,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 注册全局异常拦截器（HTTP 异常、参数校验异常等）
 configure_exception_handlers(app)
+
+@app.exception_handler(BlobReadError)
+async def handle_blob_read_error(request, exc):
+    return UnifiedResponse(status_code=503, content={"code": 503, "message": str(exc), "data": None})
 
 # 认证路由（登录公开；/me、改密、用户管理由路由内部依赖各自守卫）
 app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
@@ -101,28 +105,9 @@ DOCUMENT_FIELD_CHOICES = {
 
 
 def _inject_string_choices(schema: dict, choices: list[str]) -> None:
-    """将字符串类型 schema 替换为枚举，并设置默认值。"""
-    if not choices or not isinstance(schema, dict):
-        return
-
-    if schema.get("type") == "string":
-        schema["enum"] = choices
-        schema["default"] = choices[0]
-        return
-
-    # 处理 anyOf 中包含 string 的可选字段
-    any_of = schema.get("anyOf")
-    if isinstance(any_of, list):
-        string_variant = next(
-            (item for item in any_of if isinstance(item, dict) and item.get("type") == "string"),
-            None,
-        )
-        if string_variant is not None:
-            schema.pop("anyOf", None)
-            schema["type"] = "string"
-            schema["nullable"] = True
-            schema["enum"] = choices
-            schema["default"] = choices[0]
+    """示例不限制合法输入，也不覆盖可选字段的类型。"""
+    if isinstance(schema, dict) and choices:
+        schema["example"] = choices[0]
 
 
 def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict | None:
@@ -143,31 +128,12 @@ def _resolve_schema_reference(openapi_schema: dict, schema: dict | None) -> dict
 
 
 def _load_openapi_display_choices() -> tuple[list[str], list[str], dict[str, list[str]]]:
-    """从数据库加载 Swagger 下拉展示值。"""
-    try:
-        db_service = PostgreSQLService()
-        project_identifier_choices = db_service.list_project_identifiers()
-        project_choices = db_service.list_project_display_choices()
-        document_choices = {
-            "all": db_service.list_document_display_choices(),
-            DOCUMENT_TYPE_TENDER: db_service.list_document_display_choices(DOCUMENT_TYPE_TENDER),
-            DOCUMENT_TYPE_BUSINESS_BID: db_service.list_document_display_choices(
-                DOCUMENT_TYPE_BUSINESS_BID,
-            ),
-            DOCUMENT_TYPE_TECHNICAL_BID: db_service.list_document_display_choices(
-                DOCUMENT_TYPE_TECHNICAL_BID,
-            ),
-        }
-    except Exception:
-        project_identifier_choices = []
-        project_choices = []
-        document_choices = {
-            "all": [],
-            DOCUMENT_TYPE_TENDER: [],
-            DOCUMENT_TYPE_BUSINESS_BID: [],
-            DOCUMENT_TYPE_TECHNICAL_BID: [],
-        }
-    return project_identifier_choices, project_choices, document_choices
+    """公开文档仅使用虚构示例，不查询任何业务数据。"""
+    return ["00000000-0000-4000-8000-000000000001"], ["示例采购项目"], {
+        "all": ["示例文件.pdf"], DOCUMENT_TYPE_TENDER: ["示例招标文件.pdf"],
+        DOCUMENT_TYPE_BUSINESS_BID: ["示例商务标.pdf"],
+        DOCUMENT_TYPE_TECHNICAL_BID: ["示例技术标.pdf"],
+    }
 
 
 def _parameter_schema(parameter: dict) -> dict:
@@ -180,19 +146,11 @@ def _mark_project_parameter(parameter: dict, choices: list[str]) -> None:
     schema = _parameter_schema(parameter)
     schema["title"] = "项目名"
     parameter["description"] = (
-        "请选择或输入项目名；旧 UUID 仍兼容。Swagger 下拉值会由后端解析为项目 UUID。"
+        "请选择或输入项目名；旧 UUID 仍兼容。名称会由后端解析为项目 UUID；文档仅展示虚构示例。"
     )
     _inject_string_choices(schema, choices)
 
 
-def _mark_project_identifier_parameter(parameter: dict, choices: list[str]) -> None:
-    """把参数展示成项目 identifier_id（UUID）下拉选择。"""
-    schema = _parameter_schema(parameter)
-    schema["type"] = "string"
-    schema["title"] = "identifier_id"
-    schema.pop("nullable", None)
-    parameter["description"] = "请选择或输入项目 identifier_id（UUID）。"
-    _inject_string_choices(schema, choices)
 
 
 def _mark_document_parameter(parameter: dict, choices: list[str]) -> None:
@@ -200,7 +158,7 @@ def _mark_document_parameter(parameter: dict, choices: list[str]) -> None:
     schema = _parameter_schema(parameter)
     schema["title"] = "文件名"
     parameter["description"] = (
-        "请选择或输入文件名；旧 UUID 仍兼容。文件名重复时下拉值会附带 UUID。"
+        "请输入文件名或 UUID；同名文件请使用 UUID，文档仅展示虚构示例。"
     )
     _inject_string_choices(schema, choices)
 

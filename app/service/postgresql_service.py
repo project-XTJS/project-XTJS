@@ -13,7 +13,9 @@ from uuid import uuid4
 
 from fastapi.encoders import jsonable_encoder
 from psycopg2.extras import Json, RealDictCursor
-from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.pool import ThreadedConnectionPool, PoolError
+from threading import Lock
+from fastapi import HTTPException
 
 from app.config.settings import settings
 from app.core.document_types import (
@@ -33,6 +35,9 @@ from app.service.analysis.location_utils import (
 from app.service.minio_service import MinioService
 from app.service import document_blob_store
 from app.service.project_result_summary import build_project_result_summary
+from app.service.upload_manifest import upload_summary
+from app.core.consistency import ConsistencyConflict
+from app.service.upload_recovery import UploadRecoveryMixin
 from app.service.manual_review_state import (
     MANUAL_REVIEW_RESULTS_KEY,
     build_manual_review_results,
@@ -56,26 +61,28 @@ MISSING_UUID_SENTINEL = "00000000-0000-0000-0000-000000000000"
 
 # 全局连接池（模块级单例）
 _db_pool = None
+_db_pool_lock = Lock()
 
 
 def get_db_pool():
     """返回 PostgreSQL 线程安全连接池，首次调用时初始化。"""
     global _db_pool
-    if _db_pool is None:
-        try:
-            _db_pool = ThreadedConnectionPool(
-                minconn=1,
-                maxconn=20,
-                dsn=settings.DATABASE_URL,
-            )
-            logger.info("PostgreSQL 连接池初始化成功。")
-        except Exception as exc:
-            logger.error("PostgreSQL 连接池初始化失败: %s", exc)
-            raise
+    with _db_pool_lock:
+        if _db_pool is None:
+            try:
+                _db_pool = ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=20,
+                    dsn=settings.DATABASE_URL,
+                )
+                logger.info("PostgreSQL 连接池初始化成功。")
+            except Exception as exc:
+                logger.error("PostgreSQL 连接池初始化失败: %s", exc)
+                raise
     return _db_pool
 
 
-class PostgreSQLService:
+class PostgreSQLService(UploadRecoveryMixin):
     """PostgreSQL 数据库服务层，封装项目、文档、关系及结果操作。"""
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
@@ -106,9 +113,12 @@ class PostgreSQLService:
     def _get_connection(self):
         """获取数据库连接上下文，使用完毕后自动归还连接池。"""
         pool = get_db_pool()
-        conn = pool.getconn()
         try:
-            with conn:
+            conn = pool.getconn()
+        except PoolError as exc:
+            raise HTTPException(503, "数据库连接繁忙，请稍后重试") from exc
+        try:
+            with document_blob_store.transaction_objects(), conn:
                 yield conn
         finally:
             pool.putconn(conn)
@@ -123,11 +133,6 @@ class PostgreSQLService:
         match = UUID_SUFFIX_PATTERN.search(text)
         return match.group(1) if match else text
 
-    @staticmethod
-    def _normalize_identifier(identifier_id: Optional[str]) -> str:
-        """若传入标识为空则自动生成 UUID。"""
-        identifier = PostgreSQLService._extract_identifier(identifier_id)
-        return identifier or str(uuid4())
 
     @staticmethod
     def _normalize_required_identifier(identifier_id: str, field_name: str) -> str:
@@ -192,6 +197,11 @@ class PostgreSQLService:
         decorated["parsing_status"] = normalized
         decorated["parsing_status_label"] = cls.PARSING_STATUS_LABELS[normalized]
         decorated["parsing_status_text"] = cls.get_parsing_status_text(normalized)
+        decorated.update(upload_summary(decorated.get("upload_manifest")))
+        if decorated.get("material_reference_missing"):
+            decorated["upload_complete"] = False
+            if not decorated["upload_issues"]:
+                decorated["upload_issues"] = [{"status":"unbound", "name":"关联文件不存在或已删除，请补齐或解除关联"}]
         return decorated
 
     @staticmethod
@@ -319,6 +329,37 @@ class PostgreSQLService:
         return document
 
     # 项目 CRUD
+    def initialize_upload_manifest(self, identifier_id, manifest):
+        with self._get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE xtjs_projects SET upload_manifest=%s WHERE identifier_id=%s AND deleted=FALSE",
+                               (Json(manifest), identifier_id))
+
+    def record_upload_file(self, identifier_id, slot, *, document_id=None, error=None):
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT upload_manifest FROM xtjs_projects WHERE identifier_id=%s AND deleted=FALSE FOR UPDATE",
+                               (identifier_id,))
+                row = cursor.fetchone()
+                if not row:
+                    raise ValueError("项目不存在或已删除")
+                manifest = row["upload_manifest"] or {}
+                item = next((f for f in manifest.get("files", []) if f.get("slot") == slot), None)
+                if item is None:
+                    raise ValueError("文件不在项目上传清单内")
+                item.update(status="uploaded" if document_id else "failed",
+                            document_id=str(document_id) if document_id else None, error=error)
+                cursor.execute("UPDATE xtjs_projects SET upload_manifest=%s, update_time=CURRENT_TIMESTAMP WHERE identifier_id=%s",
+                               (Json(manifest), identifier_id))
+
+    def _reconcile_upload_manifest(self, cursor, identifier_id):
+        cursor.execute("SELECT xtjs_sync_materials(%s::uuid)", (str(identifier_id),))
+
+    def reconcile_upload_manifest(self, identifier_id):
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                self._reconcile_upload_manifest(cursor, identifier_id)
+
     def create_project(
         self,
         project_name: Optional[str] = None,
@@ -333,14 +374,14 @@ class PostgreSQLService:
             query = """
                 INSERT INTO xtjs_projects (identifier_id, project_name, parsing_status)
                 VALUES (%s, %s, %s)
-                RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             """
             values = (normalized_identifier, normalized_project_name, self.PARSING_STATUS_UPLOADED)
         else:
             query = """
                 INSERT INTO xtjs_projects (project_name, parsing_status)
                 VALUES (%s, %s)
-                RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             """
             values = (normalized_project_name, self.PARSING_STATUS_UPLOADED)
         with self._get_connection() as conn:
@@ -352,7 +393,13 @@ class PostgreSQLService:
         """根据项目名称获取未删除项目。"""
         normalized_project_name = self._normalize_project_name(project_name)
         query = """
-            SELECT identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+            SELECT EXISTS(SELECT 1 FROM xtjs_project_documents links
+                   LEFT JOIN xtjs_documents td ON td.identifier_id=links.tender_document_id AND NOT td.deleted
+                   LEFT JOIN xtjs_documents bd ON bd.identifier_id=links.business_bid_document_id AND NOT bd.deleted
+                   LEFT JOIN xtjs_documents vd ON vd.identifier_id=links.technical_bid_document_id AND NOT vd.deleted
+                   WHERE links.project_id=xtjs_projects.identifier_id AND
+                   (td.identifier_id IS NULL OR bd.identifier_id IS NULL OR (links.technical_bid_document_id IS NOT NULL AND vd.identifier_id IS NULL))) AS material_reference_missing,
+                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE project_name = %s AND deleted = FALSE
         """
@@ -396,6 +443,15 @@ class PostgreSQLService:
                         p.identifier_id,
                         p.project_name,
                         p.parsing_status,
+                        p.upload_manifest,
+                        p.input_revision,
+                        EXISTS(SELECT 1 FROM xtjs_project_documents links
+                           LEFT JOIN xtjs_documents td ON td.identifier_id=links.tender_document_id AND NOT td.deleted
+                           LEFT JOIN xtjs_documents bd ON bd.identifier_id=links.business_bid_document_id AND NOT bd.deleted
+                           LEFT JOIN xtjs_documents vd ON vd.identifier_id=links.technical_bid_document_id AND NOT vd.deleted
+                           WHERE links.project_id=p.identifier_id AND
+                             (td.identifier_id IS NULL OR bd.identifier_id IS NULL OR (links.technical_bid_document_id IS NOT NULL AND vd.identifier_id IS NULL))) AS material_reference_missing,
+                        EXISTS(SELECT 1 FROM xtjs_result stale WHERE stale.project_identifier_id=p.identifier_id AND stale.input_revision<>p.input_revision) AS results_stale,
                         p.report_url,
                         p.deleted,
                         p.create_time,
@@ -475,7 +531,7 @@ class PostgreSQLService:
                             r.update_time AS result_update_time,
                             r.result_summary
                         FROM xtjs_result r
-                        WHERE r.project_identifier_id = p.identifier_id
+                        WHERE r.project_identifier_id = p.identifier_id AND r.input_revision=p.input_revision
                         LIMIT 1
                     ) res ON TRUE
                     WHERE {where_clause}
@@ -494,73 +550,19 @@ class PostgreSQLService:
             items=items,
         )
 
-    def list_project_identifiers(self) -> List[str]:
-        """获取所有未删除项目的标识列表。"""
-        with self._get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT identifier_id
-                    FROM xtjs_projects
-                    WHERE deleted = FALSE
-                    ORDER BY create_time DESC, identifier_id DESC
-                    """
-                )
-                return [str(identifier_id) for (identifier_id,) in cursor.fetchall()]
 
-    def list_project_display_choices(self) -> List[str]:
-        """获取 Swagger 使用的项目下拉显示值。"""
-        with self._get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    SELECT project_name
-                    FROM xtjs_projects
-                    WHERE deleted = FALSE
-                    ORDER BY create_time DESC, identifier_id DESC
-                    """
-                )
-                return [str(project_name) for (project_name,) in cursor.fetchall()]
 
-    def list_document_display_choices(
-        self,
-        document_type: Optional[str] = None,
-    ) -> List[str]:
-        """获取 Swagger 使用的文档下拉显示值；文件名重复时附带 UUID。"""
-        normalized_type = (document_type or "").strip().lower()
-        conditions = ["deleted = FALSE"]
-        values: List[Any] = []
-        if normalized_type:
-            conditions.append("document_type = %s")
-            values.append(self._normalize_document_type(normalized_type))
-        where_clause = " AND ".join(conditions)
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(
-                    f"""
-                    SELECT
-                        identifier_id,
-                        file_name,
-                        COUNT(*) OVER (PARTITION BY file_name) AS same_name_count
-                    FROM xtjs_documents
-                    WHERE {where_clause}
-                    ORDER BY create_time DESC, identifier_id DESC
-                    """,
-                    tuple(values),
-                )
-                choices: List[str] = []
-                for row in cursor.fetchall():
-                    file_name = str(row["file_name"])
-                    if int(row.get("same_name_count") or 0) > 1:
-                        choices.append(f"{file_name} ({row['identifier_id']})")
-                    else:
-                        choices.append(file_name)
-                return choices
 
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取项目记录。"""
         query = """
-            SELECT identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+            SELECT EXISTS(SELECT 1 FROM xtjs_project_documents links
+                   LEFT JOIN xtjs_documents td ON td.identifier_id=links.tender_document_id AND NOT td.deleted
+                   LEFT JOIN xtjs_documents bd ON bd.identifier_id=links.business_bid_document_id AND NOT bd.deleted
+                   LEFT JOIN xtjs_documents vd ON vd.identifier_id=links.technical_bid_document_id AND NOT vd.deleted
+                   WHERE links.project_id=xtjs_projects.identifier_id AND
+                   (td.identifier_id IS NULL OR bd.identifier_id IS NULL OR (links.technical_bid_document_id IS NOT NULL AND vd.identifier_id IS NULL))) AS material_reference_missing,
+                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
@@ -589,7 +591,7 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET {", ".join(updates)}, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -609,11 +611,16 @@ class PostgreSQLService:
             UPDATE xtjs_projects
             SET report_url = %s, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 resolved_identifier = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute("SELECT input_revision FROM xtjs_projects WHERE identifier_id=%s AND deleted=FALSE FOR UPDATE", (resolved_identifier,))
+                current = cursor.fetchone()
+                if current is None:
+                    return None
+                self.assert_input_revision(resolved_identifier, current["input_revision"])
                 cursor.execute(query, (normalized_report_url, resolved_identifier))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
@@ -622,25 +629,61 @@ class PostgreSQLService:
         self,
         identifier_id: str,
         parsing_status: int,
+        expected_input_revision: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         # 路由层统一通过这里同步项目 OCR 阶段状态。
         normalized_status = self._normalize_parsing_status(parsing_status)
         query = """
             UPDATE xtjs_projects
             SET parsing_status = %s, update_time = CURRENT_TIMESTAMP
-            WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, report_url, deleted, create_time, update_time
+            WHERE identifier_id = %s AND deleted = FALSE AND (%s IS NULL OR input_revision=%s)
+            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 normalized_identifier = self._resolve_project_identifier(cursor, identifier_id)
-                cursor.execute(query, (normalized_status, normalized_identifier))
+                cursor.execute(query, (normalized_status, normalized_identifier, expected_input_revision, expected_input_revision))
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
-    def refresh_project_parsing_status(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+    def get_project_ocr_metadata(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        """Load OCR/workflow state without downloading OCR bodies or analysis reports."""
+        project = self.get_project_by_identifier(identifier_id)
+        if not project:
+            return None
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT pd.id AS relation_id, slot.role AS relation_role,
+                           d.identifier_id, d.document_type, d.file_name, d.extracted,
+                           td.identifier_id AS tender_identifier_id, td.file_name AS tender_file_name,
+                           td.extracted AS tender_extracted
+                    FROM xtjs_project_documents pd
+                    CROSS JOIN LATERAL (VALUES ('business_bid', pd.business_bid_document_id),
+                                               ('technical_bid', pd.technical_bid_document_id)) AS slot(role, doc_id)
+                    JOIN xtjs_documents d ON d.identifier_id=slot.doc_id AND d.deleted=FALSE
+                    JOIN xtjs_documents td ON td.identifier_id=pd.tender_document_id AND td.deleted=FALSE
+                    WHERE pd.project_id=%s ORDER BY pd.id,slot.role
+                """, (project["identifier_id"],))
+                documents = [dict(row) for row in cursor.fetchall()]
+                cursor.execute("""SELECT workflow_scope,result_keys,result_summary,result_object_key,result,input_revision
+                    FROM xtjs_result WHERE project_identifier_id=%s""", (project["identifier_id"],))
+                result_meta = dict(cursor.fetchone() or {})
+                if result_meta.get("input_revision", 0) != project.get("input_revision", 0):
+                    result_meta["result_keys"] = []
+                    result_meta["result_summary"] = {}
+                    project["results_stale"] = True
+        scope = result_meta.get("workflow_scope")
+        if scope is None:
+            # Compatibility for rows created before the metadata migration.
+            scope = workflow_scope_from_result_record(self._sanitize_project_result_record(result_meta)) if result_meta else {}
+        return {"project": project, "documents": documents, "workflow_scope": scope,
+                "result_keys": result_meta.get("result_keys") or [],
+                "result_summary": result_meta.get("result_summary") or {}}
+
+    def refresh_project_parsing_status(self, identifier_id: str, payload=None) -> Optional[Dict[str, Any]]:
         """按项目下文档 extracted 状态重算 0/1/2/3 的 OCR 阶段。"""
-        payload = self.get_project_documents_for_duplicate_check(identifier_id)
+        payload = payload if payload is not None else self.get_project_ocr_metadata(identifier_id)
         if not payload:
             return None
 
@@ -674,7 +717,7 @@ class PostgreSQLService:
         def extracted_count(records: dict[str, dict[str, Any]]) -> int:
             return sum(1 for item in records.values() if bool(item.get("extracted")))
 
-        if not tender_docs or extracted_count(tender_docs) < len(tender_docs):
+        if project.get("upload_complete") is False or not tender_docs or extracted_count(tender_docs) < len(tender_docs):
             next_status = self.PARSING_STATUS_PENDING
         elif not business_docs or extracted_count(business_docs) < len(business_docs):
             next_status = self.PARSING_STATUS_TENDER_OCR_COMPLETED
@@ -683,70 +726,13 @@ class PostgreSQLService:
         else:
             next_status = self.PARSING_STATUS_TECHNICAL_OCR_COMPLETED
 
-        return self.update_project_parsing_status(normalized_identifier, next_status)
-
-        status_query = """
-            WITH project_row AS (
-                SELECT identifier_id
-                FROM xtjs_projects
-                WHERE identifier_id = %s AND deleted = FALSE
-            ),
-            document_stats AS (
-                SELECT
-                    -- 这里按“文档类型整体是否全部 extracted”来推进项目阶段。
-                    COUNT(DISTINCT td.identifier_id) AS tender_count,
-                    COUNT(DISTINCT CASE WHEN COALESCE(td.extracted, FALSE) = TRUE THEN td.identifier_id END) AS tender_extracted_count,
-                    COUNT(DISTINCT bbd.identifier_id) AS business_count,
-                    COUNT(DISTINCT CASE WHEN COALESCE(bbd.extracted, FALSE) = TRUE THEN bbd.identifier_id END) AS business_extracted_count,
-                    COUNT(DISTINCT CASE WHEN pd.technical_bid_document_id IS NOT NULL THEN tbd.identifier_id END) AS technical_count,
-                    COUNT(
-                        DISTINCT CASE
-                            WHEN pd.technical_bid_document_id IS NOT NULL
-                             AND COALESCE(tbd.extracted, FALSE) = TRUE
-                            THEN tbd.identifier_id
-                        END
-                    ) AS technical_extracted_count
-                FROM project_row pr
-                JOIN xtjs_project_documents pd
-                  ON pd.project_id = pr.identifier_id
-                JOIN xtjs_documents td
-                  ON td.identifier_id = pd.tender_document_id
-                 AND td.deleted = FALSE
-                JOIN xtjs_documents bbd
-                  ON bbd.identifier_id = pd.business_bid_document_id
-                 AND bbd.deleted = FALSE
-                LEFT JOIN xtjs_documents tbd
-                  ON tbd.identifier_id = pd.technical_bid_document_id
-                 AND tbd.deleted = FALSE
-            )
-            SELECT CASE
-                -- 招标文件没完成前，整个项目仍视为未开始 OCR。
-                WHEN tender_count = 0
-                  OR tender_extracted_count < tender_count
-                THEN 0
-                -- 招标完成后，只要商务标没全部完成，就停留在状态 1。
-                WHEN business_count = 0
-                  OR business_extracted_count < business_count
-                THEN 1
-                -- 商务标完成后，若没有技术标或技术标未全部完成，则停留在状态 2。
-                WHEN technical_count = 0
-                  OR technical_extracted_count < technical_count
-                THEN 2
-                ELSE 3
-            END AS parsing_status
-            FROM document_stats
-        """
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                normalized_identifier = self._resolve_project_identifier(cursor, identifier_id)
-                cursor.execute(status_query, (normalized_identifier,))
-                row = cursor.fetchone()
-                if row is None:
-                    return None
-                return self.update_project_parsing_status(
-                    normalized_identifier,
-                    int(row.get("parsing_status") or 0),
-                )
+        if int(project.get("parsing_status") or 0) == next_status:
+            return project
+        updated = self.update_project_parsing_status(normalized_identifier, next_status,
+            expected_input_revision=project.get("input_revision"))
+        if updated is None:
+            raise ConsistencyConflict("材料在状态刷新期间发生变化，请刷新项目")
+        return updated
 
     def soft_delete_project(self, identifier_id: str) -> bool:
         """软删除项目（设置删除标记）。"""
@@ -1342,7 +1328,16 @@ class PostgreSQLService:
 
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                values.append(self._resolve_document_identifier(cursor, identifier_id))
+                did = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute("SELECT file_url FROM xtjs_documents WHERE identifier_id=%s AND deleted=FALSE FOR UPDATE", (did,))
+                current = cursor.fetchone()
+                if current is None:
+                    return None
+                if file_url is not None:
+                    from app.service.document_ingest_service import normalize_file_url
+                    if normalize_file_url(file_url) != normalize_file_url(current["file_url"]):
+                        raise ConsistencyConflict("原件地址不能原地替换，请上传新文档并替换项目关联")
+                values.append(did)
                 cursor.execute(query, tuple(values))
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
@@ -1398,6 +1393,9 @@ class PostgreSQLService:
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 normalized_identifier = self._resolve_document_identifier(cursor, identifier_id)
+                cursor.execute("SELECT identifier_id FROM xtjs_documents WHERE identifier_id=%s AND deleted=FALSE FOR UPDATE", (normalized_identifier,))
+                if cursor.fetchone() is None:
+                    return None
                 # DB 瘦身：识别内容写 MinIO，库里只存对象键。MinIO 失败抛错→事务回滚。
                 content_object_key = document_blob_store.save_document_content(
                     recognition_content,
@@ -1770,6 +1768,8 @@ class PostgreSQLService:
                 if not project:
                     raise ValueError(f"项目不存在：{project_identifier}")
 
+                cursor.execute("SELECT identifier_id FROM xtjs_projects WHERE identifier_id=%s FOR UPDATE", (project["identifier_id"],))
+
                 tender = self._get_required_document_record(
                     cursor,
                     tender_document_identifier,
@@ -1797,7 +1797,7 @@ class PostgreSQLService:
                 # 检查是否已存在完全相同的绑定关系
                 cursor.execute(
                     """
-                    SELECT id
+                    SELECT *
                     FROM xtjs_project_documents
                     WHERE project_id = %s
                       AND tender_document_id = %s
@@ -1814,9 +1814,10 @@ class PostgreSQLService:
                 )
                 duplicated = cursor.fetchone()
                 if duplicated:
-                    raise ValueError(
-                        "当前招标文件、商务标文件、技术标文件的关联关系已存在"
-                    )
+                    return {**dict(duplicated), "project_identifier": project["identifier_id"],
+                            "tender_document_identifier": tender["identifier_id"],
+                            "business_bid_document_identifier": business_bid["identifier_id"],
+                            "technical_bid_document_identifier": technical_bid["identifier_id"] if technical_bid else None}
 
                 cursor.execute(
                     """
@@ -1843,6 +1844,7 @@ class PostgreSQLService:
                     ),
                 )
                 binding = dict(cursor.fetchone())
+                self._reconcile_upload_manifest(cursor, project["identifier_id"])
                 return {
                     **binding,
                     "project_identifier": project["identifier_id"],
@@ -2001,6 +2003,8 @@ class PostgreSQLService:
                 if not relation:
                     return None
 
+                cursor.execute("SELECT identifier_id FROM xtjs_projects WHERE identifier_id=%s FOR UPDATE", (relation["project_id"],))
+
                 tender = self._get_required_document_record(
                     cursor,
                     tender_document_identifier,
@@ -2125,6 +2129,8 @@ class PostgreSQLService:
                 if not project:
                     raise ValueError(f"项目不存在：{normalized_project_identifier}")
 
+                cursor.execute("SELECT identifier_id FROM xtjs_projects WHERE identifier_id=%s FOR UPDATE", (project["identifier_id"],))
+
                 business_bid = self._get_required_document_record(
                     cursor,
                     normalized_business_identifier,
@@ -2240,36 +2246,29 @@ class PostgreSQLService:
                     detached_count += int(cursor.rowcount or 0)
                 return detached_count
 
-    def delete_relation(self, relation_id: int) -> bool:
-        """物理删除一条项目文档关系。"""
-        with self._get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    DELETE FROM xtjs_project_documents
-                    WHERE id = %s
-                    """,
-                    (relation_id,),
-                )
-                return cursor.rowcount > 0
+    def delete_relation(self, relation_id: int, *, remove_expected_group: bool = False) -> bool:
+        return self.delete_relations([relation_id], remove_expected_group=remove_expected_group) > 0
 
-    def delete_relations(self, relation_ids: list[int]) -> int:
-        """批量物理删除项目文档关系。"""
-        normalized_ids = [int(relation_id) for relation_id in relation_ids if relation_id is not None]
-        if not normalized_ids:
-            return 0
-        with self._get_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    DELETE FROM xtjs_project_documents
-                    WHERE id = ANY(%s)
-                    """,
-                    (normalized_ids,),
-                )
-                return int(cursor.rowcount or 0)
+    def delete_relations(self, relation_ids: list[int], *, remove_expected_group: bool = False) -> int:
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("SELECT * FROM xtjs_project_documents WHERE id=ANY(%s) ORDER BY project_id,id", (relation_ids,))
+            rows = cursor.fetchall()
+            pids = sorted({str(r["project_id"]) for r in rows})
+            for pid in pids:
+                cursor.execute("SELECT upload_manifest FROM xtjs_projects WHERE identifier_id=%s FOR UPDATE", (pid,))
+                manifest = cursor.fetchone()["upload_manifest"]
+                if remove_expected_group and manifest:
+                    slots = {r["upload_group_slot"] for r in rows if str(r["project_id"]) == pid}
+                    if None in slots:
+                        raise ConsistencyConflict("无法唯一确定预期投标组，请先核查关联；未自动删除")
+                    removed = [g for g in manifest["groups"] if (g.get("slot") or g["business_bid"]) in slots]
+                    file_slots = {g[k] for g in removed for k in ("business_bid", "technical_bid")}
+                    manifest["groups"] = [g for g in manifest["groups"] if g not in removed]
+                    manifest["files"] = [f for f in manifest["files"] if f["slot"] not in file_slots]
+                    cursor.execute("UPDATE xtjs_projects SET upload_manifest=%s WHERE identifier_id=%s", (Json(manifest),pid))
+            cursor.execute("DELETE FROM xtjs_project_documents WHERE id=ANY(%s)", (relation_ids,))
+            return cursor.rowcount
 
-    # 项目详情及查重/审查文档集
     def get_project_detail(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """获取项目基本信息及其所有文档绑定关系。"""
         project = self.get_project_by_identifier(identifier_id)
@@ -2985,14 +2984,16 @@ class PostgreSQLService:
         self,
         project_identifier_id: str,
         result: Dict[str, Any],
+        existing: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         project_detail = self.get_project_detail(project_identifier_id)
+        if project_detail and project_detail["project"].get("upload_complete") is False:
+            raise ValueError("项目材料上传或关联不完整，请补齐后再执行检查")
         source_index = self._build_project_document_source_index(project_detail)
         enriched = self._enrich_result_node_with_document_sources(
             dict(result or {}),
             source_index,
         )
-        existing = self.get_project_result(project_identifier_id)
         manual_review_results = manual_review_results_from_record(existing)
         embedded_manual_results = dict(enriched.get(MANUAL_REVIEW_RESULTS_KEY) or {})
         if embedded_manual_results:
@@ -3085,6 +3086,8 @@ class PostgreSQLService:
         project = self.get_project_by_identifier(identifier_id)
         if not project:
             return None
+
+        self.observe_input_revision(project["identifier_id"], project.get("input_revision", 0))
 
         query = """
             SELECT
@@ -3181,30 +3184,49 @@ class PostgreSQLService:
             MANUAL_REVIEW_RESULTS_KEY: manual_review_results_from_record(result_record),
         }
 
+    def observe_input_revision(self, pid, revision):
+        if not hasattr(self, "_input_revisions"):
+            self._input_revisions = {}
+        self._input_revisions.setdefault(str(pid), int(revision))
+
+    def expect_input_revision(self, identifier_id, revision):
+        with self._get_connection() as conn, conn.cursor() as cursor:
+            pid = self._resolve_project_identifier(cursor, identifier_id)
+            cursor.execute("SELECT input_revision FROM xtjs_projects WHERE identifier_id=%s AND deleted=FALSE", (pid,))
+            row = cursor.fetchone()
+            if row is None or int(row[0]) != revision:
+                raise ConsistencyConflict()
+        self.observe_input_revision(pid, revision)
+
+    def assert_input_revision(self, pid, revision):
+        expected = getattr(self, "_input_revisions", {}).get(str(pid))
+        if expected is not None and expected != int(revision):
+            raise ConsistencyConflict()
+
     # 分析结果管理
-    def get_project_result(self, project_identifier_id: str) -> Optional[Dict[str, Any]]:
-        """获取项目分析结果记录。"""
-        query = """
-            SELECT
-                id,
-                project_identifier_id,
-                result,
-                result_object_key,
-                create_time,
-                update_time
-            FROM xtjs_result
-            WHERE project_identifier_id = %s
-            LIMIT 1
-        """
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                normalized_project_identifier = self._resolve_project_identifier(
-                    cursor,
-                    project_identifier_id,
-                )
-                cursor.execute(query, (normalized_project_identifier,))
-                result = cursor.fetchone()
-                return self._sanitize_project_result_record(dict(result)) if result else None
+    def get_project_result(self, project_identifier_id: str):
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            pid = self._resolve_project_identifier(cursor, project_identifier_id)
+            cursor.execute("SELECT input_revision FROM xtjs_projects WHERE identifier_id=%s AND deleted=FALSE", (pid,))
+            project = cursor.fetchone()
+            if not project:
+                return None
+            revision = project["input_revision"]
+            self.assert_input_revision(pid, revision)
+            self.observe_input_revision(pid, revision)
+            cursor.execute("SELECT * FROM xtjs_result WHERE project_identifier_id=%s", (pid,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            row = dict(row)
+            row["results_stale"] = row["input_revision"] != revision
+            row["current_input_revision"] = revision
+            if row["results_stale"]:
+                row["historical_result_object_key"] = row.pop("result_object_key", None)
+                row["result"] = {}
+                row["result_keys"] = []
+                row["result_summary"] = None
+            return self._sanitize_project_result_record(row)
 
     def list_project_results(
         self,
@@ -3216,7 +3238,7 @@ class PostgreSQLService:
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
-        conditions = ["p.deleted = FALSE"]
+        conditions = ["p.deleted = FALSE", "r.input_revision=p.input_revision"]
         values: List[Any] = []
         if normalized_keyword:
             keyword_like = f"%{normalized_keyword}%"
@@ -3263,8 +3285,8 @@ class PostgreSQLService:
     # 结果外置：把完整 result 写 MinIO，DB 行只留 result_object_key + 轻量 result_keys，
     # result 列置 NULL。
     _RESULT_UPSERT_SQL = """
-        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys, result_summary)
-        VALUES (%s, NULL, %s, %s, %s)
+        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys, result_summary, workflow_scope, input_revision)
+        VALUES (%s, NULL, %s, %s, %s, %s, %s)
         ON CONFLICT (project_identifier_id)
         DO UPDATE
         SET
@@ -3272,6 +3294,8 @@ class PostgreSQLService:
             result_object_key = EXCLUDED.result_object_key,
             result_keys = EXCLUDED.result_keys,
             result_summary = EXCLUDED.result_summary,
+            workflow_scope = EXCLUDED.workflow_scope,
+            input_revision = EXCLUDED.input_revision,
             update_time = CURRENT_TIMESTAMP
         RETURNING
             id,
@@ -3303,12 +3327,33 @@ class PostgreSQLService:
         result_keys = sorted(k for k in (encoded or {}).keys()) if isinstance(encoded, dict) else []
         cursor.execute(self._RESULT_UPSERT_SQL, (
             pid, result_object_key, Json(result_keys), Json(build_project_result_summary(encoded)),
+            Json(workflow_scope_from_result_record({"result": encoded})), project.get("input_revision", 0),
         ))
         record = dict(cursor.fetchone())
         # 注入刚写入的内容，避免 _sanitize 立刻再读一次 MinIO。
         record["result"] = encoded
         record["result_object_key"] = result_object_key
         return self._sanitize_project_result_record(record)
+
+    @contextmanager
+    def _locked_project_result(self, identifier_id: str):
+        """Serialize read/merge/write across processes, including the first result insert."""
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                pid = self._resolve_project_identifier(cursor, identifier_id)
+                cursor.execute("""SELECT identifier_id,project_name,upload_manifest,input_revision FROM xtjs_projects
+                    WHERE identifier_id=%s AND deleted=FALSE FOR UPDATE""", (pid,))
+                project = cursor.fetchone()
+                if not project:
+                    raise ValueError(f"项目不存在：{identifier_id}")
+                cursor.execute("SELECT * FROM xtjs_result WHERE project_identifier_id=%s", (pid,))
+                row = cursor.fetchone()
+                self.assert_input_revision(pid, project.get("input_revision", 0))
+                if row and row.get("input_revision", 0) != project.get("input_revision", 0):
+                    # History was archived in the material-change transaction. Only the scope survives.
+                    row = {"result": {}, "workflow_scope": row.get("workflow_scope")}
+                existing = self._sanitize_project_result_record(dict(row)) if row else {}
+                yield cursor, dict(project), existing
 
     def create_or_replace_project_result(
         self,
@@ -3318,18 +3363,11 @@ class PostgreSQLService:
         """创建或完全覆盖项目的分析结果。"""
         if not isinstance(result, dict):
             raise ValueError("result must be a JSON object")
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"项目不存在：{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
-        persisted_result = self._prepare_project_result_for_persistence(
-            normalized_project_identifier,
-            result,
-        )
-
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                return self._persist_project_result(cursor, project, persisted_result)
+        with self._locked_project_result(project_identifier_id) as (cursor, project, existing):
+            persisted_result = self._prepare_project_result_for_persistence(
+                str(project["identifier_id"]), result, existing=existing,
+            )
+            return self._persist_project_result(cursor, project, persisted_result)
 
     def delete_project_result(self, project_identifier_id: str) -> bool:
         """删除项目分析结果记录。"""
@@ -3375,24 +3413,14 @@ class PostgreSQLService:
         if not isinstance(result_value, dict):
             raise ValueError("result_value must be a JSON object")
 
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"项目不存在：{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
-
-        payload = self._prepare_project_result_for_persistence(
-            normalized_project_identifier,
-            {normalized_result_key: result_value},
-        )
-        # 结果外置后无法在 SQL 层做 JSONB 合并：读出完整既有结果→Python 浅合并→整体写回。
-        # 复刻原 SQL 语义 (COALESCE(existing,'{}') - 'project_file_urls') || EXCLUDED.result。
-        existing = self.get_project_result(normalized_project_identifier)
-        merged = dict(existing.get("result") or {}) if existing else {}
-        merged.pop("project_file_urls", None)
-        merged.update(payload)
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                return self._persist_project_result(cursor, project, merged)
+        with self._locked_project_result(project_identifier_id) as (cursor, project, existing):
+            payload = self._prepare_project_result_for_persistence(
+                str(project["identifier_id"]), {normalized_result_key: result_value}, existing=existing,
+            )
+            merged = dict(existing.get("result") or {})
+            merged.pop("project_file_urls", None)
+            merged.update(payload)
+            return self._persist_project_result(cursor, project, merged)
 
     def update_project_manual_review_result(
         self,
@@ -3405,23 +3433,15 @@ class PostgreSQLService:
         if not isinstance(result_value, dict):
             raise ValueError("result_value must be a JSON object")
 
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"项目不存在：{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
-
-        existing = self.get_project_result(normalized_project_identifier) or {}
-        existing_result = dict(existing.get("result") or {})
-        manual_review_results = build_manual_review_results(
-            manual_review_results_from_record(existing),
-            latest_key=normalized_result_key,
-            latest_value=result_value,
-        )
-        existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
-
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                return self._persist_project_result(cursor, project, existing_result)
+        with self._locked_project_result(project_identifier_id) as (cursor, project, existing):
+            existing_result = dict(existing.get("result") or {})
+            manual_review_results = build_manual_review_results(
+                manual_review_results_from_record(existing),
+                latest_key=normalized_result_key,
+                latest_value=result_value,
+            )
+            existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+            return self._persist_project_result(cursor, project, existing_result)
 
     def clear_project_manual_review_latest_result(
         self,
@@ -3431,30 +3451,22 @@ class PostgreSQLService:
         """Remove one result key from result.manual_review_results.latest."""
         normalized_result_key = self._normalize_required_identifier(result_key, "result_key")
 
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"椤圭洰涓嶅瓨鍦細{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
+        with self._locked_project_result(project_identifier_id) as (cursor, project, existing):
+            existing_result = dict(existing.get("result") or {})
+            manual_review_results = manual_review_results_from_record(existing)
+            latest = dict(manual_review_results.get("latest") or {})
+            if normalized_result_key not in latest:
+                return existing
 
-        existing = self.get_project_result(normalized_project_identifier) or {}
-        existing_result = dict(existing.get("result") or {})
-        manual_review_results = manual_review_results_from_record(existing)
-        latest = dict(manual_review_results.get("latest") or {})
-        if normalized_result_key not in latest:
-            return existing
+            latest.pop(normalized_result_key, None)
+            manual_review_results["latest"] = latest
+            manual_review_results["updated_at"] = utc_now_iso()
 
-        latest.pop(normalized_result_key, None)
-        manual_review_results["latest"] = latest
-        manual_review_results["updated_at"] = utc_now_iso()
-
-        if latest or manual_review_results.get("workflow_scope"):
-            existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
-        else:
-            existing_result.pop(MANUAL_REVIEW_RESULTS_KEY, None)
-
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                return self._persist_project_result(cursor, project, existing_result)
+            if latest or manual_review_results.get("workflow_scope"):
+                existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+            else:
+                existing_result.pop(MANUAL_REVIEW_RESULTS_KEY, None)
+            return self._persist_project_result(cursor, project, existing_result)
 
     def update_project_manual_review_workflow_scope(
         self,
@@ -3465,19 +3477,11 @@ class PostgreSQLService:
         if not isinstance(workflow_scope, dict):
             raise ValueError("workflow_scope must be a JSON object")
 
-        project = self.get_project_by_identifier(project_identifier_id)
-        if not project:
-            raise ValueError(f"项目不存在：{project_identifier_id}")
-        normalized_project_identifier = str(project["identifier_id"])
-
-        existing = self.get_project_result(normalized_project_identifier) or {}
-        existing_result = dict(existing.get("result") or {})
-        manual_review_results = build_manual_review_results(
-            manual_review_results_from_record(existing),
-            workflow_scope=workflow_scope,
-        )
-        existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
-
-        with self._get_connection() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                return self._persist_project_result(cursor, project, existing_result)
+        with self._locked_project_result(project_identifier_id) as (cursor, project, existing):
+            existing_result = dict(existing.get("result") or {})
+            manual_review_results = build_manual_review_results(
+                manual_review_results_from_record(existing),
+                workflow_scope=workflow_scope,
+            )
+            existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
+            return self._persist_project_result(cursor, project, existing_result)

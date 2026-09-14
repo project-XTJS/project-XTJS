@@ -548,16 +548,6 @@ class DocumentParserMixin:
             )
         )
 
-    def _looks_like_frequency_range_line(self, line: str) -> bool:
-        """识别 GHz/MHz 技术参数行。"""
-        compact = re.sub(r"\s+", "", line)
-        return bool(
-            re.match(
-                r"^\d+(?:\.\d+)?(?:GHz|Ghz|MHz|kHz|Hz)[~～\-至]\d+(?:\.\d+)?(?:GHz|Ghz|MHz|kHz|Hz)?",
-                compact,
-                re.IGNORECASE,
-            )
-        )
 
     def _looks_like_total_line(self, line: str) -> bool:
         """汇总行识别。"""

@@ -154,7 +154,11 @@ TABLE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
 PLACEHOLDER_RE = re.compile(
     r"_{2,}"
 )
-PAGE_NO_RE = re.compile(r"^\s*(?:第\s*)?\d+\s*(?:页|/\s*\d+)?\s*$")
+PAGE_NO_RE = re.compile(
+    r"^\s*(?:第\s*)?\d+\s*页(?:\s*共\s*\d+\s*页)?\s*$"
+    r"|^\s*\d+\s*/\s*\d+\s*$"
+    r"|^\s*\d+\s*$"
+)
 NUMBER_PREFIX_RE = re.compile(
     r"^\s*(?:附件|附表)?\s*(?:\d+(?:[-－]\d+)*|[一二三四五六七八九十]+)[、.．)）]?\s*"
 )
@@ -315,7 +319,7 @@ class StructuredConsistencyEngine:
         for skeleton in skeletons:
             title = skeleton["title"]
             integrity_skip = self.checker._integrity_skip_reason_for_title(title, integrity_raw)
-            if integrity_skip:
+            if integrity_skip and not skeleton.get('optionality_conflict'):
                 results.append(self._skipped_segment(skeleton, integrity_skip, model_status))
                 continue
 
@@ -326,6 +330,12 @@ class StructuredConsistencyEngine:
             )
             matched = attachment_match.get("section")
             if matched is None:
+                if skeleton.get('optionality_conflict'):
+                    result = self._unmatched_segment(skeleton, attachment_match, model_status)
+                    result['optionality_conflict'] = True
+                    result['optionality_locations'] = skeleton.get('optionality_locations') or []
+                    results.append(result)
+                    continue
                 if skeleton["is_optional"]:
                     results.append(
                         self._skipped_segment(
@@ -349,6 +359,12 @@ class StructuredConsistencyEngine:
             result = self._evaluate_attachment(skeleton, matched, attachment_match)
             result["model_status"] = self.embedding.status()
             results.append(result)
+        for skeleton, result in zip(skeletons, results):
+            result['is_optional'] = skeleton['is_optional']
+            result['optionality_locations'] = skeleton.get('optionality_locations') or []
+            if skeleton.get('optionality_conflict'):
+                result.update(status='unclear', is_passed=False, optionality_conflict=True,
+                              difference_summary='招标对该附件的必交与可选声明冲突，需要人工确认。')
         return results
 
     def _build_attachment_skeleton(
@@ -426,6 +442,8 @@ class StructuredConsistencyEngine:
             "reference_text": "\n".join(content_lines),
             "template_locations": locations,
             "is_optional": bool(template.get("is_optional")),
+            "optionality_conflict": bool(template.get('optionality_conflict')),
+            "optionality_locations": list(template.get('optionality_locations') or []),
             "is_self_defined": self_defined,
             "items": deduped,
         }
@@ -509,13 +527,46 @@ class StructuredConsistencyEngine:
         return items
 
     def _index_model_attachments(self, model_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        """对招标文件按附件切块一次，建立 编号/标题 -> 区段 的索引，用于精确定位附件页。"""
+        """在“响应文件格式”区域建立 编号/标题 -> 区段 的索引。"""
         index: dict[str, dict[str, Any]] = {}
         verification_checker = self.checker._verification_checker
         try:
-            sections = verification_checker._attachment_sections(model_json)
+            response_attachments = TemplateExtractor.extract_response_format_attachments(model_json)
         except Exception:
-            return index
+            response_attachments = []
+
+        sections: list[dict[str, Any]] = []
+        for attachment in response_attachments or []:
+            if not isinstance(attachment, dict):
+                continue
+            locations = [
+                location
+                for location in attachment.get("locations") or attachment.get("title_locations") or []
+                if isinstance(location, dict)
+            ]
+            pages = list(
+                dict.fromkeys(
+                    page
+                    for location in locations
+                    if isinstance((page := location.get("page")), int) and page > 0
+                )
+            )
+            sections.append(
+                {
+                    "attachment_number": attachment.get("attachment_number"),
+                    "title": attachment.get("title"),
+                    "pages": pages,
+                    "check_pages": pages,
+                    "sections": locations,
+                }
+            )
+
+        # 兼容没有“响应文件格式”章节的旧模板，保留原有全文附件索引兜底。
+        if not sections:
+            try:
+                sections = verification_checker._attachment_sections(model_json)
+            except Exception:
+                return index
         for section in sections or []:
             if not isinstance(section, dict):
                 continue
@@ -535,12 +586,11 @@ class StructuredConsistencyEngine:
     ) -> tuple[dict[str, Any] | None, list[int]]:
         """在招标文件附件索引中匹配当前附件，返回其区段与有效正文页（check_pages）。"""
         section = None
-        if attachment_number:
+        title_key = self.checker._verification_checker._attachment_title_key(title or "")
+        if title_key:
+            section = index.get(f"title:{title_key}")
+        if section is None and attachment_number:
             section = index.get(f"num:{attachment_number}")
-        if section is None:
-            title_key = self.checker._verification_checker._attachment_title_key(title or "")
-            if title_key:
-                section = index.get(f"title:{title_key}")
         if not isinstance(section, dict):
             return None, []
         pages = [
@@ -635,11 +685,6 @@ class StructuredConsistencyEngine:
         locations: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         normalized = normalize_raw_text(text)
-        alias_hit_count = sum(
-            1
-            for aliases in VARIABLE_LABELS.values()
-            if any(normalize_raw_text(alias) in normalized for alias in aliases)
-        )
         items: list[dict[str, Any]] = []
         for canonical, aliases in VARIABLE_LABELS.items():
             alias = next((value for value in aliases if normalize_text(value) in normalized), None)
@@ -653,7 +698,10 @@ class StructuredConsistencyEngine:
             )
             compact = re.sub(r"\s+", "", text)
             short_label = len(compact) <= 30 and compact.startswith(alias)
-            if not explicit_label and alias_hit_count < 2 and not short_label:
+            # “根据贵方为（项目名称）项目（项目编号：____）……”中的项目名称
+            # 是正文内的可填占位，不是必须原样保留的字段标签；正文骨架会另行校验。
+            # 只有明确的“标签：值”或独立短字段才生成变量字段项。
+            if not explicit_label and not short_label:
                 continue
             items.append(
                 self._make_item(
@@ -892,7 +940,14 @@ class StructuredConsistencyEngine:
         bid_norm = normalize_text(
             _mask_fillable_slots(self.checker._build_fixed_body(bid_text) or bid_text)
         )
-        if reference_norm and reference_norm in bid_norm:
+        candidate_contains_reference = bool(
+            reference_norm
+            and any(
+                reference_norm in normalize_text(candidate)
+                for candidate in comparison_candidates
+            )
+        )
+        if reference_norm and (reference_norm in bid_norm or candidate_contains_reference):
             result.update(status="pass", match_method="contains", lexical_score=1.0)
             return result
         if best_lexical >= settings.CONSISTENCY_TEXT_PASS_THRESHOLD:
@@ -1027,10 +1082,7 @@ class StructuredConsistencyEngine:
 
         title = skeleton["title"]
         scores = [
-            lexical_similarity(
-                title,
-                str(section.get("title") or section.get("text") or "").splitlines()[0],
-            )
+            self._section_title_score(title, section)
             for section in sections
         ]
         if scores:
@@ -1126,13 +1178,43 @@ class StructuredConsistencyEngine:
 
     def _accept_by_title_or_content(self, skeleton: dict[str, Any], section: dict[str, Any]) -> bool:
         """标题词法强命中即接受；否则内容相似度需达标。避免“填值/扫描件”因内容分低被误伤。"""
-        title_score = lexical_similarity(
-            str(skeleton.get("title") or ""),
-            str(section.get("title") or section.get("text") or "").splitlines()[0],
+        title_score = self._section_title_score(
+            str(skeleton.get("title") or ""), section
         )
         if title_score >= _ATTACHMENT_TITLE_STRONG_THRESHOLD:
             return True
         return self._attachment_content_score(skeleton, section) >= _ATTACHMENT_CONTENT_MATCH_THRESHOLD
+
+    def _section_title_score(self, expected_title: str, section: dict[str, Any]) -> float:
+        """比较附件开头连续标题，兼容“章节标题 + 正式表名”的两层结构。"""
+        candidates = [str(section.get("title") or "").strip()]
+        for item in (section.get("sections") or [])[:6]:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            if str(item.get("type") or "").strip().lower() != "heading":
+                break
+            candidates.append(text)
+        verifier = self.checker._verification_checker
+        expected_core = verifier._attachment_title(expected_title)
+        expected_key = verifier._attachment_title_key(expected_title)
+        scores = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            scores.append(lexical_similarity(expected_title, candidate))
+            scores.append(
+                lexical_similarity(expected_core, verifier._attachment_title(candidate))
+            )
+            scores.append(
+                lexical_similarity(expected_key, verifier._attachment_title_key(candidate))
+            )
+        return max(
+            scores,
+            default=0.0,
+        )
 
     def _attachment_content_score(self, skeleton: dict[str, Any], section: dict[str, Any]) -> float:
         """模板正文（掩码后）与段的有效文本（check_text，剔除后附页）的相似度。"""
@@ -1496,7 +1578,13 @@ class StructuredConsistencyEngine:
                 for part in strip_text_layer_noise(section.get("text") or "").splitlines()
                 if part.strip()
             )
-        return list(dict.fromkeys(values))
+        # OCR 会在换页处把一个固定句拆成两个版面块，甚至把后半句误标成 heading。
+        # 补充相邻两块窗口即可恢复句子，同时仍严格限制在已匹配附件内部。
+        adjacent = [
+            f"{values[index]} {values[index + 1]}"
+            for index in range(len(values) - 1)
+        ]
+        return list(dict.fromkeys(values + adjacent))
 
     @staticmethod
     def _best_lexical(reference: str, candidates: list[str]) -> tuple[str, float, float]:

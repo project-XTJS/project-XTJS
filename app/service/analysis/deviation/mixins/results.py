@@ -364,12 +364,16 @@ class ResultsMixin:
 
     def _self_declared_deviation_type(self, row: dict[str, Any]) -> str | None:
         """按偏离说明列、响应列判定主动声明的偏离类型。"""
+        if row.get('response_scope_unclear'):
+            return 'unclear_deviation'
         deviation_text = str(row.get("deviation_text") or "").strip()
         response_text = str(row.get("response_text") or "").strip()
         classifications = [
-            self._classify_self_declared_text(text)
+            self._classify_self_declared_text(part)
             for text in (deviation_text, response_text)
             if text
+            for part in re.split(r'[；;]|[，,]\s*(?=但|但是|其余)', text)
+            if part.strip()
         ]
         if "negative_deviation" in classifications:
             return "negative_deviation"

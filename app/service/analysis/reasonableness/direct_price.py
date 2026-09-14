@@ -7,6 +7,7 @@
 
 import re
 from typing import Dict, List, Optional
+from .evidence import MONEY_VALUE, money_fact
 
 # 中文大写金额字符集
 _CAPITAL_NUM_CHARS = "零〇壹贰叁肆伍陆柒捌玖拾佰仟万亿元角分整正圆园"
@@ -26,22 +27,8 @@ class DirectPriceMixin:
     BIG_UNITS: dict
 
     # 小写金额提取
-    def _clean_small_price(self, s: str) -> Optional[float]:
-        if not s:
-            return None
-        raw = s.strip()
-        raw = raw.replace("￥", "").replace("¥", "")
-        raw = raw.replace(",", "").replace("，", "")
-        raw = raw.replace(" ", "")
-        raw = re.sub(r"(?i)rmb", "", raw)
-        raw = raw.replace("元", "")
-        match = re.search(r"\d+(?:\.\d+)?", raw)
-        if not match:
-            return None
-        try:
-            return float(match.group())
-        except ValueError:
-            return None
+    def _clean_small_price(self, s: str, *, context: str = "", label: str = "") -> Optional[float]:
+        return money_fact(s, context=context, label=label).get("amount_yuan")
 
     # 文本净化
     def _strip_price_markup(self, text: str) -> str:
@@ -113,56 +100,17 @@ class DirectPriceMixin:
     def _extract_direct_price_pairs(self, section_text: str) -> List[Dict]:
         if not section_text or not section_text.strip():
             return []
-        lines = [self._strip_price_markup(line.strip()) for line in section_text.splitlines() if line.strip()]
-        pairs = []
-        current_small_str = None
-        current_small_val = None
+        lines = [self._strip_price_markup(line) for line in section_text.splitlines() if line.strip()]
+        pairs, pending = [], None
         for line in lines:
-            inline_match = re.search(
-                r"小写[：:]\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)"
-                r".{0,50}?"
-                + _CAPITAL_AMOUNT_RE,
-                line,
-            )
-            if inline_match:
-                small_str = inline_match.group(1).strip()
-                capital_str = inline_match.group(2).strip()
-                pairs.append({
-                    "small_price_str": small_str,
-                    "small_price": self._clean_small_price(small_str),
-                    "capital_price_str": capital_str,
-                    "capital_price": self._capital_to_number(capital_str),
-                })
-                current_small_str = None
-                current_small_val = None
-                continue
-            small_match = re.search(
-                r"小写[：:]\s*([￥¥]?\s*[\d,，]+(?:\.\d+)?\s*元?)", line
-            )
-            if small_match:
-                current_small_str = small_match.group(1).strip()
-                current_small_val = self._clean_small_price(current_small_str)
-                capital_match_same_line = re.search(_CAPITAL_AMOUNT_RE, line)
-                if capital_match_same_line:
-                    capital_str = capital_match_same_line.group(1).strip()
-                    pairs.append({
-                        "small_price_str": current_small_str,
-                        "small_price": current_small_val,
-                        "capital_price_str": capital_str,
-                        "capital_price": self._capital_to_number(capital_str),
-                    })
-                    current_small_str = None
-                    current_small_val = None
-                continue
-            capital_match = re.search(_CAPITAL_AMOUNT_RE, line)
-            if capital_match and current_small_str is not None:
-                capital_str = capital_match.group(1).strip()
-                pairs.append({
-                    "small_price_str": current_small_str,
-                    "small_price": current_small_val,
-                    "capital_price_str": capital_str,
-                    "capital_price": self._capital_to_number(capital_str),
-                })
-                current_small_str = None
-                current_small_val = None
+            small = re.search(r"[（(]?小写(?:金额)?[)）]?\s*[：:]?\s*(" + MONEY_VALUE + r")", line)
+            if small:
+                raw = small.group(1).strip()
+                pending = {"small_price_str": raw, "small_price": self._clean_small_price(raw, context=line, label="小写"),
+                           "money_evidence": money_fact(raw, context=line, label="小写")}
+            capital = re.search(_CAPITAL_AMOUNT_RE, line)
+            if capital and pending:
+                pairs.append({**pending, "capital_price_str": capital.group(1),
+                              "capital_price": self._capital_to_number(capital.group(1))})
+                pending = None
         return pairs

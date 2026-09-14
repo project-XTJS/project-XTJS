@@ -71,7 +71,7 @@ def main():
     if not docs:
         print("没找到文档"); return
     svc = BidDocumentReviewService()
-    tot_rule = tot_add = tot_only = 0
+    tot_rule = tot_add = 0
     for ident, fname, dtype, content in docs:
         sections = sections_of(content)
         if not sections:

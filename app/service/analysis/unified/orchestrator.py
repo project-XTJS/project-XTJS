@@ -530,7 +530,7 @@ class OrchestratorMixin:
                 check_code="pricing_check",
                 check_name="报价合理性审查",
                 runner=lambda: {
-                    "self_check": self.reasonableness_checker.check_price_reasonableness(business_payload),
+                    "self_check": self.reasonableness_checker.check_price_reasonableness(business_payload, tender_source=tender_payload),
                     "tender_limit_check": self.reasonableness_checker.check_bid_price_against_tender_limit(
                         tender_payload,
                         business_payload,
@@ -645,7 +645,7 @@ class OrchestratorMixin:
                 check_code="pricing_check",
                 check_name="报价合理性审查",
                 runner=lambda: {
-                    "self_check": self.reasonableness_checker.check_price_reasonableness(business_payload),
+                    "self_check": self.reasonableness_checker.check_price_reasonableness(business_payload, tender_source=tender_payload),
                     "tender_limit_check": self.reasonableness_checker.check_bid_price_against_tender_limit(
                         tender_payload,
                         business_payload,

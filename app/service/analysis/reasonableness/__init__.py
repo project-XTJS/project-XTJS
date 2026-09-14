@@ -5,7 +5,10 @@
 通过 Mixin 多重继承组装 ReasonablenessChecker，调度各个模块完成报价逻辑校验。
 """
 
+import re
 from typing import Any, Dict
+from .business_rules import BusinessRulesMixin
+from .evidence import compare_capital_amounts
 from .utils import UtilsMixin
 from .document_parser import DocumentParserMixin
 from .direct_price import DirectPriceMixin
@@ -14,6 +17,7 @@ from .tender_limit import TenderLimitMixin
 
 
 class ReasonablenessChecker(
+    BusinessRulesMixin,
     UtilsMixin,
     DocumentParserMixin,
     DirectPriceMixin,
@@ -22,8 +26,8 @@ class ReasonablenessChecker(
 ):
     """报价合理性检查类，支持直接报价与下浮率报价两种模式。"""
 
-    def __init__(self, min_float_rate: float = 1.5):
-        # 兜底下浮率阈值
+    def __init__(self, min_float_rate: float | None = None):
+        # 兼容旧调用参数；不再作为缺少招标规则时的阈值
         self.min_float_rate = min_float_rate
 
         # --- 以下是你在原有 __init__.py 中定义的常量初始化 ---
@@ -45,7 +49,23 @@ class ReasonablenessChecker(
         self.BID_TOTAL_KEYWORDS = ["参选总价", "投标总价", "投标价格", "报价总价", "响应总报价", "总报价", "总价", "合计"]
 
 
-    def check_price_compliance(self, source: Any) -> Dict:
+    def check_price_compliance(self, source: Any, *, tender_source: Any = None) -> Dict:
+        result = self._check_price_compliance_core(source, tender_source=tender_source)
+        if result.get("quote_mode") == "rate":
+            return result
+        parsed = self._parse_input(source)
+        page, opening = self._locate_bid_opening_page_and_text(parsed)
+        if re.search(r"(?:下浮率|折扣率|优惠率|折让率)\s*[：:|]?\s*\d+(?:\.\d+)?\s*[%％]", opening or ""):
+            rates = self._check_tender_rates(source, tender_source, parsed, page, opening)
+            states = [result.get("status", "unclear"), rates["status"]]
+            status = "fail" if "fail" in states else ("pass" if all(x=="pass" for x in states) else "unclear")
+            result.update(status=status, result={"pass":"合格","fail":"失败","unclear":"待复核"}[status], quote_mode="mixed",
+                rate_rows=rates["rate_rows"], tender_rules=rates.get("tender_rules", []),
+                summary=list(result.get("summary") or [])+rates["summary"],
+                locations=list(result.get("locations") or [])+rates["locations"])
+        return result
+
+    def _check_price_compliance_core(self, source: Any, *, tender_source: Any = None) -> Dict:
         """执行报价合规性检查，自动识别直接报价或下浮率模式。"""
         # 1. 解析输入
         parsed = self._parse_input(source)
@@ -56,14 +76,12 @@ class ReasonablenessChecker(
         fallback_locations = [{"page": bid_page, "label": "开标一览表", "document": "bidder"}] if isinstance(bid_page, int) else []
 
         if not bid_opening_text:
-            return self._build_fail_result(
-                "未找到开标/报价/投标一览表正文",
-                pages=fallback_pages,
-                locations=fallback_locations,
-            )
+            return self._build_result("待复核", "未识别", ["未找到开标/报价/投标一览表正文"], pages=fallback_pages, locations=fallback_locations, extra={"status":"unclear"})
 
         # 3. 尝试分流模式 A：直接报价（检查大小写金额对）
         price_pairs = self._extract_direct_price_pairs(bid_opening_text)
+        if not price_pairs and self._contains_float_rate_keywords(bid_opening_text) and not self._extract_bid_amounts(source):
+            return self._check_tender_rates(source, tender_source, parsed, bid_page, bid_opening_text)
         if price_pairs:
             summary = []
             has_mismatch = False
@@ -78,7 +96,7 @@ class ReasonablenessChecker(
                 if small_price is None or capital_price is None:
                     case_status = "missing"
                     has_missing_info = True
-                elif abs(small_price - capital_price) < 0.01:
+                elif compare_capital_amounts(small_price, capital_price) == "pass":
                     case_status = "pass"
                 else:
                     case_status = "fail"
@@ -93,6 +111,7 @@ class ReasonablenessChecker(
                 )
                 normalized_pairs.append(
                     {
+                        **pair.get("money_evidence", {}),
                         "small_raw_amount": small_str,
                         "small_amount_yuan": small_price,
                         "capital_raw_amount": capital_str,
@@ -113,13 +132,18 @@ class ReasonablenessChecker(
                 pages=fallback_pages,
                 locations=fallback_locations,
                 extra={
-                    "amount_yuan": first_pair.get("small_amount_yuan") or first_pair.get("capital_amount_yuan"),
+                    **first_pair,
+                    "locations": fallback_locations,
+                    "page": bid_page,
+                    "status": "unclear" if overall_case_status == "missing" else overall_case_status,
+                    "amount_yuan": first_pair.get("small_amount_yuan"),
                     "raw_amount": first_pair.get("small_raw_amount") or first_pair.get("capital_raw_amount"),
                     "capital_amount": first_pair.get("capital_amount_yuan"),
                     "capital_raw_amount": first_pair.get("capital_raw_amount"),
                     "case_consistency_status": overall_case_status,
                     "case_consistency_summary": "；".join(summary),
                     "price_pairs": normalized_pairs,
+                    "amount_facts": self._extract_bid_amounts(source),
                 },
             )
 
@@ -147,108 +171,20 @@ class ReasonablenessChecker(
                 pages=pages,
                 locations=locations,
                 extra={
+                    **direct_total,
+                    "status": "unclear",
                     "amount_yuan": amount_yuan,
                     "raw_amount": raw_amount,
                     "capital_amount": None,
                     "capital_raw_amount": None,
                     "case_consistency_status": "missing",
                     "case_consistency_summary": "已识别直接报价，但缺少可比对的大写或小写金额信息。",
+                    "amount_facts": self._extract_bid_amounts(source),
                 },
             )
 
-        # 4. 尝试分流模式 B：下浮率报价（提取规则与行）
-        rules = self._extract_float_rate_rules(bid_opening_text)
-        rows = self._extract_float_rate_rows(parsed, bid_page, bid_opening_text, rules)
+        return self._check_tender_rates(source, tender_source, parsed, bid_page, bid_opening_text)
 
-        if rows:
-            passed, summary = self._check_float_rate_rows_compliance(rows, rules)
-            price_type = self._rate_quote_type_for_rows(rows)
-            # 整理涉及的页面和位置
-            row_pages = []
-            seen_pages = set()
-            row_locations = []
-            for row in rows:
-                for page in row.get("pages") or []:
-                    if not isinstance(page, int):
-                        continue
-                    if page not in seen_pages:
-                        seen_pages.add(page)
-                        row_pages.append(page)
-                    row_locations.append({
-                        "page": page,
-                        "label": str(row.get("biz_name_raw") or row.get("biz_name") or price_type),
-                        "text": str(row.get("raw_line") or ""),
-                        "document": "bidder",
-                    })
-            return self._build_result(
-                result_text="合格" if passed else "失败",
-                price_type=price_type,
-                summary=summary,
-                pages=row_pages,
-                locations=row_locations,
-                extra={
-                    "quote_mode": "rate",
-                    "rate_rows": [
-                        self._build_manual_rate_quote_row(
-                            biz_name=row.get("biz_name_raw") or row.get("biz_name") or price_type,
-                            float_rate=row.get("float_rate"),
-                            rate_label=row.get("rate_label"),
-                            pages=row.get("pages") or [],
-                            raw_line=row.get("raw_line"),
-                            matched_rule=self._match_rule_for_row(row["biz_name"], rules),
-                        )
-                        for row in rows
-                    ],
-                },
-            )
-
-        # 5. 兜底：单一下浮率识别
-        single_float_rate = self._extract_single_float_rate_from_table(parsed, bid_page, bid_opening_text)
-        if single_float_rate is not None:
-            # 应用规则判断逻辑...
-            rate_label = self._pick_rate_label(bid_opening_text)
-            matched_rule = rules.get("__generic__")
-            if self._contains_discount_rate_keywords(bid_opening_text):
-                passed = single_float_rate < 100
-                summary = [f"折扣率：{single_float_rate:.2f}% < 100% ，{'合格' if passed else '不合格'}"]
-                price_type = "折扣率报价"
-            elif "__generic__" in rules:
-                rule = rules["__generic__"]
-                passed = self._compare_by_rule(single_float_rate, rule["op"], rule["threshold"])
-                summary = [f"下浮率：{single_float_rate:.2f}% {rule['op']} {rule['threshold']:g}% ，{'合格' if passed else '不合格'}"]
-                price_type = "下浮率报价"
-            else:
-                passed = single_float_rate > self.min_float_rate
-                summary = [f"下浮率：{single_float_rate:.2f}% > {self.min_float_rate:g}% ，{'合格' if passed else '不合格'}"]
-                price_type = "下浮率报价"
-
-            return self._build_result(
-                result_text="合格" if passed else "失败",
-                price_type=price_type,
-                summary=summary,
-                pages=fallback_pages,
-                locations=fallback_locations,
-                extra={
-                    "quote_mode": "rate",
-                    "rate_rows": [
-                        self._build_manual_rate_quote_row(
-                            biz_name=price_type,
-                            float_rate=single_float_rate,
-                            rate_label=rate_label,
-                            pages=fallback_pages,
-                            raw_line=bid_opening_text,
-                            matched_rule=matched_rule,
-                        )
-                    ],
-                },
-            )
-
-        return self._build_fail_result(
-            "一览表中未找到直接报价或下浮率报价信息",
-            pages=fallback_pages,
-            locations=fallback_locations,
-        )
-
-    def check_price_reasonableness(self, source: Any) -> Dict:
+    def check_price_reasonableness(self, source: Any, *, tender_source: Any = None) -> Dict:
         """主入口别名"""
-        return self.check_price_compliance(source)
+        return self.check_price_compliance(source, tender_source=tender_source)

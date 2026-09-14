@@ -1,3 +1,4 @@
+from app.core.io_dispatch import bounded_sync
 # -*- coding: utf-8 -*-
 """
 文件对象路由：提供 MinIO 预签名链接与删除能力。
@@ -33,7 +34,8 @@ def _raise_minio_http_exception(
 
 # 路由：生成预签名访问 URL
 @router.get("/objects/{object_name:path}/presigned-url", summary="生成 MinIO 临时访问链接")
-async def get_presigned_url(
+@bounded_sync
+def get_presigned_url(
     object_name: str,
     oss_service: MinioService = Depends(get_oss_service),
 ):
@@ -51,17 +53,10 @@ async def get_presigned_url(
 
 # 路由：删除文件
 @router.delete("/objects/{object_name:path}", summary="删除 MinIO 文件")
-async def delete_file(
+@bounded_sync
+def delete_file(
     object_name: str,
     oss_service: MinioService = Depends(get_oss_service),
 ):
-    """按对象名删除 MinIO 中的文件。"""
-    try:
-        oss_service.delete_file(object_name)
-        return {"status": "deleted"}
-    except Exception as exc:
-        _raise_minio_http_exception(
-            exc,
-            log_message="Unexpected error in delete_file",
-            generic_detail="Failed to delete file, please retry later.",
-        )
+    """物理回收只能由能够维护所有引用的内部流程执行。"""
+    raise HTTPException(status_code=410, detail="通用对象物理删除已停用，请使用项目或文档逻辑删除")

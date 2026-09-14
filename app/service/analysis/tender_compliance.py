@@ -2302,23 +2302,6 @@ class TenderComplianceChecker:
             location["bbox"] = section.get("bbox")
         return location
 
-    def _first_context(
-        self,
-        sections: list[dict[str, Any]],
-        keywords: list[str],
-        *,
-        include_keywords: list[str],
-        exclude_keywords: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        for section in sections:
-            text = str(section.get("text") or "")
-            if not self._contains_any(text, keywords):
-                continue
-            if exclude_keywords and self._contains_any(text, exclude_keywords):
-                continue
-            if self._contains_any(text, include_keywords):
-                return section
-        return None
 
     def _first_not_required_index(
         self,

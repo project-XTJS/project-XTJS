@@ -2663,11 +2663,6 @@ class ReportVisualizer:
             f"{html.escape(str(label))}</button>"
         )
 
-    def _project_duplicate_pair_anchor(self, doc_type, item):
-        return (
-            f"duplicate-{doc_type}-"
-            f"{self._project_make_stable_token(item.get('left_file_name'), item.get('right_file_name'))}"
-        )
 
     def _project_typo_issue_anchor(self, role, file_name, item):
         return (
@@ -2739,15 +2734,6 @@ class ReportVisualizer:
             or str(item.get("right_file_name") or "") in current_files
         ]
 
-    def _project_duplicate_item_files(self, item):
-        files = []
-        left_file = str(item.get("left_file_name") or "").strip()
-        right_file = str(item.get("right_file_name") or "").strip()
-        if left_file:
-            files.append(left_file)
-        if right_file and right_file not in files:
-            files.append(right_file)
-        return files
 
     def _project_duplicate_cluster_items(self, items):
         return DuplicateResultMerger(self).cluster_items(items)
@@ -6161,13 +6147,6 @@ class ReportVisualizer:
             or ""
         )
 
-    def _project_section_side_key(self, section, side):
-        return self._project_duplicate_text_key(
-            section.get(f"{side}_preview")
-            or section.get(f"{side}_title")
-            or section.get("text")
-            or ""
-        )
 
     def _project_pages_overlap(self, left_pages, right_pages):
         left_set = set(self._project_normalize_pages(left_pages))

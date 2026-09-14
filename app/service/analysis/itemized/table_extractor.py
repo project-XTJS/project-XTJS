@@ -298,11 +298,6 @@ class TableExtractorMixin:
             "bbox": bbox,
         }
 
-    def _extract_layout_table_lines(
-        self, section: dict, logical_tables: list[dict]
-    ) -> list[str]:
-        """将 layout 表格区段转换为逐行文本（便捷方法）。"""
-        return self._extract_layout_table_payload(section, logical_tables)["lines"]
 
     # 逻辑表格与区段匹配
     def _match_logical_table_index(

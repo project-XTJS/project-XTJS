@@ -81,6 +81,7 @@ class IdentifierBatchDeleteRequest(BaseModel):
 
 
 class RelationBatchDeleteRequest(BaseModel):
+    remove_expected_group: bool = False
     """批量删除关联关系请求。"""
     relation_ids: list[int] = Field(
         ...,

@@ -42,11 +42,6 @@ class OCREngineMixin:
         future = self._engine_executor.submit(_runner)
         return future.result()
 
-    def _describe_document(self, file_path: str, file_type: str, total_pages: int) -> str:
-        file_name = Path(file_path).name
-        normalized_type = str(file_type or "").strip().lower().lstrip(".") or "unknown"
-        page_label = total_pages if total_pages > 0 else "unknown"
-        return f"file={file_name}, type={normalized_type}, estimated_pages={page_label}"
 
     def _runtime_cache_dirs(self) -> tuple[str, ...]:
         runtime_root = settings.OCR_STORAGE_ROOT

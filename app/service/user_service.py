@@ -82,13 +82,20 @@ class UserService:
             return None
         query = """
             SELECT identifier_id, username, hashed_password, role_level, display_name,
-                   is_active, failed_attempts, locked_until, last_login_at
+                   is_active, failed_attempts, locked_until, last_login_at, token_version
             FROM xtjs_users
             WHERE username = %s AND deleted = FALSE
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (normalized,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+
+    def get_session_record(self, identifier_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(f"SELECT {_USER_PUBLIC_COLUMNS}, token_version FROM xtjs_users WHERE identifier_id=%s AND deleted=FALSE", (str(identifier_id),))
                 row = cursor.fetchone()
                 return dict(row) if row else None
 
@@ -200,6 +207,7 @@ class UserService:
         query = """
             UPDATE xtjs_users
             SET hashed_password = %s, failed_attempts = 0, locked_until = NULL,
+                token_version = token_version + 1,
                 update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
         """

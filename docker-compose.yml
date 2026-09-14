@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: project-xtjs:release-ee8ceab
+    image: project-xtjs:review-minimal-fix-20260914
     container_name: project-xtjs
     ports:
       - "8080:8080"
@@ -20,6 +20,8 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       - MINIO_BUCKET_NAME=${MINIO_BUCKET_NAME:-update-file}
+      - MINIO_BUCKET_PRECREATED=${MINIO_BUCKET_PRECREATED:-false}
+      - MINIO_ECS_ROLE_NAME=${MINIO_ECS_ROLE_NAME:-}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - MINIO_REGION=${MINIO_REGION:-}
       - MINIO_PUBLIC_ENDPOINT=${MINIO_PUBLIC_ENDPOINT:-}
@@ -63,6 +65,8 @@ services:
       - PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/app/.ocr_runtime/paddlex-cache}
       - OCR_RUNTIME_TEMP_DIR=${OCR_RUNTIME_TEMP_DIR:-/app/.ocr_runtime/runtime-tmp}
       - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
+      - XTJS_IO_CONCURRENCY=${XTJS_IO_CONCURRENCY:-8}
+      - XTJS_IO_QUEUE_TIMEOUT_SECONDS=${XTJS_IO_QUEUE_TIMEOUT_SECONDS:-10}
       - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
       - XTJS_CACHE_REQUIRED=${XTJS_CACHE_REQUIRED:-true}
       # 缓存已迁至云数据库 Redis（实际账号密码在 .env 中配置）

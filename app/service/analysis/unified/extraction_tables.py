@@ -193,7 +193,7 @@ class ExtractionTablesMixin:
                 )
 
         # 报价限价检查项
-        tender_limit = self.reasonableness_checker._extract_tender_max_limit(tender_payload)
+        tender_limit = self.reasonableness_checker.resolve_tender_limit(tender_payload)
         rows.append(
             self._make_extraction_row(
                 row_index=len(rows) + 1,
@@ -204,12 +204,12 @@ class ExtractionTablesMixin:
                 field_name="tender_limit_or_budget",
                 value=(
                     {
-                        "amount_yuan": tender_limit.get("amount_yuan"),
+                        **tender_limit,
                     }
                     if tender_limit
                     else None
                 ),
-                status="extracted" if tender_limit else "missing",
+                status="extracted" if tender_limit.get("resolution") == "resolved" else ("not_applicable" if tender_limit.get("resolution") == "explicit_none" else "unclear"),
                 page_refs=self._coerce_page_refs(tender_limit),
                 expected_document_role="business",
                 evidence=(
@@ -289,6 +289,7 @@ class ExtractionTablesMixin:
 
         # 截止日期检查项
         deadline = self.verification_checker._deadline_from_doc(tender_payload)
+        deadline_resolution = self.verification_checker.resolve_deadline(tender_payload)
         rows.append(
             self._make_extraction_row(
                 row_index=len(rows) + 1,
@@ -299,19 +300,20 @@ class ExtractionTablesMixin:
                 field_name="submission_deadline",
                 value=(
                     {
+                        **deadline_resolution,
                         "date": deadline["date"].isoformat(),
                         "text": deadline.get("text"),
                     }
                     if deadline
-                    else None
+                    else deadline_resolution
                 ),
-                status="extracted" if deadline else "missing",
+                status="extracted" if deadline else "unclear",
                 page_refs=self._coerce_page_refs(deadline),
                 expected_document_role="business",
                 evidence=(
                     {"matched_text": deadline.get("text")}
                     if deadline
-                    else {"reason": "deadline_not_detected"}
+                    else deadline_resolution
                 ),
             )
         )
@@ -496,9 +498,10 @@ class ExtractionTablesMixin:
                     field_group=field_group,
                     field_name=subcheck_code,
                     value={
+                        **{key: payload[key] for key in ("unit", "unit_source", "currency", "basis", "period", "measure", "package", "resolution", "reason_code", "context", "price_pairs", "limit_resolution", "comparisons") if key in payload},
                         "type": payload.get("type"),
                         "result": payload.get("result"),
-                        "status": self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
+                        "status": payload.get("status") or self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
                         "summary": payload.get("summary"),
                         "amount_yuan": payload.get("amount_yuan"),
                         "raw_amount": payload.get("raw_amount"),
@@ -507,7 +510,7 @@ class ExtractionTablesMixin:
                         "case_consistency_status": payload.get("case_consistency_status"),
                         "case_consistency_summary": payload.get("case_consistency_summary"),
                     },
-                    status=self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
+                    status=payload.get("status") or self._map_price_result(payload.get("result"), self._join_text(payload.get("summary"))),
                     page_refs=self._coerce_page_refs(payload.get("pages"), payload.get("locations")),
                     locations=[location for location in (payload.get("locations") or []) if isinstance(location, dict)],
                 )
@@ -691,6 +694,8 @@ class ExtractionTablesMixin:
                     field_group="attachment_result",
                     field_name=str(item.get("title") or "attachment_result"),
                     value={
+                        "requirements": item.get("requirements") or {},
+                        "deadline_resolution": date_check.get("deadline_resolution"),
                         "attachment_number": item.get("attachment_number"),
                         "matched_bid_title": item.get("matched_bid_title"),
                         "signature_status": signature_status,

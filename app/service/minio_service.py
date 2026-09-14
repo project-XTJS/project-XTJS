@@ -13,6 +13,11 @@ import urllib.request
 import os
 import re
 import logging
+import threading
+import time
+import random
+import http.client
+import urllib.error
 from datetime import datetime, timedelta
 from mimetypes import guess_type
 from urllib.parse import parse_qs, urlparse
@@ -34,49 +39,110 @@ class AlibabaEcsInstanceRoleProvider(providers.Provider):
 
     不依赖任何静态 AK：运行时从实例元数据服务
     http://100.100.100.200/latest/meta-data/ram/security-credentials/ 自动获取
-    临时 STS 凭证（含过期时间，到期后 SDK 自动刷新）。
+    临时 STS 凭证，在本提供器内缓存并于到期前刷新。
     仅在阿里云 ECS 且实例已绑定 RAM 角色时可用。
     """
 
     METADATA_BASE = "http://100.100.100.200/latest/meta-data/ram/security-credentials/"
+    TOKEN_URL = "http://100.100.100.200/latest/api/token"
+    REFRESH_SECONDS = 300
 
-    def __init__(self, timeout_seconds: int = 5) -> None:
+    def __init__(self, timeout_seconds: int = 2, role_name: str = "") -> None:
         self._timeout_seconds = max(1, int(timeout_seconds))
+        self._lock = threading.Lock()
+        self._credentials = None
+        self._expires_at = 0.0
+        self._retry_after = 0.0
+        self._role_name = role_name.strip()
+        self._token = ""
+        self._token_until = 0.0
+        # IMDS is instance-local and must never be sent through an HTTP proxy.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def _fetch(self, url: str) -> str:
+    def _fetch(self, request) -> str:
+        for attempt in range(3):
+            try:
+                with self._opener.open(request, timeout=self._timeout_seconds) as resp:
+                    return resp.read().decode("utf-8")
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+                retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code in {429, 500, 502, 503, 504}
+                if not retryable or attempt == 2:
+                    raise
+                time.sleep(0.2 * (2 ** attempt) + random.uniform(0, 0.1))
+        raise RuntimeError("ECS 元数据请求失败")
+
+    def _metadata(self, url: str) -> str:
+        if not self._token or time.monotonic() >= self._token_until:
+            self._token = self._fetch(urllib.request.Request(
+                self.TOKEN_URL, method="PUT",
+                headers={"X-aliyun-ecs-metadata-token-ttl-seconds": "21600"},
+            )).strip()
+            if not self._token:
+                raise RuntimeError("ECS 元数据访问令牌为空")
+            self._token_until = time.monotonic() + 21540
         try:
-            with urllib.request.urlopen(url, timeout=self._timeout_seconds) as resp:
-                return resp.read().decode("utf-8")
-        except Exception as exc:
-            raise RuntimeError(
-                f"无法从 ECS 元数据服务获取实例角色凭证（请确认实例已绑定 RAM 角色）: {exc}"
-            ) from exc
+            return self._fetch(urllib.request.Request(url, headers={"X-aliyun-ecs-metadata-token": self._token}))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                self._token = ""
+                self._token_until = 0
+            raise
 
     def retrieve(self) -> Credentials:
-        # 第一步：查询实例绑定的角色名
-        role_name = self._fetch(self.METADATA_BASE).strip()
-        if not role_name:
-            raise RuntimeError("ECS 实例未绑定任何 RAM 角色")
-        # 第二步：获取该角色的临时凭证
-        payload = json.loads(self._fetch(self.METADATA_BASE + role_name))
+        with self._lock:
+            now = time.time()
+            if self._credentials and self._expires_at - now > 60:
+                if self._expires_at - now > self.REFRESH_SECONDS or time.monotonic() < self._retry_after:
+                    return self._credentials
+            if time.monotonic() < self._retry_after:
+                raise RuntimeError("ECS 临时凭证暂不可用，请稍后重试")
+            try:
+                credentials, expires_at = self._refresh()
+            except Exception as exc:
+                self._retry_after = time.monotonic() + 10
+                logger.warning("ECS credential refresh failed: %s", type(exc).__name__)
+                if self._credentials and self._expires_at - time.time() > 60:
+                    return self._credentials
+                raise RuntimeError("无法获取 ECS 临时凭证，请稍后重试") from exc
+            self._credentials = credentials
+            self._expires_at = expires_at
+            # IMDS may return the same soon-to-expire credentials; avoid a refresh storm.
+            self._retry_after = time.monotonic() + 10
+            return credentials
+
+    def _refresh(self):
+        if not self._role_name:
+            self._role_name = self._metadata(self.METADATA_BASE).strip()
+        if not self._role_name or "/" in self._role_name or "\n" in self._role_name:
+            raise RuntimeError("ECS 实例角色无效或未绑定")
+        payload = json.loads(self._metadata(self.METADATA_BASE + self._role_name))
         access_key = str(payload.get("AccessKeyId") or "")
         secret_key = str(payload.get("AccessKeySecret") or "")
         session_token = str(payload.get("SecurityToken") or "")
-        if not access_key or not secret_key:
-            raise RuntimeError(f"实例角色凭证响应异常: {payload}")
-        expiration = None
+        if payload.get("Code") != "Success" or not access_key or not secret_key or not session_token:
+            raise RuntimeError("实例角色凭证响应不完整")
         raw_expiration = str(payload.get("Expiration") or "")
-        if raw_expiration:
-            try:
-                expiration = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
-            except (TypeError, ValueError):
-                expiration = None
+        expiration = datetime.fromisoformat(raw_expiration.replace("Z", "+00:00"))
+        if expiration.tzinfo is None or expiration.timestamp() - time.time() <= 60:
+            raise RuntimeError("实例角色凭证已过期或即将过期")
         return Credentials(
             access_key=access_key,
             secret_key=secret_key,
             session_token=session_token,
             expiration=expiration,
-        )
+        ), expiration.timestamp()
+
+
+_ECS_PROVIDER_LOCK = threading.Lock()
+_ECS_PROVIDERS = {}
+
+
+def _shared_ecs_provider():
+    key = (os.getpid(), settings.MINIO_ECS_ROLE_NAME)
+    with _ECS_PROVIDER_LOCK:
+        if key not in _ECS_PROVIDERS:
+            _ECS_PROVIDERS[key] = AlibabaEcsInstanceRoleProvider(role_name=key[1])
+        return _ECS_PROVIDERS[key]
 
 
 class MinioService:
@@ -93,7 +159,7 @@ class MinioService:
         if access_key and "请填写" not in access_key and secret_key and "请填写" not in secret_key:
             self._credential_provider = providers.StaticProvider(access_key, secret_key)
         else:
-            self._credential_provider = AlibabaEcsInstanceRoleProvider()
+            self._credential_provider = _shared_ecs_provider()
             logger.info(
                 "MinioService: 未配置静态 AK，使用阿里云 ECS 实例 RAM 角色临时凭证"
             )
@@ -285,22 +351,17 @@ class MinioService:
             raise RuntimeError(f"Error while checking object existence: {exc}") from exc
 
     def _resolve_upload_object_name(self, filename: str, object_name: str | None) -> str:
-        """确定上传对象名：若传入且不冲突则直接使用，否则生成唯一名。"""
-        if object_name:
-            if self._object_exists(object_name):
-                raise ValueError(f"Object already exists: {object_name}")
-            return object_name
-
-        for _ in range(5):
-            generated = self.generate_object_name(filename)
-            if not self._object_exists(generated):
-                return generated
-        raise RuntimeError("Failed to generate a unique object name")
+        base = object_name or self.generate_object_name(filename)
+        stem, ext = os.path.splitext(base)
+        return f"{stem}.{uuid4().hex}{ext}"
 
     def ensure_bucket(self) -> None:
         """确保 MinIO 桶存在，不存在则创建。"""
         if not self.bucket_name or not self.bucket_name.strip():
             raise RuntimeError("Fixed MinIO bucket name is empty")
+
+        if settings.MINIO_BUCKET_PRECREATED:
+            return
 
         try:
             try:
@@ -308,7 +369,7 @@ class MinioService:
             except S3Error as exc:
                 # 托管对象存储（如阿里云 OSS）常不允许 HEAD 桶探测，桶通常在控制台预创建：
                 # 探测被拒/桶不存在时按“已存在”继续，真实权限由后续对象操作验证。
-                if exc.code in {"AccessDenied", "Forbidden", "NoSuchBucket"}:
+                if exc.code in {"AccessDenied", "Forbidden"}:
                     self._audit(
                         action="ensure_bucket",
                         status="assumed_exists",
@@ -373,9 +434,9 @@ class MinioService:
                 action="upload_file",
                 status="failed",
                 object_name=object_name,
-                detail=f"{type(exc).__name__}: {exc}",
+                detail=self._upload_error_detail(exc),
             )
-            raise RuntimeError(f"MinIO upload failed: {exc}") from exc
+            raise RuntimeError(f"MinIO upload failed: {self._upload_error_detail(exc)}") from exc
         except Exception as exc:
             self._audit(
                 action="upload_file",
@@ -384,6 +445,21 @@ class MinioService:
                 detail=f"{type(exc).__name__}: {exc}",
             )
             raise RuntimeError(f"MinIO upload error: {exc}") from exc
+
+    @staticmethod
+    def _upload_error_detail(exc: Exception) -> str:
+        """保留 SDK 分片清理异常之前的原因，不输出请求头或临时凭证。"""
+        chain = []
+        seen = set()
+        current = exc
+        while current is not None and id(current) not in seen and len(chain) < 6:
+            seen.add(id(current))
+            label = type(current).__name__
+            if isinstance(current, S3Error):
+                label += f"(code={current.code}, request_id={current.request_id})"
+            chain.append(label)
+            current = current.__cause__ or current.__context__
+        return " -> ".join(reversed(chain))
 
     def upload_bytes(
         self,
@@ -457,9 +533,9 @@ class MinioService:
                 action="upload_bytes",
                 status="failed",
                 object_name=object_name,
-                detail=f"{type(exc).__name__}: {exc}",
+                detail=self._upload_error_detail(exc),
             )
-            raise RuntimeError(f"MinIO upload failed: {exc}") from exc
+            raise RuntimeError(f"MinIO upload failed: {self._upload_error_detail(exc)}") from exc
         except Exception as exc:
             self._audit(
                 action="upload_bytes",

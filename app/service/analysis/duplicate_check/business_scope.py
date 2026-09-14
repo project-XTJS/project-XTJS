@@ -345,12 +345,6 @@ def _iter_business_bid_deviation_sections(deviation_sections: dict[str, Any]) ->
     return sections
 
 
-def _is_technical_deviation_title(title: str) -> bool:
-    """识别标题是否为技术偏离表。"""
-    compact_title = compact_raw_text(title)
-    if not compact_title:
-        return False
-    return "技术" in compact_title and "商务" not in compact_title
 
 
 def _normalize_duplicate_compare_text(text: str) -> str:

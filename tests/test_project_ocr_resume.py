@@ -87,3 +87,15 @@ def test_project_identifier_from_payload_uses_real_project_uuid() -> None:
 def test_resume_target_stage_supports_business_aliases() -> None:
     assert batch._normalize_resume_target_stage("business") == batch._OCR_STAGE_BUSINESS
     assert batch._normalize_resume_target_stage("商务标") == batch._OCR_STAGE_BUSINESS
+
+
+import unittest
+
+class OcrResumeTests(unittest.TestCase):
+    pass
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        setattr(OcrResumeTests, _name, lambda self, fn=_fn: fn())
+
+del _name, _fn

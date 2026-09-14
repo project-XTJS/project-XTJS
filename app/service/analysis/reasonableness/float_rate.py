@@ -8,7 +8,7 @@
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 class FloatRateMixin:
     # 依赖常量（来自 __init__ 的实例属性）
@@ -47,64 +47,6 @@ class FloatRateMixin:
                 return keyword
         return "下浮率"
 
-    def _is_discount_rate_label(self, label: Any) -> bool:
-        normalized = self._normalize(label)
-        return any(keyword in normalized for keyword in getattr(self, "DISCOUNT_RATE_KEYWORDS", ["折扣率"]))
-
-    def _rate_quote_type_for_rows(self, rows: List[Dict]) -> str:
-        if any(self._is_discount_rate_label(row.get("rate_label")) for row in rows or []):
-            return "折扣率报价"
-        return "下浮率报价"
-
-    # 业务名称归一化与相似度
-    def _build_manual_rate_quote_row(
-        self,
-        *,
-        biz_name: Any,
-        float_rate: Any,
-        rate_label: Any,
-        pages: Any = None,
-        raw_line: Any = None,
-        matched_rule: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        normalized_pages = [
-            page for page in (pages or [])
-            if isinstance(page, int) and page > 0
-        ]
-        normalized_rate_label = str(rate_label or self._pick_rate_label(biz_name)).strip()
-        is_discount = self._is_discount_rate_label(normalized_rate_label)
-        if is_discount:
-            rule_operator = "<"
-            required_min_float_rate = 100.0
-            rule_source = "discount_rate_rule"
-            quote_type = "discount_rate"
-        elif matched_rule:
-            rule_operator = str(matched_rule.get("op") or ">").strip() or ">"
-            required_min_float_rate = matched_rule.get("threshold")
-            rule_source = (
-                "generic_rule"
-                if str(matched_rule.get("biz_name") or "") == "__generic__"
-                else "matched_rule"
-            )
-            quote_type = "float_rate"
-        else:
-            rule_operator = ">"
-            required_min_float_rate = float(self.min_float_rate)
-            rule_source = "fallback_rule"
-            quote_type = "float_rate"
-
-        return {
-            "biz_name": str(biz_name or "").strip(),
-            "current_float_rate": float_rate,
-            "required_min_float_rate": required_min_float_rate,
-            "rule_operator": rule_operator,
-            "rate_label": normalized_rate_label or ("鎶樻墸鐜?" if is_discount else "涓嬫诞鐜?"),
-            "quote_type": quote_type,
-            "rule_source": rule_source,
-            "pages": normalized_pages,
-            "raw_line": str(raw_line or "").strip(),
-        }
-
     def _normalize_biz_name(self, name: str) -> str:
         """归一化业务名称，去除表格中的固定标签词。"""
         n = self._normalize(name)
@@ -117,28 +59,6 @@ class FloatRateMixin:
         ]:
             n = n.replace(token, "")
         return n.strip("：:()（）-—_/、 ")
-
-    def _char_ngrams(self, s: str, n: int = 2) -> set:
-        if not s:
-            return set()
-        if len(s) <= n:
-            return {s}
-        return {s[i:i + n] for i in range(len(s) - n + 1)}
-
-    def _name_similarity(self, a: str, b: str) -> float:
-        aa = self._normalize_biz_name(a)
-        bb = self._normalize_biz_name(b)
-        if not aa or not bb:
-            return 0.0
-        if aa == bb:
-            return 1.0
-        if aa in bb or bb in aa:
-            return 0.9
-        ga = self._char_ngrams(aa, 2)
-        gb = self._char_ngrams(bb, 2)
-        if not ga or not gb:
-            return 0.0
-        return len(ga & gb) / max(len(ga | gb), 1)
 
     # 规则提取与运算符映射
     def _phrase_to_operator(self, phrase: str) -> str:
@@ -233,33 +153,6 @@ class FloatRateMixin:
 
         return rules
 
-    def _compare_by_rule(self, actual: float, op: str, threshold: float) -> bool:
-        if op == ">": return actual > threshold
-        if op == ">=": return actual >= threshold
-        if op == "<": return actual < threshold
-        if op == "<=": return actual <= threshold
-        if op == "==": return abs(actual - threshold) < 1e-9
-        return False
-
-    def _match_rule_for_row(self, biz_name: str, rules: Dict[str, Dict]) -> Optional[Dict]:
-        normalized_biz = self._normalize_biz_name(biz_name)
-        if normalized_biz in rules:
-            return rules[normalized_biz]
-        best_rule = None
-        best_score = 0.0
-        for rule_name, rule in rules.items():
-            if rule_name == "__generic__":
-                continue
-            score = self._name_similarity(normalized_biz, rule_name)
-            if score > best_score:
-                best_score = score
-                best_rule = rule
-        if best_rule is not None and best_score >= 0.35:
-            return best_rule
-        if "__generic__" in rules:
-            return rules["__generic__"]
-        return None
-
     # 表格识别与关键词检测
     def _is_header_like_cell(self, cell: Any) -> bool:
         normalized = self._normalize(cell)
@@ -298,11 +191,6 @@ class FloatRateMixin:
             )
         )
 
-    def _is_generic_table_headers(self, headers: List[str]) -> bool:
-        normalized_headers = [self._normalize(h) for h in headers if self._normalize(h)]
-        if not normalized_headers:
-            return True
-        return all(re.fullmatch(r"col_\d+", h, re.IGNORECASE) for h in normalized_headers)
 
     def _pick_bid_opening_logical_tables(self, parsed: Dict, bid_page: Optional[int]) -> List[Dict]:
         logical_tables = parsed.get("logical_tables", []) or []
@@ -668,41 +556,6 @@ class FloatRateMixin:
             return rows
         return self._extract_float_rate_rows_from_flat_text(bid_opening_text, rules, bid_page=bid_page)
 
-    def _check_float_rate_rows_compliance(
-        self, rows: List[Dict], rules: Dict[str, Dict]
-    ) -> Tuple[bool, List[str]]:
-        if not rows:
-            return False, ["未找到下浮率业务行"]
-        summary = []
-        all_passed = True
-        for row in rows:
-            biz_name = row.get("biz_name_raw") or row.get("biz_name")
-            float_rate = row["float_rate"]
-            matched_rule = self._match_rule_for_row(row["biz_name"], rules)
-            if self._is_discount_rate_label(row.get("rate_label")):
-                passed = float_rate < 100
-                if not passed:
-                    all_passed = False
-                summary.append(
-                    f"{biz_name}：折扣率 {float_rate:.2f}% ，规则 < 100% ，{'合格' if passed else '不合格'}"
-                )
-            elif matched_rule:
-                op = matched_rule["op"]
-                threshold = matched_rule["threshold"]
-                passed = self._compare_by_rule(float_rate, op, threshold)
-                if not passed:
-                    all_passed = False
-                summary.append(
-                    f"{biz_name}：下浮率 {float_rate:.2f}% ，规则 {op} {threshold:g}% ，{'合格' if passed else '不合格'}"
-                )
-            else:
-                passed = float_rate > self.min_float_rate
-                if not passed:
-                    all_passed = False
-                summary.append(
-                    f"{biz_name}：下浮率 {float_rate:.2f}% ，未匹配到专属规则，按兜底规则 > {self.min_float_rate:g}% ，{'合格' if passed else '不合格'}"
-                )
-        return all_passed, summary
 
     # 单一下浮率兜底
     def _extract_single_float_rate_from_logical_tables(

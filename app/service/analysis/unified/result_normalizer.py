@@ -136,9 +136,13 @@ class ResultNormalizerMixin:
         passed = []
         failed = []
         missing = []
+        unclear = []
+        optional_skipped = []
         for item_name, detail in details.items():
             detail = detail or {}
             if not detail.get("scored", True):
+                if detail.get('is_optional'):
+                    optional_skipped.append(item_name)
                 continue
             preview = str(detail.get("preview") or "-")
             category = str(detail.get("category") or "")
@@ -146,6 +150,9 @@ class ResultNormalizerMixin:
                 "status": detail.get("status"),
                 "preview": preview,
                 "category": category,
+                "is_optional": detail.get('is_optional', False),
+                "optionality_conflict": detail.get('optionality_conflict', False),
+                "optionality_locations": self._locations_with_document_role(detail.get('optionality_locations') or [], 'tender'),
                 "locations": self._locations_with_document_role(
                     detail.get("locations") or [],
                     "business_bid",
@@ -160,7 +167,9 @@ class ResultNormalizerMixin:
                     "business_bid",
                 ),
             }
-            if detail.get("is_passed"):
+            if detail.get('optionality_conflict'):
+                unclear.append(self._issue(status='unclear', title=item_name, message='招标对该材料的必交与可选声明冲突，需要人工确认。', evidence=evidence))
+            elif detail.get("is_passed"):
                 passed.append(
                     self._issue(
                         status="pass",
@@ -184,16 +193,20 @@ class ResultNormalizerMixin:
             if isinstance(raw, dict) and isinstance(raw.get("scored_item_count"), int)
             else len(passed) + len(failed) + len(missing)
         )
-        review_status = self._combine_review_status(
-            [issue["status"] for issue in passed + failed + missing]
-        )
+        if raw.get('scope_status') == 'unclear':
+            unclear.append(self._issue(status='unclear', title='商务材料组成范围待确认', message='未能确定完整的商务材料组成范围，已识别材料继续检查。', evidence={'template_locations': self._locations_with_document_role(raw.get('scope_locations') or [], 'tender')}))
+        review_status = self._combine_review_status([issue['status'] for issue in passed + failed + missing + unclear])
         # 摘要使用“已命中/总数”的口径，避免直接使用“缺失 X 项”的表述。
         summary = f"共校验 {total} 项，已命中 {len(passed)}/{total} 项"
         if score is not None:
             summary += f"，完整性得分 {score}"
         summary += "。"
-        if ignored_count:
-            summary += f" 另有 {ignored_count} 个父级标题由子项覆盖，不单独计分。"
+        if optional_skipped:
+            summary += f" 另有 {len(optional_skipped)} 个可选材料未提供／未定位，不计通过或计分：" + '、'.join(optional_skipped) + '。'
+        if ignored_count > len(optional_skipped):
+            summary += f" 另有 {ignored_count - len(optional_skipped)} 个条目不单独计分。"
+        if raw.get('scope_status') == 'unclear':
+            summary += ' 商务材料组成范围待确认。'
         return {
             "validation": {
                 "status": "correct" if isinstance(details, dict) else "failed",
@@ -210,12 +223,14 @@ class ResultNormalizerMixin:
                 "failed_item_count": len(failed),
                 "missing_item_count": len(missing),
                 "ignored_item_count": ignored_count,
+                "skipped_optional_item_count": len(optional_skipped),
+                "unclear_item_count": len(unclear),
             },
             "issues": {
                 "passed": passed,
                 "failed": failed,
                 "missing": missing,
-                "unclear": [],
+                "unclear": unclear,
             },
         }
 
@@ -294,6 +309,9 @@ class ResultNormalizerMixin:
                 "element_results": segment.get("element_results") or [],
                 "difference_category": segment.get("difference_category"),
                 "difference_items": segment.get("difference_items") or [],
+                "is_optional": bool(segment.get('is_optional')),
+                "optionality_conflict": bool(segment.get('optionality_conflict')),
+                "optionality_locations": self._locations_with_document_role(segment.get('optionality_locations') or [], 'tender'),
             }
             segment_status = str(segment.get("status") or "").strip().lower()
             if segment_status not in {"pass", "missing", "unclear", "skipped"}:
@@ -328,7 +346,9 @@ class ResultNormalizerMixin:
                     self._issue(
                         status="unclear",
                         title=title,
-                        message="模板骨架存在疑似改写或对齐不确定项，需要人工复核。",
+                        message=("招标对该附件的必交与可选声明冲突，需要人工确认。"
+                                 if segment.get('optionality_conflict')
+                                 else "模板骨架存在疑似改写或对齐不确定项，需要人工复核。"),
                         evidence=evidence,
                     )
                 )
@@ -446,8 +466,10 @@ class ResultNormalizerMixin:
             ("tender_limit_check", "是否超过最高限价", tender_limit_check),
         ):
             payload = payload if isinstance(payload, dict) else {}
+            if subcheck_code == "price_reasonableness" and payload.get("quote_mode") == "rate":
+                label = "费率是否符合招标规则"
             summary_text = self._join_text(payload.get("summary"))
-            status = self._map_price_result(payload.get("result"), summary_text)
+            status = payload.get("status") if payload.get("status") in {"pass", "fail", "missing", "unclear", "not_applicable"} else self._map_price_result(payload.get("result"), summary_text)
             message = summary_text or "未返回明确结论。"
             message_parts.append(f"{label}：{message}")
 
@@ -458,7 +480,7 @@ class ResultNormalizerMixin:
             ]
             for location in subcheck_locations:
                 role = location_role(location)
-                if subcheck_code == "price_reasonableness" or role == "business_bid":
+                if role == "business_bid" or (subcheck_code == "price_reasonableness" and role != "tender"):
                     business_locations.append(location)
                 elif role == "tender":
                     tender_locations.append(location)
@@ -502,7 +524,7 @@ class ResultNormalizerMixin:
         business_pages = positive_pages(business_pages)
         tender_pages = positive_pages(tender_pages)
         review_status = self._combine_review_status(
-            [subcheck["status"] for subcheck in subchecks]
+            [subcheck["status"] for subcheck in subchecks if subcheck["status"] != "not_applicable"]
         )
         issue_evidence: dict[str, Any] = {
             "subcheck_code": "pricing_reasonableness",
@@ -551,6 +573,7 @@ class ResultNormalizerMixin:
                 "summary": issue["message"],
             },
             "metrics": {
+                "not_applicable_subcheck_count": sum(1 for subcheck in subchecks if subcheck["status"] == "not_applicable"),
                 "passed_subcheck_count": status_counts["pass"],
                 "failed_subcheck_count": status_counts["fail"],
                 "missing_subcheck_count": status_counts["missing"],
@@ -768,7 +791,7 @@ class ResultNormalizerMixin:
         if itemized_evidence.get("total_candidates"):
             issue_evidence["total_candidates"] = itemized_evidence.get("total_candidates")
 
-        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks])
+        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks if subcheck["status"] != "not_applicable"])
         message_parts = [
             f"{subcheck['label']}：{subcheck['message']}"
             for subcheck in subchecks
@@ -1020,6 +1043,8 @@ class ResultNormalizerMixin:
         item = lookup.get(str(attachment or "").strip())
         if not isinstance(item, dict):
             return evidence
+        if isinstance(item.get('found'), bool):
+            evidence['bid_content_found'] = item['found']
 
         for key in ("pages", "locations", "attachment_number", "matched_bid_title", "template_locations"):
             value = item.get(key)
@@ -1027,7 +1052,7 @@ class ResultNormalizerMixin:
                 evidence[key] = (
                     self._locations_with_document_role(value, "tender")
                     if key == "template_locations"
-                    else value
+                    else self._locations_with_document_role(value, 'business_bid') if key == 'locations' else value
                 )
 
         date_check = item.get("date_check")
@@ -1087,6 +1112,8 @@ class ResultNormalizerMixin:
             return status_of(value.get("status") if isinstance(value, dict) else None)
 
         def effective_attachment_status(item: dict[str, Any]) -> str:
+            if (item.get('requirements') or {}).get('optionality_conflict'):
+                return 'pending'
             status = status_of(item.get("status"))
             statuses = [
                 component_status(item, "signature_check"),
@@ -1110,6 +1137,8 @@ class ResultNormalizerMixin:
 
         def attachment_status_details(item: dict[str, Any]) -> list[str]:
             details: list[str] = []
+            if (item.get('requirements') or {}).get('optionality_conflict'):
+                details.append('招标的必交与可选声明冲突')
             signature_status = component_status(item, "signature_check")
             seal_status = component_status(item, "seal_check")
             item_date_status = component_status(item, "date_check")
@@ -1277,20 +1306,9 @@ class ResultNormalizerMixin:
                 )
             )
 
-        required_attachment_count = int(raw.get("required_attachment_count") or 0)
-        position_pass_count = max(
-            0,
-            required_attachment_count - len(missing_attachments) - len(missing_signature) - len(missing_seal),
-        )
-        date_pass_count = max(
-            0,
-            required_attachment_count - len(missing_date) - len(late_date),
-        )
-        review_summary = (
-            f"共核验 {required_attachment_count} 个必检附件，"
-            f"签章要素已覆盖 {position_pass_count}/{required_attachment_count} 个，"
-            f"日期校验通过 {date_pass_count}/{required_attachment_count} 个。"
-        )
+        from ..verification_evidence import attachment_counts, attachment_summary
+        verification_counts = attachment_counts(raw)
+        review_summary = attachment_summary(verification_counts)
         if seal_company_check:
             review_summary += (
                 " 公章单位匹配已确认。"
@@ -1305,6 +1323,7 @@ class ResultNormalizerMixin:
             "validation": {"status": "correct", "reason": "模块返回了附件级签字、盖章、日期和公章匹配结果。"},
             "review": {"status": review_status, "summary": review_summary},
             "metrics": {
+                **verification_counts,
                 "required_attachment_count": raw.get("required_attachment_count"),
                 "missing_attachment_count": len(missing_attachments),
                 "missing_signature_count": len(missing_signature),

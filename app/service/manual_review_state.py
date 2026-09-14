@@ -82,7 +82,7 @@ def manual_review_results_from_record(record: dict[str, Any] | None) -> dict[str
     result = as_dict(payload.get("result"))
     source = as_dict(result.get(MANUAL_REVIEW_RESULTS_KEY))
     latest = as_dict(source.get(MANUAL_REVIEW_LATEST_KEY))
-    workflow_scope = as_dict(source.get(WORKFLOW_SCOPE_KEY))
+    workflow_scope = as_dict(source.get(WORKFLOW_SCOPE_KEY)) or as_dict(payload.get(WORKFLOW_SCOPE_KEY))
 
     return {
         MANUAL_REVIEW_LATEST_KEY: deepcopy(latest),

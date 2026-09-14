@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from ..reasonableness.evidence import FACT_KEYS, manual_money, compare_money, compare_capital_amounts, decimal_value, REASONS
+from ..reasonableness.business_rules import rate_status
+from ..verification_evidence import compare_dates, attachment_counts, attachment_summary
+
 import hashlib
 import re
 from copy import deepcopy
@@ -442,6 +446,10 @@ def _enrich_business_attachment_value(original_value: Any, attachment: dict[str,
     if not isinstance(original_value, dict) or not isinstance(attachment, dict):
         return original_value
     value = dict(original_value)
+    if isinstance(attachment.get('found'), bool):
+        value['bid_content_found'] = attachment['found']
+    value['requirements'] = deepcopy(attachment.get('requirements') or value.get('requirements') or {})
+    value['template_locations'] = deepcopy(attachment.get('template_locations') or value.get('template_locations') or [])
     signature_evidence = _business_attachment_signature_evidence_texts(attachment)
     signature_check = attachment.get("signature_check") or {}
     signature_status = str(signature_check.get("status") or value.get("signature_status") or "").strip().lower() if isinstance(signature_check, dict) else str(value.get("signature_status") or "").strip().lower()
@@ -480,7 +488,7 @@ def _first_present_value(*values: Any) -> Any:
 
 
 def _compact_price_constraint_value(value: Any) -> Any:
-    """Keep only the tender highest limit amount for manual review display."""
+    """Preserve amount scope and source evidence through manual review."""
     if not isinstance(value, dict):
         return value
     amount = _first_present_value(
@@ -488,7 +496,7 @@ def _compact_price_constraint_value(value: Any) -> Any:
         value.get("limit_amount_yuan"),
         value.get("amount"),
     )
-    return {"amount_yuan": amount} if amount is not None else None
+    return {**value, "amount_yuan": amount}
 
 
 def _status_from_amount_pair(small_amount: Any, capital_amount: Any) -> str | None:
@@ -496,19 +504,17 @@ def _status_from_amount_pair(small_amount: Any, capital_amount: Any) -> str | No
     capital = _decimal_from_manual(capital_amount)
     if small is None or capital is None:
         return "missing" if small is not None or capital is not None else None
-    return "pass" if abs(small - capital) <= Decimal("0.01") else "fail"
+    return compare_capital_amounts(small, capital)
 
 
 def _limit_status_from_amounts(opening_amount: Any, tender_limit: Any) -> str | None:
-    opening = _decimal_from_manual(opening_amount)
-    limit = _decimal_from_manual(tender_limit)
-    if opening is None or limit is None:
-        return None
-    return "pass" if opening <= limit + Decimal("0.01") else "fail"
+    if isinstance(tender_limit, dict) and tender_limit.get("resolution") == "explicit_none":
+        return "not_applicable"
+    return compare_money(manual_money(opening_amount), manual_money(tender_limit))[0]
 
 
 def _compact_opening_amount_value(value: Any, *, tender_limit_value: Any = None) -> Any:
-    """Keep opening quote amounts and the two pricing judgments only."""
+    """Keep quote amounts, judgments and the evidence required to recompute them."""
     if not isinstance(value, dict):
         return value
 
@@ -541,9 +547,9 @@ def _compact_opening_amount_value(value: Any, *, tender_limit_value: Any = None)
         first_pair.get("case_consistency_status"),
         _status_from_amount_pair(small_amount, capital_amount),
     )
-    limit_status = _limit_status_from_amounts(small_amount, tender_limit_value)
+    limit_status = _limit_status_from_amounts({**value, "small_amount_yuan": small_amount}, tender_limit_value)
 
-    compact: dict[str, Any] = {}
+    compact: dict[str, Any] = {key: value[key] for key in (*FACT_KEYS, "price_pairs", "amount_facts") if key in value}
     if small_amount is not None:
         compact["small_amount_yuan"] = small_amount
     if capital_amount is not None:
@@ -568,7 +574,7 @@ def _compact_rate_quote_value(value: Any) -> Any:
         "rule_operator",
         "rate_label",
         "quote_type",
-        "rule_source",
+        "rule_source", "rule_resolution", "applicable_rule", "rule_candidates", "rule_locations", "locations", "package", "status",
     ):
         current = value.get(key)
         if current is not None and current != "":
@@ -739,44 +745,37 @@ def _build_business_format_editable_items(
                         document=document,
                     )
                 )
-        else:
-            for tender_row in pricing_tender_rows:
-                tender_row_index = tender_rows.index(tender_row)
-                path = _result_path(["extraction_tables", "tender_table", "rows", tender_row_index, "value"])
-                items.append(
-                    _make_business_editable_item(
-                        manual_by_id=manual_by_id,
-                        result_path=path,
-                        bidder_key=bidder_key,
-                        bidder_name=bidder_name,
-                        check_code="pricing_check",
-                        field_group="price_constraint",
+        if not pricing_rate_rows or pricing_self_check.get("quote_mode") == "mixed":
+            limit_raw = (((checks.get("pricing_check") or {}).get("raw_result") or {}).get("tender_limit_check") or {})
+            if isinstance(limit_raw.get("limit_resolution"), dict):
+                constraint = limit_raw["limit_resolution"]
+                path = _result_path(["bidders", bidder_index, "checks", "pricing_check", "raw_result", "tender_limit_check", "limit_resolution"])
+                items.append(_make_business_editable_item(manual_by_id=manual_by_id, result_path=path,
+                    bidder_key=bidder_key, bidder_name=bidder_name, check_code="pricing_check", field_group="price_constraint",
+                    field_name="tender_limit_or_budget", original_value=_compact_price_constraint_value(constraint),
+                    page_refs=_coerce_manual_page_refs(constraint), document=tender_document))
+            else:
+                for tender_row in pricing_tender_rows:
+                    path = _result_path(["extraction_tables", "tender_table", "rows", tender_rows.index(tender_row), "value"])
+                    items.append(_make_business_editable_item(manual_by_id=manual_by_id, result_path=path,
+                        bidder_key=bidder_key, bidder_name=bidder_name, check_code="pricing_check", field_group="price_constraint",
                         field_name=str(tender_row.get("field_name") or "tender_limit_or_budget"),
                         original_value=_compact_price_constraint_value(tender_row.get("value")),
-                        page_refs=_coerce_manual_page_refs(tender_row.get("page_refs") or tender_row.get("locations") or tender_row),
-                        document=tender_document,
-                    )
-                )
-
+                        page_refs=_coerce_manual_page_refs(tender_row), document=tender_document))
             if isinstance(pricing_self_check, dict) and pricing_self_check:
-                path = _result_path(["bidders", bidder_index, "checks", "pricing_check", "raw_result", "self_check"])
-                items.append(
-                    _make_business_editable_item(
-                        manual_by_id=manual_by_id,
-                        result_path=path,
-                        bidder_key=bidder_key,
-                        bidder_name=bidder_name,
-                        check_code="pricing_check",
-                        field_group="opening_amount",
-                        field_name="opening_amount",
-                        original_value=_compact_opening_amount_value(
-                            pricing_self_check,
-                            tender_limit_value=primary_tender_limit_value,
-                        ),
-                        page_refs=_coerce_manual_page_refs(pricing_self_check),
-                        document=document,
-                    )
-                )
+                facts = pricing_self_check.get("amount_facts") or []
+                quotes = facts if len(facts)>1 else [pricing_self_check]
+                for quote_index, quote in enumerate(quotes):
+                    path_parts = ["bidders", bidder_index, "checks", "pricing_check", "raw_result", "self_check"]
+                    if len(quotes)>1:
+                        path_parts += ["amount_facts", quote_index]
+                        pair = next((x for x in pricing_self_check.get("price_pairs", []) if x.get("small_amount_yuan")==quote.get("amount_yuan")), {})
+                        quote = {**pair, **quote}
+                    items.append(_make_business_editable_item(manual_by_id=manual_by_id, result_path=_result_path(path_parts),
+                        bidder_key=bidder_key, bidder_name=bidder_name, check_code="pricing_check", field_group="opening_amount",
+                        field_name="opening_amount" if len(quotes)==1 else f"opening_amount_{quote.get('period') or quote_index+1}",
+                        original_value=_compact_opening_amount_value(quote, tender_limit_value=limit_raw.get("limit_resolution") or primary_tender_limit_value),
+                        page_refs=_coerce_manual_page_refs(quote) or _coerce_manual_page_refs(pricing_self_check), document=document))
 
         if bidder_index >= len(bidder_tables):
             continue
@@ -900,37 +899,8 @@ def _decimal_from_manual(value: Any) -> Decimal | None:
     return None
 
 
-def _amount_pair_from_value(value: Any) -> tuple[Decimal | None, Decimal | None]:
-    if isinstance(value, dict):
-        small = (
-            _decimal_from_manual(value.get("small_amount"))
-            or _decimal_from_manual(value.get("small_amount_yuan"))
-            or _decimal_from_manual(value.get("small_price"))
-            or _decimal_from_manual(value.get("amount_yuan"))
-            or _decimal_from_manual(value.get("amount"))
-        )
-        capital = (
-            _decimal_from_manual(value.get("capital_amount"))
-            or _decimal_from_manual(value.get("capital_amount_yuan"))
-            or _decimal_from_manual(value.get("capital_price"))
-        )
-        return small, capital
-    amount = _decimal_from_manual(value)
-    return amount, None
 
 
-def _compare_manual_rate(actual: Decimal, operator: str, threshold: Decimal) -> bool:
-    if operator == ">":
-        return actual > threshold
-    if operator == ">=":
-        return actual >= threshold
-    if operator == "<":
-        return actual < threshold
-    if operator == "<=":
-        return actual <= threshold
-    if operator == "==":
-        return actual == threshold
-    return False
 
 
 def _manual_issue(status: str, title: str, message: str, items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1006,96 +976,55 @@ def _recompute_manual_consistency(check: dict[str, Any], items: list[dict[str, A
 
 
 def _recompute_manual_pricing(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
-    rate_items = [item for item in items if str(item.get("field_group") or "") == "rate_quote"]
+    rate_items = [x for x in items if x.get("field_group") == "rate_quote"]
+    statuses, details, rate_states = [], [], []
+    has_opening = any(x.get("field_group") == "opening_amount" for x in items)
+    raw = check.setdefault("raw_result", {})
     if rate_items:
-        has_fail = False
-        has_missing = False
-        has_unclear = False
-        details: list[str] = []
-
         for item in rate_items:
-            value = item.get("effective_value")
-            if not isinstance(value, dict):
-                has_unclear = True
-                details.append("Manual rate quote value is invalid.")
-                continue
-
-            current_rate = _decimal_from_manual(
-                value.get("current_float_rate")
-                or value.get("float_rate")
-            )
-            required_rate = _decimal_from_manual(
-                value.get("required_min_float_rate")
-                or value.get("rule_threshold")
-                or value.get("threshold")
-            )
-            operator = str(value.get("rule_operator") or value.get("op") or ">").strip() or ">"
-            rate_label = str(value.get("rate_label") or "").strip()
-            metric_label = "discount rate" if "鎶樻墸鐜?" in rate_label else "float rate"
-            biz_name = str(value.get("biz_name") or item.get("field_name") or metric_label).strip()
-
-            if current_rate is None:
-                has_missing = True
-                details.append(f"{biz_name} current {metric_label} is missing.")
-                continue
-            if required_rate is None:
-                has_unclear = True
-                details.append(f"{biz_name} required {metric_label} threshold is missing.")
-                continue
-
-            passed = _compare_manual_rate(current_rate, operator, required_rate)
-            if not passed:
-                has_fail = True
-            details.append(
-                f"{biz_name} {metric_label} {current_rate:.2f}% {operator} {required_rate:.2f}% "
-                f"{'passes' if passed else 'fails'} manual review."
-            )
-
-        status = "fail" if has_fail else ("missing" if has_missing else ("unclear" if has_unclear else "pass"))
-        summary = " ".join(details) if details else "Manual rate quote review needs confirmation."
-        _set_manual_check_summary(check, status, summary, rate_items)
-        return
-
-    opening_amount: Decimal | None = None
-    capital_amount: Decimal | None = None
-    tender_limit: Decimal | None = None
-    details: list[str] = []
-
-    for item in items:
-        field_group = str(item.get("field_group") or "")
-        value = item.get("effective_value")
-        if field_group == "price_constraint":
-            tender_limit = _decimal_from_manual(value)
-            continue
-        if field_group == "opening_amount":
-            opening_amount, capital_amount = _amount_pair_from_value(value)
-
-    status = "pass"
-    if opening_amount is None:
-        status = "missing"
-        details.append("Manual opening amount is missing.")
-    elif capital_amount is None:
-        status = "unclear"
-        details.append("Manual opening capital amount is missing; case consistency cannot be confirmed.")
-    elif abs(opening_amount - capital_amount) <= Decimal("0.01"):
-        details.append("Manual opening lowercase and uppercase amounts match.")
-    else:
-        status = "fail"
-        details.append("Manual opening lowercase and uppercase amounts do not match.")
-
-    if tender_limit is None:
-        if status == "pass":
-            status = "unclear"
-        details.append("Manual tender highest limit is missing; limit comparison cannot be confirmed.")
-    elif opening_amount is not None:
-        if opening_amount <= tender_limit + Decimal("0.01"):
-            details.append("Manual bid amount does not exceed tender highest limit.")
-        else:
-            status = "fail"
-            details.append("Manual bid amount exceeds tender highest limit.")
-
-    summary = " ".join(details) if details else "Manual pricing review needs confirmation."
-    _set_manual_check_summary(check, status, summary, items)
+            value = item.get("effective_value") or {}
+            state, message = rate_status(value)
+            statuses.append(state)
+            rate_states.append(state)
+            details.append(message)
+            if isinstance(value, dict):
+                value["status"] = state
+        # A rate response never exempts a separately applicable monetary limit.
+        limit_check = raw.get("tender_limit_check") or {}
+        state = limit_check.get("status", "unclear")
+        if not has_opening and state != "not_applicable":
+            statuses.append(state)
+            details.extend(limit_check.get("summary") or ["总金额限价依据需复核"])
+    if not rate_items or has_opening:
+        openings = [x.get("effective_value") for x in items if x.get("field_group") == "opening_amount"]
+        limits = [x.get("effective_value") for x in items if x.get("field_group") == "price_constraint"]
+        limit = limits[0] if len(limits)==1 else None
+        normalized_quotes, comparisons = [], []
+        for opening in openings or [None]:
+            bid = manual_money(opening)
+            capital = decimal_value((opening or {}).get("capital_amount_yuan", (opening or {}).get("capital_amount"))) if isinstance(opening,dict) else None
+            small = decimal_value(bid.get("amount_yuan"))
+            case_status = compare_capital_amounts(small, capital)
+            statuses.append(case_status)
+            details.append({"pass":"大小写金额一致", "fail":"大小写金额不一致", "unclear":"大小写金额或单位依据不足，需复核"}[case_status])
+            if isinstance(limit,dict) and limit.get("resolution")=="explicit_none" and limit.get("amount_yuan") in (None, ""):
+                limit_status, reason = "not_applicable", "explicit_no_limit"
+            else:
+                limit_status, reason = compare_money(bid, manual_money(limit))
+            if limit_status != "not_applicable":
+                statuses.append(limit_status)
+            details.append(REASONS.get(reason,"招标明确不设最高限价" if reason=="explicit_no_limit" else "最高限价依据需复核"))
+            normalized_quotes.append({**(opening if isinstance(opening,dict) else {}), **bid,
+                "status":case_status,"case_consistency_status":case_status, "capital_amount_yuan":float(capital) if capital is not None else None})
+            comparisons.append({"status":limit_status,"reason_code":reason,"bid_amount":bid,"tender_limit":limit})
+        raw["self_check"] = {**(raw.get("self_check") or {}), **normalized_quotes[0], "amount_facts":normalized_quotes if len(normalized_quotes)>1 else [],
+            "status":"fail" if any(x['status']=='fail' for x in normalized_quotes) or "fail" in rate_states else ("pass" if all(x['status']=='pass' for x in normalized_quotes) and all(x=="pass" for x in rate_states) else "unclear")}
+        states = [x['status'] for x in comparisons]
+        raw["tender_limit_check"] = {**(raw.get("tender_limit_check") or {}),
+            "status":"fail" if 'fail' in states else ('unclear' if 'unclear' in states else states[0]),
+            "comparisons":comparisons,"limit_resolution":limit,"summary":details[1::2]}
+    status = "fail" if "fail" in statuses else ("unclear" if any(x!="pass" for x in statuses) or not statuses else "pass")
+    _set_manual_check_summary(check, status, "；".join(details), items)
 
 
 def _manual_itemized_decimal(value: Any, keys: tuple[str, ...]) -> Decimal | None:
@@ -1224,18 +1153,48 @@ def _verification_value_status(value: Any, field_group: str) -> str:
     ):
         statuses.append("pass")
     if value.get("date") or value.get("date_text"):
-        statuses.append("pass")
+        statuses.append(compare_dates(value.get("date_text") or value.get("date"), value.get("deadline_date")))
     if any(item in {"fail", "late"} for item in statuses):
         return "fail"
     if any(item in {"missing", "missing_date"} for item in statuses):
         return "missing"
+    if "missing_deadline" in statuses:
+        return "unclear"
     if any(item in {"pass", "found"} for item in statuses):
         return "pass"
     return "unclear"
 
 
 def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
+    raw = check.setdefault("raw_result", {})
+    attachments = (raw.get("attachment_results") or []) + (raw.get("missing_attachment_results") or [])
+    for item in items:
+        value = item.get("effective_value")
+        if not isinstance(value, dict):
+            continue
+        matched = next((a for a in attachments if a.get("title")==item.get("field_name")), None)
+        requirements = (matched or {}).get("requirements") or value.get("requirements") or {}
+        if requirements.get("requires_date", value.get("date_status") != "not_required"):
+            deadline_value = value.get("deadline_date")
+            original = item.get("original_value")
+            resolution = value.get("deadline_resolution") or {}
+            if isinstance(original, dict) and resolution.get("resolution") != "resolved":
+                explicitly_changed = bool(item.get("has_manual_value")) and (value.get("deadline_manually_confirmed") is True or deadline_value != original.get("deadline_date"))
+                if not explicitly_changed:
+                    deadline_value = None
+            value["date_status"] = compare_dates(value.get("date_text") or value.get("date"), deadline_value)
+        else:
+            value["date_status"] = "not_required"
+        if matched:
+            for kind in ("signature", "seal", "date"):
+                state = value.get(kind+"_status")
+                if state:
+                    matched.setdefault(kind+"_check", {})["status"] = state
+            matched["date_check"].update(sign_date=value.get("date_text") or value.get("date"), deadline_date=value.get("deadline_date"))
+    counts = attachment_counts(raw)
     statuses = [_verification_value_status(item.get("effective_value"), str(item.get("field_group") or "")) for item in items]
+    if any((a.get('requirements') or {}).get('optionality_conflict') for a in attachments):
+        statuses.append('unclear')
     if any(status == "fail" for status in statuses):
         status = "fail"
         summary = "Manual signature/seal/date review has failed items."
@@ -1248,7 +1207,9 @@ def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, 
     else:
         status = "pass"
         summary = "Manual signature/seal/date review passed."
+    summary = attachment_summary(counts)
     _set_manual_check_summary(check, status, summary, items)
+    check["metrics"].update(counts)
 
 
 def _apply_manual_business_review_inputs(
@@ -1264,6 +1225,19 @@ def _apply_manual_business_review_inputs(
         and item.get("field_group") != "template_skeleton_item"
     ]
     for item in applied:
+        original, manual = item.get("original_value"), item.get("manual_value")
+        if item.get("field_group") in {"rate_quote", "opening_amount", "price_constraint", "attachment_result"} and isinstance(original, dict) and isinstance(manual, dict):
+            item["manual_value"] = {**original, **manual}
+            if item.get("field_group") == "rate_quote":
+                for key in ("applicable_rule", "rule_resolution", "rule_source", "rule_candidates", "rule_locations"):
+                    item["manual_value"][key] = original.get(key)
+                rule = original.get("applicable_rule") or {}
+                item["manual_value"]["required_min_float_rate"] = rule.get("threshold")
+                item["manual_value"]["rule_operator"] = rule.get("op")
+            if item.get('field_group') == 'attachment_result':
+                for key in ('requirements', 'template_locations', 'bid_content_found'):
+                    if key in original:
+                        item['manual_value'][key] = deepcopy(original[key])
         _set_path_value(corrected, str(item.get("result_path") or ""), item.get("manual_value"))
         item["effective_value"] = item.get("manual_value")
 

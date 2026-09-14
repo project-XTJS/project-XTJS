@@ -22,6 +22,9 @@ def _default_ocr_storage_root() -> Path:
 
 
 class Settings(BaseSettings):
+    XTJS_IO_CONCURRENCY: int = Field(default=8, ge=1, le=16)
+    XTJS_IO_QUEUE_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
+
     DATABASE_URL: str = "postgresql://admin:password@localhost:5432/xtjs_db"
 
     # —— 日志：JSON 结构化输出，文件按天/大小滚动并保留 N 天 ——
@@ -34,6 +37,8 @@ class Settings(BaseSettings):
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET_NAME: str = "update-file"
+    MINIO_BUCKET_PRECREATED: bool = False
+    MINIO_ECS_ROLE_NAME: str = ""
     MINIO_SECURE: bool = False
     # 对象存储签名区域（OSS 时填 cn-hangzhou 等地域码；MinIO 可留空）
     MINIO_REGION: str = ""

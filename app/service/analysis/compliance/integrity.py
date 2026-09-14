@@ -936,6 +936,9 @@ class IntegrityChecker:
         返回完整性评分、各项详情及位置信息。
         """
         reqs, attachment_mapping = TemplateExtractor.extract_requirements(model_json)
+        scope = TemplateExtractor.extract_business_attachment_scope(model_json)
+        attachments, _ = TemplateExtractor.filter_business_response_attachments(model_json)
+        attributes = {str(a.get('attachment_number')): a for a in attachments if a.get('attachment_number')}
         data_node = test_json.get('data', test_json)
         sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
         toc_pages = self._collect_toc_pages(sections)
@@ -956,17 +959,25 @@ class IntegrityChecker:
             match_section = self._find_required_section(sections, headers, norm_item, toc_pages)
             match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
             is_optional = self._is_optional_item(item)
+            referenced = [attributes[n] for n in attachment_mapping.get(item, []) if n in attributes]
+            conflict = any(a.get('optionality_conflict') for a in referenced)
+            if referenced:
+                is_optional = all(bool(a.get('is_optional')) or self._is_optional_item(a.get('title', '')) for a in referenced)
+            is_optional = is_optional and not conflict
 
             all_details[item] = {
                 "status": (
-                    "已找到"
+                    "待复核" if conflict else "已找到"
                     if match
-                    else ("可选项未提供" if is_optional else "缺失")
+                    else ("待复核" if conflict else ("可选项未提供" if is_optional else "缺失"))
                 ),
                 "preview": match or "-",
-                "is_passed": bool(match) or is_optional,
+                "is_passed": bool(match) and not conflict,
+                "is_optional": is_optional,
+                "optionality_conflict": conflict,
+                "optionality_locations": [loc for a in referenced for loc in a.get('optionality_locations') or []],
                 "category": cat,
-                "scored": True,
+                "scored": not (is_optional and not match),
                 "locations": [self._location_from_section(match_section)] if match_section else [],
                 "template_locations": template_locations_by_item.get(item) or [],
             }
@@ -977,6 +988,8 @@ class IntegrityChecker:
         score = round((passed / total) * 100, 2) if total else 0
 
         return {
+            "scope_status": scope.get('scope_status', 'legacy'),
+            "scope_locations": scope.get('scope_locations') or [],
             "integrity_score": score,
             "details": all_details,
             "scored_item_count": total,

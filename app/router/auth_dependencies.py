@@ -38,12 +38,15 @@ def get_current_user(
     if not payload or not payload.get("sub"):
         raise HTTPException(status_code=401, detail="认证令牌无效或已过期")
 
-    user = user_service.get_public_by_identifier(payload["sub"])
+    user = user_service.get_session_record(payload["sub"])
     if user is None:
         raise HTTPException(status_code=401, detail="账号不存在")
     if not user.get("is_active"):
         raise HTTPException(status_code=401, detail="账号已被停用")
-    return user
+    version = payload.get("token_version", 0)
+    if type(version) is not int or version < 0 or version != user["token_version"]:
+        raise HTTPException(status_code=401, detail="密码已变更，请重新登录")
+    return UserService._public_view(user)
 
 
 def require_role(min_level: int):

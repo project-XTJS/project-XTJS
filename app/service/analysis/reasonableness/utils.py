@@ -57,15 +57,6 @@ class UtilsMixin:
                 return True
         return False
 
-    def _contains_direct_price_keywords(self, text: str) -> bool:
-        """判断文本中是否含有直接报价的大写/小写特征。"""
-        normalized = self._normalize(text)
-        return (
-            ("小写" in normalized and "大写" in normalized)
-            or "参选总价" in normalized
-            or "投标总价" in normalized
-            or "报价总价" in normalized
-        )
 
     def _contains_float_rate_keywords(self, text: str) -> bool:
         """判断文本中是否含有下浮率/折扣率报价特征关键词。"""
@@ -150,12 +141,13 @@ class UtilsMixin:
             )
             label = str(location.get("label") or "").strip()
             document = str(location.get("document") or "").strip()
-            key = (document, page, label)
+            key = (document, page, label, str(location.get("text") or ""), str(location.get("bbox") or ""))
             if key in seen_locations:
                 continue
             seen_locations.add(key)
             normalized_locations.append(
                 {
+                    **location,
                     "page": page,
                     "label": label,
                     "text": str(location.get("text") or "").strip()[:120],
@@ -174,21 +166,6 @@ class UtilsMixin:
             result.update(extra)
         return result
 
-    def _build_fail_result(
-        self,
-        reason: str,
-        *,
-        pages: Optional[List[int]] = None,
-        locations: Optional[List[Dict]] = None,
-    ) -> Dict:
-        """快捷生成“未识别/缺失”状态的检查结果。"""
-        return self._build_result(
-            "未识别",
-            "未识别",
-            [reason],
-            pages=pages,
-            locations=locations,
-        )
 
     # 目录行判断（会被 DocumentParserMixin 使用）
     def _is_catalog_line(self, line: str) -> bool:

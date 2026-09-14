@@ -46,6 +46,28 @@ class DeviationTableMixin:
     _section_text: Any
     _is_catalog_like_line: Any
 
+    _FILLING_INSTRUCTION_RE = re.compile(
+        r'(?:注\s*[:：]\s*(?:\d+[、.．]\s*)?)?'
+        r'对\s*不\s*(?:满足|响应|符合)[^。；;\n]{0,100}?(?:文件|条款)[^。；;\n]{0,30}?要求的部分\s*[，,]\s*'
+        r'(?:必须|应当|应)[^。；;\n]{0,25}?如实填写(?:并说明原因)?[。；;]?'
+    )
+    _EVIDENCE_INSTRUCTION_RE = re.compile(
+        r'未点对点应答或未按要求提供证明材料的视为未响应[。；;]?'
+        r'|证明材料[，,]\s*建议采用[^。；;\n]{0,100}?'
+        r'否则评标委员会有权做负偏离处理[。；;]?'
+    )
+
+    def _response_without_instructions(self, text: str) -> str:
+        # Remove complete imperative boilerplate only, never an arbitrary '注' or '不满足'.
+        value = self._FILLING_INSTRUCTION_RE.sub('\n', str(text or ''))
+        return self._EVIDENCE_INSTRUCTION_RE.sub('\n', value).strip()
+
+    @staticmethod
+    def _response_scope_unclear(text: str) -> bool:
+        return bool(re.search(r'对\s*不\s*(?:满足|响应|符合).*?(?:填写|说明)', text)) and not bool(
+            re.search(r'(?:我方|我公司|本公司|本单位)', text)
+        )
+
     def _extract_bid_deviation_sections(
         self,
         bid_payload: dict,
@@ -617,6 +639,12 @@ class DeviationTableMixin:
             deviation = " ".join(deviation_parts).strip()
 
         joined_text = " ".join(part for part in (requirement, response, deviation) if part).strip()
+        response = self._response_without_instructions(response)
+        deviation = self._response_without_instructions(deviation)
+        requirement = self._response_without_instructions(requirement)
+        if not self._norm(requirement + response + deviation).strip('0123456789'):
+            return None
+        joined_text = ' '.join(part for part in (requirement, response, deviation) if part).strip()
         if len(self._norm(requirement or joined_text)) < 4:
             return None
 
@@ -643,6 +671,7 @@ class DeviationTableMixin:
             "bbox": normalize_bbox(bbox),
             "material_text": material_text,
             "material_locations": material_locations,
+            "response_scope_unclear": self._response_scope_unclear(response + '\n' + deviation),
         }
 
     def _scan_material_text(self, text: str) -> str:
@@ -765,36 +794,66 @@ class DeviationTableMixin:
         """从纯文本区段中提取标记为★或含偏离响应的行。"""
         out: list[dict[str, Any]] = []
         title = str(section.get("title") or "")
-        raw_text = re.sub(r"\s+", " ", str(section.get("text") or "")).strip()
-        for segment in self._split_table_row_segments(raw_text):
-            normalized = self._norm(segment)
-            if len(normalized) < 8:
+        line_items = section.get('line_items') or [{'text': line, 'page': section.get('page'), 'bbox': section.get('bbox')} for line in str(section.get('text') or '').splitlines()]
+        chunks, current = [], []
+        def flush() -> None:
+            if current:
+                chunks.append(list(current))
+                current.clear()
+        for line in line_items:
+            raw_line = str(line.get('text') or '')
+            # A separate numbered form is not another deviation response row.
+            # Match full headings only; a response mentioning a form stays.
+            if re.fullmatch(r'\s*(?:附件\s*)?\d+[、.．\s]*[^。；;：:\n]{2,35}(?:声明函|授权委托书|资格证明书|基本情况表)(?:[（(][^）)]{0,12}[）)])?\s*', raw_line):
+                flush()
+                break
+            cleaned = self._response_without_instructions(raw_line)
+            if cleaned != raw_line.strip():
+                # A footer must not attach to the preceding blank row number.
+                if cleaned:
+                    current.append(dict(line, text=cleaned))
+                flush()
                 continue
-            has_response_marker = bool(
-                "响应" in segment
-                or self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS)
-                or re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", segment, re.IGNORECASE)
-            )
-            if not ("★" in segment or has_response_marker):
+            if re.match(r'^\s*(?:投标人(?:名称)?|法定代表人|法定代表人或授权代表|日期)\s*[（(:：]', cleaned) or str(line.get('type')) in {'seal', 'signature'}:
+                flush()
                 continue
-            out.append(
-                {
-                    "group": group,
-                    "source": "section_text",
-                    "page": section.get("page"),
-                    "document_role": document_role,
-                    "title": title,
-                    "requirement_text": segment,
-                    "response_text": segment if has_response_marker else "",
-                    "deviation_text": segment if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
-                    "joined_text": segment,
-                    "requirement_norm": normalized,
-                    "response_norm": self._norm(segment) if has_response_marker else "",
-                    "deviation_norm": self._norm(segment) if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
-                    "joined_norm": normalized,
-                    "bbox": normalize_bbox(section.get("bbox") or section.get("box")),
-                }
-            )
+            if not cleaned:
+                flush()
+                continue
+            current.append(dict(line, text=cleaned))
+        flush()
+        for chunk in chunks:
+            raw_text = '\n'.join(line['text'] for line in chunk)
+            for segment in self._split_table_row_segments(raw_text):
+                normalized = self._norm(segment)
+                if len(normalized) < 8:
+                    continue
+                has_response_marker = bool(
+                    "响应" in segment
+                    or self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS)
+                    or re.search(r"\bP\d{1,4}(?:\s*[-~]\s*P?\d{1,4})?\b", segment, re.IGNORECASE)
+                )
+                if not ("★" in segment or has_response_marker):
+                    continue
+                out.append(
+                    {
+                        "group": group,
+                        "source": "section_text",
+                        "page": chunk[0].get('page', section.get('page')),
+                        "document_role": document_role,
+                        "title": title,
+                        "requirement_text": segment,
+                        "response_text": segment if has_response_marker else "",
+                        "deviation_text": segment if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
+                        "joined_text": segment,
+                        "requirement_norm": normalized,
+                        "response_norm": self._norm(segment) if has_response_marker else "",
+                        "deviation_norm": self._norm(segment) if self._match_patterns(segment, self.NO_DEV_PATTERNS + self.POS_DEV_PATTERNS + self.NEG_DEV_PATTERNS) else "",
+                        "joined_norm": normalized,
+                        "bbox": _merge_bboxes([normalize_bbox(line.get('bbox') or line.get('box')) for line in chunk]) or normalize_bbox(section.get('bbox')),
+                        "response_scope_unclear": self._response_scope_unclear(segment),
+                    }
+                )
         return out
 
     def _split_table_row_segments(self, text: str) -> list[str]:

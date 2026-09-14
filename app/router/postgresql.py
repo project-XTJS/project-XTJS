@@ -1,3 +1,5 @@
+from app.core.consistency import ConsistencyConflict
+from app.core.io_dispatch import bounded_sync
 # -*- coding: utf-8 -*-
 """
 项目与文档 CRUD 路由。
@@ -29,7 +31,7 @@ from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Cm, Pt, RGBColor
 from psycopg2 import Error as PsycopgError
-from starlette.concurrency import run_in_threadpool
+from app.core.io_dispatch import run_io as run_in_threadpool
 
 from app.config.settings import settings
 from app.core.document_types import (
@@ -239,6 +241,8 @@ def _ensure_project_analysis_status(
     analysis_name: str,
 ) -> dict[str, Any]:
     """分析前先校验项目 OCR 阶段是否达标。"""
+    if project.get("upload_complete") is False:
+        raise HTTPException(status_code=409, detail="项目材料上传或关联不完整，请先补齐失败文件")
     current_status = int(project.get("parsing_status") or 0)
     if PostgreSQLService.parsing_status_reached(current_status, required_status):
         return project
@@ -866,39 +870,6 @@ def _normalize_preview_highlight_bbox(raw_bbox: Any) -> Optional[list[float]]:
     return [x0, y0, x1, y1]
 
 
-# 生成高亮变体签名（用于缓存键，区分不同高亮参数组合）
-def _preview_variant_signature(
-    highlight_phrases: Optional[list[str]],
-    highlight_bbox: Optional[list[float]],
-    highlight_rects: Optional[list[list[float]]] = None,
-    *,
-    highlight_coordinate_space: str = "auto",
-    document_type: str = "",
-    strategy_version: str = _FINE_OCR_PREVIEW_STRATEGY_VERSION,
-) -> str:
-    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
-    bbox = highlight_bbox or []
-    rects = highlight_rects or []
-    coordinate_space = _normalize_preview_coordinate_space(highlight_coordinate_space)
-    if not phrases and not bbox and not rects:
-        return ""
-    payload = json.dumps(
-        {
-            "phrases": phrases,
-            "bbox": [round(float(value), 2) for value in bbox],
-            "rects": [
-                [round(float(value), 2) for value in rect[:4]]
-                for rect in rects
-                if isinstance(rect, (list, tuple)) and len(rect) >= 4
-            ],
-            "coordinate_space": coordinate_space,
-            "document_type": str(document_type or "").strip().lower(),
-            "strategy_version": strategy_version,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
-    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 # 从短语中提取用于匹配的 token（去标点、小写、排序）
@@ -1547,81 +1518,6 @@ def _section_subrects_for_phrases(section_text: str, section_bbox: list[float], 
     return rects
 
 
-# 当文本高亮失败时，利用 OCR 对 PDF 页面截图进行识别，并精修高亮区域
-def _refine_highlight_rects_via_ocr(pdf_page, *, highlight_rects: list[list[float]], highlight_phrases: list[str]) -> list[list[float]]:
-    ocr_service = _get_preview_ocr_service()
-    if ocr_service is None:
-        return highlight_rects
-
-    import fitz
-
-    scale = 2.0
-    refined: list[list[float]] = []
-    phrases = _normalize_preview_highlight_phrases(highlight_phrases)
-    if not phrases:
-        return highlight_rects
-    if len(highlight_rects or []) > 1:
-        return highlight_rects
-
-    for rect_values in highlight_rects or []:
-        coerced = _coerce_rect_to_pdf_page_space(pdf_page, rect_values)
-        if not coerced:
-            continue
-        rect = fitz.Rect(coerced)
-        if rect.is_empty or rect.get_area() <= 0:
-            continue
-        clip = fitz.Rect(rect)
-        clip.x0 = max(0, clip.x0 - 2)
-        clip.y0 = max(0, clip.y0 - 2)
-        clip.x1 = min(float(pdf_page.rect.width), clip.x1 + 2)
-        clip.y1 = min(float(pdf_page.rect.height), clip.y1 + 2)
-        if clip.x1 <= clip.x0 or clip.y1 <= clip.y0:
-            refined.append(coerced)
-            continue
-        try:
-            pix = pdf_page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
-            pix_bytes = pix.tobytes("png")
-        except Exception:
-            refined.append(coerced)
-            continue
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_file:
-            temp_file.write(pix_bytes)
-            temp_path = temp_file.name
-        try:
-            ocr_payload = ocr_service.extract_all(temp_path, "png")
-        except Exception:
-            ocr_payload = {}
-        finally:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-
-        sections = []
-        if isinstance(ocr_payload, dict):
-            sections = list(ocr_payload.get("layout_sections") or [])
-        matched_any = False
-        for section in sections:
-            section_text = str(section.get("text") or section.get("raw_text") or "").strip()
-            bbox = section.get("bbox") or section.get("bbox_ocr") or section.get("box")
-            if not section_text or not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-                continue
-            local_bbox = [float(bbox[index]) for index in range(4)]
-            rects = _section_subrects_for_phrases(section_text, local_bbox, phrases)
-            for local_rect in rects:
-                refined.append(
-                    [
-                        clip.x0 + (local_rect[0] / scale),
-                        clip.y0 + (local_rect[1] / scale),
-                        clip.x0 + (local_rect[2] / scale),
-                        clip.y0 + (local_rect[3] / scale),
-                    ]
-                )
-                matched_any = True
-        if not matched_any:
-            refined.append([clip.x0, clip.y0, clip.x1, clip.y1])
-
-    return refined or highlight_rects
 
 
 # 执行项目重复检查，并持久化结果和合并聚类
@@ -2366,26 +2262,15 @@ def _build_project_workflow_state(
     identifier_id: str,
     db_service: PostgreSQLService,
 ) -> dict[str, Any]:
-    project = db_service.refresh_project_parsing_status(identifier_id)
+    payload_data = db_service.get_project_ocr_metadata(identifier_id)
+    project = db_service.refresh_project_parsing_status(identifier_id, payload=payload_data)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
 
-    payload_data = db_service.get_project_documents_for_duplicate_check(str(project["identifier_id"]))
-    if not payload_data:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    result_record = db_service.get_project_result(str(project["identifier_id"]))
-    manual_review_results = manual_review_results_from_record(result_record)
-    workflow_scope = workflow_scope_from_result_record(result_record)
-    result_payload = display_result_view(
-        (result_record or {}).get("result") or {},
-        manual_review_results=manual_review_results,
-    )
-    result_keys = sorted(
-        key
-        for key in result_payload.keys()
-        if _is_result_key_visible(str(key))
-    )
+    workflow_scope = payload_data.get("workflow_scope") or {}
+    manual_review_results = {"latest": {}, "workflow_scope": workflow_scope}
+    result_keys = sorted((payload_data.get("result_summary") or {}).get("result_keys")
+                         or payload_data.get("result_keys") or [])
     parsing_status = int(project.get("parsing_status") or 0)
     if parsing_status >= PostgreSQLService.PARSING_STATUS_TECHNICAL_OCR_COMPLETED:
         stage = "technical_ocr_completed"
@@ -2405,11 +2290,11 @@ def _build_project_workflow_state(
         "documents": _build_workflow_document_summary(payload_data, workflow_scope),
         "results_status": {
             "available_result_keys": result_keys,
-            "business_review_completed": "business_bid_format_review" in result_payload,
-            "deviation_check_completed": "deviation_check" in result_payload,
-            "business_duplicate_completed": "business_bid_duplicate_check" in result_payload,
-            "technical_duplicate_completed": "technical_bid_duplicate_check" in result_payload,
-            "personnel_reuse_completed": "personnel_reuse_check" in result_payload,
+            "business_review_completed": "business_bid_format_review" in result_keys,
+            "deviation_check_completed": "deviation_check" in result_keys,
+            "business_duplicate_completed": "business_bid_duplicate_check" in result_keys,
+            "technical_duplicate_completed": "technical_bid_duplicate_check" in result_keys,
+            "personnel_reuse_completed": "personnel_reuse_check" in result_keys,
         },
     }
 
@@ -2879,9 +2764,6 @@ def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] =
     _set_word_run_fonts(run)
 
 
-def _add_centered_title(document: Document, text: str, *, level: int = 0) -> None:
-    paragraph = document.add_heading(str(text or ""), level=level)
-    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
 def _add_header_text(
@@ -3713,20 +3595,6 @@ def _section_total_rows(company_groups: list[tuple[str, list[list[str]]]]) -> in
     return sum(len(rows) for _label, rows in company_groups)
 
 
-def _flatten_report_issue_sections(
-    sections: list[tuple[str, str, list[tuple[str, list[list[str]]]]]],
-) -> list[list[str]]:
-    rows: list[list[str]] = []
-    for _key, _label, company_groups in sections:
-        for _company_label, section_rows in company_groups:
-            rows.extend(section_rows)
-    return _dedupe_report_issue_rows(rows)
-
-
-def _collect_report_issue_rows(result_payload: dict[str, Any]) -> list[list[str]]:
-    return _flatten_report_issue_sections(_collect_report_issue_sections(result_payload))
-
-
 def _load_payload_by_identifier(db_service: PostgreSQLService, identifier_id: Any) -> dict[str, Any] | None:
     """按文档标识加载 OCR JSON（含 layout_sections/logical_tables）。"""
     doc_id = str(identifier_id or "").strip()
@@ -4245,7 +4113,7 @@ async def _export_result_word_report(
     db_service: PostgreSQLService,
     oss_service: MinioService,
 ) -> dict[str, Any]:
-    project_detail = db_service.get_project_detail(project_identifier_id)
+    project_detail = await run_in_threadpool(db_service.get_project_detail, project_identifier_id)
     if not project_detail:
         raise ValueError(f"项目不存在：{project_identifier_id}")
     project = project_detail.get("project") or {}
@@ -4277,7 +4145,8 @@ async def _export_result_word_report(
 
 # 项目 CRUD
 @router.post("/projects", summary="创建项目")
-async def create_project(
+@bounded_sync
+def create_project(
     payload: ProjectCreateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -4319,7 +4188,8 @@ async def list_projects(
             offset=resolved_offset,
             keyword=keyword,
         )
-        return _cache_get_or_set_payload(
+        return await run_in_threadpool(
+            _cache_get_or_set_payload,
             cache_service=cache_service,
             cache_key=cache_key,
             ttl_seconds=settings.XTJS_CACHE_PROJECT_LIST_TTL_SECONDS,
@@ -4335,7 +4205,8 @@ async def list_projects(
 
 
 @router.post("/projects/batch-delete", summary="批量删除项目")
-async def batch_delete_projects(
+@bounded_sync
+def batch_delete_projects(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -4374,7 +4245,8 @@ async def get_project_detail(
                 raise HTTPException(status_code=404, detail="项目不存在")
             return detail
 
-        return _cache_get_or_set_payload(
+        return await run_in_threadpool(
+            _cache_get_or_set_payload,
             cache_service=cache_service,
             cache_key=cache_key,
             ttl_seconds=settings.XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS,
@@ -4388,7 +4260,8 @@ async def get_project_detail(
 
 
 @router.put("/projects/{identifier_id}", summary="更新项目名称")
-async def update_project(
+@bounded_sync
+def update_project(
     identifier_id: str,
     payload: ProjectUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -4415,7 +4288,8 @@ async def update_project(
 
 
 @router.delete("/projects/{identifier_id}", summary="删除项目")
-async def delete_project(
+@bounded_sync
+def delete_project(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -4441,7 +4315,8 @@ async def delete_project(
 
 # 项目分析结果
 @router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
-async def get_project_results(
+@bounded_sync
+def get_project_results(
     identifier_id: str,
     response: Response,
     view: Literal["display", "raw"] = Query(
@@ -4456,6 +4331,10 @@ async def get_project_results(
 ):
     """获取项目的分析结果，支持展示视图和原始视图，可附加返回原始数据。"""
     try:
+        project = db_service.get_project_by_identifier(identifier_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="project not found")
+        db_service.observe_input_revision(project["identifier_id"], project.get("input_revision", 0))
         cache_key = cache_service.project_results_key(
             identifier_id,
             view=view,
@@ -4463,11 +4342,10 @@ async def get_project_results(
             include_result_record=include_result_record,
         )
 
-        def _load_results():
-            project = db_service.get_project_by_identifier(identifier_id)
-            if not project:
-                raise HTTPException(status_code=404, detail="project not found")
+        # A delayed old cache fill must never become the current input's result.
+        cache_key = f"{cache_key}:input:{project.get('input_revision', 0)}"
 
+        def _load_results():
             result_record = db_service.get_project_result(identifier_id)
             refreshed_record = result_record or {}
             raw_results = raw_result_view((result_record or {}).get("result") or {})
@@ -4489,6 +4367,8 @@ async def get_project_results(
                 "project": project,
                 "view": view,
                 "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+                "results_stale": bool((result_record or {}).get("results_stale")),
+                "input_revision": project.get("input_revision", 0),
                 "results": selected_results,
                 "available_result_keys": selected_result_keys,
             }
@@ -4518,7 +4398,8 @@ async def get_project_results(
 
 
 @router.get("/projects/{identifier_id}/results/{result_key}", summary="查询项目单项分析结果")
-async def get_project_result_item(
+@bounded_sync
+def get_project_result_item(
     identifier_id: str,
     result_key: str,
     view: Literal["display", "raw"] = Query(default="display"),
@@ -4545,6 +4426,8 @@ async def get_project_result_item(
 
         payload = {
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+                "results_stale": bool((result_record or {}).get("results_stale")),
+                "input_revision": project.get("input_revision", 0),
             "project": project,
             "result_key": result_key,
             "view": view,
@@ -4561,7 +4444,8 @@ async def get_project_result_item(
 
 
 @router.get("/projects/{identifier_id}/merged-results", summary="查询项目查重合并结果")
-async def get_project_merged_results(
+@bounded_sync
+def get_project_merged_results(
     identifier_id: str,
     result_key: Optional[str] = Query(default=None),
     include_result_record: bool = Query(default=False),
@@ -4595,6 +4479,8 @@ async def get_project_merged_results(
         payload = {
             "project": project,
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
+                "results_stale": bool((result_record or {}).get("results_stale")),
+                "input_revision": project.get("input_revision", 0),
             "results": merged_results,
             "available_result_keys": merged_result_keys,
         }
@@ -4608,7 +4494,8 @@ async def get_project_merged_results(
 
 
 @router.get("/projects/{identifier_id}/visualization-data", summary="查询项目可视化聚合数据")
-async def get_project_visualization_data(
+@bounded_sync
+def get_project_visualization_data(
     identifier_id: str,
     include_document_content: bool = Query(default=False),
     include_raw_results: bool = Query(default=False),
@@ -4639,7 +4526,8 @@ async def get_project_visualization_data(
 
 # 全局结果管理（不限定项目）
 @router.get("/results", summary="查询结果表列表")
-async def list_results(
+@bounded_sync
+def list_results(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
@@ -4665,7 +4553,8 @@ async def list_results(
 
 
 @router.post("/results", summary="创建或覆盖项目结果")
-async def create_or_replace_result(
+@bounded_sync
+def create_or_replace_result(
     payload: ProjectResultUpsertRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -4685,7 +4574,8 @@ async def create_or_replace_result(
 
 
 @router.get("/results/{project_identifier_id}", summary="查询单个项目结果")
-async def get_result_record(
+@bounded_sync
+def get_result_record(
     project_identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
@@ -4702,7 +4592,8 @@ async def get_result_record(
 
 
 @router.put("/results/{project_identifier_id}", summary="更新单个项目结果")
-async def update_result_record(
+@bounded_sync
+def update_result_record(
     project_identifier_id: str,
     payload: ProjectResultUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -4731,6 +4622,13 @@ async def export_project_result_report(
     oss_service: MinioService = Depends(get_oss_service),
 ):
     """基于本次请求的展示结果生成 Word 报告，不持久化前端删减副本。"""
+    record = await run_in_threadpool(db_service.get_project_result, project_identifier_id)
+    if record and record.get("results_stale"):
+        raise ConsistencyConflict("材料已变更，旧结果不能作为当前报告导出")
+    project = await run_in_threadpool(db_service.get_project_by_identifier, project_identifier_id)
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    db_service.assert_input_revision(project["identifier_id"], project.get("input_revision", 0))
     operator_name = _report_operator_name(current_user)
     try:
         return await _export_result_word_report(
@@ -4772,7 +4670,8 @@ async def post_document_page_preview(
 
 
 @router.delete("/results/{project_identifier_id}", summary="删除单个项目结果")
-async def delete_result_record(
+@bounded_sync
+def delete_result_record(
     project_identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -4791,7 +4690,8 @@ async def delete_result_record(
 
 
 @router.post("/results/batch-delete", summary="批量删除项目结果")
-async def batch_delete_result_records(
+@bounded_sync
+def batch_delete_result_records(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -5415,7 +5315,8 @@ async def project_duplicate_check_legacy(
 
 # 文档与绑定关系管理
 @router.post("/projects/{identifier_id}/bind-documents", summary="绑定招标/商务标/技术标文件")
-async def bind_project_documents(
+@bounded_sync
+def bind_project_documents(
     identifier_id: str,
     payload: ProjectBindDocumentsRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -5438,7 +5339,8 @@ async def bind_project_documents(
 
 
 @router.get("/relations", summary="查询项目文件绑定列表")
-async def list_relations(
+@bounded_sync
+def list_relations(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
@@ -5466,7 +5368,8 @@ async def list_relations(
 
 
 @router.get("/relations/{relation_id}", summary="查询关联详情")
-async def get_relation_detail(
+@bounded_sync
+def get_relation_detail(
     relation_id: int,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
@@ -5483,7 +5386,8 @@ async def get_relation_detail(
 
 
 @router.put("/relations/{relation_id}", summary="更新关联")
-async def update_relation(
+@bounded_sync
+def update_relation(
     relation_id: int,
     payload: ProjectRelationUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -5510,14 +5414,16 @@ async def update_relation(
 
 
 @router.delete("/relations/{relation_id}", summary="删除关联")
-async def delete_relation(
+@bounded_sync
+def delete_relation(
     relation_id: int,
+    remove_expected_group: bool = Query(default=False),
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """删除一条文档绑定关系。"""
     try:
-        deleted = db_service.delete_relation(relation_id)
+        deleted = db_service.delete_relation(relation_id, remove_expected_group=remove_expected_group is True)
         if not deleted:
             raise HTTPException(status_code=404, detail="关联不存在")
         _invalidate_project_cache_or_error(cache_service)
@@ -5529,14 +5435,15 @@ async def delete_relation(
 
 
 @router.post("/relations/batch-delete", summary="批量删除关联")
-async def batch_delete_relations(
+@bounded_sync
+def batch_delete_relations(
     payload: RelationBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
 ):
     """批量删除绑定关系。"""
     try:
-        deleted_count = db_service.delete_relations(payload.relation_ids)
+        deleted_count = db_service.delete_relations(payload.relation_ids, remove_expected_group=payload.remove_expected_group)
         _invalidate_project_cache_or_error(cache_service)
         return {
             "requested_count": len(payload.relation_ids),
@@ -5579,7 +5486,8 @@ async def create_document(
 
 
 @router.get("/documents", summary="查询文档列表")
-async def list_documents(
+@bounded_sync
+def list_documents(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
@@ -5609,7 +5517,8 @@ async def list_documents(
 
 
 @router.post("/documents/batch-delete", summary="批量删除文档")
-async def batch_delete_documents(
+@bounded_sync
+def batch_delete_documents(
     payload: IdentifierBatchDeleteRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -5632,7 +5541,8 @@ async def batch_delete_documents(
 
 
 @router.get("/documents/{identifier_id}", summary="查询文档")
-async def get_document(
+@bounded_sync
+def get_document(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
@@ -5649,7 +5559,8 @@ async def get_document(
 
 
 @router.get("/documents/{identifier_id}/review-content", summary="查询文档人工识别工作副本")
-async def get_document_review_content(
+@bounded_sync
+def get_document_review_content(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
@@ -5665,7 +5576,8 @@ async def get_document_review_content(
 
 
 @router.put("/documents/{identifier_id}/review-content", summary="保存文档人工识别工作副本")
-async def update_document_review_content(
+@bounded_sync
+def update_document_review_content(
     identifier_id: str,
     payload: DocumentReviewContentUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -5691,7 +5603,8 @@ async def update_document_review_content(
 
 
 @router.put("/documents/{identifier_id}", summary="更新文档")
-async def update_document(
+@bounded_sync
+def update_document(
     identifier_id: str,
     payload: DocumentUpdateRequest,
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -5721,7 +5634,8 @@ async def update_document(
 
 
 @router.delete("/documents/{identifier_id}", summary="删除文档")
-async def delete_document(
+@bounded_sync
+def delete_document(
     identifier_id: str,
     db_service: PostgreSQLService = Depends(get_db_service),
     cache_service: RedisCacheService = Depends(get_cache_service),
@@ -5741,7 +5655,8 @@ async def delete_document(
 
 
 @router.get("/documents/{identifier_id}/source", summary="获取文档源文件")
-async def get_document_source(
+@bounded_sync
+def get_document_source(
     identifier_id: str,
     page: Optional[int] = Query(default=None, ge=1, description="可选页码，仅 PDF 源文件支持跳转"),
     db_service: PostgreSQLService = Depends(get_db_service),
@@ -5781,7 +5696,7 @@ async def _build_document_page_preview_response(
 ):
     """返回文档指定页的 base64 预览图，支持文本/区域高亮。结果会被缓存。"""
     try:
-        document = db_service.get_document_by_identifier(identifier_id)
+        document = await run_in_threadpool(db_service.get_document_by_identifier, identifier_id)
         if not document:
             raise HTTPException(status_code=404, detail="document not found")
 

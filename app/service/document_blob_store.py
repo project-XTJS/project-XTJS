@@ -10,14 +10,15 @@
   的历史行。读取统一走本模块，调用方无需感知数据落在 DB 还是 MinIO。
 
 派生数据（content）键放在 `JSON识别/content/` 前缀下，便于对象生命周期规则
-（短 TTL，可重建）。结果（result）键按项目维度放在 `<项目>/JSON识别/result.json.gz`，
-便于浏览。
+（短 TTL，可重建）。结果每次写入新的 `<项目>/JSON识别/result.<版本>.json.gz`，
+数据库提交后才切换对象键，避免保存失败破坏旧结果。
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 from app.service.minio_service import MinioService
 
@@ -31,6 +32,49 @@ REVIEW_OBJECT_PREFIX = "JSON识别/review"
 TENDER_REVIEW_OBJECT_PREFIX = "JSON识别/tender-review"
 
 _minio_singleton: Optional[MinioService] = None
+
+
+class BlobReadError(RuntimeError):
+    """A referenced object could not be read; callers must not treat it as empty."""
+
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_transaction_objects = ContextVar("xtjs_transaction_objects", default=None)
+
+@contextmanager
+def transaction_objects():
+    keys = []
+    token = _transaction_objects.set(keys)
+    try:
+        yield
+    except BaseException:
+        for key in keys:
+            logger.warning("blob_pending_reconciliation key=%s; confirm references before cleanup", key)
+        raise
+    finally:
+        _transaction_objects.reset(token)
+
+def _put_new_object(key, value):
+    keys = _transaction_objects.get()
+    if keys is not None:
+        keys.append(key)
+    # Outside a SQL scope (independent tender review), retain a log for reference reconciliation.
+    else:
+        logger.info("blob_version_created key=%s; reference commit follows", key)
+    _client().put_json_gz(key, value)
+
+
+def _read_required_json(key: str):
+    try:
+        blob = _client().get_json_gz(key)
+        if not isinstance(blob, dict):
+            raise ValueError("Referenced JSON object is missing or invalid")
+        return blob
+    except Exception as exc:
+        logger.warning("读取已保存对象失败 key=%s type=%s", key, type(exc).__name__)
+        raise BlobReadError("已保存内容暂时无法读取，本次操作未继续，请稍后重试") from exc
 
 
 def _client() -> MinioService:
@@ -118,36 +162,26 @@ def save_document_content(
     file_name: Any = None,
 ) -> str:
     """把文档识别内容写入 MinIO，返回对象键。失败抛异常由调用方处理。"""
-    key = build_content_object_key(identifier_id, file_name)
-    _client().put_json_gz(key, content)
+    key = build_content_object_key(identifier_id, file_name).removesuffix(".json.gz") + f".{uuid4().hex}.json.gz"
+    _put_new_object(key, content)
     return key
 
 
 def read_blob(object_key: Any) -> Any:
-    """按对象键直接从 MinIO 取回 JSON；缺键/缺对象/失败均返回 None。"""
+    """缺键返回 None；已引用的对象无法读取时明确失败，避免误当空内容。"""
     key = _non_empty_str(object_key)
     if not key:
         return None
-    try:
-        return _client().get_json_gz(key)
-    except Exception:  # noqa: BLE001
-        logger.warning("read_blob 失败 key=%s", key, exc_info=True)
-        return None
+    return _read_required_json(key)
 
 
 def get_document_content(document: Optional[Dict[str, Any]]) -> Any:
-    """返回文档识别内容：优先对象键 → MinIO；缺键/缺对象回退 DB `content`。"""
+    """优先读取已引用的对象；仅没有对象键时兼容 DB 内联 `content`。"""
     if not isinstance(document, dict):
         return None
     key = _non_empty_str(document.get("content_object_key"))
     if key:
-        try:
-            blob = _client().get_json_gz(key)
-        except Exception:  # noqa: BLE001 - 读对象失败回退 DB，保证可用性
-            logger.warning("读取 content 对象失败，回退数据库内联 JSON key=%s", key, exc_info=True)
-            blob = None
-        if blob is not None:
-            return blob
+        return _read_required_json(key)
     return document.get("content")
 
 
@@ -161,13 +195,7 @@ def hydrate_document_content(document: Optional[Dict[str, Any]]) -> Optional[Dic
     if not _is_present_json(document.get("content")):
         key = _non_empty_str(document.get("content_object_key"))
         if key:
-            try:
-                blob = _client().get_json_gz(key)
-            except Exception:  # noqa: BLE001
-                logger.warning("hydrate content 失败 key=%s", key, exc_info=True)
-                blob = None
-            if blob is not None:
-                document["content"] = blob
+            document["content"] = _read_required_json(key)
     return document
 
 
@@ -182,8 +210,8 @@ def save_document_review_content(
     file_name: Any = None,
 ) -> str:
     """把人工复核工作副本写入 MinIO，返回对象键。"""
-    key = build_review_content_object_key(identifier_id, file_name)
-    _client().put_json_gz(key, review_content)
+    key = build_review_content_object_key(identifier_id, file_name).removesuffix(".json.gz") + f".{uuid4().hex}.json.gz"
+    _put_new_object(key, review_content)
     return key
 
 
@@ -224,7 +252,9 @@ def save_project_result(
 ) -> str:
     """把项目分析结果写入 MinIO，返回对象键。"""
     key = build_result_object_key(project_name, project_identifier_id)
-    _client().put_json_gz(key, result)
+    # Immutable versions: SQL rollback must leave the previously referenced object intact.
+    key = key.removesuffix(".json.gz") + f".{uuid4().hex}.json.gz"
+    _put_new_object(key, result)
     return key
 
 
@@ -234,13 +264,7 @@ def get_result_payload(record: Optional[Dict[str, Any]]) -> Any:
         return None
     key = _non_empty_str(record.get("result_object_key"))
     if key:
-        try:
-            blob = _client().get_json_gz(key)
-        except Exception:  # noqa: BLE001
-            logger.warning("读取 result 对象失败，回退数据库内联 JSON key=%s", key, exc_info=True)
-            blob = None
-        if blob is not None:
-            return blob
+        return _read_required_json(key)
     return record.get("result")
 
 
@@ -251,13 +275,7 @@ def hydrate_result_record(record: Optional[Dict[str, Any]]) -> Optional[Dict[str
     if not _is_present_json(record.get("result")):
         key = _non_empty_str(record.get("result_object_key"))
         if key:
-            try:
-                blob = _client().get_json_gz(key)
-            except Exception:  # noqa: BLE001
-                logger.warning("hydrate result 失败 key=%s", key, exc_info=True)
-                blob = None
-            if blob is not None:
-                record["result"] = blob
+            record["result"] = _read_required_json(key)
     return record
 
 
@@ -272,8 +290,8 @@ def save_tender_review_result(
     file_name: Any = None,
 ) -> str:
     """保存独立招标文件审查结果并返回对象键。"""
-    key = build_tender_review_result_object_key(review_identifier_id, file_name)
-    _client().put_json_gz(key, result)
+    key = build_tender_review_result_object_key(review_identifier_id, file_name).removesuffix(".json.gz") + f".{uuid4().hex}.json.gz"
+    _put_new_object(key, result)
     return key
 
 

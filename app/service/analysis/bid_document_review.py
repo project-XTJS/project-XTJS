@@ -1870,8 +1870,6 @@ class BidDocumentReviewService:
         )
         return any(self._compact(value) in whitelist for value in source_values)
 
-    def _normalize_typo_equivalence(self, value: Any) -> str:
-        return self._compact(value)
 
     def _is_case_only_letter_change(self, matched_text: str, suggestion: str) -> bool:
         matched = str(matched_text or "").strip()
@@ -2605,9 +2603,6 @@ class BidDocumentReviewService:
                 return self._normalize_role(role)
         return ""
 
-    def _personnel_entry_priority(self, entry: dict[str, Any]) -> int:
-        source_type = str(entry.get("source_type") or "").strip()
-        return int(self.PERSONNEL_SOURCE_PRIORITY.get(source_type, 0))
 
     def _personnel_entry_display_priority(self, entry: dict[str, Any]) -> int:
         source_type = str(entry.get("source_type") or "").strip()
@@ -2878,8 +2873,3 @@ class BidDocumentReviewService:
                 bottom = int(round(max(ys)))
                 return [left, top, max(right - left, 0), max(bottom - top, 0)]
         return None
-
-    def _bbox_top(self, bbox: Any) -> int:
-        """获取 bbox 的顶部 y 坐标，用于排序。"""
-        normalized = self._normalize_bbox(bbox)
-        return normalized[1] if normalized else 0

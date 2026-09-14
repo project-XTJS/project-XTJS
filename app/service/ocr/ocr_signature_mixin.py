@@ -74,33 +74,6 @@ class OCRSignatureMixin:
             if best_score is None or score < best_score: best_score, best_text = score, candidate_text
         return best_text or raw_text
 
-    def _merge_signature_into_anchor(self, signature_section: dict[str, Any], page_sections: list[dict[str, Any]]) -> None:
-        """将独立游离的签名文本段落合并到附近的“法定代表人”等锚点段落尾部。"""
-        signature_text = self._normalize_section_text(signature_section.get("text") or "")
-        if not signature_text: return
-        signature_bbox = self._bbox_to_xywh(signature_section.get("bbox"))
-        signature_page = int(signature_section.get("page", 0) or 0)
-        best_anchor, best_score = None, None
-        for section in page_sections:
-            if section is signature_section or int(section.get("page", 0) or 0) != signature_page or str(section.get("type") or "").strip().lower() not in {"heading", "text"}: continue
-            anchor_text = self._normalize_section_text(section.get("text") or "")
-            if not self._is_signature_anchor_text(anchor_text): continue
-            anchor_bbox = self._bbox_to_xywh(section.get("bbox"))
-            if signature_bbox is not None and anchor_bbox is not None and not self._boxes_are_close(anchor_bbox, signature_bbox, max_dx=420, max_dy=180): continue
-            score = self._bbox_distance(anchor_bbox, signature_bbox)
-            if best_score is None or score < best_score: best_score, best_anchor = score, section
-        if best_anchor is None: return
-        
-        anchor_text = self._normalize_section_text(best_anchor.get("text") or "")
-        if re.sub(r"\s+", "", signature_text) in re.sub(r"\s+", "", anchor_text):
-            signature_section["_merged"] = True
-            return
-            
-        merged_text = re.sub(r"[_＿]{2,}$", "", anchor_text).rstrip()
-        if re.search(r"[：:]\s*$", merged_text): merged_text = f"{merged_text}{signature_text}"
-        elif any(token in merged_text for token in self.SIGNATURE_ANCHOR_TOKENS): merged_text = f"{merged_text.rstrip('：: ')}：{signature_text}"
-        else: return
-        best_anchor["text"], signature_section["_merged"] = merged_text, True
 
     def _is_signature_placeholder_text(self, text: Any) -> bool:
         normalized = self._normalize_section_text(text)

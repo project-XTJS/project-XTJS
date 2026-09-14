@@ -1,9 +1,9 @@
 from __future__ import annotations
+from . import bidder_identity
 
 import json
 import re
 from datetime import date
-from difflib import SequenceMatcher
 from typing import Any
 
 from .attachment_synonyms import (
@@ -32,7 +32,6 @@ class VerificationChecker:
     DATE_FIELD_ANCHORS = ("日期", "填写日期", "签署日期", "落款日期", "签订日期")
     COMPANY_ANCHORS = ("投标人名称", "投标人", "供应商名称", "供应商", "单位名称", "公司名称", "企业名称", "声明人")
     OPTIONAL_MARKERS = ("如有", "可选", "如适用", "如需")
-    BIDDER_NAME_NOISE_MARKERS = ("可另外再附", "可另附", "可后附", "公司简介", "如有", "详见后附")
     EXCLUDE_ATTACHMENTS = ("拟派项目负责人情况表", "项目人员配置表", "人员配置表")
     ATTACHMENT_SCOPE_STOP_MARKERS = (
         "营业执照",
@@ -177,6 +176,7 @@ class VerificationChecker:
         signature_bundle = self._signature_bundle(bid)
         bidder_name = self._bidder_name(bid, seal_bundle["texts"])
         deadline = self._deadline_from_doc(tender)
+        deadline_resolution = self.resolve_deadline(tender)
         template_required = self._required_attachments(tender)
         expected_attachments = self._attachment_title_hints(template_required)
         bid_sections = self._attachment_sections(bid, seal_bundle["locations"], signature_bundle["locations"], expected_attachments)
@@ -188,11 +188,20 @@ class VerificationChecker:
             bid_by_no.setdefault(attachment_number, []).append(item)
         required = self._required_attachments(tender, bid_by_no, bid_sections)
 
-        results, missing_attachment_results, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], [], []
+        results, missing_attachment_results, skipped_missing_attachments, skipped_optional_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], [], [], []
         for item in required:
             section = self._match_attachment(item, bid_by_no, bid_sections)
             result = self._evaluate_attachment(item, section, deadline, bidder_name)
+            result["date_check"]["deadline_resolution"] = deadline_resolution
+            if deadline is None:
+                result["date_check"]["deadline_locations"] = deadline_resolution["locations"]
             if not result["found"]:
+                if item.get('requirements', {}).get('optionality_conflict'):
+                    results.append(result)
+                    continue
+                if bool(item.get("requirements", {}).get("is_optional")):
+                    skipped_optional_attachments.append(result["title"])
+                    continue
                 skipped_missing_attachments.append(result["title"])
                 missing_attachment_results.append(result)
                 continue
@@ -228,6 +237,7 @@ class VerificationChecker:
         position_status = "missing" if skipped_missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
         deadline_locations = deadline.get("locations") if isinstance(deadline, dict) else []
         return {
+            "deadline_resolution": deadline_resolution,
             "mode": "tender_vs_bid",
             "summary": self._pair_summary(required_count, deadline, compliance_status, skipped_missing_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates),
             "seal_detected": seal_bundle["detected"],
@@ -237,10 +247,12 @@ class VerificationChecker:
             "signature_count": signature_bundle["count"],
             "signature_contents": signature_bundle["texts"],
             "bidder_name": bidder_name,
+            "bidder_identity": self._bidder_identity(bid),
             "required_attachment_count": len(required),
             "checked_attachment_count": checked_count,
             "required_attachments": [x["title"] for x in required],
             "skipped_missing_attachments": skipped_missing_attachments,
+            "skipped_optional_attachments": skipped_optional_attachments,
             "missing_attachment_results": missing_attachment_results,
             "attachment_results": results,
             "position_check": {"status": position_status, "missing_attachments": skipped_missing_attachments, "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
@@ -260,6 +272,7 @@ class VerificationChecker:
         has_signature = bool(signatures or signature_bundle["detected"])
         signature_status = "pass" if has_signature else ("pending" if seal_bundle["detected"] and sign_date else "missing")
         has_missing = not text or not seal_bundle["detected"] or not has_signature or not sign_date
+        seal_company_check = self._seal_company_check(self._bidder_name(document, seal_bundle["texts"]), seal_bundle["texts"])
         return {
             "mode": "single_document",
             "summary": "仅基于单文档全文做兜底扫描，未执行招投标附件级联校验。",
@@ -270,14 +283,15 @@ class VerificationChecker:
             "signature_count": max(len(signatures), signature_bundle["count"]),
             "signature_contents": signature_bundle["texts"] or list(dict.fromkeys([x.get("value") for x in signatures if isinstance(x, dict) and x.get("value")])),
             "bidder_name": self._bidder_name(document, seal_bundle["texts"]),
+            "bidder_identity": self._bidder_identity(document),
             "required_attachment_count": 0,
             "required_attachments": [],
             "attachment_results": [],
             "position_check": {"status": signature_status if seal_bundle["detected"] or signature_status != "missing" else "missing", "missing_attachments": [], "missing_signature_attachments": [] if has_signature or signature_status == "pending" else ["全文未识别到有效签字内容或签字区域"], "pending_signature_attachments": ["全文识别到签字位或签字区域，但未回填出稳定签名文本，建议人工复核"] if signature_status == "pending" else [], "missing_seal_attachments": [] if seal_bundle["detected"] else ["全文未识别到有效盖章"]},
             "date_check": {"status": "pass" if sign_date else "missing_date", "deadline_date": None, "matched_deadline_text": None, "missing_date_attachments": [] if sign_date else ["全文未识别到落款日期"], "late_date_attachments": []},
             "deadline_check": {"status": "not_applicable", "deadline_date": None, "matched_deadline_text": None, "source": None},
-            "seal_company_check": self._seal_company_check(self._bidder_name(document, seal_bundle["texts"]), seal_bundle["texts"]),
-            "compliance_status": "pass" if not has_missing else ("pending" if text and seal_bundle["detected"] and sign_date else "missing"),
+            "seal_company_check": seal_company_check,
+            "compliance_status": seal_company_check["status"] if not has_missing else ("pending" if text and seal_bundle["detected"] and sign_date else "missing"),
         }
 
     def _pair_summary(self, count: int, deadline: dict | None, status: str, missing_attachments: list[str], missing_signatures: list[str], pending_signatures: list[str], missing_seals: list[str], missing_dates: list[str], late_dates: list[str]) -> str:
@@ -507,45 +521,17 @@ class VerificationChecker:
             return False
         return any(marker in compact for marker in self.DATE_CONTEXT_EXCLUDE_MARKERS)
 
+    def resolve_deadline(self, payload: dict | None) -> dict:
+        from .verification_evidence import resolve_deadline
+        return resolve_deadline(self, payload)
+
     def _deadline_from_doc(self, payload: dict | None) -> dict | None:
-        candidates = []
-        sections = self._sections(payload)
-        anchors = sorted(((a, self._compact(a)) for a in self.DEADLINE_ANCHORS), key=lambda x: len(x[1]), reverse=True)
-        for sec_index, section in enumerate(sections):
-            if section["type"] == "seal" or self._catalog_like(section["text"]):
-                continue
-            lines = self._lines(section["text"]) or [section["text"]]
-            for line_index, line in enumerate(lines):
-                compact_line = self._compact(line)
-                if not compact_line:
-                    continue
-                for anchor_text, anchor in anchors:
-                    start = 0
-                    while True:
-                        pos = compact_line.find(anchor, start)
-                        if pos < 0:
-                            break
-                        window = compact_line[pos:pos + 72]
-                        local_dates = self._date_candidates(window)
-                        if local_dates:
-                            nearest = min(local_dates, key=lambda x: x["start"])
-                            location = {
-                                "page": section.get("page"),
-                                "bbox": section.get("bbox"),
-                                "text": line or section.get("text") or window[:72],
-                                "document": "tender",
-                                "document_role": "tender",
-                            }
-                            if section.get("coordinate_system"):
-                                location["coordinate_system"] = section.get("coordinate_system")
-                            is_primary_anchor = any(marker in anchor_text for marker in self.DEADLINE_PRIMARY_ANCHOR_MARKERS)
-                            candidates.append({"date": nearest["date"], "text": window[:72], "page": section.get("page"), "section_index": sec_index, "line_index": line_index, "distance": nearest["start"], "anchor": anchor_text, "primary_anchor": is_primary_anchor, "locations": [location]})
-                        start = pos + len(anchor)
-        if not candidates:
+        resolution = self.resolve_deadline(payload)
+        selected = resolution.get("selected")
+        if selected is None:
             return None
-        primary_candidates = [item for item in candidates if item.get("primary_anchor")]
-        scoped_candidates = primary_candidates or candidates
-        return min(scoped_candidates, key=lambda x: (x["date"], x["page"] if x["page"] is not None else 10**9, x["section_index"], x["line_index"], x["distance"]))
+        return {**selected, "date": date.fromisoformat(selected["date"]),
+                "locations": resolution["locations"], "resolution_evidence": resolution}
 
     def _catalog_like(self, text: str) -> bool:
         compact = self._compact(text)
@@ -677,7 +663,6 @@ class VerificationChecker:
             from app.service.analysis.compliance.structured_consistency import lexical_similarity
 
             best, best_score = None, 0.0
-            target = self._strip_attachment_title_prefix(self._attachment_title(text))
             for item in expected_attachments or []:
                 expected_title = str(item.get("title") or item.get("title_key") or "")
                 if not expected_title:
@@ -856,8 +841,23 @@ class VerificationChecker:
         current_key = self._attachment_title_key(current_title)
         current_number = self._attachment_number(current_title)
         attachment_number = self._attachment_number(text)
+        current_expected = self._expected_attachment(current_title, expected_attachments)
+        candidate_expected = self._expected_attachment(text, expected_attachments)
+        if current_expected is not None and candidate_expected is not None:
+            current_identity = (
+                current_expected.get("attachment_number")
+                or current_expected.get("title_key")
+            )
+            candidate_identity = (
+                candidate_expected.get("attachment_number")
+                or candidate_expected.get("title_key")
+            )
+            # “章节说明标题 + 正式表单标题”可能措辞不同，但只要都明确指向
+            # 同一招标附件，就仍属于当前附件，不能在正式标题处截断。
+            if current_identity and current_identity == candidate_identity:
+                return False
         if attachment_number is not None:
-            matched_expected = self._expected_attachment(text, expected_attachments)
+            matched_expected = candidate_expected
             if matched_expected is None:
                 return True
             matched_number = matched_expected.get("attachment_number")
@@ -868,6 +868,10 @@ class VerificationChecker:
                 return False
             return True
 
+        # A continued deviation row may mention an invoice/payment. It is still
+        # table content, not a new invoice attachment that terminates this form.
+        if '偏离表' in current_title and section.get('type') == 'table':
+            return False
         if not self._is_page_title_like(section):
             return False
 
@@ -1069,6 +1073,9 @@ class VerificationChecker:
             title = self._attachment_title(item.get("title"))
             text = "\n".join(item.get("content") or [])
             template_req = self._requirements(title, text)
+            template_req['optionality_conflict'] = bool(item.get('optionality_conflict'))
+            template_req['optionality_locations'] = list(item.get('optionality_locations') or [])
+            template_req['is_optional'] = (template_req['is_optional'] or bool(item.get('is_optional'))) and not template_req['optionality_conflict']
             attachment_number = self._attachment_number(title)
             key = attachment_number or title
             if key in seen:
@@ -1249,7 +1256,9 @@ class VerificationChecker:
         seal_check = self._seal_check(attachment, bid_section, bidder_name)
         date_check = self._date_check(attachment, bid_section, deadline)
         signature_check = self._signature_check(attachment, bid_section, seal_check, date_check)
-        if bid_section is None:
+        if attachment.get('requirements', {}).get('optionality_conflict'):
+            status = 'pending'
+        elif bid_section is None:
             status = "missing"
         elif any(x["status"] in {"fail", "late"} for x in (signature_check, seal_check, date_check)):
             status = "fail"
@@ -1301,29 +1310,6 @@ class VerificationChecker:
                 break
         return self._dedupe_locations(locations)
 
-    def _optional_signature_filled_values(self, bid_section: dict) -> list[dict]:
-        """招标模板未要求签字时，仍在投标件附件上扫描签字证据，按 filled_values 形态返回。"""
-        values: list[dict] = []
-        signature_texts = [str(t).strip() for t in (bid_section.get("signature_texts") or []) if str(t).strip()]
-        for loc in self._dedupe_locations(bid_section.get("signature_locations") or []):
-            values.append({
-                "line": "",
-                "page": loc.get("page"),
-                "mode": "ocr_signature_region",
-                "value": self._signature_placeholder_text(),
-                "signature_page": loc.get("page"),
-                "signature_box": loc.get("box"),
-                "signature_text": signature_texts[0] if signature_texts else None,
-            })
-        if not values and signature_texts:
-            values.append({
-                "line": "",
-                "page": None,
-                "mode": "text_inline",
-                "value": signature_texts[0],
-                "signature_text": signature_texts[0],
-            })
-        return values
 
     def _signature_check(self, attachment: dict, bid_section: dict | None, seal_check: dict, date_check: dict) -> dict:
         required = int(attachment["requirements"].get("signature_field_count") or 0)
@@ -1613,22 +1599,6 @@ class VerificationChecker:
             return None
         return value if re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", value) or re.fullmatch(r"[A-Za-z]{2,20}", value) else None
 
-    def _extract_person_name_candidates(self, bid_section: dict) -> list[str]:
-        names: list[str] = []
-        patterns = (
-            r"[\(（]\s*([一-龥]{2,4})\s*[、,，/]",
-            r"(?:法定代表人|授权代表|授权委托人|委托代理人|被授权人)[：:\s]{0,4}([一-龥]{2,4})",
-        )
-        for line in self._lines(bid_section.get("text") or ""):
-            compact = self._compact(line)
-            if "公司" in compact:
-                continue
-            for pattern in patterns:
-                for match in re.finditer(pattern, line):
-                    person = self._normalize_person_name(match.group(1))
-                    if person:
-                        names.append(person)
-        return list(dict.fromkeys(names))
 
     def _is_company_like_seal_text(self, text: str) -> bool:
         compact = self._compact(text)
@@ -1745,17 +1715,16 @@ class VerificationChecker:
         seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
         textual_seals = self._textual_seal_evidences(bid_section, bidder_name)
         detected = bool(raw_seal_texts or seal_locations)
-        only_personal_seal_text = bool(raw_seal_texts) and not seal_texts
-        matched = bool(seal_texts or (seal_locations and not only_personal_seal_text))
+        matched = False
         best_match = None
         if bidder_name and seal_texts:
             for seal_text in seal_texts:
                 score = self._company_score(bidder_name, seal_text)
                 if best_match is None or score > best_match["score"]:
                     best_match = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
-            matched = bool(best_match and best_match["score"] >= 0.45)
+            matched = bool(best_match and best_match["score"] == 1.0)
         return {
-            "status": "pass" if detected and matched else ("fail" if detected else "missing"),
+            "status": "pass" if detected and matched else ("pending" if detected else "missing"),
             "detected": detected,
             "matched": matched,
             "seal_texts": seal_texts,
@@ -1792,7 +1761,7 @@ class VerificationChecker:
             sign_date = None
             date_match_method = None
         if deadline is None:
-            return {"status": "missing_deadline", "sign_date": None, "deadline_date": None, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": None, "matched_deadline_page": None, "deadline_locations": []}
+            return {"status": "missing_deadline", "sign_date": sign_date["date"].isoformat() if sign_date else None, "deadline_date": None, "matched_sign_text": sign_date["text"] if sign_date else None, "matched_sign_page": sign_date.get("page") if sign_date else None, "matched_deadline_text": None, "matched_deadline_page": None, "deadline_locations": [], "match_method": date_match_method}
         if sign_date is None:
             return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations}
         ok = sign_date["date"] <= deadline["date"]
@@ -1912,88 +1881,21 @@ class VerificationChecker:
         return values
 
     def _normalize_company(self, text: str) -> str:
-        text = re.sub(r"（.*?）|\(.*?\)", "", str(text or ""))
-        text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fa5]", "", text)
-        for anchor in self.COMPANY_ANCHORS:
-            text = text.replace(anchor, "")
-        return text
+        return bidder_identity.comparison_key(text)
 
-    def _looks_like_placeholder_bidder_name(self, text: str) -> bool:
-        compact = self._compact(text)
-        if not compact:
-            return True
-        return any(marker in compact for marker in self.BIDDER_NAME_NOISE_MARKERS)
 
-    def _best_company_candidate(self, candidates: list[str], seal_texts: list[str]) -> str | None:
-        deduped = [candidate for candidate in dict.fromkeys(candidates) if candidate]
-        if not deduped:
-            return None
-        if not seal_texts:
-            return deduped[0]
-        best_candidate = None
-        best_score = -1.0
-        for candidate in deduped:
-            score = max(self._company_score(candidate, seal_text) for seal_text in seal_texts)
-            if score > best_score:
-                best_score = score
-                best_candidate = candidate
-        if best_candidate and best_score >= 0.45:
-            return best_candidate
-        return deduped[0]
 
     def _extract_company_candidate(self, text: str) -> str | None:
-        compact = self._compact(text)
-        match = self.COMPANY_RE.search(compact)
-        if match:
-            candidate = self._normalize_company(match.group(1))
-            if candidate:
-                return candidate
-        normalized_text = self._normalize_company(text)
-        if len(normalized_text) >= 4 and normalized_text.endswith(
-            ("有限责任公司", "股份有限公司", "集团有限公司", "有限公司", "公司")
-        ):
-            return normalized_text
-        return None
+        return bidder_identity.name_value(text)
+
+    def _bidder_identity(self, payload: dict | None) -> dict:
+        return bidder_identity.identify(self._container(payload), self._sections(payload))
 
     def _bidder_name(self, payload: dict | None, seal_texts: list[str]) -> str | None:
-        container = self._container(payload)
-        fallback = None
-        for key in ("bidder_name", "company_name", "supplier_name"):
-            value = container.get(key)
-            if isinstance(value, str) and value.strip():
-                normalized = self._normalize_company(value)
-                if len(normalized) >= 4 and not self._looks_like_placeholder_bidder_name(normalized):
-                    fallback = normalized
-                    break
-        section_candidates: list[str] = []
-        for section in self._sections(payload):
-            compact = self._compact(section["text"])
-            for anchor in self.COMPANY_ANCHORS:
-                if anchor in compact:
-                    candidate = self._extract_company_candidate(compact.split(anchor, 1)[-1])
-                    if candidate and not self._looks_like_placeholder_bidder_name(candidate):
-                        section_candidates.append(candidate)
-        best_section_candidate = self._best_company_candidate(section_candidates, seal_texts)
-        if best_section_candidate:
-            return best_section_candidate
-        seal_candidates: list[str] = []
-        for seal_text in seal_texts:
-            candidate = self._extract_company_candidate(seal_text)
-            if candidate and not self._looks_like_placeholder_bidder_name(candidate):
-                seal_candidates.append(candidate)
-        best_seal_candidate = self._best_company_candidate(seal_candidates, seal_texts)
-        if best_seal_candidate:
-            return best_seal_candidate
-        return fallback
+        return self._bidder_identity(payload)["name"]
 
     def _company_score(self, bidder_name: str, seal_text: str) -> float:
-        bidder, seal = self._normalize_company(bidder_name), self._normalize_company(seal_text)
-        if not bidder or not seal:
-            return 0.0
-        bonus = 0.35 if bidder in seal or seal in bidder else 0.0
-        ratio = SequenceMatcher(None, bidder, seal).ratio()
-        overlap = len(set(bidder) & set(seal)) / max(len(set(bidder)), 1)
-        return min(max(ratio, overlap) + bonus, 1.0)
+        return bidder_identity.company_score(bidder_name, seal_text)
 
     def _seal_company_check(self, bidder_name: str | None, seal_texts: list[str]) -> dict:
         if not seal_texts:
@@ -2005,8 +1907,8 @@ class VerificationChecker:
             score = self._company_score(bidder_name, seal_text)
             if best is None or score > best["score"]:
                 best = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
-        matched = bool(best and best["score"] >= 0.45)
-        return {"status": "pass" if matched else "fail", "matched": matched, "reason": "matched" if matched else "low_similarity", "best_match": best}
+        matched = bool(best and best["score"] == 1.0)
+        return {"status": "pass" if matched else "pending", "matched": matched, "reason": "matched" if matched else "identity_requires_confirmation", "best_match": best}
 
     def _textual_seal_evidences(self, bid_section: dict | None, bidder_name: str | None) -> list[dict]:
         if not isinstance(bid_section, dict):

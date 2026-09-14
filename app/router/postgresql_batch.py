@@ -1,3 +1,5 @@
+from contextlib import suppress
+from uuid import uuid4
 # -*- coding: utf-8 -*-
 """
 项目批量上传与手动 OCR 路由。
@@ -14,7 +16,7 @@ from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from psycopg2 import Error as PsycopgError
-from starlette.concurrency import run_in_threadpool
+from app.core.io_dispatch import run_io as run_in_threadpool
 
 from app.config.settings import settings
 from app.core.document_types import (
@@ -39,12 +41,12 @@ from app.service.analysis.unified import UnifiedBusinessReviewService
 from app.service.analysis.author_check import check_project_author_conflicts
 from app.service import ocr_progress_publisher
 from app.service.cache_service import CacheUnavailableError, RedisCacheService, invalidate_project_cache
-from app.service.analysis.duplicate_merge import build_duplicate_merge_results
 from app.service.document_ingest_service import (
     upload_and_create_document_without_ocr,
     recognize_existing_document,
 )
 from app.service.minio_service import MinioService
+from app.service.upload_manifest import make_upload_manifest
 from app.service.postgresql_service import PostgreSQLService
 from app.service.project_runtime import (
     ProjectTaskCancelledError,
@@ -543,7 +545,7 @@ async def _run_project_ocr_pipeline(
                 return
 
             payload = await run_in_threadpool(
-                db_service.get_project_documents_for_duplicate_check,
+                db_service.get_project_ocr_metadata,
                 identifier_id,
             )
             if not payload:
@@ -652,7 +654,7 @@ async def _run_project_ocr_pipeline(
             return
 
         payload = await run_in_threadpool(
-            db_service.get_project_documents_for_duplicate_check,
+            db_service.get_project_ocr_metadata,
             identifier_id,
         )
         if not payload:
@@ -771,6 +773,8 @@ async def _build_async_ocr_response(
     extra_response: Optional[dict] = None,
 ) -> dict:
     """统一处理单类文档 OCR 的排队响应。"""
+    if (payload.get("project") or {}).get("upload_complete") is False:
+        raise HTTPException(status_code=409, detail="项目材料上传或关联不完整，请先补齐失败文件")
     _invalidate_project_cache_or_error(identifier_id)
     refreshed_project = await run_in_threadpool(
         db_service.refresh_project_parsing_status,
@@ -845,6 +849,38 @@ def _bidder_company_label(business: UploadFile, technical: UploadFile) -> str:
 
 
 # 批量上传文件（不执行 OCR）
+async def _tracked_upload(*, project_identifier, slot, attempt_id=None, **kwargs):
+    db_service = kwargs["db_service"]
+    should_raise = kwargs.pop("raise_http_exception", True)
+    attempt_id = attempt_id or uuid4().hex
+    entry = await run_in_threadpool(db_service.claim_upload, project_identifier, slot, attempt_id)
+    if entry["status"] == "uploaded":
+        document = await run_in_threadpool(db_service.get_document_by_identifier, entry["document_id"])
+        return {"ok": True, "document": document, "document_summary": document, "upload": {}}
+    lease_id = entry["lease_id"]
+    async def renew():
+        while True:
+            await asyncio.sleep(30)
+            await run_in_threadpool(db_service.renew_upload, project_identifier, slot, lease_id)
+    heartbeat = asyncio.create_task(renew())
+    try:
+        result = await upload_and_create_document_without_ocr(**kwargs, raise_http_exception=False)
+        await run_in_threadpool(db_service.finish_upload, project_identifier, slot, lease_id,
+            document_id=(result.get("document") or {}).get("identifier_id") if result.get("ok") else None,
+            error=result.get("error"))
+    except Exception:
+        with suppress(Exception):
+            await run_in_threadpool(db_service.finish_upload, project_identifier, slot, lease_id, error="上传或入库失败，请重试")
+        raise
+    finally:
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await heartbeat
+    if not result.get("ok") and should_raise:
+        raise HTTPException(status_code=result.get("status_code", 500), detail=result.get("error", "文件上传失败"))
+    return result
+
+
 async def _upload_batch_documents_without_ocr(
     *,
     files: list[UploadFile],
@@ -854,6 +890,7 @@ async def _upload_batch_documents_without_ocr(
     db_service: PostgreSQLService,
     oss_service: MinioService,
     object_names: Optional[list[str]] = None,
+    project_identifier: Optional[str] = None,
 ) -> list[dict]:
     """批量上传文件至 MinIO 并创建文档记录，但不触发 OCR 提取。
 
@@ -869,7 +906,10 @@ async def _upload_batch_documents_without_ocr(
     for index, upload in enumerate(normalized_files, start=1):
         file_name = (upload.filename or "").strip() or f"{role_label}_{index}"
         object_name = object_names[index - 1] if object_names and index - 1 < len(object_names) else None
-        result = await upload_and_create_document_without_ocr(
+        upload_fn = _tracked_upload if project_identifier else upload_and_create_document_without_ocr
+        tracking = {"project_identifier": project_identifier, "slot": f"{document_type}:{index}"} if project_identifier else {}
+        result = await upload_fn(
+            **tracking,
             file=upload,
             document_type=document_type,
             db_service=db_service,
@@ -928,44 +968,8 @@ def _summarize_batch_items(items: list[dict]) -> dict:
     }
 
 
-# 持久化项目分析结果
-def _persist_result_item(
-    *,
-    db_service: PostgreSQLService,
-    project_identifier: str,
-    result_key: str,
-    result_value: dict,
-) -> dict:
-    """将单个分析结果写入项目结果存储。"""
-    result = db_service.upsert_project_result_item(
-        project_identifier_id=project_identifier,
-        result_key=result_key,
-        result_value=result_value,
-    )
-    _invalidate_project_cache_or_error(project_identifier)
-    return result
 
 
-def _persist_merge_result_items(
-    *,
-    db_service: PostgreSQLService,
-    project_identifier: str,
-    source_result_key: str,
-    raw_result: dict,
-) -> dict[str, dict]:
-    """将雷同检查的原始结果拆分为多个合并项并分别持久化。"""
-    merged_results = build_duplicate_merge_results(
-        raw_result=raw_result,
-        source_result_key=source_result_key,
-    )
-    for result_key, result_value in merged_results.items():
-        db_service.upsert_project_result_item(
-            project_identifier_id=project_identifier,
-            result_key=result_key,
-            result_value=result_value,
-        )
-    _invalidate_project_cache_or_error(project_identifier)
-    return merged_results
 
 
 # 路由：上传 OCR JSON 并执行商务标形式审查
@@ -1107,8 +1111,13 @@ async def ingest_and_recognize_project_documents(
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
+    await run_in_threadpool(db_service.initialize_upload_manifest, str(project["identifier_id"]),
+        make_upload_manifest(tender_file, [(_bidder_company_label(biz, tech), biz, tech)
+            for biz, tech in zip(normalized_business_files, normalized_technical_files)]))
+
     # 原件按分级对象键存储：招标文件、各投标方（公司名取商务标文件名去扩展名）的商务/技术标。
-    tender_result = await upload_and_create_document_without_ocr(
+    tender_result = await _tracked_upload(
+        project_identifier=str(project["identifier_id"]), slot="tender",
         file=tender_file,
         document_type=DOCUMENT_TYPE_TENDER,
         db_service=db_service,
@@ -1142,6 +1151,7 @@ async def ingest_and_recognize_project_documents(
     effective_parallelism = 1
     # 先顺序上传商务标，再上传技术标，避免项目创建阶段再引入额外并发。
     business_results = await _upload_batch_documents_without_ocr(
+        project_identifier=str(project["identifier_id"]),
         files=normalized_business_files,
         document_type=DOCUMENT_TYPE_BUSINESS_BID,
         role_label="business_bid",
@@ -1151,6 +1161,7 @@ async def ingest_and_recognize_project_documents(
         object_names=business_object_names,
     )
     technical_results = await _upload_batch_documents_without_ocr(
+        project_identifier=str(project["identifier_id"]),
         files=normalized_technical_files,
         document_type=DOCUMENT_TYPE_TECHNICAL_BID,
         role_label="technical_bid",
@@ -1439,10 +1450,16 @@ async def upload_project_folder(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
     project_identifier = str(project["identifier_id"])
 
+    await run_in_threadpool(db_service.initialize_upload_manifest, project_identifier,
+        make_upload_manifest(normalized_files[parsed["tender"]["index"]],
+            [(company, normalized_files[slot["business"]["index"]], normalized_files[slot["technical"]["index"]])
+             for company, slot in parsed["companies"].items()]))
+
     # 1) 招标文件
     tender = parsed["tender"]
     tender_pdf_name = tender["pdf_name"]
-    tender_result = await upload_and_create_document_without_ocr(
+    tender_result = await _tracked_upload(
+        project_identifier=project_identifier, slot="tender",
         file=normalized_files[tender["index"]],
         document_type=DOCUMENT_TYPE_TENDER,
         db_service=db_service,
@@ -1457,12 +1474,13 @@ async def upload_project_folder(
 
     # 2) 各公司商务标 + 技术标，命名 = 公司名 + PDF 名，对象键按分级布局
     binding_items: list[dict] = []
-    for company, slot in parsed["companies"].items():
+    for index, (company, slot) in enumerate(parsed["companies"].items(), 1):
         business = slot["business"]
         technical = slot["technical"]
         business_doc_name = f"{company}{business['pdf_name']}"
         technical_doc_name = f"{company}{technical['pdf_name']}"
-        business_upload = await upload_and_create_document_without_ocr(
+        business_upload = await _tracked_upload(
+            project_identifier=project_identifier, slot=f"business_bid:{index}",
             file=normalized_files[business["index"]],
             document_type=DOCUMENT_TYPE_BUSINESS_BID,
             db_service=db_service,
@@ -1473,7 +1491,8 @@ async def upload_project_folder(
             ),
             raise_http_exception=False,
         )
-        technical_upload = await upload_and_create_document_without_ocr(
+        technical_upload = await _tracked_upload(
+            project_identifier=project_identifier, slot=f"technical_bid:{index}",
             file=normalized_files[technical["index"]],
             document_type=DOCUMENT_TYPE_TECHNICAL_BID,
             db_service=db_service,
@@ -1693,6 +1712,37 @@ def _build_project_ocr_status_response(
     }
 
 
+@router.post("/projects/{identifier_id}/upload-missing", summary="补传失败文件并补齐项目关联")
+async def upload_missing_project_file(
+    identifier_id: str,
+    slot: str = Form(default=""),
+    attempt_id: str = Form(default=""),
+    file: Optional[UploadFile] = File(default=None),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    project = await run_in_threadpool(db_service.get_project_by_identifier, identifier_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    pid = str(project["identifier_id"])
+    manifest = project.get("upload_manifest")
+    if not manifest:
+        raise HTTPException(status_code=409, detail="项目没有待补传清单")
+    if file is not None:
+        entry = next((f for f in manifest.get("files", []) if f["slot"] == slot), None)
+        if not entry:
+            raise HTTPException(status_code=400, detail="补传文件不在项目清单内")
+        if file.filename != entry["name"]:
+            raise HTTPException(status_code=400, detail=f"请选择清单中的文件：{entry['name']}")
+        await _tracked_upload(project_identifier=pid, slot=slot, attempt_id=attempt_id if isinstance(attempt_id,str) and attempt_id else None, file=file,
+            document_type=entry["role"], db_service=db_service, oss_service=oss_service,
+            object_name=MinioService.build_project_object_key(project["project_name"],
+                role=entry["role"], company=entry["company"], filename=file.filename))
+    await run_in_threadpool(db_service.bind_uploaded_groups, pid)
+    await run_in_threadpool(_invalidate_project_cache_for_task, pid)
+    return await run_in_threadpool(db_service.get_project_detail, pid)
+
+
 @router.get("/projects/{identifier_id}/ocr-status", summary="查询项目 OCR 断点状态")
 async def get_project_ocr_status(
     identifier_id: str,
@@ -1702,20 +1752,22 @@ async def get_project_ocr_status(
 ):
     """查询项目下各阶段文档 OCR 完成/待处理数量。"""
     def _load_status():
-        refreshed_project = db_service.refresh_project_parsing_status(identifier_id)
+        payload = db_service.get_project_ocr_metadata(identifier_id)
+        refreshed_project = db_service.refresh_project_parsing_status(identifier_id, payload=payload)
         if not refreshed_project:
             raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
 
         project_identifier = str(refreshed_project["identifier_id"])
-        payload = db_service.get_project_documents_for_duplicate_check(project_identifier)
         if not payload:
             raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
+        payload["project"] = refreshed_project
         return _build_project_ocr_status_response(
             payload=payload,
             project_identifier=project_identifier,
         )
 
-    payload = _cache_get_or_set_payload(
+    payload = await run_in_threadpool(
+        _cache_get_or_set_payload,
         cache_service=cache_service,
         cache_key=cache_service.project_ocr_status_key(identifier_id),
         ttl_seconds=settings.XTJS_CACHE_OCR_STATUS_TTL_SECONDS,
@@ -1725,7 +1777,7 @@ async def get_project_ocr_status(
     # 实时逐页进度不走 3s 缓存，新鲜读取后合并进响应（无活动文档则为 None）。
     if isinstance(payload, dict) and isinstance(payload.get("ocr_progress"), dict):
         project_identifier = str((payload.get("project") or {}).get("identifier_id") or identifier_id)
-        payload["ocr_progress"]["active"] = ocr_progress_publisher.read_live(project_identifier)
+        payload["ocr_progress"]["active"] = await run_in_threadpool(ocr_progress_publisher.read_live, project_identifier)
     return payload
 
 
@@ -1743,7 +1795,7 @@ async def resume_project_ocr(
 ):
     """恢复项目 OCR，按招标文件、商务标、技术标顺序只处理未 extracted 的文档。"""
     _ = parallelism
-    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    payload = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)
@@ -1769,7 +1821,7 @@ async def run_project_tender_ocr(
 ):
     """手动触发招标文件 OCR，接口会立即返回，后台按串行队列执行。"""
     _ = parallelism
-    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    payload = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)
@@ -1795,7 +1847,7 @@ async def run_project_business_ocr(
 ):
     """手动触发商务标 OCR，接口会立即返回，后台按串行队列执行。"""
     _ = parallelism
-    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    payload = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)
@@ -1825,7 +1877,7 @@ async def continue_project_technical_ocr(
 ):
     """手动触发技术标 OCR，接口会立即返回，后台按串行队列执行。"""
     _ = parallelism
-    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    payload = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)
@@ -1851,7 +1903,7 @@ async def continue_project_technical_ocr(
             workflow_scope=workflow_scope,
         )
         await run_in_threadpool(db_service.refresh_project_parsing_status, project_identifier)
-        payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, project_identifier)
+        payload = await run_in_threadpool(db_service.get_project_ocr_metadata, project_identifier)
         if not payload:
             raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
 
@@ -1881,7 +1933,7 @@ async def run_project_full_ocr(
 ):
     """手动触发全量 OCR，接口会立即返回，后台补齐到技术标 OCR 完成。"""
     _ = parallelism
-    payload = await run_in_threadpool(db_service.get_project_documents_for_duplicate_check, identifier_id)
+    payload = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
     if not payload:
         raise HTTPException(status_code=404, detail=f"项目不存在：{identifier_id}")
     project_identifier = _project_identifier_from_payload(payload, identifier_id)

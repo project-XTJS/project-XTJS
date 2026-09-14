@@ -706,12 +706,10 @@ def patch_visualizer_duplicate_display(visualizer: ReportVisualizer) -> None:
                 docs = occurrence.get("docs") or {}
                 if file_name not in docs:
                     continue
-                other_files = [name for name in docs.keys() if name != file_name]
-                other_file_name = other_files[0] if other_files else ""
                 pages = self._project_normalize_pages((docs.get(file_name) or {}).get("pages"))
                 for start_page, end_page in self._coalesce_page_ranges(pages):
                     key = (start_page, end_page)
-                    payload = range_map.setdefault(
+                    range_map.setdefault(
                         key,
                         {
                             "label": f"P{start_page}" if start_page == end_page else f"P{start_page}-P{end_page}",
