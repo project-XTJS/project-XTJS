@@ -4199,7 +4199,7 @@ class ReportVisualizer:
                 highlight_text = self._project_typo_highlight_text(item)
                 suggestion = self._project_trim_text(str(item.get("suggestion") or "-"), 200)
                 issue_description = self._project_trim_text(
-                    f"疑似错别字“{display_text}”，建议改为“{suggestion}”。",
+                    f"疑似错别字“{display_text}”，模型候选为“{suggestion}”，请结合原文语义复核。",
                     200,
                 )
                 cards.append(

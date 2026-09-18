@@ -117,7 +117,7 @@ class TypoTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    now=[0];m=ModelManager([],worker_url='',model_id='fixture',cache_path=Path(d)/'c.db',clock=lambda:now[0])
    worker=Mock();worker.poll.return_value=None;worker.pid=999999;m.worker=worker;m.state='ready'
-   with patch.object(m,'_start') as start,patch.object(m,'_request',return_value={'choices':[{'finish_reason':'stop','message':{'content':'{"corrected_text":"正常文字"}'}}]}),patch('os.killpg') as kill:
+   with patch.object(m,'_start') as start,patch.object(m,'_request',return_value={'corrected_text':'正常文字'}),patch('os.killpg') as kill:
     m.check('正常文字');self.assertEqual(m.last_used,0)
     now[0]=1799;self.assertFalse(m.reap_idle());self.assertTrue(m.check('正常文字')['cache_hit']);self.assertEqual(m.last_used,0)
     now[0]=1800;m.pending=1;self.assertFalse(m.reap_idle());m.pending=0;self.assertTrue(m.reap_idle());self.assertEqual(kill.call_count,2);self.assertEqual(m.status()['state'],'unloaded')
