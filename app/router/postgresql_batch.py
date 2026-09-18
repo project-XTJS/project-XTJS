@@ -120,6 +120,14 @@ def _cache_get_or_set_payload(
     response: Response | None,
     factory,
 ):
+    from app.service.resource_access import cache_scope, restricted
+    if restricted():
+        # Re-check ownership even on a cache hit (revocations take effect immediately).
+        parts = cache_key.split(':')
+        if 'project' in parts:
+            position = parts.index('project')
+            PostgreSQLService().assert_resource_access('project', parts[position + 1])
+    cache_key = cache_key + ':actor:' + cache_scope()
     if not settings.XTJS_CACHE_ENABLED:
         _set_cache_header(response, "disabled")
         return factory()
@@ -180,6 +188,7 @@ def _collect_tender_documents(payload: dict) -> list[dict]:
                 "identifier_id": identifier,
                 "file_name": record.get("tender_file_name"),
                 "extracted": bool(record.get("tender_extracted")),
+                **({"ocr_last_error": record["tender_ocr_last_error"]} if not record.get("tender_extracted") and record.get("tender_ocr_last_error") else {}),
             }
         )
     return documents
@@ -201,6 +210,7 @@ def _collect_business_documents(payload: dict) -> list[dict]:
                 "identifier_id": identifier,
                 "file_name": record.get("file_name"),
                 "extracted": bool(record.get("extracted")),
+                **({"ocr_last_error": record["ocr_last_error"]} if not record.get("extracted") and record.get("ocr_last_error") else {}),
             }
         )
     return documents
@@ -232,6 +242,7 @@ def _collect_technical_documents(payload: dict, *, include_excluded: bool = Fals
                 "identifier_id": identifier,
                 "file_name": record.get("file_name"),
                 "extracted": bool(record.get("extracted")),
+                **({"ocr_last_error": record["ocr_last_error"]} if not record.get("extracted") and record.get("ocr_last_error") else {}),
             }
         )
     return documents
@@ -408,6 +419,7 @@ def _ocr_stage_progress(payload: dict) -> list[dict]:
                 "total_count": len(documents),
                 "completed_count": len(completed),
                 "pending_count": len(pending),
+                "failed_count": sum(bool(item.get("ocr_last_error")) for item in pending),
                 "skipped_count": len(skipped),
                 "completed_documents": completed,
                 "pending_documents": pending,
@@ -1777,6 +1789,8 @@ async def get_project_ocr_status(
     # 实时逐页进度不走 3s 缓存，新鲜读取后合并进响应（无活动文档则为 None）。
     if isinstance(payload, dict) and isinstance(payload.get("ocr_progress"), dict):
         project_identifier = str((payload.get("project") or {}).get("identifier_id") or identifier_id)
+        active_task = _PROJECT_OCR_QUEUE_TAILS.get(project_identifier)
+        payload["is_queued"] = bool(active_task and not active_task.done())
         payload["ocr_progress"]["active"] = await run_in_threadpool(ocr_progress_publisher.read_live, project_identifier)
     return payload
 

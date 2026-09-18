@@ -23,6 +23,7 @@ from app.core.document_types import DOCUMENT_TYPE_TENDER, DocumentType
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
 from app.service.project_runtime import ProjectTaskCancelledError
+from app.service.ocr_failure import describe_ocr_failure
 from app.utils.text_utils import cleanup_temp_file, save_temp_file
 
 logger = logging.getLogger(__name__)
@@ -911,6 +912,13 @@ async def recognize_existing_document(
         )
         raise
     except Exception as exc:
+        if document:
+            try:
+                await run_in_threadpool(db_service.record_document_ocr_failure,
+                    document_identifier, describe_ocr_failure(exc))
+            except Exception:
+                # Preserve the original error and continue the other documents.
+                logger.exception("OCR failure persistence failed identifier=%s", document_identifier)
         _log_document_pipeline_exception(
             operation="recognize_existing_document",
             file_name=str((document or {}).get("file_name") or document_identifier),

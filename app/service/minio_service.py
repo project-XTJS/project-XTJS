@@ -556,14 +556,14 @@ class MinioService:
                 raise ValueError("Bucket name cannot be empty")
             if resolved_bucket_name == self.bucket_name:
                 self.ensure_bucket()
-            expires_days = max(1, min(int(settings.MINIO_PRESIGNED_EXPIRES_DAYS), 7))
+            expires_seconds = 300
             # 预签名 URL 是给浏览器/前端用的，必须用公网端点生成，
             # 否则内网端点（oss-cn-hangzhou-internal...）在公网不可达，下载会超时。
             presign_client = self._get_public_client()
             presigned_url = presign_client.presigned_get_object(
                 resolved_bucket_name,
                 object_name,
-                expires=timedelta(days=expires_days),
+                expires=timedelta(seconds=expires_seconds),
             )
             self._audit(action="get_presigned_url", status="success", object_name=object_name)
             return presigned_url

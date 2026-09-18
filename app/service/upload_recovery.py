@@ -1,4 +1,5 @@
 """Idempotent upload leases and atomic completion of expected bidder groups."""
+from app.service.resource_access import access_check
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from psycopg2.extras import Json, RealDictCursor
@@ -33,6 +34,7 @@ class UploadRecoveryMixin:
     def _save_manifest(cursor,pid,manifest):
         cursor.execute('UPDATE xtjs_projects SET upload_manifest=%s,update_time=CURRENT_TIMESTAMP WHERE identifier_id=%s',(Json(manifest),pid))
 
+    @access_check(pid='project')
     def claim_upload(self,pid,slot,attempt_id):
         with self._get_connection() as conn,conn.cursor(cursor_factory=RealDictCursor) as cursor:
             manifest=self._locked_manifest(cursor,pid);entry=self._upload_entry(manifest,slot)
@@ -45,6 +47,7 @@ class UploadRecoveryMixin:
             self._save_manifest(cursor,pid,manifest)
             return dict(entry)
 
+    @access_check(pid='project')
     def renew_upload(self,pid,slot,lease_id):
         with self._get_connection() as conn,conn.cursor(cursor_factory=RealDictCursor) as cursor:
             manifest=self._locked_manifest(cursor,pid);entry=self._upload_entry(manifest,slot)
@@ -74,6 +77,7 @@ class UploadRecoveryMixin:
                 DO UPDATE SET tender_document_id=EXCLUDED.tender_document_id,business_bid_document_id=EXCLUDED.business_bid_document_id,technical_bid_document_id=EXCLUDED.technical_bid_document_id''',(pid,*ids,slot))
         cursor.execute('SELECT xtjs_sync_materials(%s::uuid)',(pid,))
 
+    @access_check(pid='project', document_id='document')
     def finish_upload(self,pid,slot,lease_id,*,document_id=None,error=None):
         with self._get_connection() as conn,conn.cursor(cursor_factory=RealDictCursor) as cursor:
             manifest=self._locked_manifest(cursor,pid);entry=self._upload_entry(manifest,slot)
@@ -85,6 +89,7 @@ class UploadRecoveryMixin:
             self._bind_manifest_groups(cursor,pid,manifest)
             return dict(entry)
 
+    @access_check(pid='project')
     def bind_uploaded_groups(self,pid):
         with self._get_connection() as conn,conn.cursor(cursor_factory=RealDictCursor) as cursor:
             manifest=self._locked_manifest(cursor,pid)

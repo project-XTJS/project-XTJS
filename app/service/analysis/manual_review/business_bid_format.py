@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ..reasonableness.evidence import FACT_KEYS, manual_money, compare_money, compare_capital_amounts, decimal_value, REASONS
 from ..reasonableness.business_rules import rate_status
-from ..verification_evidence import compare_dates, attachment_counts, attachment_summary
+from ..verification_evidence import compare_dates, attachment_counts, attachment_summary, project_attachment, refresh_verification_summary
 
 import hashlib
 import re
@@ -450,6 +450,9 @@ def _enrich_business_attachment_value(original_value: Any, attachment: dict[str,
         value['bid_content_found'] = attachment['found']
     value['requirements'] = deepcopy(attachment.get('requirements') or value.get('requirements') or {})
     value['template_locations'] = deepcopy(attachment.get('template_locations') or value.get('template_locations') or [])
+    for key in ('location_status', 'location_candidates', 'locations', 'pages'):
+        if key in attachment:
+            value[key] = deepcopy(attachment[key])
     signature_evidence = _business_attachment_signature_evidence_texts(attachment)
     signature_check = attachment.get("signature_check") or {}
     signature_status = str(signature_check.get("status") or value.get("signature_status") or "").strip().lower() if isinstance(signature_check, dict) else str(value.get("signature_status") or "").strip().lower()
@@ -1133,36 +1136,13 @@ def _recompute_manual_itemized(check: dict[str, Any], items: list[dict[str, Any]
 
 
 def _verification_value_status(value: Any, field_group: str) -> str:
-    if isinstance(value, str):
-        return "pass" if value.strip() else "missing"
-    if isinstance(value, list):
-        return "pass" if value else "missing"
+    from app.service.analysis.verification_evidence import aggregate_status
     if not isinstance(value, dict):
         return "unclear"
-    statuses = []
-    for key in ("signature_status", "seal_status", "date_status", "status"):
-        raw = str(value.get(key) or "").strip().lower()
-        if raw:
-            statuses.append(raw)
-    if field_group == "attachment_result" and (
-        value.get("signature_text") or value.get("signature_texts") or value.get("signature_evidence")
-    ):
-        statuses.append("pass")
-    if field_group == "attachment_result" and (
-        value.get("seal_text") or value.get("seal_texts") or value.get("seal_evidence")
-    ):
-        statuses.append("pass")
+    statuses = [value[k] for k in ("signature_status", "seal_status", "date_status") if k in value]
     if value.get("date") or value.get("date_text"):
         statuses.append(compare_dates(value.get("date_text") or value.get("date"), value.get("deadline_date")))
-    if any(item in {"fail", "late"} for item in statuses):
-        return "fail"
-    if any(item in {"missing", "missing_date"} for item in statuses):
-        return "missing"
-    if "missing_deadline" in statuses:
-        return "unclear"
-    if any(item in {"pass", "found"} for item in statuses):
-        return "pass"
-    return "unclear"
+    return aggregate_status(statuses or [value.get("status", "pending")])
 
 
 def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
@@ -1185,12 +1165,24 @@ def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, 
             value["date_status"] = compare_dates(value.get("date_text") or value.get("date"), deadline_value)
         else:
             value["date_status"] = "not_required"
+        original = item.get('original_value') or {}
+        if item.get('has_manual_value'):
+            for kind, fields in (('signature', ('signature_text','signature_texts','signature_evidence')), ('seal', ('seal_text','seal_texts','seal_evidence'))):
+                if value.get(kind + '_manually_confirmed') is True:
+                    value[kind + '_status'] = 'pass'
+                elif any(value.get(f) != original.get(f) for f in fields):
+                    value[kind + '_status'] = 'pending'
+                else:
+                    value[kind + '_status'] = original.get(kind + '_status', 'pending')
         if matched:
             for kind in ("signature", "seal", "date"):
                 state = value.get(kind+"_status")
                 if state:
                     matched.setdefault(kind+"_check", {})["status"] = state
             matched["date_check"].update(sign_date=value.get("date_text") or value.get("date"), deadline_date=value.get("deadline_date"))
+    for attachment in attachments:
+        project_attachment(attachment)
+    refresh_verification_summary(raw)
     counts = attachment_counts(raw)
     statuses = [_verification_value_status(item.get("effective_value"), str(item.get("field_group") or "")) for item in items]
     if any((a.get('requirements') or {}).get('optionality_conflict') for a in attachments):

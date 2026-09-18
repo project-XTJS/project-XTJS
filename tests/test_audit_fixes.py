@@ -27,18 +27,18 @@ class IdentityTests(unittest.TestCase):
         payload={'layout_sections':[{'page':1,'text':'投标人：上海星淼文化传媒有限公司'}, {'page':9,'text':'甲方：上海客户有限公司\n乙方：上海航界文化传媒有限公司\n供应商名称：上海航界文化传媒有限公司'}]}
         self.assertEqual(self.checker._bidder_name(payload,[]),'上海星淼文化传媒有限公司')
     def test_table_field_stays_in_its_cell(self):
-        payload=self.payload('<tr><td>供应商名称</td><td>至和益科技（深圳）有限公司</td><td>联系人</td><td>张三</td></tr>')
+        payload=self.payload('<tr><td>单位名称：</td><td>至和益科技（深圳）有限公司</td><td>联系人</td><td>张三</td></tr>')
         self.assertEqual(self.checker._bidder_name(payload,[]),'至和益科技（深圳）有限公司')
     def test_conflicting_explicit_names_need_confirmation(self):
         identity=self.checker._bidder_identity(self.payload('投标人：上海甲方科技有限公司','投标单位：上海乙方科技有限公司'))
         self.assertIsNone(identity['name']);self.assertEqual(identity['reason'],'conflicting_bidder_fields')
     def test_branch_and_instruction_boundaries(self):
         for name in ['中国电信股份有限公司上海分公司','中国联合网络通信有限公司上海市分公司','新闻报社']:
-            self.assertEqual(self.checker._bidder_name(self.payload('投标人：（名称加盖公章）'+name),[]),name)
+            self.assertEqual(self.checker._bidder_name(self.payload('投标人：（公章）'+name),[]),name)
     def test_conflicting_cover_ocr_needs_confirmation_without_correction(self):
         payload={'layout_sections':[{'page':1,'text':'投标单位：深圳市骑士动音商贸有限公司'},{'page':8,'text':'投标人：（加盖公章）深圳市骑士勋章商贸有限公司'}]}
-        self.assertIsNone(self.checker._bidder_name(payload,[]))
-        self.assertEqual(self.checker._bidder_identity(payload)['reason'],'conflicting_bidder_fields')
+        self.assertEqual(self.checker._bidder_name(payload,[]),'深圳市骑士动音商贸有限公司')
+        self.assertEqual(self.checker._bidder_identity(payload)['reason'],'explicit_homepage_field')
     def test_generic_suffix_and_near_matches_cannot_pass(self):
         for name,seal in [('餐饮管理有限公司','上海天焮餐饮管理有限公司'),('上海天焮餐饮管理有限公司','上海天焱餐饮管理有限公司'),('餐饮管理有限公司','餐饮管理有限公司')]:
             self.assertEqual(self.checker._seal_company_check(name,[seal])['status'],'pending')

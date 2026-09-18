@@ -28,37 +28,10 @@ class ConsistencyChecker:
     )
     # 已填写的动态内容常出现在下划线、括号或 LaTeX underline 中，一致性比较时应剥离
     FILLED_UNDERLINE_RE = re.compile(r"\$?\s*\\underline\{\s*(?:\\text\{)?[^{}\n]{0,200}(?:\})?\s*\}\s*\$?")
-    FILLED_UNDERLINE_CAPTURE_RE = re.compile(
-        r"\$?\s*\\underline\{\s*(?:\\text\{)?(?P<content>[^{}\n]{0,200})(?:\})?\s*\}\s*\$?"
-    )
     URL_TEXT_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
     BRACKET_PLACEHOLDER_RE = re.compile(r"【[^】\n]{1,80}】|\[[^\]\n]{1,80}\]|「[^」\n]{1,80}」")
     FILLED_BLANK_SPAN_RE = re.compile(r"_{2,}\s*[^_\n]{0,120}?\s*_{2,}")
     SHORT_PAREN_RE = re.compile(r"[（(][^()（）\n]{0,80}[）)]")
-    FIELD_LABEL_PREFIXES = ("地址", "邮政编码", "电话号码", "传真号码", "电子邮件", "电子邮箱", "电话", "传真")
-    AMOUNT_LINE_MARKERS = ("总报价为", "不含税总价", "含税总价", "人民币")
-    AMOUNT_FILL_FRAGMENT_RE = re.compile(
-        r"(?:投标报价|报价|总报价|投标总价|报价总价)\s*(?:为)?\s*(?:人民币)?\s*(?:大写)?\s*[：:]\s*[^；;。,\n]*"
-        r"(?:[，,；;]\s*小写\s*[：:]\s*[^；;。,\n]*)?"
-    )
-    UNDERLINE_PRESERVE_MARKERS = (
-        "副本",
-        "电子文件",
-        "u盘",
-        "授权代表",
-        "宣布如下",
-        "投标文件所在页",
-        "偏离说明",
-        "劳动合同",
-        "退休人员",
-    )
-    UNDERLINE_FIXED_PHRASE_MARKERS = (
-        "承担相应",
-        "承担责任",
-        "法律责任",
-        "依法承担",
-        "愿承担",
-    )
     TEMPLATE_PLACEHOLDER_HINT_MARKERS = (
         "招标人名称",
         "采购人名称",
@@ -248,12 +221,17 @@ class ConsistencyChecker:
         if not isinstance(details, dict):
             return None
 
+        from ..requirement_groups import alternative_state
+        if alternative_state(self._verification_checker, title, details) == 'alternative_not_provided':
+            return {'type': 'alternative_not_provided', 'integrity_item': title}
         segment_title = str(title or "")
         normalized_segment_title = self._normalize_match_text(segment_title)
         segment_numbers = self._attachment_numbers_from_text(segment_title)
 
         for item_name, detail in details.items():
             if not isinstance(detail, dict):
+                continue
+            if detail.get('requirement_group') or detail.get('resolution_status') == 'unclear':
                 continue
             if detail.get("is_passed") or not detail.get("scored", True):
                 continue
@@ -346,108 +324,9 @@ class ConsistencyChecker:
             return "专业人员分类及人数"
         return ""
 
-    def _should_preserve_underlined_text(self, content: str) -> bool:
-        """仅在下划线内容明显属于固定句子骨架时保留，避免把纯填写值带入一致性比较。"""
-        plain = self._plain_text(content)
-        normalized = self._normalize(plain)
-        if len(normalized) < 6:
-            return False
-        if self.URL_TEXT_RE.search(plain):
-            return True
-        if any(marker in normalized for marker in self.UNDERLINE_PRESERVE_MARKERS):
-            return True
-        if any(marker in normalized for marker in self.UNDERLINE_FIXED_PHRASE_MARKERS):
-            return True
-        if re.search(r"[，。；：、】【、]", plain) and len(normalized) >= 10:
-            if re.fullmatch(r"[0-9零一二三四五六七八九十百千万年月日份元圆整]+", normalized):
-                return False
-            return True
-        return False
-
-    def _strip_or_preserve_filled_underlines(self, text: str) -> str:
-        """保留被 OCR 包进 underline 的固定句，继续剥离纯填写值。"""
-
-        def repl(match: re.Match[str]) -> str:
-            content = match.group("content") or ""
-            if self._should_preserve_underlined_text(content):
-                return content
-            return " "
-
-        return self.FILLED_UNDERLINE_CAPTURE_RE.sub(repl, text)
-
-    def _strip_amount_fill_fragments(self, text: str) -> str:
-        """剥离报价大写/小写填写值，避免由报价字段触发模板一致性误报。"""
-        value = self.AMOUNT_FILL_FRAGMENT_RE.sub(" ", str(text or ""))
-        value = re.sub(r"\s+", " ", value).strip("：:；;，,。 ")
-        return value
-
     def _fixed_body_line(self, line: str) -> str:
-        """提取一行中的固定正文，只保留不随填写内容变化的部分。"""
-        text = self._plain_text(line)
-        if not text:
-            return ""
-        if re.fullmatch(r"[a-z]{1,3}", self._compact_text(text)):
-            return ""
-        if self._is_non_comparable_slot_line(text):
-            return ""
-        normalized_text = self._normalize(text)
-        hint_projection = self._non_required_hint_projection(text, normalized_text)
-        if hint_projection is not None:
-            return hint_projection
-        table_header_projection = self._table_header_projection(text)
-        if table_header_projection:
-            return table_header_projection
-        compact_text = self._compact_text(text)
-        if "已签字" in compact_text and any(
-            marker in compact_text for marker in ("法定代表人", "委托代理人", "项目经理", "投标人")
-        ):
-            return ""
-        has_dynamic_marker = bool(
-            self.FILLED_UNDERLINE_RE.search(text)
-            or self.FILLED_BLANK_SPAN_RE.search(text)
-            or self.PLACEHOLDER_SPAN_RE.search(compact_text)
-        )
-        # 招标模板里的说明性提示不是正文，避免与投标文件填写内容混在一起误判。
-        if (
-            normalized_text in self.SHORT_INSTRUCTIONAL_LINE_MARKERS
-            or any(marker in normalized_text for marker in self.INSTRUCTIONAL_LINE_MARKERS)
-        ):
-            return ""
-        # 报价金额句属于填写项，模板和投标文件的书写方式差异较大，不纳入固定正文一致性比较。
-        if any(marker in normalized_text for marker in self.AMOUNT_LINE_MARKERS):
-            if "总报价为" in normalized_text and (has_dynamic_marker or re.search(r"[¥￥]|\d[\d,，.]*", text)):
-                return ""
-        fixed_line = self._strip_or_preserve_filled_underlines(text)
-        fixed_line = self._strip_amount_fill_fragments(fixed_line)
-        fixed_line = self.FILLED_BLANK_SPAN_RE.sub(" ", fixed_line)
-        fixed_line = self.SHORT_PAREN_RE.sub(" ", fixed_line)
-        normalized_fixed_candidate = self._normalize(self._strip_placeholder_hints(fixed_line))
-        # 长填写骨架句先剥离填写值，再根据剩余固定正文判断；只有固定信息几乎为空时才跳过。
-        if has_dynamic_marker and len(normalized_text) > 30 and len(normalized_fixed_candidate) < 10:
-            return ""
-        fill_spec = self._build_fill_spec(text)
-        if fill_spec is not None:
-            # 填写行不应整行删除，而是保留固定标签部分参与一致性比较。
-            preserved_label = self._plain_text(
-                fill_spec.get("display_label")
-                or fill_spec.get("anchor_text")
-                or fill_spec.get("template_line")
-                or ""
-            )
-            if "：" in preserved_label or ":" in preserved_label:
-                preserved_label = re.split(r"[:：]", preserved_label, maxsplit=1)[0]
-            preserved_label = self._strip_placeholder_hints(preserved_label)
-            preserved_label = re.sub(r"\s+", " ", preserved_label).strip("：:；;，,。 ")
-            return preserved_label if len(self._normalize(preserved_label)) >= 2 else ""
-        # 已填写的地址、邮箱等行只保留字段名，不把具体值带入一致性比较
-        if "：" in fixed_line or ":" in fixed_line:
-            label, _ = re.split(r"[:：]", fixed_line, maxsplit=1)
-            plain_label = self._plain_text(label)
-            if plain_label and any(marker in plain_label for marker in self.FIELD_LABEL_PREFIXES):
-                fixed_line = plain_label
-        fixed_line = self._strip_placeholder_hints(fixed_line)
-        fixed_line = re.sub(r"\s+", " ", fixed_line).strip("：:；;，,。 ")
-        return fixed_line if self._normalize(fixed_line) else ""
+        from .underline_projection import project_text
+        return self._plain_text(project_text(line)['text'])
 
     def _build_fixed_body(self, text: str) -> str:
         """从正文中提取固定内容，填写项和落款等内容不参与一致性判断。"""

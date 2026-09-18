@@ -341,6 +341,8 @@ class ExtractionTablesMixin:
             detail_status = str(detail.get("status") or "").strip().lower()
             if detail.get("is_passed"):
                 status = "found"
+            elif detail.get('resolution_status') == 'unclear':
+                status = 'unclear'
             elif "optional" in detail_status or "可选" in detail_status:
                 status = "optional"
             else:
@@ -357,6 +359,9 @@ class ExtractionTablesMixin:
                     status=status,
                     evidence={
                         "detail_status": detail.get("status"),
+                        "requirement_group": detail.get('requirement_group'),
+                        "locations": detail.get('locations') or [],
+                        "template_locations": detail.get('template_locations') or [],
                         "category": detail.get("category"),
                     },
                 )

@@ -151,3 +151,57 @@ def attachment_summary(counts):
     else:
         text += '；无需日期核验'
     return text + f"；不要求日期 {counts['date_not_required_count']} 个，已跳过 {counts['skipped_attachment_count']} 个附件。"
+
+
+"""Single projection of independent signature, seal and date conclusions."""
+VERSION = 'independent-verification-v1'
+
+def aggregate_status(statuses):
+    states = [str(s or 'pending').lower() for s in statuses if s not in ('not_required','not_applicable','skipped')]
+    if any(s in {'fail','late'} for s in states): return 'fail'
+    if any(s in {'missing','missing_date'} for s in states): return 'missing'
+    if any(s not in {'pass','found'} for s in states): return 'unclear'
+    return 'pass' if states else 'not_applicable'
+
+def component_message(kind, check):
+    label = {'signature':'签字','seal':'盖章','date':'落款日期'}[kind]
+    state = check.get('status')
+    if state in ('not_required','not_applicable','skipped'): return f'无需核验{label}'
+    if state == 'pass': return f'{label}核验通过'
+    if kind != 'date' and check.get('presence') == 'detected' and check.get('text_status') == 'unparsed':
+        return f'已检测到{label}区域，内容未稳定识别，待复核'
+    if state in ('missing','missing_date'): return f'未提供{label}' if check.get('presence') == 'absent' else f'未定位到{label}，待复核'
+    if state == 'late': return '落款日期晚于截止日期'
+    if state == 'missing_deadline': return '截止日期未确定，待复核'
+    return f'{label}依据不足，待复核'
+
+def project_attachment(attachment):
+    for kind in ('signature','seal','date'):
+        check = attachment.get(kind+'_check') or {}
+        check['message'] = component_message(kind, check)
+    if (attachment.get('requirements') or {}).get('optionality_conflict'):
+        attachment['status'] = 'pending'
+    elif attachment.get('found') is False:
+        attachment['status'] = 'missing'
+    else:
+        state = aggregate_status((attachment.get(kind+'_check') or {}).get('status') for kind in ('signature','seal','date'))
+        attachment['status'] = 'pending' if state == 'unclear' else state
+    attachment['verification_rule_version'] = VERSION
+    attachment['summary'] = '；'.join(component_message(k, attachment.get(k+'_check') or {}) for k in ('signature','seal','date'))
+    return attachment
+
+
+def refresh_verification_summary(raw):
+    """Auto and manual paths report the same effective attachment evidence."""
+    counts = attachment_counts(raw)
+    position = raw.setdefault('position_check', {})
+    position['status'] = ('missing' if counts['position_missing_count'] else 'pending' if counts['position_unclear_count'] else 'pass' if counts['position_required_count'] else 'not_applicable')
+    attachments = (raw.get('attachment_results') or []) + (raw.get('missing_attachment_results') or [])
+    for kind in ('signature', 'seal'):
+        for category, states in [('missing', {'missing','fail'}), ('pending', {'pending','unclear'})]:
+            position[category+'_'+kind+'_attachments'] = list(dict.fromkeys(
+                a.get('title') for a in attachments
+                if (a.get(kind+'_check') or {}).get('status') in states and a.get('title')))
+    raw['summary'] = attachment_summary(counts)
+    raw['evidence_counts'] = counts
+    return raw

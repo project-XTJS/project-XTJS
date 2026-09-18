@@ -627,7 +627,7 @@ class IntegrityChecker:
                 continue
             source_locations = source_locations_for(item_title)
             if source_locations:
-                locations_by_requirement[item_title] = source_locations[:1]
+                locations_by_requirement[item_title] = source_locations
                 continue
             attachment = attachments_by_title.get(TemplateExtractor._compact(item_title))
             if attachment is None:
@@ -642,7 +642,7 @@ class IntegrityChecker:
                 for location in attachment.get("locations") or []
                 if isinstance(location, dict)
             ]
-            locations_by_requirement[item_title] = locations[:1]
+            locations_by_requirement[item_title] = locations
 
         return locations_by_requirement
 
@@ -957,6 +957,29 @@ class IntegrityChecker:
             # 每个附件单独判断，不再允许证明书/授权委托书互替，也不再做父子项放宽。
             norm_item = self._normalize_target(item)
             match_section = self._find_required_section(sections, headers, norm_item, toc_pages)
+            from ..requirement_groups import parse_group
+            group = parse_group(item)
+            group_locations = []
+            resolution_status = None
+            if group['operator'] != 'single':
+                for branch in group['branches']:
+                    hit = self._find_required_section(sections, headers, self._normalize_target(branch['title']), toc_pages)
+                    # A staff certificate or a short contained synonym does not
+                    # establish the presence of the enterprise material named in an OR branch.
+                    if hit:
+                        from ..verification import VerificationChecker
+                        from ..attachment_resolution import title_keys
+                        verifier = VerificationChecker(None)
+                        hit_key = verifier._raw_attachment_title_key(hit.get('text', ''))
+                        if not any(len(key) >= 4 and key in hit_key for key in title_keys(verifier, branch['title'])):
+                            hit = None
+                    branch['matched'] = bool(hit)
+                    branch['locations'] = [self._location_from_section(hit)] if hit else []
+                    group_locations.extend(branch['locations'])
+                hits = [b for b in group['branches'] if b['matched']]
+                passed_group = bool(hits) if group['operator'] == 'any_of' else len(hits) == len(group['branches'])
+                resolution_status = 'unclear' if group['operator'] == 'unclear' else 'matched' if passed_group else 'not_found'
+                match_section = {'text': '；'.join(b['title'] for b in hits), **(group_locations[0] if group_locations else {})} if passed_group and resolution_status != 'unclear' else None
             match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
             is_optional = self._is_optional_item(item)
             referenced = [attributes[n] for n in attachment_mapping.get(item, []) if n in attributes]
@@ -967,18 +990,20 @@ class IntegrityChecker:
 
             all_details[item] = {
                 "status": (
-                    "待复核" if conflict else "已找到"
+                    "待复核" if conflict or resolution_status == 'unclear' else "已找到"
                     if match
                     else ("待复核" if conflict else ("可选项未提供" if is_optional else "缺失"))
                 ),
                 "preview": match or "-",
-                "is_passed": bool(match) and not conflict,
+                "is_passed": bool(match) and not conflict and resolution_status != 'unclear',
+                "resolution_status": resolution_status,
+                "requirement_group": group if group['operator'] != 'single' else None,
                 "is_optional": is_optional,
                 "optionality_conflict": conflict,
                 "optionality_locations": [loc for a in referenced for loc in a.get('optionality_locations') or []],
                 "category": cat,
                 "scored": not (is_optional and not match),
-                "locations": [self._location_from_section(match_section)] if match_section else [],
+                "locations": group_locations if group['operator'] != 'single' else [self._location_from_section(match_section)] if match_section else [],
                 "template_locations": template_locations_by_item.get(item) or [],
             }
 

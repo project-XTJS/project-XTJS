@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+import json
 from fastapi.encoders import jsonable_encoder
 from psycopg2.extras import Json, RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool, PoolError
@@ -82,7 +83,10 @@ def get_db_pool():
     return _db_pool
 
 
-class PostgreSQLService(UploadRecoveryMixin):
+from app.service.resource_access import ResourceAccessMixin, access_check, actor_id, scope_sql
+
+
+class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
     """PostgreSQL 数据库服务层，封装项目、文档、关系及结果操作。"""
 
     ACTIVE_DOCUMENT_TYPES = set(ACTIVE_DOCUMENT_TYPES)
@@ -119,6 +123,8 @@ class PostgreSQLService(UploadRecoveryMixin):
             raise HTTPException(503, "数据库连接繁忙，请稍后重试") from exc
         try:
             with document_blob_store.transaction_objects(), conn:
+                with conn.cursor() as actor_cursor:
+                    actor_cursor.execute("SELECT set_config('xtjs.actor_id', %s, true)", (actor_id(),))
                 yield conn
         finally:
             pool.putconn(conn)
@@ -236,15 +242,16 @@ class PostgreSQLService(UploadRecoveryMixin):
     # 内部记录获取
     def _resolve_project_identifier(self, cursor, identifier_or_name: str) -> str:
         """将项目 UUID、Swagger 展示值或项目名解析为项目 UUID。"""
+        self.assert_resource_access("project", identifier_or_name, cursor=cursor)
         normalized = self._normalize_required_identifier(identifier_or_name, "identifier_id")
         if UUID_TEXT_PATTERN.fullmatch(normalized):
             return normalized
 
         cursor.execute(
-            """
+            f"""
             SELECT identifier_id
             FROM xtjs_projects
-            WHERE project_name = %s AND deleted = FALSE
+            WHERE project_name = %s AND deleted = FALSE AND {scope_sql("project", "xtjs_projects")}
             LIMIT 2
             """,
             (normalized,),
@@ -258,15 +265,16 @@ class PostgreSQLService(UploadRecoveryMixin):
 
     def _resolve_document_identifier(self, cursor, identifier_or_file_name: str) -> str:
         """将文档 UUID、Swagger 展示值或文件名解析为文档 UUID。"""
+        self.assert_resource_access("document", identifier_or_file_name, cursor=cursor)
         normalized = self._normalize_required_identifier(identifier_or_file_name, "identifier_id")
         if UUID_TEXT_PATTERN.fullmatch(normalized):
             return normalized
 
         cursor.execute(
-            """
+            f"""
             SELECT identifier_id
             FROM xtjs_documents
-            WHERE file_name = %s AND deleted = FALSE
+            WHERE file_name = %s AND deleted = FALSE AND {scope_sql("document", "xtjs_documents")}
             LIMIT 2
             """,
             (normalized,),
@@ -329,12 +337,14 @@ class PostgreSQLService(UploadRecoveryMixin):
         return document
 
     # 项目 CRUD
+    @access_check(identifier_id='project')
     def initialize_upload_manifest(self, identifier_id, manifest):
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("UPDATE xtjs_projects SET upload_manifest=%s WHERE identifier_id=%s AND deleted=FALSE",
                                (Json(manifest), identifier_id))
 
+    @access_check(identifier_id='project')
     def record_upload_file(self, identifier_id, slot, *, document_id=None, error=None):
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -355,6 +365,7 @@ class PostgreSQLService(UploadRecoveryMixin):
     def _reconcile_upload_manifest(self, cursor, identifier_id):
         cursor.execute("SELECT xtjs_sync_materials(%s::uuid)", (str(identifier_id),))
 
+    @access_check(identifier_id='project')
     def reconcile_upload_manifest(self, identifier_id):
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -374,14 +385,14 @@ class PostgreSQLService(UploadRecoveryMixin):
             query = """
                 INSERT INTO xtjs_projects (identifier_id, project_name, parsing_status)
                 VALUES (%s, %s, %s)
-                RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             """
             values = (normalized_identifier, normalized_project_name, self.PARSING_STATUS_UPLOADED)
         else:
             query = """
                 INSERT INTO xtjs_projects (project_name, parsing_status)
                 VALUES (%s, %s)
-                RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+                RETURNING identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             """
             values = (normalized_project_name, self.PARSING_STATUS_UPLOADED)
         with self._get_connection() as conn:
@@ -392,16 +403,16 @@ class PostgreSQLService(UploadRecoveryMixin):
     def get_project_by_name(self, project_name: str) -> Optional[Dict[str, Any]]:
         """根据项目名称获取未删除项目。"""
         normalized_project_name = self._normalize_project_name(project_name)
-        query = """
+        query = f"""
             SELECT EXISTS(SELECT 1 FROM xtjs_project_documents links
                    LEFT JOIN xtjs_documents td ON td.identifier_id=links.tender_document_id AND NOT td.deleted
                    LEFT JOIN xtjs_documents bd ON bd.identifier_id=links.business_bid_document_id AND NOT bd.deleted
                    LEFT JOIN xtjs_documents vd ON vd.identifier_id=links.technical_bid_document_id AND NOT vd.deleted
                    WHERE links.project_id=xtjs_projects.identifier_id AND
                    (td.identifier_id IS NULL OR bd.identifier_id IS NULL OR (links.technical_bid_document_id IS NOT NULL AND vd.identifier_id IS NULL))) AS material_reference_missing,
-                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             FROM xtjs_projects
-            WHERE project_name = %s AND deleted = FALSE
+            WHERE project_name = %s AND deleted = FALSE AND {scope_sql("project", "xtjs_projects")}
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -419,7 +430,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
-        conditions = ["p.deleted = FALSE"]
+        conditions = ["p.deleted = FALSE", scope_sql("project", "p")]
         values: List[Any] = []
         if normalized_keyword:
             conditions.append("(p.identifier_id::text ILIKE %s OR p.project_name ILIKE %s)")
@@ -442,6 +453,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                     SELECT
                         p.identifier_id,
                         p.project_name,
+                        p.owner_user_id,
+                        (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=p.owner_user_id) AS uploader_name,
                         p.parsing_status,
                         p.upload_manifest,
                         p.input_revision,
@@ -553,6 +566,7 @@ class PostgreSQLService(UploadRecoveryMixin):
 
 
 
+    @access_check(identifier_id='project')
     def get_project_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取项目记录。"""
         query = """
@@ -562,7 +576,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                    LEFT JOIN xtjs_documents vd ON vd.identifier_id=links.technical_bid_document_id AND NOT vd.deleted
                    WHERE links.project_id=xtjs_projects.identifier_id AND
                    (td.identifier_id IS NULL OR bd.identifier_id IS NULL OR (links.technical_bid_document_id IS NOT NULL AND vd.identifier_id IS NULL))) AS material_reference_missing,
-                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+                EXISTS(SELECT 1 FROM xtjs_result r WHERE r.project_identifier_id=xtjs_projects.identifier_id AND r.input_revision<>xtjs_projects.input_revision) AS results_stale, identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
             FROM xtjs_projects
             WHERE identifier_id = %s AND deleted = FALSE
         """
@@ -573,6 +587,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 result = cursor.fetchone()
                 return self._decorate_project_record(dict(result)) if result else None
 
+    @access_check(identifier_id='project')
     def update_project(
         self,
         identifier_id: str,
@@ -591,7 +606,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             UPDATE xtjs_projects
             SET {", ".join(updates)}, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -600,6 +615,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
+    @access_check(identifier_id='project')
     def update_project_report_url(
         self,
         identifier_id: str,
@@ -611,7 +627,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             UPDATE xtjs_projects
             SET report_url = %s, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE
-            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -625,6 +641,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
+    @access_check(identifier_id='project')
     def update_project_parsing_status(
         self,
         identifier_id: str,
@@ -637,7 +654,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             UPDATE xtjs_projects
             SET parsing_status = %s, update_time = CURRENT_TIMESTAMP
             WHERE identifier_id = %s AND deleted = FALSE AND (%s IS NULL OR input_revision=%s)
-            RETURNING identifier_id, project_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
+            RETURNING identifier_id, project_name, owner_user_id, (SELECT COALESCE(u.display_name,u.username) FROM xtjs_users u WHERE u.identifier_id=xtjs_projects.owner_user_id) AS uploader_name, parsing_status, report_url, upload_manifest, input_revision, deleted, create_time, update_time
         """
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -646,6 +663,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 updated = cursor.fetchone()
                 return self._decorate_project_record(dict(updated)) if updated else None
 
+    @access_check(identifier_id='project')
     def get_project_ocr_metadata(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """Load OCR/workflow state without downloading OCR bodies or analysis reports."""
         project = self.get_project_by_identifier(identifier_id)
@@ -655,9 +673,9 @@ class PostgreSQLService(UploadRecoveryMixin):
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("""
                     SELECT pd.id AS relation_id, slot.role AS relation_role,
-                           d.identifier_id, d.document_type, d.file_name, d.extracted,
+                           d.identifier_id, d.document_type, d.file_name, d.extracted, d.ocr_last_error,
                            td.identifier_id AS tender_identifier_id, td.file_name AS tender_file_name,
-                           td.extracted AS tender_extracted
+                           td.extracted AS tender_extracted, td.ocr_last_error AS tender_ocr_last_error
                     FROM xtjs_project_documents pd
                     CROSS JOIN LATERAL (VALUES ('business_bid', pd.business_bid_document_id),
                                                ('technical_bid', pd.technical_bid_document_id)) AS slot(role, doc_id)
@@ -681,6 +699,21 @@ class PostgreSQLService(UploadRecoveryMixin):
                 "result_keys": result_meta.get("result_keys") or [],
                 "result_summary": result_meta.get("result_summary") or {}}
 
+    @access_check(identifier_id='document_write')
+    def record_document_ocr_failure(self, identifier_id: str, failure: dict) -> bool:
+        """Persist failures without changing materials, OCR bodies or old results.
+
+        Late failures cannot mark recognized/deleted files as failed. Live progress
+        takes precedence over the retained last failure while a retry runs.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""UPDATE xtjs_documents SET ocr_last_error=%s::jsonb
+                    WHERE identifier_id=%s AND deleted=FALSE AND extracted=FALSE""",
+                    (json.dumps(failure, ensure_ascii=False), identifier_id))
+                return cursor.rowcount > 0
+
+    @access_check(identifier_id='project')
     def refresh_project_parsing_status(self, identifier_id: str, payload=None) -> Optional[Dict[str, Any]]:
         """按项目下文档 extracted 状态重算 0/1/2/3 的 OCR 阶段。"""
         payload = payload if payload is not None else self.get_project_ocr_metadata(identifier_id)
@@ -734,6 +767,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             raise ConsistencyConflict("材料在状态刷新期间发生变化，请刷新项目")
         return updated
 
+    @access_check(identifier_id='project')
     def soft_delete_project(self, identifier_id: str) -> bool:
         """软删除项目（设置删除标记）。"""
         query = """
@@ -747,6 +781,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 cursor.execute(query, (resolved_identifier,))
                 return cursor.rowcount > 0
 
+    @access_check(identifier_ids='project')
     def soft_delete_projects(self, identifier_ids: list[str]) -> int:
         """批量软删除项目。"""
         normalized_ids = [
@@ -970,6 +1005,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                         content = NULL,
                         content_object_key = %s,
                         extracted = TRUE,
+                        ocr_last_error = NULL,
                         source_file_hash = COALESCE(%s, source_file_hash),
                         source_file_size = COALESCE(%s, source_file_size),
                         ocr_cache_key = COALESCE(%s, ocr_cache_key),
@@ -1009,6 +1045,9 @@ class PostgreSQLService(UploadRecoveryMixin):
                     ),
                 )
                 updated_document = dict(cursor.fetchone())
+                identity = self._homepage_identity(recognition_content)
+                cursor.execute("UPDATE xtjs_documents SET bidder_identity=%s WHERE identifier_id=%s AND document_type IN ('business_bid','technical_bid')", (Json(identity), document['identifier_id']))
+                updated_document['bidder_identity'] = identity if normalized_document_type in ('business_bid','technical_bid') else None
                 # 返回给上层时补回 content，保持既有契约（上层会 compact 剥离）。
                 updated_document["content"] = recognition_content
 
@@ -1027,7 +1066,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
         normalized_document_type = (document_type or "").strip().lower()
-        conditions = ["deleted = FALSE"]
+        conditions = ["deleted = FALSE", scope_sql("document", "xtjs_documents")]
         values: List[Any] = []
         if normalized_keyword:
             conditions.append("(identifier_id::text ILIKE %s OR file_name ILIKE %s)")
@@ -1056,6 +1095,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                     SELECT
                         identifier_id,
                         document_type,
+                bidder_identity,
                         file_name,
                         file_url,
                         extracted,
@@ -1085,12 +1125,14 @@ class PostgreSQLService(UploadRecoveryMixin):
             items=items,
         )
 
+    @access_check(identifier_id='document')
     def get_document_by_identifier(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """根据标识获取文档完整信息。"""
         query = """
             SELECT
                 identifier_id,
                 document_type,
+                bidder_identity,
                 file_name,
                 file_url,
                 extracted,
@@ -1122,6 +1164,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 document = document_blob_store.hydrate_document_content(dict(result))
                 return document_blob_store.hydrate_document_review_content(document)
 
+    @access_check(identifier_id='document')
     def get_document_review_content(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """Return the normalized manual OCR working copy for a document."""
         document = self.get_document_by_identifier(identifier_id)
@@ -1137,6 +1180,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             ),
         }
 
+    @access_check(identifier_id='document_write')
     def update_document_review_content(
         self,
         identifier_id: str,
@@ -1209,6 +1253,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                     ),
                 }
 
+    @access_check(identifier_id='document_write')
     def update_document_review_input(
         self,
         identifier_id: str,
@@ -1283,6 +1328,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                     ),
                 }
 
+    @access_check(identifier_id='document_write')
     def update_document(
         self,
         identifier_id: str,
@@ -1342,6 +1388,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 updated = cursor.fetchone()
                 return dict(updated) if updated else None
 
+    @access_check(identifier_id='document_write')
     def update_document_content(
         self,
         identifier_id: str,
@@ -1363,6 +1410,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 content = NULL,
                 content_object_key = %s,
                 extracted = TRUE,
+                ocr_last_error = NULL,
                 source_file_hash = COALESCE(%s, source_file_hash),
                 source_file_size = COALESCE(%s, source_file_size),
                 ocr_cache_key = COALESCE(%s, ocr_cache_key),
@@ -1418,9 +1466,13 @@ class PostgreSQLService(UploadRecoveryMixin):
                 if not updated:
                     return None
                 updated = dict(updated)
+                identity = self._homepage_identity(recognition_content)
+                cursor.execute("UPDATE xtjs_documents SET bidder_identity=%s WHERE identifier_id=%s AND document_type IN ('business_bid','technical_bid')", (Json(identity), normalized_identifier))
+                updated['bidder_identity'] = identity if updated.get('document_type') in ('business_bid','technical_bid') else None
                 updated["content"] = recognition_content
                 return updated
 
+    @access_check(identifier_id='document_write')
     def update_document_source_metadata(
         self,
         identifier_id: str,
@@ -1485,7 +1537,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         if not normalized_hash or not normalized_engine or not normalized_config:
             return None
 
-        conditions = [
+        conditions = [scope_sql("document", "xtjs_documents"),
             "deleted = FALSE",
             "extracted = TRUE",
             "(content IS NOT NULL OR content_object_key IS NOT NULL)",
@@ -1538,6 +1590,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 # OCR 缓存复用需要完整 content：外置后从 MinIO 取回。
                 return document_blob_store.hydrate_document_content(dict(result))
 
+    @access_check(identifier_id='document_write')
     def soft_delete_document(self, identifier_id: str) -> bool:
         """软删除文档。"""
         query = """
@@ -1551,6 +1604,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 cursor.execute(query, (resolved_identifier,))
                 return cursor.rowcount > 0
 
+    @access_check(identifier_ids='document_write')
     def soft_delete_documents(self, identifier_ids: list[str]) -> int:
         """批量软删除文档。"""
         normalized_ids = [
@@ -1571,6 +1625,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 return int(cursor.rowcount or 0)
 
     # 独立招标文件审查
+    @access_check(document_identifier_id='document')
     def create_tender_review(self, document_identifier_id: str) -> Dict[str, Any]:
         """为一个独立招标文档创建审查记录。"""
         with self._get_connection() as conn:
@@ -1586,6 +1641,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 )
                 return dict(cursor.fetchone())
 
+    @access_check(review_identifier_id='review')
     def complete_tender_review(
         self,
         review_identifier_id: str,
@@ -1632,6 +1688,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                     raise ValueError("招标文件审查记录不存在")
                 return dict(result)
 
+    @access_check(review_identifier_id='review')
     def fail_tender_review(self, review_identifier_id: str, error_message: str) -> Optional[Dict[str, Any]]:
         """记录审查失败，保留文档供用户重新审查。"""
         review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
@@ -1649,6 +1706,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 result = cursor.fetchone()
                 return dict(result) if result else None
 
+    @access_check(review_identifier_id='review')
     def get_tender_review(self, review_identifier_id: str) -> Optional[Dict[str, Any]]:
         """读取审查记录及其独立文档摘要。"""
         review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
@@ -1679,7 +1737,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         """分页读取所有登录用户共享的独立审查历史。"""
         normalized_limit = max(1, min(int(limit or 20), 200))
         normalized_offset = max(0, int(offset or 0))
-        where_clause = "r.deleted = FALSE AND d.deleted = FALSE"
+        where_clause = "r.deleted = FALSE AND d.deleted = FALSE AND " + scope_sql("document", "d")
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
@@ -1722,6 +1780,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             items=items,
         )
 
+    @access_check(review_identifier_id='review')
     def soft_delete_tender_review(self, review_identifier_id: str) -> bool:
         """在同一事务内软删除审查记录及其独立文档。"""
         review_id = self._normalize_required_identifier(review_identifier_id, "review_identifier_id")
@@ -1739,6 +1798,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 record = cursor.fetchone()
                 if not record:
                     return False
+                self.assert_resource_access("document_write", record["document_identifier_id"], cursor=cursor)
                 cursor.execute(
                     """UPDATE xtjs_tender_reviews
                        SET deleted = TRUE, update_time = CURRENT_TIMESTAMP
@@ -1754,6 +1814,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                 return True
 
     # 项目-文档关系管理
+    @access_check(project_identifier='project')
+    @access_check(tender_document_identifier='document', business_bid_document_identifier='document', technical_bid_document_identifier='document')
     def bind_project_documents(
         self,
         project_identifier: str,
@@ -1855,6 +1917,22 @@ class PostgreSQLService(UploadRecoveryMixin):
                     ),
                 }
 
+    @staticmethod
+    def _homepage_identity(content):
+        from app.service.analysis.bidder_identity import identify
+        payload = content.get('data') if isinstance(content.get('data'), dict) else content
+        return identify(payload, payload.get('layout_sections') or [])
+
+    @staticmethod
+    def _relation_identity(row):
+        from app.service.analysis.bidder_identity import combine
+        result = dict(row)
+        result['bidder_identity'] = combine(
+            ('business', result.pop('business_bid_identity', None) or {}),
+            ('technical', result.pop('technical_bid_identity', None) or {}))
+        return result
+
+    @access_check(relation_id='relation')
     def get_relation_by_id(self, relation_id: int) -> Optional[Dict[str, Any]]:
         """根据关系 ID 获取绑定详情。"""
         query = """
@@ -1870,6 +1948,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                 bbd.document_type AS business_bid_document_type,
                 bbd.file_name AS business_bid_file_name,
                 bbd.file_url AS business_bid_file_url,
+                bbd.bidder_identity AS business_bid_identity,
+                tbd.bidder_identity AS technical_bid_identity,
                 tbd.identifier_id AS technical_bid_identifier_id,
                 tbd.document_type AS technical_bid_document_type,
                 tbd.file_name AS technical_bid_file_name,
@@ -1887,8 +1967,9 @@ class PostgreSQLService(UploadRecoveryMixin):
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (relation_id,))
                 relation = cursor.fetchone()
-                return dict(relation) if relation else None
+                return self._relation_identity(relation) if relation else None
 
+    @access_check(project_identifier='project')
     def list_relations(
         self,
         limit: int = 20,
@@ -1902,6 +1983,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         normalized_keyword = (keyword or "").strip()
         normalized_project_identifier = (project_identifier or "").strip()
         conditions = [
+            scope_sql("project", "p"),
             "p.deleted = FALSE",
             "td.deleted = FALSE",
             "bbd.deleted = FALSE",
@@ -1954,6 +2036,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                 bbd.document_type AS business_bid_document_type,
                 bbd.file_name AS business_bid_file_name,
                 bbd.file_url AS business_bid_file_url,
+                bbd.bidder_identity AS business_bid_identity,
+                tbd.bidder_identity AS technical_bid_identity,
                 tbd.identifier_id AS technical_bid_identifier_id,
                 tbd.document_type AS technical_bid_document_type,
                 tbd.file_name AS technical_bid_file_name,
@@ -1973,7 +2057,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 cursor.execute(count_query, tuple(values))
                 total = int(cursor.fetchone()["total"])
                 cursor.execute(data_query, tuple(values + [normalized_limit, normalized_offset]))
-                items: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
+                items: List[Dict[str, Any]] = [self._relation_identity(item) for item in cursor.fetchall()]
         return self._build_paginated_response(
             total=total,
             limit=normalized_limit,
@@ -1981,6 +2065,33 @@ class PostgreSQLService(UploadRecoveryMixin):
             items=items,
         )
 
+    @access_check(project_identifier='project', old_identifier='document', new_identifier='document')
+    def replace_project_document(self, project_identifier, old_identifier, new_identifier, role, expected_revision):
+        """Replace one role within one project atomically; retain both document records."""
+        columns = {"tender": "tender_document_id", "business_bid": "business_bid_document_id", "technical_bid": "technical_bid_document_id"}
+        if role not in columns:
+            raise ValueError("不支持替换的文件类型")
+        column = columns[role]
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("SELECT input_revision FROM xtjs_projects WHERE identifier_id=%s AND NOT deleted FOR UPDATE", (project_identifier,))
+            project = cursor.fetchone()
+            if not project or project["input_revision"] != expected_revision:
+                raise ConsistencyConflict("项目材料已变化，请刷新后重新替换。原关联未修改。")
+            cursor.execute("SELECT document_type,extracted FROM xtjs_documents WHERE identifier_id=%s AND NOT deleted FOR SHARE", (new_identifier,))
+            new_doc = cursor.fetchone()
+            if not new_doc or new_doc["document_type"] != role or not new_doc["extracted"]:
+                raise ValueError("新文件尚未完成识别，原关联未修改")
+            cursor.execute(f"UPDATE xtjs_project_documents SET {column}=%s WHERE project_id=%s AND {column}=%s RETURNING id",
+                           (new_identifier, project_identifier, old_identifier))
+            changed = cursor.fetchall()
+            if not changed:
+                raise ConsistencyConflict("原文件已不属于该项目，请刷新后重试。")
+            # Existing relation triggers synchronize manifest, parsing status,
+            # input revision and historical result references in this transaction.
+            return {"replaced_relation_count": len(changed)}
+
+    @access_check(relation_id='relation')
+    @access_check(tender_document_identifier='document', business_bid_document_identifier='document', technical_bid_document_identifier='document')
     def update_relation(
         self,
         relation_id: int,
@@ -2100,6 +2211,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                     ),
                 }
 
+    @access_check(project_identifier='project')
+    @access_check(technical_bid_document_identifier='document')
     def attach_technical_bid_to_relation(
         self,
         *,
@@ -2203,6 +2316,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                     technical_bid["identifier_id"],
                 )
 
+    @access_check(project_identifier='project')
     def detach_technical_bid_documents_from_project(
         self,
         *,
@@ -2246,9 +2360,11 @@ class PostgreSQLService(UploadRecoveryMixin):
                     detached_count += int(cursor.rowcount or 0)
                 return detached_count
 
+    @access_check(relation_id='relation')
     def delete_relation(self, relation_id: int, *, remove_expected_group: bool = False) -> bool:
         return self.delete_relations([relation_id], remove_expected_group=remove_expected_group) > 0
 
+    @access_check(relation_ids='relation')
     def delete_relations(self, relation_ids: list[int], *, remove_expected_group: bool = False) -> int:
         with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("SELECT * FROM xtjs_project_documents WHERE id=ANY(%s) ORDER BY project_id,id", (relation_ids,))
@@ -2269,6 +2385,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             cursor.execute("DELETE FROM xtjs_project_documents WHERE id=ANY(%s)", (relation_ids,))
             return cursor.rowcount
 
+    @access_check(identifier_id='project')
     def get_project_detail(self, identifier_id: str) -> Optional[Dict[str, Any]]:
         """获取项目基本信息及其所有文档绑定关系。"""
         project = self.get_project_by_identifier(identifier_id)
@@ -2286,6 +2403,8 @@ class PostgreSQLService(UploadRecoveryMixin):
                 bbd.document_type AS business_bid_document_type,
                 bbd.file_name AS business_bid_file_name,
                 bbd.file_url AS business_bid_file_url,
+                bbd.bidder_identity AS business_bid_identity,
+                tbd.bidder_identity AS technical_bid_identity,
                 tbd.identifier_id AS technical_bid_identifier_id,
                 tbd.document_type AS technical_bid_document_type,
                 tbd.file_name AS technical_bid_file_name,
@@ -2302,7 +2421,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         with self._get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(query, (project["identifier_id"],))
-                relations: List[Dict[str, Any]] = [dict(item) for item in cursor.fetchall()]
+                relations: List[Dict[str, Any]] = [self._relation_identity(item) for item in cursor.fetchall()]
         return {"project": project, "relations": relations}
 
     @staticmethod
@@ -3078,6 +3197,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 return effective
         return None
 
+    @access_check(identifier_id='project')
     def get_project_documents_for_duplicate_check(
         self,
         identifier_id: str,
@@ -3189,6 +3309,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             self._input_revisions = {}
         self._input_revisions.setdefault(str(pid), int(revision))
 
+    @access_check(identifier_id='project')
     def expect_input_revision(self, identifier_id, revision):
         with self._get_connection() as conn, conn.cursor() as cursor:
             pid = self._resolve_project_identifier(cursor, identifier_id)
@@ -3204,6 +3325,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             raise ConsistencyConflict()
 
     # 分析结果管理
+    @access_check(project_identifier_id='project')
     def get_project_result(self, project_identifier_id: str):
         with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
             pid = self._resolve_project_identifier(cursor, project_identifier_id)
@@ -3238,7 +3360,7 @@ class PostgreSQLService(UploadRecoveryMixin):
         normalized_limit = max(1, min(limit, 200))
         normalized_offset = max(0, offset)
         normalized_keyword = (keyword or "").strip()
-        conditions = ["p.deleted = FALSE", "r.input_revision=p.input_revision"]
+        conditions = ["p.deleted = FALSE", "r.input_revision=p.input_revision", scope_sql("project", "p")]
         values: List[Any] = []
         if normalized_keyword:
             keyword_like = f"%{normalized_keyword}%"
@@ -3355,6 +3477,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 existing = self._sanitize_project_result_record(dict(row)) if row else {}
                 yield cursor, dict(project), existing
 
+    @access_check(project_identifier_id='project')
     def create_or_replace_project_result(
         self,
         project_identifier_id: str,
@@ -3369,6 +3492,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             )
             return self._persist_project_result(cursor, project, persisted_result)
 
+    @access_check(project_identifier_id='project')
     def delete_project_result(self, project_identifier_id: str) -> bool:
         """删除项目分析结果记录。"""
         query = """
@@ -3384,6 +3508,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 cursor.execute(query, (normalized_project_identifier,))
                 return cursor.rowcount > 0
 
+    @access_check(project_identifier_ids='project')
     def delete_project_results(self, project_identifier_ids: list[str]) -> int:
         """批量删除项目分析结果记录。"""
         normalized_ids = [
@@ -3402,6 +3527,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
+    @access_check(project_identifier_id='project')
     def upsert_project_result_item(
         self,
         project_identifier_id: str,
@@ -3422,6 +3548,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             merged.update(payload)
             return self._persist_project_result(cursor, project, merged)
 
+    @access_check(project_identifier_id='project')
     def update_project_manual_review_result(
         self,
         project_identifier_id: str,
@@ -3443,6 +3570,7 @@ class PostgreSQLService(UploadRecoveryMixin):
             existing_result[MANUAL_REVIEW_RESULTS_KEY] = manual_review_results
             return self._persist_project_result(cursor, project, existing_result)
 
+    @access_check(project_identifier_id='project')
     def clear_project_manual_review_latest_result(
         self,
         project_identifier_id: str,
@@ -3468,6 +3596,7 @@ class PostgreSQLService(UploadRecoveryMixin):
                 existing_result.pop(MANUAL_REVIEW_RESULTS_KEY, None)
             return self._persist_project_result(cursor, project, existing_result)
 
+    @access_check(project_identifier_id='project')
     def update_project_manual_review_workflow_scope(
         self,
         project_identifier_id: str,

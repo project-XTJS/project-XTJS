@@ -7,6 +7,7 @@ import re
 from itertools import combinations
 from typing import Any
 
+from app.config.settings import settings
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
 from app.service.minio_service import MinioService
 from app.service.analysis.location_utils import append_location, make_location, normalize_bbox
@@ -44,6 +45,8 @@ from .risk_scorer import (
     business_risk_level,
     risk_rank,
 )
+from app.service.analysis.typo_client import DuplicateTypoService, common_edits
+from app.service.typo_runtime.contract import TypoUnavailable, VERSION as TYPO_VERSION
 
 
 def _bbox_overlap(a: list[float], b: list[float]) -> bool:
@@ -1254,6 +1257,11 @@ class DuplicateCheckService:
                 decision = self._short_duplicate_report_decision(next_evidence)
                 next_evidence["duplicate_text_length"] = decision["text_length"]
                 next_evidence["duplicate_report_reason"] = decision["reason"]
+                default_typo_status = "completed" if settings.TYPO_CHECK_ENABLED else "disabled"
+                next_evidence["typo_check"] = decision.get(
+                    "typo_check",
+                    {"status": default_typo_status, "rule_version": TYPO_VERSION},
+                )
                 if decision.get("typo_issues"):
                     next_evidence["short_duplicate_typo_issues"] = decision["typo_issues"]
                 if decision["report"]:
@@ -1265,7 +1273,7 @@ class DuplicateCheckService:
 
         # 汇总该对文档全部证据中的错别字，去重后挂到 issue 层，供合并/前端展示。
         aggregated_typo_issues: list[dict[str, Any]] = []
-        seen_typo_keys: set[tuple[str, str]] = set()
+        seen_typo_keys: set[tuple] = set()
         for evidence_key in text_evidence_keys:
             for evidence in issue.get(evidence_key) or []:
                 for typo in evidence.get("short_duplicate_typo_issues") or []:
@@ -1274,12 +1282,27 @@ class DuplicateCheckService:
                     key = (
                         str(typo.get("matched_text") or ""),
                         str(typo.get("suggestion") or ""),
+                        typo.get("side"), typo.get("page"), typo.get("start"), typo.get("end"),
+                        str(typo.get("bbox") or ""),
                     )
                     if not key[0] or key in seen_typo_keys:
                         continue
                     seen_typo_keys.add(key)
                     aggregated_typo_issues.append(typo)
         issue["short_duplicate_typo_issues"] = aggregated_typo_issues
+        incomplete = any(e.get("typo_check", {}).get("status") == "incomplete" for k in text_evidence_keys for e in issue.get(k, []))
+        typo_status = "incomplete" if incomplete else ("completed" if settings.TYPO_CHECK_ENABLED else "disabled")
+        issue["typo_check"] = {
+            "status": typo_status,
+            "rule_version": TYPO_VERSION,
+            "message": (
+                "错别字检查未完成，请重试"
+                if incomplete
+                else "重复内容错别字检查完成"
+                if settings.TYPO_CHECK_ENABLED
+                else "错别字模型未通过质量门槛，本次未执行"
+            ),
+        }
 
         issue["short_duplicate_filter"] = {
             "enabled": True,
@@ -1298,8 +1321,20 @@ class DuplicateCheckService:
         left_text, right_text = self._duplicate_evidence_pair_text(evidence)
         representative_text = left_text or right_text
         text_length = self._duplicate_text_length(representative_text)
-        # 对所有重复证据文本（不限长度）检测错别字，只保留两边一致的错字。
-        typo_issues = self._short_duplicate_typo_issues(evidence, left_text=left_text, right_text=right_text)
+        typo_issues: list[dict[str, Any]] = []
+        if settings.TYPO_CHECK_ENABLED:
+            # 对所有重复证据文本（不限长度）检测错别字，只保留两边一致的错字。
+            try:
+                typo_issues = self._short_duplicate_typo_issues(
+                    evidence,
+                    left_text=left_text,
+                    right_text=right_text,
+                )
+            except TypoUnavailable as exc:
+                # Preserve evidence that could contain a shared typo; never turn failure into zero issues.
+                return {"report": True, "reason": "typo_check_incomplete", "text_length": text_length,
+                        "typo_check": {"status": "incomplete", "message": str(exc), "rule_version": TYPO_VERSION}}
+
         if text_length >= 30:
             decision = {"report": True, "reason": "duplicate_text_at_least_30_chars", "text_length": text_length}
             if typo_issues:
@@ -1390,11 +1425,7 @@ class DuplicateCheckService:
     ) -> list[dict[str, Any]]:
         left_issues = self._check_short_duplicate_side_typos("left", left_text, evidence)
         right_issues = self._check_short_duplicate_side_typos("right", right_text, evidence)
-        left_signature = self._typo_issue_signature(left_issues)
-        right_signature = self._typo_issue_signature(right_issues)
-        if not left_signature or left_signature != right_signature:
-            return []
-        return left_issues + right_issues
+        return common_edits(left_text, right_text, left_issues, right_issues)
 
     def _check_short_duplicate_side_typos(
         self,
@@ -1410,10 +1441,7 @@ class DuplicateCheckService:
             "page": evidence.get(f"{side}_page"),
             "bbox": evidence.get(f"{side}_bbox"),
         }
-        try:
-            issues = self._get_short_duplicate_typo_service().check_text_snippets_for_typos([snippet])
-        except Exception:
-            return []
+        issues = self._get_short_duplicate_typo_service().check_text_snippets_for_typos([snippet])
         normalized: list[dict[str, Any]] = []
         for issue in issues or []:
             if not isinstance(issue, dict):
@@ -1423,33 +1451,9 @@ class DuplicateCheckService:
             normalized.append(item)
         return normalized
 
-    def _typo_issue_signature(self, issues: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
-        signatures: list[tuple[str, str]] = []
-        for issue in issues or []:
-            matched = str(
-                issue.get("matched_text") or
-                issue.get("matchedText") or
-                issue.get("wrong") or
-                issue.get("error_word") or
-                issue.get("source") or
-                ""
-            ).strip()
-            suggestion = str(
-                issue.get("suggestion") or
-                issue.get("correct") or
-                issue.get("correct_word") or
-                issue.get("target") or
-                ""
-            ).strip()
-            if matched:
-                signatures.append((matched, suggestion))
-        return tuple(sorted(set(signatures)))
-
     def _get_short_duplicate_typo_service(self) -> Any:
         if self._short_duplicate_typo_service is None:
-            from app.service.analysis.bid_document_review import BidDocumentReviewService
-
-            self._short_duplicate_typo_service = BidDocumentReviewService()
+            self._short_duplicate_typo_service = DuplicateTypoService()
         return self._short_duplicate_typo_service
 
     def _build_duplicate_issue_locations(self, item: dict[str, Any]) -> list[dict[str, Any]]:

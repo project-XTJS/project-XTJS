@@ -534,9 +534,8 @@ class NormalModeMixin:
             reasons.append("同一文件内存在多处分项报价表锚点。")
         if len(structured_analysis.get("used_tables") or []) > 1:
             reasons.append("当前主报价表涉及多张结构化表，需谨慎判定。")
-        threshold = int(getattr(self, "LOW_CONFIDENCE_UNRESOLVED_THRESHOLD", 3) or 3)
-        if len(blocking_unresolved_rows) >= threshold:
-            reasons.append("未解析分项行较多，当前结构化结果可信度不足。")
+        if blocking_unresolved_rows:
+            reasons.append("存在未完整解析的分项行，不能用部分金额确定整表合计是否正确。")
         if column_shift_suspected:
             reasons.append("疑似存在金额列错位或厂家列误绑金额列。")
         if row_issues and blocking_unresolved_rows:

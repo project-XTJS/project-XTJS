@@ -105,12 +105,13 @@ class Settings(BaseSettings):
     OCR_POSTPROCESS_MAX_WORKERS: int = 0
     OCR_SIGNATURE_PLACEHOLDER_TEXT: str = "已签字"
 
-    TYPO_ERNIE_CSC_MODEL_NAME: str = "ernie-csc"
-    TYPO_ERNIE_CSC_DEVICE: str = "gpu:0"
-    TYPO_ERNIE_CSC_MAX_SEQ_LEN: int = 128
-    TYPO_ERNIE_CSC_BATCH_SIZE: int = 32
-    TYPO_ERNIE_CSC_TASK_PATH: str | None = None
-    TYPO_CHECK_VISIBLE: bool = True
+    TYPO_SERVICE_URL: str = "http://xtjs-typo:8090"
+    TYPO_CLIENT_TIMEOUT_SECONDS: int = 780
+    # Only enable after the selected model passes the recorded quality gate.
+    # Disabled means no typo conclusion is produced; it never falls back to the
+    # removed legacy corrector.
+    TYPO_CHECK_ENABLED: bool = False
+    TYPO_CHECK_VISIBLE: bool = False
 
     # 人员姓名 NER 抽取（PaddleNLP LAC）：作为规则抽取的“补漏”一路，
     # 只在人员相关段落（目标页）跑，输出 {人名, 页码} 交给既有去重/复用比对。

@@ -1,0 +1,10 @@
+# Reuse the last verified runtime and replace the application tree completely.
+# This keeps OCR/CUDA dependencies identical while ensuring removed Python
+# modules cannot survive as files from an older image layer.
+FROM project-xtjs:word-xml-fix-20260916
+WORKDIR /app
+RUN find /app/app -mindepth 1 -delete \
+    && find /app/tools -mindepth 1 -delete
+COPY app/ /app/app/
+COPY tools/ /app/tools/
+RUN python -m compileall -q /app/app /app/tools

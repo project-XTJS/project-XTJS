@@ -1,0 +1,47 @@
+# Use only after the selected model passes acceptance; no alternate model fallback.
+# docker compose -f docker-compose.yml -f docker-compose.typo.yml up -d typo
+services:
+  app:
+    environment:
+      TYPO_SERVICE_URL: http://xtjs-typo:8090
+      TYPO_CLIENT_TIMEOUT_SECONDS: 780
+      TYPO_CHECK_ENABLED: "true"
+      TYPO_CHECK_VISIBLE: "true"
+  typo:
+    image: xtjs-vllm:v0.22.1
+    container_name: xtjs-typo
+    init: true
+    entrypoint: ["python", "-m", "typo_runtime.manager"]
+    environment:
+      PYTHONPATH: /runtime
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      TYPO_MODEL_PATH: /models/current
+      TYPO_CACHE_PATH: /cache/checks.sqlite
+      TYPO_IDLE_SECONDS: "1800"
+      TYPO_GPU_MEMORY_FRACTION: ${TYPO_GPU_MEMORY_FRACTION:-0.25}
+    volumes:
+      - ./app/service/typo_runtime:/runtime/typo_runtime:ro
+      - ./models/typo/${TYPO_ACCEPTED_MODEL:?Set the model directory after acceptance}:/models/current:ro
+      - typo_cache:/cache
+    shm_size: 1gb
+    mem_limit: 16g
+    cpus: 4
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 30s
+    restart: unless-stopped
+volumes:
+  typo_cache:

@@ -347,7 +347,12 @@ class StructuredExtractorMixin:
         if column_count <= 1:
             return None
 
-        serial_index = self._infer_structured_serial_column(data_rows, column_count)
+        normalized_headers = [self._normalize_label_key(h) for h in headers]
+        serial_index = self._match_structured_column_index(
+            normalized_headers, list(self.STRUCTURED_COLUMN_ALIASES['serial'])
+        )
+        if serial_index is None:
+            serial_index = self._infer_structured_serial_column(data_rows, column_count)
         excluded_indexes = {index for index in (serial_index,) if index is not None}
         line_total_index = self._infer_structured_amount_column(
             data_rows,
@@ -429,6 +434,11 @@ class StructuredExtractorMixin:
             self._normalize_label_key(alias)
             for alias in self.STRUCTURED_COLUMN_ALIASES.get("line_total", ())
         }
+        explicit = self._match_structured_column_index(
+            [self._normalize_label_key(h) for h in headers or []], list(total_aliases)
+        )
+        if explicit is not None and explicit not in excluded_indexes:
+            return explicit
         text_aliases = {
             self._normalize_label_key(alias)
             for field in ("brand", "model", "description")
@@ -561,6 +571,14 @@ class StructuredExtractorMixin:
             )
             if total_entry is not None:
                 totals.append(total_entry)
+                continue
+
+            fee = self._extract_structured_additional_fee(cells, section_context, offset)
+            if fee is not None:
+                if fee.pop('_unresolved', False):
+                    unresolved_rows.append(fee)
+                else:
+                    direct_items.append(fee)
                 continue
 
             if column_map.get("mode") == "amount_only":
@@ -711,9 +729,9 @@ class StructuredExtractorMixin:
         quantity_cell = self._structured_cell_value(cells, column_map.get("quantity"))
         unit_price_cell = self._structured_cell_value(cells, column_map.get("unit_price"))
         line_total_cell = self._structured_cell_value(cells, column_map.get("line_total"))
-        quantity = self._to_quantity_decimal(quantity_cell)
-        unit_price = self._to_decimal(unit_price_cell)
-        line_total = self._to_decimal(line_total_cell)
+        quantity = self._extract_structured_repair_quantity_value(quantity_cell)
+        unit_price = self._money_cell_decimal(unit_price_cell)
+        line_total = self._money_cell_decimal(line_total_cell)
         zero_amount = self._extract_structured_zero_amount(
             row_text=row_text,
             amount_cell=line_total_cell,
@@ -735,11 +753,7 @@ class StructuredExtractorMixin:
                 model=model,
                 description=description,
                 brand=brand,
-                quantity_cell=quantity_cell,
-                quantity=quantity,
-                unit_price=unit_price,
-                line_total=line_total,
-                carry=carry,
+                column_map=column_map,
             )
             if repaired is not None:
                 serial = repaired["serial"]
@@ -780,7 +794,7 @@ class StructuredExtractorMixin:
             title=title,
         )
         if quantity is None or unit_price is None or line_total is None:
-            if has_pricing_signal:
+            if has_pricing_signal or (self._looks_like_structured_serial_value(serial) and (description or model)):
                 return {
                     "_unresolved": True,
                     "serial": serial,
@@ -897,7 +911,7 @@ class StructuredExtractorMixin:
                     section_context, serial=serial, line_index=row_index
                 ),
             }
-        if label and serial and amount_cell:
+        if label and self._looks_like_structured_serial_value(serial):
             return {
                 "_unresolved": True,
                 "serial": serial,
@@ -953,11 +967,11 @@ class StructuredExtractorMixin:
         preferred_index: int | None,
         serial_index: int | None,
     ) -> Decimal | None:
-        """仅存在金额列时，优先取目标列，否则回退到最靠右的有效金额。"""
+        """Use the amount column or a unique monetary cell after merged-cell shifts."""
         preferred_cell = self._structured_cell_value(cells, preferred_index)
-        preferred_amounts = self._extract_row_amounts(preferred_cell) if preferred_cell else []
-        if preferred_amounts:
-            return preferred_amounts[-1]
+        preferred_amount = self._money_cell_decimal(preferred_cell)
+        if preferred_amount is not None:
+            return preferred_amount
 
         fallback_candidates: list[tuple[int, Decimal]] = []
         for index, cell in enumerate(cells):
@@ -966,14 +980,20 @@ class StructuredExtractorMixin:
             cell_text = str(cell).strip()
             if not cell_text or self._is_placeholder_amount_text(cell_text):
                 continue
-            amounts = self._extract_row_amounts(cell_text)
-            if not amounts:
+            amount = self._money_cell_decimal(cell_text)
+            if amount is None:
                 continue
-            fallback_candidates.append((index, amounts[-1]))
+            fallback_candidates.append((index, amount))
 
-        if not fallback_candidates:
+        if len(fallback_candidates) > 1:
+            # A duplicated row number is not monetary evidence. A unique cell
+            # explicitly formatted as money can be retained in amount-only tables.
+            explicit = [c for c in fallback_candidates
+                        if re.search(r'(?:\.\d{2}$|[元万亿￥¥])', cells[c[0]].strip())]
+            if len(explicit) == 1:
+                return explicit[0][1]
+        if len(fallback_candidates) != 1:
             return None
-        fallback_candidates.sort(key=lambda item: item[0], reverse=True)
         return fallback_candidates[0][1]
 
     def _repair_shifted_structured_row_relation(
@@ -984,117 +1004,51 @@ class StructuredExtractorMixin:
         model: str | None,
         description: str | None,
         brand: str | None,
-        quantity_cell: str | None,
-        quantity: Decimal | None,
-        unit_price: Decimal | None,
-        line_total: Decimal | None,
-        carry: dict,
+        column_map: dict,
     ) -> dict | None:
-        """修复左右错位的分项报价行，向右搜索金额并回填文本列。"""
-        money_cells = self._collect_structured_money_cells(cells)
-        if not money_cells:
+        """Recover only an unambiguous uniform shift of the known price columns."""
+        # OCR sometimes omits leading rowspan cells. Only accept a unique
+        # uniform shift of the known quantity/unit-price/total columns. Do not
+        # search arbitrary numbers in descriptions or choose by arithmetic fit.
+        candidates = []
+        for shift in (-2, -1, 1, 2):
+            indexes = [column_map[k] + shift for k in ('quantity', 'unit_price', 'line_total')]
+            if min(indexes) < 0 or max(indexes) >= len(cells):
+                continue
+            q = self._extract_structured_repair_quantity_value(cells[indexes[0]])
+            u = self._money_cell_decimal(cells[indexes[1]])
+            t = self._money_cell_decimal(cells[indexes[2]])
+            if q is not None and u is not None and t is not None:
+                candidates.append((shift, q, u, t))
+        if len(candidates) != 1:
             return None
-
-        quantity_value = (
-            quantity
-            if (
-                self._extract_structured_repair_quantity_value(quantity_cell) is not None
-                and self._is_reasonable_repair_quantity(quantity)
-            )
-            else None
-        )
-        quantity_index = None
-        if quantity_value is None:
-            quantity_index, quantity_value = self._find_structured_repair_quantity(
-                cells, before_index=money_cells[0][0]
-            )
-        if quantity_value is None:
-            return None
-
-        if len(money_cells) >= 2:
-            repaired_unit_price = money_cells[0][1]
-            repaired_line_total = money_cells[-1][1]
-        elif quantity_value == Decimal("1"):
-            repaired_unit_price = money_cells[0][1]
-            repaired_line_total = money_cells[0][1]
-        else:
-            return None
-
-        leading_texts = self._collect_structured_leading_texts(
-            cells,
-            before_index=quantity_index if quantity_index is not None else money_cells[0][0],
-        )
-        trusted_model = self._structured_repair_trusted_text(model)
-        trusted_description = self._structured_repair_trusted_text(description)
-        trusted_brand = self._structured_repair_trusted_text(brand)
-
-        serial_is_reliable = self._looks_like_structured_serial_value(serial)
-        repaired_serial = serial if serial_is_reliable else carry.get("serial")
-        repaired_model = (
-            trusted_model
-            if serial_is_reliable and trusted_model
-            else carry.get("model") or trusted_model
-        )
-        repaired_description = trusted_description
-        repaired_brand = trusted_brand
-
-        if leading_texts:
-            primary_text = leading_texts[0]
-            if repaired_model:
-                if not repaired_description and primary_text != repaired_model:
-                    repaired_description = primary_text
-            else:
-                repaired_model = primary_text
-            if not repaired_brand and len(leading_texts) >= 2:
-                brand_candidate = leading_texts[-1]
-                if brand_candidate not in {repaired_model, repaired_description}:
-                    repaired_brand = brand_candidate
-            if not repaired_description:
-                for text in leading_texts:
-                    if text not in {repaired_model, repaired_brand}:
-                        repaired_description = text
-                        break
-
-        if not repaired_model:
-            repaired_model = carry.get("model")
-        if not repaired_brand:
-            repaired_brand = carry.get("brand")
-
+        shift, quantity_value, repaired_unit_price, repaired_line_total = candidates[0]
+        def shifted(field):
+            index = column_map.get(field)
+            return self._structured_cell_value(cells, index + shift) if index is not None else ''
         return {
-            "serial": repaired_serial,
-            "model": repaired_model,
-            "description": repaired_description,
-            "brand": repaired_brand,
-            "quantity": quantity_value,
-            "unit_price": repaired_unit_price,
-            "line_total": repaired_line_total,
+            'serial': shifted('serial') or serial,
+            'model': shifted('model') or model,
+            'description': shifted('description') or description,
+            'brand': shifted('brand') or brand,
+            'quantity': quantity_value, 'unit_price': repaired_unit_price,
+            'line_total': repaired_line_total,
         }
 
-    def _collect_structured_money_cells(
-        self, cells: list[str]
-    ) -> list[tuple[int, Decimal]]:
-        """收集结构化行中的金额候选。"""
-        matches: list[tuple[int, Decimal]] = []
-        for index, cell in enumerate(cells):
-            cell_text = str(cell).strip()
-            if not cell_text or self._is_placeholder_amount_text(cell_text):
-                continue
-            amounts = self._extract_row_amounts(cell_text)
-            if not amounts:
-                continue
-            matches.append((index, amounts[-1]))
-        return matches
-
-    def _find_structured_repair_quantity(
-        self, cells: list[str], *, before_index: int
-    ) -> tuple[int | None, Decimal | None]:
-        """从金额前的单元格中反向找到最像数量的值。"""
-        search_limit = min(len(cells), max(before_index, 0))
-        for index in range(search_limit - 1, -1, -1):
-            quantity = self._extract_structured_repair_quantity_value(cells[index])
-            if quantity is not None:
-                return index, quantity
-        return None, None
+    def _extract_structured_additional_fee(self, cells, context, row_index):
+        """Explicit standalone fees, not an 'already included' note on an item."""
+        label = next((c for c in cells if c), '')
+        if not re.fullmatch(r'(?:税费(?:及管理费)?|税金|管理费|运费|运输费|安装费)(?:[（(][^）)]{1,20}[）)])?[：:]?', label):
+            return None
+        values = [self._money_cell_decimal(c) for c in cells if c and c != label]
+        amounts = [v for v in values if v is not None]
+        entry = {'label': label, 'text': ' '.join(cells),
+                 **self._build_entry_context(context, line_index=row_index)}
+        if len(amounts) != 1:
+            return {**entry, '_unresolved': True, 'reason': 'additional_fee_unclear',
+                    'reason_text': '附加费用行金额不明确，不能完成整表合计核验。'}
+        return {**entry, 'amount': amounts[0], 'source': 'structured_additional_fee',
+                'relation_type': 'additional_fee'}
 
     def _extract_structured_repair_quantity_value(
         self, value: str | None
@@ -1108,7 +1062,7 @@ class StructuredExtractorMixin:
 
         unit_pattern = "|".join(
             sorted(
-                (re.escape(unit) for unit in self.UNIT_KEYWORDS if unit),
+                (re.escape(unit) for unit in (*self.UNIT_KEYWORDS, "部", "篇", "张", "条", "天", "面", "处", "家媒体") if unit),
                 key=len,
                 reverse=True,
             )
@@ -1123,38 +1077,10 @@ class StructuredExtractorMixin:
             return None
         return self._to_quantity_decimal(normalized)
 
-    def _is_reasonable_repair_quantity(self, value: Decimal | None) -> bool:
-        """判断数量值是否落在合理范围内，避免把金额当成数量。"""
-        if value is None:
-            return False
-        return Decimal("0") <= value <= Decimal("10000")
-
-    def _collect_structured_leading_texts(
-        self, cells: list[str], *, before_index: int
-    ) -> list[str]:
-        """收集数量前的可信文本列。"""
-        texts = []
-        for cell in cells[: max(before_index, 0)]:
-            text = self._structured_repair_trusted_text(cell)
-            if text and text not in texts:
-                texts.append(text)
-        return texts
-
-    def _structured_repair_trusted_text(self, value: str | None) -> str | None:
-        """过滤掉金额、数量和占位符后，保留可用于回填的文本。"""
-        text = str(value or "").strip()
-        if not text or self._is_placeholder_amount_text(text):
-            return None
-        if self._extract_row_amounts(text):
-            return None
-        if self._extract_structured_repair_quantity_value(text) is not None:
-            return None
-        return text
-
     def _looks_like_structured_serial_value(self, value: str | None) -> bool:
         """判断是否为纯序号单元格。"""
         text = str(value or "").strip()
-        return bool(text) and bool(re.fullmatch(r"\d+(?:\.\d+)*", text))
+        return bool(text) and bool(re.fullmatch(r"\d+(?:\.\d+)*[.、]?", text))
 
     def _build_structured_amount_only_label(
         self,

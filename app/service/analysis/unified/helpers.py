@@ -441,12 +441,12 @@ class HelpersMixin:
             return CHECK_DISPLAY_ORDER.index(text)
         return len(CHECK_DISPLAY_ORDER)
 
-    # 投标人名称提取 
-    def _extract_bidder_name(self, checks: dict[str, Any], fallback: str) -> str:
-        """从签字盖章检查结果中探测投标人名称，若缺失则使用 fallback。"""
-        verification_raw = checks.get("verification_check", {}).get("raw_result") or {}
-        bidder_name = str(verification_raw.get("bidder_name") or "").strip()
-        return bidder_name or fallback
+    def _identify_bidder(self, business_payload, technical_payload=None):
+        from app.service.analysis.bidder_identity import combine
+        return combine(
+            ("business", self.verification_checker._bidder_identity(business_payload)),
+            ("technical", self.verification_checker._bidder_identity(technical_payload)),
+        )
 
     # 分项报价子检查摘要
     def _summarize_itemized_subcheck(self, subcheck_code: str, payload: dict[str, Any]) -> str:

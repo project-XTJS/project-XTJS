@@ -195,7 +195,9 @@ def build_excluded_bidders_from_technical_ids(
         item = {
             "relation_id": record.get("relation_id"),
             "bidder_key": "",
-            "bidder_name": str(business_record.get("file_name") or record.get("file_name") or "").strip(),
+            # File names are not bidder identities. The review pipeline fills a
+            # name only from the four explicit fields on the first PDF page.
+            "bidder_name": "",
             "business_bid_document_id": str(business_record.get("identifier_id") or "").strip(),
             "business_file_name": str(business_record.get("file_name") or "").strip(),
             "technical_bid_document_id": technical_id,

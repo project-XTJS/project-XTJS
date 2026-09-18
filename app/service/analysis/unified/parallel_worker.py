@@ -22,5 +22,6 @@ def run_business_bidder_review(task: dict[str, Any]) -> dict[str, Any]:
         bidder_key=task["bidder_key"],
         business_payload=task["business_payload"],
         business_meta=task["business_meta"],
+        technical_payload=task.get("technical_payload"),
     )
     return review

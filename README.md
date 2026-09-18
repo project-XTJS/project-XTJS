@@ -20,7 +20,7 @@
 - python -m venv venv
 - ./venv/Scripts/activate
 - pip install -r requirements.txt
-- 错别字检查使用 pycorrector 的 MacBERT 中文纠错模型，首次运行会按配置加载 `TYPO_MACBERT_MODEL_NAME`，默认通过 `TYPO_MACBERT_DEVICE=cuda` 使用 GPU；当前默认 `TYPO_CHECK_VISIBLE=false`，暂不在展示结果和导出报告中显示
+- 错别字检查仅处理两份投标文件的重复片段，使用独立的按需模型服务；模型通过质量验收后才同时启用 `TYPO_CHECK_ENABLED=true` 和 `TYPO_CHECK_VISIBLE=true`。默认不执行也不展示，且不会回退到已删除的旧纠错器。
 - 需要手动安装对应的cuda版本 pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/ 
 - python run.py
 

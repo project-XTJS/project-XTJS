@@ -39,6 +39,9 @@ class AnalysisService:
         self.deviation = DeviationChecker()
         self.verification = VerificationChecker(ocr_service)
 
+    def extract_text_boxes_without_layout(self, image_path: str) -> dict:
+        return self.ocr_service.extract_text_boxes_without_layout(image_path)
+
     def get_supported_extensions(self) -> list[str]:
         """返回支持的文件扩展名列表副本。"""
         return self.SUPPORTED_EXTENSIONS.copy()
@@ -188,6 +191,13 @@ class AnalysisServiceDispatcher:
         self.itemized = primary.itemized
         self.deviation = primary.deviation
         self.verification = primary.verification
+
+    def extract_text_boxes_without_layout(self, image_path: str) -> dict:
+        slot = self._acquire_slot()
+        try:
+            return self._services[slot].extract_text_boxes_without_layout(image_path)
+        finally:
+            self._release_slot(slot)
 
     def get_supported_extensions(self) -> list[str]:
         return self._services[0].get_supported_extensions()

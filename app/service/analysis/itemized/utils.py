@@ -63,6 +63,17 @@ class UtilsMixin:
             return None
         return self._to_decimal(match.group("number"))
 
+    def _money_cell_decimal(self, value: object) -> Decimal | None:
+        """Parse an entire monetary cell, never a number embedded in a model or rate."""
+        text = re.sub(r"\s+", "", str("" if value is None else value)).replace(",", "").replace("，", "")
+        match = re.fullmatch(
+            r"(?:人民币|[￥¥])?(?P<number>[+-]?\d+(?:\.\d+)?)(?P<unit>亿元|万元|元|亿|万)?(?:整)?", text
+        )
+        if not match:
+            return None
+        scale = {"万": 10000, "万元": 10000, "亿": 100000000, "亿元": 100000000}
+        return Decimal(match['number']) * scale.get(match['unit'], 1)
+
     def _format_decimal(self, value: Decimal | None) -> str | None:
         """把 Decimal 规范化为保留两位小数的字符串。"""
         if value is None:

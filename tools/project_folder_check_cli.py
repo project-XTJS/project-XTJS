@@ -55,7 +55,6 @@ CHECK_OPTIONS = (
     ("business_bid_duplicate_check", "商务标查重"),
     ("technical_bid_duplicate_check", "技术标查重"),
     ("personnel_reuse_check", "一人多用"),
-    ("typo_check", "错别字检查"),
 )
 
 CHECK_LABELS = dict(CHECK_OPTIONS)
@@ -109,10 +108,6 @@ CHECK_ALIASES = {
     "personnel_reuse": "personnel_reuse_check",
     "personnel_reuse_check": "personnel_reuse_check",
     "一人多用": "personnel_reuse_check",
-    "typo": "typo_check",
-    "typo_check": "typo_check",
-    "错别字": "typo_check",
-    "错别字检查": "typo_check",
 }
 
 STATUS_ORDER = {
@@ -143,7 +138,6 @@ EXTRA_CHECK_CODES = {
     "business_bid_duplicate_check",
     "technical_bid_duplicate_check",
     "personnel_reuse_check",
-    "typo_check",
 }
 
 
@@ -609,65 +603,6 @@ def _build_personnel_reuse_result(review_result: dict[str, Any]) -> dict[str, An
     }
 
 
-def _build_typo_check_result(review_result: dict[str, Any]) -> dict[str, Any]:
-    groups = {}
-    total_document_count = 0
-    total_skipped_document_count = 0
-    total_typo_issue_count = 0
-    total_shared_typo_issue_count = 0
-    total_suspicious_typo_document_count = 0
-
-    for role, group in (review_result.get("groups") or {}).items():
-        summary = group.get("summary") or {}
-        typo_check = group.get("typo_check") or {}
-        group_document_count = int(summary.get("document_count") or 0)
-        group_skipped_count = int(summary.get("skipped_document_count") or 0)
-        group_typo_issue_count = int(summary.get("typo_issue_count") or 0)
-        group_shared_typo_issue_count = int(summary.get("shared_typo_issue_count") or 0)
-        group_suspicious_document_count = int(summary.get("suspicious_typo_document_count") or 0)
-
-        groups[role] = {
-            "documents": group.get("documents") or [],
-            "skipped_documents": group.get("skipped_documents") or [],
-            "typo_check": typo_check,
-            "summary": {
-                "document_count": group_document_count,
-                "skipped_document_count": group_skipped_count,
-                "typo_issue_count": group_typo_issue_count,
-                "shared_typo_issue_count": group_shared_typo_issue_count,
-                "suspicious_typo_document_count": group_suspicious_document_count,
-                "suspicious": bool(group_typo_issue_count),
-            },
-        }
-
-        total_document_count += group_document_count
-        total_skipped_document_count += group_skipped_count
-        total_typo_issue_count += group_typo_issue_count
-        total_shared_typo_issue_count += group_shared_typo_issue_count
-        total_suspicious_typo_document_count += group_suspicious_document_count
-
-    config = review_result.get("config") or {}
-    return {
-        "project": review_result.get("project"),
-        "config": {
-            "document_types": config.get("document_types") or [],
-            "typo_detection_engine": config.get("typo_detection_engine"),
-            "typo_macbert_model_name": config.get("typo_macbert_model_name"),
-            "typo_macbert_device": config.get("typo_macbert_device"),
-            "typo_macbert_active_device": config.get("typo_macbert_active_device"),
-            "typo_filtering_enabled": config.get("typo_filtering_enabled"),
-        },
-        "groups": groups,
-        "summary": {
-            "requested_document_types": config.get("document_types") or [],
-            "document_count": total_document_count,
-            "skipped_document_count": total_skipped_document_count,
-            "typo_issue_count": total_typo_issue_count,
-            "shared_typo_issue_count": total_shared_typo_issue_count,
-            "suspicious_typo_document_count": total_suspicious_typo_document_count,
-            "suspicious": bool(total_typo_issue_count),
-        },
-    }
 
 
 def _build_selected_extra_results(
@@ -703,14 +638,6 @@ def _build_selected_extra_results(
             document_types=[DOCUMENT_TYPE_BUSINESS_BID],
         )
         results["personnel_reuse_check"] = _build_personnel_reuse_result(personnel_review_result)
-    if "typo_check" in selected_checks:
-        typo_review_result = bid_review_service.check_project_typos(
-            project_identifier=project_identifier,
-            project={"identifier_id": project_identifier},
-            document_records=records,
-            document_types=[DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID],
-        )
-        results["typo_check"] = _build_typo_check_result(typo_review_result)
 
     return results
 
@@ -900,12 +827,6 @@ def _metric_tuple_for_extra(result_key: str, result: dict[str, Any] | None) -> t
             int(summary.get("reused_name_count") or 0),
             int(summary.get("personnel_count") or 0),
         )
-    if result_key == "typo_check":
-        return (
-            int(summary.get("typo_issue_count") or 0),
-            int(summary.get("shared_typo_issue_count") or 0),
-            int(summary.get("suspicious_typo_document_count") or 0),
-        )
     return tuple()
 
 
@@ -974,16 +895,6 @@ def _summarize_original_extra_issue(result_key: str, result: dict[str, Any] | No
             return f"共提取人员 {personnel} 个，复用姓名 {reused} 个"
         return None
 
-    if result_key == "typo_check":
-        typo_issue_count = int(summary.get("typo_issue_count") or 0)
-        shared_typo_issue_count = int(summary.get("shared_typo_issue_count") or 0)
-        suspicious_typo_document_count = int(summary.get("suspicious_typo_document_count") or 0)
-        if typo_issue_count or shared_typo_issue_count or suspicious_typo_document_count:
-            return (
-                f"错别字 {typo_issue_count} 处，共享错别字 {shared_typo_issue_count} 处，"
-                f"可疑文档 {suspicious_typo_document_count} 份"
-            )
-        return None
 
     return None
 

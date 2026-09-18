@@ -39,16 +39,7 @@ def get_presigned_url(
     object_name: str,
     oss_service: MinioService = Depends(get_oss_service),
 ):
-    """按对象名生成预签名访问 URL，用于临时授权下载或预览。"""
-    try:
-        presigned_url = oss_service.get_presigned_url(object_name)
-        return {"object_name": object_name, "presigned_url": presigned_url}
-    except Exception as exc:
-        _raise_minio_http_exception(
-            exc,
-            log_message="Unexpected error in get_presigned_url",
-            generic_detail="Failed to get presigned URL, please retry later.",
-        )
+    raise HTTPException(status_code=410, detail="通用对象签名已停用，请通过项目或文档下载")
 
 
 # 路由：删除文件

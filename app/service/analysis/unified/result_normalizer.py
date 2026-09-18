@@ -150,6 +150,8 @@ class ResultNormalizerMixin:
                 "status": detail.get("status"),
                 "preview": preview,
                 "category": category,
+                "requirement_group": detail.get('requirement_group'),
+                "resolution_status": detail.get('resolution_status'),
                 "is_optional": detail.get('is_optional', False),
                 "optionality_conflict": detail.get('optionality_conflict', False),
                 "optionality_locations": self._locations_with_document_role(detail.get('optionality_locations') or [], 'tender'),
@@ -169,6 +171,8 @@ class ResultNormalizerMixin:
             }
             if detail.get('optionality_conflict'):
                 unclear.append(self._issue(status='unclear', title=item_name, message='招标对该材料的必交与可选声明冲突，需要人工确认。', evidence=evidence))
+            elif detail.get('resolution_status') == 'unclear':
+                unclear.append(self._issue(status='unclear', title=item_name, message='材料要求关系或定位依据不明确，需要人工复核。', evidence=evidence))
             elif detail.get("is_passed"):
                 passed.append(
                     self._issue(
@@ -306,6 +310,8 @@ class ResultNormalizerMixin:
                 "engine_version": segment.get("engine_version"),
                 "model_status": segment.get("model_status") or {},
                 "attachment_match": segment.get("attachment_match") or {},
+                "location_status": segment.get('location_status'),
+                "location_candidates": segment.get('location_candidates') or [],
                 "element_results": segment.get("element_results") or [],
                 "difference_category": segment.get("difference_category"),
                 "difference_items": segment.get("difference_items") or [],
@@ -348,6 +354,8 @@ class ResultNormalizerMixin:
                         title=title,
                         message=("招标对该附件的必交与可选声明冲突，需要人工确认。"
                                  if segment.get('optionality_conflict')
+                                 else "存在多个附件候选，对应附件待确认。" if segment.get('location_status') == 'ambiguous'
+                                 else "未定位到对应投标内容，需要人工复核。" if segment.get('location_status') == 'not_found'
                                  else "模板骨架存在疑似改写或对齐不确定项，需要人工复核。"),
                         evidence=evidence,
                     )
@@ -1043,6 +1051,8 @@ class ResultNormalizerMixin:
         item = lookup.get(str(attachment or "").strip())
         if not isinstance(item, dict):
             return evidence
+        evidence['location_status'] = item.get('location_status')
+        evidence['location_candidates'] = item.get('location_candidates') or []
         if isinstance(item.get('found'), bool):
             evidence['bid_content_found'] = item['found']
 
@@ -1137,25 +1147,15 @@ class ResultNormalizerMixin:
 
         def attachment_status_details(item: dict[str, Any]) -> list[str]:
             details: list[str] = []
+            if item.get('location_status') == 'ambiguous':
+                return ['存在多个附件候选，对应附件待确认']
             if (item.get('requirements') or {}).get('optionality_conflict'):
                 details.append('招标的必交与可选声明冲突')
-            signature_status = component_status(item, "signature_check")
-            seal_status = component_status(item, "seal_check")
-            item_date_status = component_status(item, "date_check")
-            if signature_status in {"missing", "fail"}:
-                details.append("缺少签字")
-            elif signature_status == "pending":
-                details.append("签字待复核")
-            if seal_status in {"missing", "fail"}:
-                details.append("缺少盖章")
-            elif seal_status == "pending":
-                details.append("盖章待复核")
-            if item_date_status == "missing_date":
-                details.append("缺少落款日期")
-            elif item_date_status == "late":
-                details.append("落款日期晚于招标截止时间")
-            elif item_date_status == "missing_deadline":
-                details.append("未识别到招标截止日期，需复核日期")
+            from ..verification_evidence import component_message
+            for kind in ('signature', 'seal', 'date'):
+                check = item.get(kind + '_check') or {}
+                if check.get('status') not in ('pass', 'not_required', 'not_applicable', 'skipped'):
+                    details.append(component_message(kind, check))
             return details
 
         for item in attachment_results:

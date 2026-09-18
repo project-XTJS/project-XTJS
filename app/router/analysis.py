@@ -343,6 +343,15 @@ def _parse_source_paths_json(raw_value: str | None, expected_count: int) -> list
     if raw_value is None or not str(raw_value).strip():
         return [None] * expected_count
 
+    # A middle-level user may process uploads, but cannot turn that endpoint
+    # into a write primitive for arbitrary server paths.
+    from app.service.resource_access import restricted
+    if restricted():
+        raise HTTPException(
+            status_code=403,
+            detail="中级用户不能指定服务器源文件路径。",
+        )
+
     raw_text = str(raw_value).strip()
     try:
         parsed = json.loads(raw_text)

@@ -21,7 +21,7 @@ from app.core.logging_config import setup_logging
 # 路由模块
 from app.router.analysis import router as analysis_router
 from app.router.auth import router as auth_router
-from app.router.auth_dependencies import get_current_user
+from app.router.auth_dependencies import get_current_user, bind_resource_actor
 from app.router.file import router as file_router
 from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
@@ -69,7 +69,7 @@ app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
 
 # 业务路由统一要求登录（携带有效 JWT）。
 # 后续如需逐功能的级别限制，可在具体路由上追加 Depends(require_role(n))。
-_login_required = [Depends(get_current_user)]
+_login_required = [Depends(bind_resource_actor)]
 app.include_router(
     analysis_router, prefix="/api/analysis", tags=["文档解析"],
     dependencies=_login_required,

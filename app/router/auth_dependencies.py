@@ -7,6 +7,8 @@
 """
 
 from typing import Any, Dict
+from starlette.concurrency import run_in_threadpool
+from app.service.resource_access import actor_context
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -63,3 +65,12 @@ def require_role(min_level: int):
         return current_user
 
     return _checker
+
+
+async def bind_resource_actor(user: Dict[str, Any] = Depends(get_current_user)):
+    """Bind on the request task so worker thread copies preserve the identity."""
+    token = actor_context.set(user)
+    try:
+        yield user
+    finally:
+        actor_context.reset(token)

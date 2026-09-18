@@ -26,6 +26,7 @@ ocr_runtime*/
 output_seals/
 test_image.png
 *.log
+logs/
 
 # 7. 文档与报告文件
  *.pdf
@@ -49,3 +50,4 @@ output_signatures/
 ocr_results/
 test_reports/
 tmp/
+models/typo/

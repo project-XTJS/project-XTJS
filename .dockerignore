@@ -15,4 +15,7 @@ tmp/
 backups/
 node_modules/
 *.log
+logs/
 .env
+
+models/typo/

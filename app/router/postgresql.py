@@ -147,6 +147,14 @@ def _cache_get_or_set_payload(
     response: Optional[Response],
     factory,
 ):
+    from app.service.resource_access import cache_scope, restricted
+    if restricted():
+        # Re-check ownership even on a cache hit (revocations take effect immediately).
+        parts = cache_key.split(':')
+        if 'project' in parts:
+            position = parts.index('project')
+            PostgreSQLService().assert_resource_access('project', parts[position + 1])
+    cache_key = cache_key + ':actor:' + cache_scope()
     if not settings.XTJS_CACHE_ENABLED:
         _set_cache_header(response, "disabled")
         return factory()
@@ -2758,9 +2766,19 @@ def _apply_report_document_fonts(document: Document) -> None:
                             _set_word_run_fonts(run)
 
 
+# XML 1.0 Char production: retain TAB/LF/CR and legal Unicode, including CJK
+# and supplementary characters. Apply only at Word output boundaries.
+_REPORT_XML_INVALID_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def _word_xml_text(value: Any) -> str:
+    """Remove XML-forbidden code points without changing stored source content."""
+    return _REPORT_XML_INVALID_CHARS.sub("", "" if value is None else str(value))
+
+
 def _add_word_paragraph(document: Document, text: str, *, style: Optional[str] = None) -> None:
     paragraph = document.add_paragraph(style=style)
-    run = paragraph.add_run(text)
+    run = paragraph.add_run(_word_xml_text(text))
     _set_word_run_fonts(run)
 
 
@@ -2781,7 +2799,7 @@ def _add_header_text(
         if align == "center"
         else WD_ALIGN_PARAGRAPH.LEFT
     )
-    run = paragraph.add_run(str(text or ""))
+    run = paragraph.add_run(_word_xml_text(str(text or "")))
     run.bold = bold
     run.font.size = Pt(size_pt)
     _set_word_run_fonts(run)
@@ -2796,7 +2814,7 @@ def _set_word_cell_text(
 ) -> None:
     cell.text = ""
     paragraph = cell.paragraphs[0]
-    run = paragraph.add_run(str(text or ""))
+    run = paragraph.add_run(_word_xml_text(str(text or "")))
     run.bold = bold
     if color is not None:
         run.font.color.rgb = color
@@ -2937,8 +2955,8 @@ def _set_report_core_properties(
 ) -> None:
     """写入真实、像人工操作的文档属性（作者/标题/主题/关键字/创建与修改时间）。"""
     when = exported_at or datetime.now()
-    author = operator_name.strip()  # 仅实际操作者；取不到则留空，不默认代理机构
-    project_title = project_name or ""
+    author = _word_xml_text(operator_name).strip()  # 仅实际操作者；取不到则留空，不默认代理机构
+    project_title = _word_xml_text(project_name or "")
     cp = document.core_properties
     cp.title = f"{project_title} 项目审查报告".strip()
     cp.subject = f"{project_title} 项目审查报告".strip()
@@ -4001,10 +4019,10 @@ def _render_result_word_report(
     if issue_sections:
         for key, label, company_groups in issue_sections:
             include_description = key not in _REPORT_DUPLICATE_RESULT_KEYS
-            document.add_heading(label, level=2)
+            document.add_heading(_word_xml_text(label), level=2)
             for company_label, section_rows in company_groups:
                 if company_label:
-                    document.add_heading(company_label, level=3)
+                    document.add_heading(_word_xml_text(company_label), level=3)
                 _add_report_issue_table(document, section_rows, include_description=include_description)
     else:
         _add_word_paragraph(document, "无")
@@ -5485,6 +5503,48 @@ async def create_document(
     }
 
 
+@router.post("/projects/{identifier_id}/replace-document", summary="上传识别并替换项目中的单份文件")
+async def replace_project_document(
+    identifier_id: str,
+    document_identifier: str = Form(...),
+    document_type: Literal["tender", "business_bid", "technical_bid"] = Form(...),
+    file: UploadFile = File(...),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+    oss_service: MinioService = Depends(get_oss_service),
+    analysis_service=Depends(get_text_analysis_service),
+):
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="请选择 PDF 文件")
+    metadata = await run_in_threadpool(db_service.get_project_ocr_metadata, identifier_id)
+    if not metadata:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    project = metadata["project"]
+    pid = str(project["identifier_id"])
+    documents = metadata.get("documents") or []
+    bound = (any(str(d.get("tender_identifier_id")) == document_identifier for d in documents)
+             if document_type == "tender" else any(str(d.get("identifier_id")) == document_identifier
+                and d.get("relation_role") == document_type for d in documents))
+    if not bound:
+        raise HTTPException(status_code=409, detail="原文件已不属于该项目，请刷新后重试")
+    from app.service import ocr_progress_publisher
+    if await run_in_threadpool(ocr_progress_publisher.read_live, pid):
+        raise HTTPException(status_code=409, detail="项目正在识别，请待本次 OCR 结束后替换文件")
+    result = await upload_extract_and_create_document(
+        file=file, document_type=document_type, db_service=db_service,
+        oss_service=oss_service, analysis_service=analysis_service, raise_http_exception=True,
+    )
+    new_id = str(result["document"]["identifier_id"])
+    try:
+        await run_in_threadpool(db_service.replace_project_document, pid, document_identifier,
+                                new_id, document_type, project.get("input_revision", 0))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # A failed association leaves the original linked and the new document retained.
+    _invalidate_project_cache_or_error(cache_service, pid)
+    return await run_in_threadpool(db_service.get_project_detail, pid)
+
+
 @router.get("/documents", summary="查询文档列表")
 @bounded_sync
 def list_documents(
@@ -5658,6 +5718,7 @@ def delete_document(
 @bounded_sync
 def get_document_source(
     identifier_id: str,
+    as_json: bool = Query(default=False),
     page: Optional[int] = Query(default=None, ge=1, description="可选页码，仅 PDF 源文件支持跳转"),
     db_service: PostgreSQLService = Depends(get_db_service),
     oss_service: MinioService = Depends(get_oss_service),
@@ -5672,6 +5733,8 @@ def get_document_source(
         presigned_url = oss_service.get_presigned_url(object_name, bucket_name)
         if page and _document_source_kind(document) == "pdf":
             presigned_url = f"{presigned_url}#page={page}"
+        if as_json is True:
+            return {"presigned_url": presigned_url, "expires_seconds": 300}
         return RedirectResponse(url=presigned_url, status_code=307)
     except HTTPException:
         raise
@@ -5769,3 +5832,21 @@ async def _build_document_page_preview_response(
         raise HTTPException(status_code=503, detail=f"预览加载失败，请检查 MinIO：{exc}") from exc
     except PsycopgError as exc:
         raise HTTPException(status_code=500, detail=f"database error: {exc}") from exc    # ???????
+
+
+@router.get("/projects/{identifier_id}/report-source", summary="获取授权项目报告下载地址")
+@bounded_sync
+def get_project_report_source(identifier_id: str, db_service: PostgreSQLService = Depends(get_db_service), oss_service: MinioService = Depends(get_oss_service)):
+    project = db_service.get_project_by_identifier(identifier_id)
+    if not project or not project.get('report_url'):
+        raise HTTPException(404, '项目尚无已保存报告')
+    if project.get('results_stale'):
+        raise HTTPException(409, '材料已变更，请重新检查并导出报告')
+    url = project['report_url']
+    if str(url).startswith('minio://'):
+        bucket, obj = oss_service.bucket_and_object_from_file_url(url)
+    elif MinioService.is_presigned_url(url):
+        bucket, obj = oss_service.bucket_and_object_from_presigned_url(url)
+    else:
+        raise HTTPException(409, '报告地址无法确认，请重新导出')
+    return {'presigned_url': oss_service.get_presigned_url(obj, bucket), 'expires_seconds': 300}

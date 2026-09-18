@@ -145,62 +145,11 @@ class OCRSignatureMixin:
         normalized = re.sub(rf"({placeholder})\s*[)）](?=(?:\s|$|日期|20\d{{2}}年|\d{{4}}年))", r"\1", normalized)
         return re.sub(r"\s{2,}", " ", normalized).strip()
 
-    def _estimate_signature_bbox_from_anchor(self, anchor_bbox: Any, page_image_size: tuple[int, int] | None) -> list[int] | None:
-        """从文字锚点盲猜签名的右侧偏下位置。"""
-        anchor_xywh = self._bbox_to_xywh(anchor_bbox)
-        if anchor_xywh is None: return None
-        left, top, width, height = anchor_xywh
-        return self._clip_xywh_to_page([left + int(width * 0.56), top - int(height * 0.35), max(132, int(width * 0.26)), max(72, int(height * 1.9))], page_image_size)
 
-    def _estimate_signature_bbox_from_text_anchor(self, anchor_section: dict[str, Any], page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]], page_image_size: tuple[int, int] | None) -> list[int] | None:
-        """结合文字锚点和附近的印章位置，精准预估签名可能出现的包围盒位置。"""
-        anchor_xywh = self._bbox_to_xywh(anchor_section.get("bbox"))
-        if anchor_xywh is None: return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
-        nearest_seal_bbox = self._find_nearest_seal_bbox(anchor_xywh, page_sections, page_blocks)
-        if nearest_seal_bbox is not None and self._bbox_distance(anchor_xywh, nearest_seal_bbox) <= max(280, anchor_xywh[2] + nearest_seal_bbox[2]):
-            estimated_bbox = [max(0, min(anchor_xywh[0] + int(anchor_xywh[2] * 0.34), nearest_seal_bbox[0] - int(nearest_seal_bbox[2] * 0.72))), max(0, min(anchor_xywh[1], nearest_seal_bbox[1]) - int(max(anchor_xywh[3], nearest_seal_bbox[3]) * 0.28)), max(108, int(max(anchor_xywh[2] * 0.20, nearest_seal_bbox[2] * 2.1))), max(72, int(max(anchor_xywh[3], nearest_seal_bbox[3]) * 1.45))]
-            # 若印章面积离谱，切回保守估算
-            if estimated_bbox[2] > max(int(anchor_xywh[2] * 1.2), 220) or estimated_bbox[3] > max(int(anchor_xywh[3] * 3), 120): return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
-            return self._clip_xywh_to_page(estimated_bbox, page_image_size)
-        return self._estimate_signature_bbox_from_anchor(anchor_section.get("bbox"), page_image_size)
 
-    def _find_nearest_seal_bbox(self, reference_bbox: list[int] | None, page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]]) -> list[int] | None:
-        if reference_bbox is None: return None
-        best_bbox, best_score = None, None
-        for item in [*page_sections, *page_blocks]:
-            if str(item.get("type") or "").strip().lower() != "seal": continue
-            bbox = self._bbox_to_xywh(item.get("bbox"))
-            if bbox is not None:
-                score = self._bbox_distance(reference_bbox, bbox)
-                if best_score is None or score < best_score: best_score, best_bbox = score, bbox
-        return best_bbox
 
-    def _estimate_signature_bbox_from_table_anchor(self, anchor_section: dict[str, Any], page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]], page_image_size: tuple[int, int] | None) -> list[int] | None:
-        table_bbox = self._bbox_to_xywh(anchor_section.get("bbox"))
-        if table_bbox is None: return None
-        left, top, width, height = table_bbox
-        nearest_seal_bbox = self._find_nearest_seal_bbox(table_bbox, page_sections, page_blocks)
-        if nearest_seal_bbox is not None:
-            return self._clip_xywh_to_page([max(left + int(width * 0.46), nearest_seal_bbox[0] + int(nearest_seal_bbox[2] * 0.85)), max(top + int(height * 0.72), nearest_seal_bbox[1] - int(nearest_seal_bbox[3] * 0.18)), max(144, int(width * 0.22)), max(72, int(nearest_seal_bbox[3] * 0.9))], page_image_size)
-        return self._clip_xywh_to_page([left + int(width * 0.62), top + int(height * 0.78), max(144, int(width * 0.22)), max(72, int(height * 0.12))], page_image_size)
 
-    def _signature_anchor_reference_bbox(self, anchor_section: dict[str, Any], page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]], page_image_size: tuple[int, int] | None) -> list[int] | None:
-        if str(anchor_section.get("type") or "").strip().lower() == "table": return self._estimate_signature_bbox_from_table_anchor(anchor_section, page_sections, page_blocks, page_image_size)
-        return self._estimate_signature_bbox_from_text_anchor(anchor_section, page_sections, page_blocks, page_image_size) or self._bbox_to_xywh(anchor_section.get("bbox"))
 
-    def _anchor_has_signature_evidence(self, anchor_section: dict[str, Any], page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]], page_image_size: tuple[int, int] | None) -> bool:
-        """判定目标锚点附近是否存在印章、手写签名的实质性线索。"""
-        compact_value = re.sub(r"\s+", "", self._extract_signature_anchor_value(anchor_section.get("text") or ""))
-        strong_anchor = self._is_strong_signature_anchor_text(anchor_section.get("text") or "")
-        if compact_value and (self._is_signature_placeholder_text(compact_value) and strong_anchor or self._normalize_signature_candidate_text(compact_value)): return True
-        anchor_bbox = self._signature_anchor_reference_bbox(anchor_section, page_sections, page_blocks, page_image_size)
-        for items in (page_sections, page_blocks):
-            for item in items:
-                if item is anchor_section: continue
-                item_type, item_bbox = str(item.get("type") or "").strip().lower(), self._bbox_to_xywh(item.get("bbox"))
-                if item_type == "signature" and anchor_bbox and item_bbox and self._boxes_are_close(anchor_bbox, item_bbox, max_dx=420, max_dy=180): return True
-                if strong_anchor and item_type == "seal" and anchor_bbox and item_bbox and self._boxes_are_close(anchor_bbox, item_bbox, max_dx=180, max_dy=180): return True
-        return False
 
     def _dedupe_signature_sections(self, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """同页同坐标的伪合成签字区只保留一份。"""
@@ -223,7 +172,7 @@ class OCRSignatureMixin:
             s_bbox = self._bbox_to_xywh(signature.get("bbox"))
             for a_idx, anchor in enumerate(anchors):
                 a_bbox = self._bbox_to_xywh(anchor.get("_signature_anchor_bbox") or anchor.get("bbox"))
-                if a_bbox and s_bbox and not self._boxes_are_close(a_bbox, s_bbox, max_dx=420, max_dy=180): continue
+                if not a_bbox or not s_bbox or not self._boxes_are_close(a_bbox, s_bbox, max_dx=420, max_dy=180): continue
                 candidate_pairs.append((self._bbox_distance(a_bbox, s_bbox), abs(s_idx - a_idx), a_idx, s_idx))
         matches, matched_s, matched_a = [], set(), set()
         for _, _, a_idx, s_idx in sorted(candidate_pairs):
@@ -231,9 +180,6 @@ class OCRSignatureMixin:
                 matched_s.add(s_idx)
                 matched_a.add(a_idx)
                 matches.append((s_idx, a_idx))
-        rem_s = [i for i in range(len(signatures)) if i not in matched_s]
-        rem_a = [i for i in range(len(anchors)) if i not in matched_a]
-        for s_idx, a_idx in zip(rem_s, rem_a): matches.append((s_idx, a_idx))
         return sorted(matches, key=lambda item: item[1])
 
     def _enrich_page_signature_sections(self, page_sections: list[dict[str, Any]], page_blocks: list[dict[str, Any]], page_image_size: tuple[int, int] | None) -> list[dict[str, Any]]:
@@ -266,19 +212,9 @@ class OCRSignatureMixin:
             elif s_type in {"heading", "text", "table"}:
                 s["text"] = self._normalize_section_text(s.get("text") or "")
                 if self._is_signature_anchor_text(s.get("text") or "") or self._is_table_signature_anchor_text(s.get("text") or ""):
-                    s["_signature_anchor_bbox"] = self._xywh_to_bbox(self._signature_anchor_reference_bbox(s, sections, page_blocks, page_image_size))
+                    s["_signature_anchor_bbox"] = s.get("bbox")
                     anc_sections.append(s)
                     
-        # 2. 对匹配空缺的锚点生成“伪装”合成签名区
-        matched_a_idx = {a_idx for _, a_idx in self._match_signatures_to_anchors(sig_sections, anc_sections)}
-        for a_idx, a_sec in enumerate(anc_sections):
-            if a_idx not in matched_a_idx and self._anchor_has_signature_evidence(a_sec, sections, page_blocks, page_image_size):
-                inferred_bbox = self._xywh_to_bbox(self._signature_anchor_reference_bbox(a_sec, sections, page_blocks, page_image_size))
-                synth = {"page": int(a_sec.get("page", 0) or inferred_page_no or 0), "type": "signature", "text": placeholder, "_synthetic": True}
-                if inferred_bbox is not None: synth["bbox"] = inferred_bbox
-                sections.append(synth)
-                sig_sections.append(synth)
-                
         # 3. 最终应用替换和属性合并
         for s_idx, a_idx in self._match_signatures_to_anchors(sig_sections, anc_sections):
             s_sec, a_sec = sig_sections[s_idx], anc_sections[a_idx]

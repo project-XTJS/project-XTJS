@@ -211,6 +211,9 @@ class OrchestratorMixin:
                     "bidder_key": bidder_key,
                     "business_payload": business_payload,
                     "business_meta": business_meta,
+                    "technical_payload": next((self._coerce_stored_payload(x.get("content")) for x in document_records
+                        if x.get("relation_id") == record.get("relation_id") and record.get("relation_id") is not None
+                        and self._normalize_project_document_role(x.get("relation_role")) == DOCUMENT_TYPE_TECHNICAL_BID), None),
                 }
             )
 
@@ -407,11 +410,13 @@ class OrchestratorMixin:
                 normalizer=self._normalize_deviation,
             )
             checks = {"deviation_check": check}
-            bidder_name = self._extract_bidder_name(checks, bidder_key)
+            identity = self._identify_bidder(business_payload, technical_payload)
+            bidder_name = identity["name"]
             summary = self._summarize_bidder_checks(checks)
             bidder = {
                 "bidder_key": bidder_key,
                 "bidder_name": bidder_name,
+                "bidder_identity": identity,
                 "reading_guide": self._build_bidder_reading_guide(
                     bidder_key=bidder_key,
                     bidder_name=bidder_name,
@@ -510,6 +515,8 @@ class OrchestratorMixin:
     ) -> dict[str, Any]:
         """对单个投标人执行完整的商务标+技术标审查。"""
         business_payload = bidder["business"]["content"]
+        business_meta = bidder["business"]["meta"]
+        identity = self._identify_bidder(business_payload, (bidder.get("technical") or {}).get("content"))
 
         integrity_check = self._execute_check(
             check_code="integrity_check",
@@ -518,8 +525,8 @@ class OrchestratorMixin:
             normalizer=self._normalize_integrity,
         )
         consistency_check = self._execute_consistency_check(
-            tender_payload=tender_payload,
-            business_payload=business_payload,
+            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender"}),
+            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid"}),
             integrity_check=integrity_check,
         )
 
@@ -550,7 +557,7 @@ class OrchestratorMixin:
             "verification_check": self._execute_check(
                 check_code="verification_check",
                 check_name="签字盖章日期审查",
-                runner=lambda: self.verification_checker.check_seal_and_date(tender_payload, business_payload),
+                runner=lambda: self.verification_checker.check_seal_and_date(tender_payload, business_payload, bidder_identity_result=identity),
                 normalizer=self._normalize_verification,
             ),
         }
@@ -559,7 +566,7 @@ class OrchestratorMixin:
             integrity_check=integrity_check,
         )
 
-        bidder_name = self._extract_bidder_name(checks, bidder["bidder_key"])
+        bidder_name = identity["name"]
         aggregate_issues = self._aggregate_bidder_issues(checks)
         summary = self._summarize_bidder_checks(checks)
         reading_guide = self._build_bidder_reading_guide(
@@ -575,6 +582,7 @@ class OrchestratorMixin:
         return {
             "bidder_key": bidder["bidder_key"],
             "bidder_name": bidder_name,
+                "bidder_identity": identity,
             "reading_guide": reading_guide,
             "documents": {
                 "tender": tender_meta,
@@ -595,6 +603,29 @@ class OrchestratorMixin:
                 for task in bidder_tasks
             ]
 
+        # Resolve PDF line evidence in the parent process. GPU OCR pipelines and
+        # their locks must never be initialized or inherited for use by fork workers.
+        from app.service.analysis.compliance.template_extractor import TemplateExtractor
+        from app.service.analysis.compliance.template_pdf_evidence import evidence_for
+        from app.service.analysis.compliance.underline_projection import EVIDENCE_KEY
+        prepared = []
+        for task in bidder_tasks:
+            task = dict(task)
+            for role in ('tender', 'business'):
+                key = role + '_payload'
+                payload = dict(task[key])
+                meta = task[role + '_meta']
+                payload['_template_source'] = {'file_url': meta.get('file_path'), 'identifier_id': meta.get('identifier_id'), 'role': role}
+                if role == 'tender':
+                    templates = TemplateExtractor.extract_consistency_templates(payload)
+                    pages = sorted({int(loc['page']) for template in templates for loc in template.get('locations', []) if loc.get('page')})
+                else:
+                    _, sections = self.consistency_checker._build_attachment_lookup(payload, templates)
+                    pages = sorted({int(page) for section in sections for page in section.get('pages', []) if page})
+                payload[EVIDENCE_KEY] = evidence_for(payload, pages)
+                task[key] = payload
+            prepared.append(task)
+        bidder_tasks = prepared
         # 取可用核数的一半（上限 8），既充分利用多核，又给其他容器/任务留余量。
         workers = min(
             len(bidder_tasks),
@@ -624,8 +655,10 @@ class OrchestratorMixin:
         bidder_key: str,
         business_payload: dict[str, Any],
         business_meta: dict[str, Any],
+        technical_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """对提供商务标的投标人执行审查。"""
+        identity = self._identify_bidder(business_payload, technical_payload)
         integrity_check = self._execute_check(
             check_code="integrity_check",
             check_name="商务标完整性审查",
@@ -633,8 +666,8 @@ class OrchestratorMixin:
             normalizer=self._normalize_integrity,
         )
         consistency_check = self._execute_consistency_check(
-            tender_payload=tender_payload,
-            business_payload=business_payload,
+            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender"}),
+            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid"}),
             integrity_check=integrity_check,
         )
 
@@ -665,7 +698,7 @@ class OrchestratorMixin:
             "verification_check": self._execute_check(
                 check_code="verification_check",
                 check_name="签字盖章日期审查",
-                runner=lambda: self.verification_checker.check_seal_and_date(tender_payload, business_payload),
+                runner=lambda: self.verification_checker.check_seal_and_date(tender_payload, business_payload, bidder_identity_result=identity),
                 normalizer=self._normalize_verification,
             ),
         }
@@ -674,7 +707,7 @@ class OrchestratorMixin:
             integrity_check=integrity_check,
         )
 
-        bidder_name = self._extract_bidder_name(checks, bidder_key)
+        bidder_name = identity["name"]
         aggregate_issues = self._aggregate_bidder_issues(checks)
         summary = self._summarize_bidder_checks(checks)
         reading_guide = self._build_bidder_reading_guide(
@@ -689,6 +722,7 @@ class OrchestratorMixin:
         return {
             "bidder_key": bidder_key,
             "bidder_name": bidder_name,
+                "bidder_identity": identity,
             "reading_guide": reading_guide,
             "documents": {
                 "tender": tender_meta,

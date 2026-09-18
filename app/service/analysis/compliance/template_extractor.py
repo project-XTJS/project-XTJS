@@ -788,6 +788,11 @@ class TemplateExtractor:
     @classmethod
     def _explicit_template_heading(cls, text: str) -> bool:
         """Only an independent numbered title, not a reference inside prose."""
+        text = re.sub(r'(?<=\d)\s*[–—－]\s*(?=\d)', '-', str(text or ''))
+        # The generic classifier excludes prose containing “响应文件”; an
+        # explicitly numbered “响应文件偏离表” is nevertheless a real form title.
+        if re.fullmatch(r'\s*附件\s*\d+(?:\s*[-－]\s*\d+)*\s*[：:]?\s*(?:响应|投标)文件偏离表(?:\s*[（(]格式[）)])?\s*', str(text or '')):
+            return True
         return bool(re.match(r'^\s*附件\s*\d', str(text or ''))) and SectionClassifier.is_attachment_heading_text(text)
 
     @classmethod
@@ -922,9 +927,16 @@ class TemplateExtractor:
                 if clean_numbers:
                     attachment_mapping[normalized_title] = clean_numbers
 
+        from ..requirement_groups import parse_group
+        grouped_branches = set()
         # 有附件引用的组成条目优先落到附件模板标题；没有附件引用的材料项直接保留。
         for entry in business_scope.get("item_entries") or []:
             numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
+            group = parse_group(entry.get('content', ''))
+            if group['operator'] != 'single':
+                push_requirement(entry['content'])
+                grouped_branches.update(cls._attachment_core_title(b['title']) for b in group['branches'])
+                continue
             if numbers:
                 matched_any = False
                 for number in numbers:
@@ -947,6 +959,9 @@ class TemplateExtractor:
             if not title or attachment.get("is_composite"):
                 continue
             attachment_number = str(attachment.get("attachment_number") or "").strip()
+            core = cls._attachment_core_title(title)
+            if core in grouped_branches:
+                continue
             push_requirement(title, [attachment_number] if attachment_number else None)
 
         return ordered_list, attachment_mapping
@@ -979,6 +994,10 @@ class TemplateExtractor:
                 continue
             entry_locations = [dict(location) for location in entry.get("locations") or [] if isinstance(location, dict)]
             if not entry_locations:
+                continue
+            from ..requirement_groups import parse_group
+            if parse_group(entry.get('content', ''))['operator'] != 'single':
+                add_locations(entry['content'], entry_locations)
                 continue
             numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
             matched_any = False
@@ -1203,7 +1222,9 @@ class TemplateExtractor:
     def _legacy_business_attachment_scope(cls, model_raw_json: dict) -> dict:
         """提取“投标文件的组成”中明确归入商务标的条目和附件范围。"""
         data_node = model_raw_json.get('data', model_raw_json)
+        from ..requirement_groups import continuation_view
         sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
+        sections = continuation_view(sections)
 
         ordered_items: list[str] = []
         item_entries: list[dict] = []
@@ -1261,7 +1282,7 @@ class TemplateExtractor:
                     if requirement_text:
                         next_location["text"] = requirement_text
                     locations.append(next_location)
-                return locations[:1]
+                return locations
 
             parsed_any = False
             for part in cls._split_requirement_parts(text):

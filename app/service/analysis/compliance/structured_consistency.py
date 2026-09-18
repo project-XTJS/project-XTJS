@@ -14,16 +14,13 @@ from app.service.manual_review.working_copy import MANUAL_EXTRACTIONS_KEY
 from ..attachment_synonyms import strip_attachment_title_parenthetical_noise
 from .embedding_service import get_embedding_service
 from .template_extractor import TemplateExtractor
+from .underline_projection import project_text, markup_spans
+from .template_pdf_evidence import evidence_for
 
 
-ENGINE_VERSION = "structured-template-v1"
+ENGINE_VERSION = "structured-template-underlines-v2"
 VALID_STATUSES = {"pass", "missing", "unclear", "skipped"}
 DELEGATED_KINDS = {"signature", "seal", "date"}
-# 附件命中需达到的内容相似度阈值：低于此值视为“未匹配/缺失”。
-_ATTACHMENT_CONTENT_MATCH_THRESHOLD = 0.5
-# 标题词法相似度达到此值视为“强命中”——填值/扫描件内容分低但标题明确时不再误伤。
-_ATTACHMENT_TITLE_STRONG_THRESHOLD = 0.6
-
 VARIABLE_LABELS: dict[str, tuple[str, ...]] = {
     "项目名称": ("项目名称", "项目名"),
     "项目编号": ("项目编号", "招标编号", "采购编号", "比选编号"),
@@ -81,49 +78,6 @@ TABLE_HEADER_MARKERS = (
 )
 
 
-def _mask_fillable_slots(text: str) -> str:
-    """把模板/投标文本里的“可填槽位”归一成占位符 <V>，用于骨架比对。
-
-    覆盖：空括号、下划线、LaTeX\\underline、【】{}、含 编号/包件/名称/项目/日期/金额 等关键字的
-    括号组（如（招标编号）、（包件号、包件名称）、（包件2：计算及配套网络设备采购））、
-    以及 日期/金额/长数字。固定措辞保持不变，只有“该填的值”被归一。
-    """
-    if not text:
-        return str(text or "")
-    s = str(text)
-    # LaTeX 下划线/隐藏值
-    s = re.sub(r"\\underline\s*\{[^}]*\}", " <V> ", s)
-    # 方括号/花括号
-    s = re.sub(r"[【\[][^】\]]{0,60}[】\]]", " <V> ", s)
-    s = re.sub(r"\{[^{}]{0,60}\}", " <V> ", s)
-    # 下划线
-    s = re.sub(r"(?:_{2,}|＿{2,})", " <V> ", s)
-    # 括号组：空括号、或含“编号/名称/包件/项目/日期/金额/数量/型号/联系人…”的填值框
-    paren = re.compile(r"[（(]([^（）()]{0,60})[）)]")
-    _PAREN_KEYWORDS = (
-        "编号", "包件", "包号", "标段", "项目", "投标人", "供应商", "名称", "联系人",
-        "日期", "时间", "金额", "数量", "型号", "公司", "地址", "电话", "邮箱", "单位",
-        "费率", "单价", "总价", "大写", "小写", "第一次", "第几次", "次", "期", "批",
-    )
-
-    def _paren_repl(match: re.Match) -> str:
-        inner = match.group(1).strip()
-        if not inner or re.fullmatch(r"[\s_＿\-—:：,，、;；/]+", inner):
-            return " <V> "
-        if any(keyword in inner for keyword in _PAREN_KEYWORDS):
-            return " <V> "
-        return match.group(0)
-
-    s = paren.sub(_paren_repl, s)
-    # 日期
-    s = re.sub(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日", " <V> ", s)
-    s = re.sub(r"\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}", " <V> ", s)
-    # 金额
-    s = re.sub(r"[￥¥]\s*[\d,，.]+\s*元?", " <V> ", s)
-    s = re.sub(r"[\d,，]{3,}\s*元", " <V> ", s)
-    # 长数字（编号/金额残留，长度>=3，避免误伤第X条等短数）
-    s = re.sub(r"(?<!第)\b\d{3,}\b", " <V> ", s)
-    return re.sub(r"\s+", " ", s).strip()
 # 可填写表格的题注词：含这些词（或以“表”结尾的短题注）的段落属于需投标人填写的表格题注，
 # 仅校验其在投标附件中是否存在，不对填写内容做“是否被改动”的一致性检查。
 FILLABLE_TABLE_TITLE_MARKERS = (
@@ -319,16 +273,16 @@ class StructuredConsistencyEngine:
         for skeleton in skeletons:
             title = skeleton["title"]
             integrity_skip = self.checker._integrity_skip_reason_for_title(title, integrity_raw)
-            if integrity_skip and not skeleton.get('optionality_conflict'):
-                results.append(self._skipped_segment(skeleton, integrity_skip, model_status))
-                continue
-
             attachment_match = self._match_attachment_with_integrity_fallback(
                 skeleton,
                 bid_by_no,
                 bid_sections,
             )
             matched = attachment_match.get("section")
+            if (integrity_skip and not skeleton.get('optionality_conflict')
+                    and attachment_match.get('location_status') == 'not_found'):
+                results.append(self._skipped_segment(skeleton, integrity_skip, model_status))
+                continue
             if matched is None:
                 if skeleton.get('optionality_conflict'):
                     result = self._unmatched_segment(skeleton, attachment_match, model_status)
@@ -336,7 +290,7 @@ class StructuredConsistencyEngine:
                     result['optionality_locations'] = skeleton.get('optionality_locations') or []
                     results.append(result)
                     continue
-                if skeleton["is_optional"]:
+                if skeleton["is_optional"] and attachment_match.get("location_status") == "not_found":
                     results.append(
                         self._skipped_segment(
                             skeleton,
@@ -346,16 +300,13 @@ class StructuredConsistencyEngine:
                         )
                     )
                 else:
-                    if attachment_match.get("_low_content"):
-                        results.append(
-                            self._missing_segment(skeleton, attachment_match, model_status)
-                        )
-                    else:
-                        results.append(
-                            self._unmatched_segment(skeleton, attachment_match, model_status)
-                        )
+                    results.append(
+                        self._unmatched_segment(skeleton, attachment_match, model_status)
+                    )
                 continue
 
+            matched = dict(matched, _underline_evidence=evidence_for(test_json, matched.get('pages') or []),
+                           _underline_locations=self._underline_locations(test_json, matched.get('sections') or []))
             result = self._evaluate_attachment(skeleton, matched, attachment_match)
             result["model_status"] = self.embedding.status()
             results.append(result)
@@ -395,6 +346,10 @@ class StructuredConsistencyEngine:
             allowed_pages = set(accurate_pages)
         else:
             allowed_pages = self._location_pages(locations)
+        raw_template = "\n".join(str(line) for line in template.get("content") or [])
+        projection = project_text(raw_template, evidence=evidence_for(model_json, list(allowed_pages)),
+                                  pages=list(allowed_pages), locations=self._underline_locations(model_json, (matched_section or {}).get('sections') or locations), require_physical=True, require_scope=True)
+        content_lines = self._truncate_at_next_attachment_heading(self._clean_lines(projection['text'].splitlines()), title=title)
         items: list[dict[str, Any]] = []
         items.append(
             self._make_item(
@@ -436,6 +391,7 @@ class StructuredConsistencyEngine:
             seen.add(key)
             deduped.append(item)
         return {
+            "underline_projection": projection,
             "attachment_key": attachment_key,
             "attachment_number": attachment_number,
             "title": title,
@@ -740,14 +696,34 @@ class StructuredConsistencyEngine:
             for marker in present
         ]
 
+    @staticmethod
+    def _underline_locations(payload, locations):
+        container = payload.get('data') if isinstance(payload.get('data'), dict) else payload
+        unit = container.get('bbox_coordinate_space')
+        result = []
+        for location in locations:
+            if unit not in ('pdf', 'pdf_point', 'pdf_points') and location.get('coordinate_system') not in ('pdf_point', 'pdf_points'):
+                continue
+            box = location.get('bbox')
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            box = list(box)
+            if location.get('bbox_format') == 'xywh':
+                box[2] += box[0]; box[3] += box[1]
+            result.append(dict(location, bbox=box))
+        return result
+
     def _evaluate_attachment(
         self,
         skeleton: dict[str, Any],
         section: dict[str, Any],
         attachment_match: dict[str, Any],
     ) -> dict[str, Any]:
-        bid_text = strip_text_layer_noise(section.get("text") or "")
-        candidate_texts = self._candidate_texts(section)
+        projection = project_text(section.get('text') or '', evidence=section.get('_underline_evidence'),
+                                  pages=section.get('pages') or [], locations=section.get('_underline_locations') or [], require_physical=True, require_scope=True)
+        bid_text = strip_text_layer_noise(projection['text'])
+        candidate_texts = self._candidate_texts({'text': projection['text']})
+        candidate_texts.append(section.get('title') or '')
         locations = self.checker._serialize_section_locations(section)
         element_results: list[dict[str, Any]] = []
         for item in skeleton["items"]:
@@ -775,6 +751,14 @@ class StructuredConsistencyEngine:
         else:
             status = "skipped" if skeleton["is_self_defined"] else "pass"
 
+        reference_projection = skeleton.get('underline_projection') or {}
+        projection_unclear = reference_projection.get('status') != 'ready' or projection['status'] != 'ready'
+        body_items = [item for item in required if item.get('kind') != 'title']
+        if projection_unclear or not body_items or not normalize_text(bid_text):
+            status = 'unclear'
+            for item in element_results:
+                if item.get('kind') not in DELEGATED_KINDS:
+                    item.update(status='unclear', difference_category='alignment_unclear')
         missing = [
             str(item.get("label") or item.get("reference_text") or "")
             for item in required
@@ -807,6 +791,7 @@ class StructuredConsistencyEngine:
         )
         return {
             "name": skeleton["title"],
+            "underline_projection": {"tender": reference_projection, "bid": projection},
             "status": status,
             "is_passed": status in {"pass", "skipped"},
             "engine_version": ENGINE_VERSION,
@@ -875,14 +860,6 @@ class StructuredConsistencyEngine:
         reference = item["reference_text"]
         comparison_reference = reference
         comparison_candidates = candidates
-        if item["kind"] == "fixed_clause":
-            comparison_reference = _mask_fillable_slots(
-                self.checker._fixed_body_line(reference) or reference
-            )
-            comparison_candidates = [
-                _mask_fillable_slots(self.checker._fixed_body_line(candidate) or candidate)
-                for candidate in candidates
-            ]
         best_text, best_lexical, second_lexical = self._best_lexical(
             comparison_reference,
             comparison_candidates,
@@ -926,20 +903,8 @@ class StructuredConsistencyEngine:
                 structural=True,
             )
 
-        slot_spec = self.checker._build_dynamic_slot_spec(reference)
-        if slot_spec and self.checker._dynamic_slot_spec_matches(slot_spec, candidates):
-            result.update(
-                status="pass",
-                match_method="deterministic_slot",
-                lexical_score=max(best_lexical, settings.CONSISTENCY_TEXT_PASS_THRESHOLD),
-                difference_category="allowed_variable",
-            )
-            return result
-
         reference_norm = normalize_text(comparison_reference)
-        bid_norm = normalize_text(
-            _mask_fillable_slots(self.checker._build_fixed_body(bid_text) or bid_text)
-        )
+        bid_norm = normalize_text(bid_text)
         candidate_contains_reference = bool(
             reference_norm
             and any(
@@ -1057,102 +1022,8 @@ class StructuredConsistencyEngine:
             )
         return result
 
-    def _match_attachment(
-        self,
-        skeleton: dict[str, Any],
-        sections: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        expected_no = str(skeleton.get("attachment_number") or "")
-        if expected_no:
-            exact = [
-                section
-                for section in sections
-                if str(section.get("attachment_number") or "") == expected_no
-            ]
-            if len(exact) == 1:
-                return {
-                    "section": exact[0],
-                    "method": "attachment_number",
-                    "score": 1.0,
-                    "margin": 1.0,
-                    "confidence": "high",
-                }
-            if len(exact) > 1:
-                sections = exact
-
-        title = skeleton["title"]
-        scores = [
-            self._section_title_score(title, section)
-            for section in sections
-        ]
-        if scores:
-            order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)
-            best_index = order[0]
-            best = scores[best_index]
-            second = scores[order[1]] if len(order) > 1 else 0.0
-            margin = best - second
-            if (
-                best >= settings.CONSISTENCY_TITLE_MATCH_THRESHOLD
-                and margin >= settings.CONSISTENCY_MATCH_MARGIN
-            ):
-                return {
-                    "section": sections[best_index],
-                    "method": "lexical",
-                    "score": round(best, 4),
-                    "margin": round(margin, 4),
-                    "confidence": "high",
-                }
-            # 标题侧重、但词法相似度达标（表/介绍、一拆多等变体），也视为命中——与完整性口径一致。
-            if best >= 0.5:
-                return {
-                    "section": sections[best_index],
-                    "method": "lexical_similarity",
-                    "score": round(best, 4),
-                    "margin": round(margin, 4),
-                    "confidence": "high",
-                }
-
-        embedding_scores = self.embedding.similarities(
-            title,
-            [str(section.get("title") or section.get("text") or "").splitlines()[0] for section in sections],
-        )
-        if embedding_scores:
-            order = sorted(
-                range(len(embedding_scores)),
-                key=lambda index: embedding_scores[index],
-                reverse=True,
-            )
-            best_index = order[0]
-            best = embedding_scores[best_index]
-            second = embedding_scores[order[1]] if len(order) > 1 else 0.0
-            margin = best - second
-            if (
-                best >= settings.CONSISTENCY_TITLE_MATCH_THRESHOLD
-                and margin >= settings.CONSISTENCY_MATCH_MARGIN
-            ):
-                return {
-                    "section": sections[best_index],
-                    "method": "embedding",
-                    "score": round(best, 4),
-                    "margin": round(margin, 4),
-                    "confidence": "high",
-                }
-            if best >= settings.CONSISTENCY_TITLE_UNMATCHED_THRESHOLD:
-                return {
-                    "section": None,
-                    "method": "embedding",
-                    "score": round(best, 4),
-                    "margin": round(margin, 4),
-                    "confidence": "unclear",
-                }
-        best = max(scores, default=0.0)
-        return {
-            "section": None,
-            "method": "lexical",
-            "score": round(best, 4),
-            "margin": 0.0,
-            "confidence": "unclear" if best >= settings.CONSISTENCY_TITLE_UNMATCHED_THRESHOLD else "low",
-        }
+    def _match_attachment(self, skeleton: dict[str, Any], sections: list[dict[str, Any]]) -> dict[str, Any]:
+        return self.checker._verification_checker._resolve_attachment(skeleton, sections)
 
     def _match_attachment_with_integrity_fallback(
         self,
@@ -1160,30 +1031,9 @@ class StructuredConsistencyEngine:
         bid_by_no: dict[str, list[dict[str, Any]]],
         sections: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        strict_match = self._match_attachment(skeleton, sections)
-        if strict_match.get("section") is not None:
-            if self._accept_by_title_or_content(skeleton, strict_match.get("section")):
-                return strict_match
-            return self._low_content_unmatched(strict_match)
-        candidate_match = self._integrity_candidate_attachment_match(
-            skeleton,
-            bid_by_no,
-            sections,
-        )
-        if candidate_match.get("section") is not None:
-            if self._accept_by_title_or_content(skeleton, candidate_match.get("section")):
-                return candidate_match
-            return self._low_content_unmatched(candidate_match)
-        return strict_match
-
-    def _accept_by_title_or_content(self, skeleton: dict[str, Any], section: dict[str, Any]) -> bool:
-        """标题词法强命中即接受；否则内容相似度需达标。避免“填值/扫描件”因内容分低被误伤。"""
-        title_score = self._section_title_score(
-            str(skeleton.get("title") or ""), section
-        )
-        if title_score >= _ATTACHMENT_TITLE_STRONG_THRESHOLD:
-            return True
-        return self._attachment_content_score(skeleton, section) >= _ATTACHMENT_CONTENT_MATCH_THRESHOLD
+        # Location is shared with signature/date checks. Body differences are
+        # evaluated below and must not erase a reliably located form.
+        return self._match_attachment(skeleton, sections)
 
     def _section_title_score(self, expected_title: str, section: dict[str, Any]) -> float:
         """比较附件开头连续标题，兼容“章节标题 + 正式表名”的两层结构。"""
@@ -1216,90 +1066,6 @@ class StructuredConsistencyEngine:
             default=0.0,
         )
 
-    def _attachment_content_score(self, skeleton: dict[str, Any], section: dict[str, Any]) -> float:
-        """模板正文（掩码后）与段的有效文本（check_text，剔除后附页）的相似度。"""
-        reference = _mask_fillable_slots(str(skeleton.get("reference_text") or ""))
-        text = _mask_fillable_slots(
-            str(section.get("check_text") or section.get("text") or "")
-        )
-        if not reference or not text:
-            return 1.0
-        return lexical_similarity(reference, text)
-
-    def _low_content_unmatched(self, match: dict[str, Any]) -> dict[str, Any]:
-        """内容相似度低于阈值：视为未匹配（缺失），不当作命中结果。"""
-        return {
-            "section": None,
-            "method": str(match.get("method") or ""),
-            "score": float(match.get("score") or 0.0),
-            "margin": 0.0,
-            "confidence": "low",
-            "_low_content": True,
-        }
-
-    def _integrity_candidate_attachment_match(
-        self,
-        skeleton: dict[str, Any],
-        bid_by_no: dict[str, list[dict[str, Any]]],
-        sections: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        verifier = self.checker._verification_checker
-        expected_title = str(skeleton.get("title") or "")
-        expected_number = str(skeleton.get("attachment_number") or "").strip()
-        probe = {
-            "attachment_number": expected_number or None,
-            "title": verifier._attachment_title(expected_title),
-        }
-        matched = verifier._match_attachment(probe, bid_by_no, sections)
-        if not isinstance(matched, dict):
-            return {}
-
-        same_number = [
-            section
-            for section in sections
-            if expected_number
-            and str(section.get("attachment_number") or "").strip() == expected_number
-        ]
-        title_candidates = [
-            section
-            for section in sections
-            if verifier._attachment_titles_compatible(
-                probe["title"] or expected_title,
-                str(section.get("title") or section.get("text") or ""),
-            )
-        ]
-        matched_title = str(matched.get("title") or matched.get("text") or "").splitlines()[0]
-        lexical_score = round(lexical_similarity(expected_title, matched_title), 4)
-        method = "integrity_fallback"
-        margin = 0.0
-
-        if same_number and any(section == matched for section in same_number):
-            if len(same_number) == 1:
-                method = "integrity_attachment_number"
-                return {
-                    "section": matched,
-                    "method": method,
-                    "score": 1.0,
-                    "margin": 1.0,
-                    "confidence": "candidate",
-                }
-            method = "integrity_attachment_number_title"
-            margin = self._attachment_title_margin(expected_title, same_number)
-        elif len(title_candidates) == 1 and title_candidates[0] == matched:
-            method = "integrity_unique_title"
-            margin = 1.0
-        elif any(section == matched for section in title_candidates):
-            method = "integrity_title"
-            margin = self._attachment_title_margin(expected_title, title_candidates)
-
-        return {
-            "section": matched,
-            "method": method,
-            "score": lexical_score,
-            "margin": round(margin, 4),
-            "confidence": "candidate",
-        }
-
     def _unmatched_segment(
         self,
         skeleton: dict[str, Any],
@@ -1330,69 +1096,14 @@ class StructuredConsistencyEngine:
                 }
             ],
             "difference_summary": "未可靠定位投标文件中的对应附件，需要人工复核。",
+            "location_status": attachment_match.get('location_status', 'not_found'),
+            "location_candidates": attachment_match.get('candidates', []),
             "pages": [],
             "locations": [],
             "template_attachment_locations": skeleton["template_locations"],
             "template_locations": skeleton["template_locations"],
             "tender_highlight_locations": skeleton["template_locations"],
         }
-
-    def _missing_segment(
-        self,
-        skeleton: dict[str, Any],
-        attachment_match: dict[str, Any],
-        model_status: dict[str, Any],
-    ) -> dict[str, Any]:
-        """内容相似度低于阈值：命中的候选与模板正文不符，判为缺失。"""
-        return {
-            "name": skeleton["title"],
-            "status": "missing",
-            "is_passed": False,
-            "engine_version": ENGINE_VERSION,
-            "model_status": model_status,
-            "attachment_match": self._public_attachment_match(attachment_match),
-            "element_results": [],
-            "difference_category": "fixed_clause_missing",
-            "missing_anchors": [],
-            "unfilled_fields": [],
-            "template_text": skeleton["reference_text"],
-            "bid_text": "",
-            "difference_items": [
-                {
-                    "type": "fixed_clause_missing",
-                    "difference_category": "fixed_clause_missing",
-                    "label": "未在投标文件中找到与模板正文匹配的对应附件",
-                    "template_text": skeleton["title"],
-                    "bid_text": "",
-                    "status": "missing",
-                }
-            ],
-            "difference_summary": "未在投标文件中找到与模板正文内容匹配的对应附件，判定缺失。",
-            "pages": [],
-            "locations": [],
-            "template_attachment_locations": skeleton["template_locations"],
-            "template_locations": skeleton["template_locations"],
-            "tender_highlight_locations": skeleton["template_locations"],
-        }
-
-    @staticmethod
-    def _attachment_title_margin(
-        expected_title: str,
-        sections: list[dict[str, Any]],
-    ) -> float:
-        scores = sorted(
-            (
-                lexical_similarity(
-                    expected_title,
-                    str(section.get("title") or section.get("text") or "").splitlines()[0],
-                )
-                for section in sections
-            ),
-            reverse=True,
-        )
-        if not scores:
-            return 0.0
-        return scores[0] - (scores[1] if len(scores) > 1 else 0.0)
 
     @staticmethod
     def _supports_deterministic_attachment_decision(

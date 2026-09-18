@@ -55,17 +55,18 @@ class ProjectFolderCheckCliTests(unittest.TestCase):
             ["integrity_check", "pricing_check", "verification_check"],
         )
 
-    def test_normalize_selected_checks_supports_new_numeric_options(self) -> None:
-        checks = _normalize_selected_checks(["7,8,9,10"])
+    def test_normalize_selected_checks_uses_typo_only_inside_duplicate_checks(self) -> None:
+        checks = _normalize_selected_checks(["7,8,9"])
         self.assertEqual(
             checks,
             [
                 "business_bid_duplicate_check",
                 "technical_bid_duplicate_check",
                 "personnel_reuse_check",
-                "typo_check",
             ],
         )
+        with self.assertRaisesRegex(ValueError, "不支持的检查项选择"):
+            _normalize_selected_checks(["10"])
 
     def test_extract_business_review_supports_wrapped_payload(self) -> None:
         payload = {
