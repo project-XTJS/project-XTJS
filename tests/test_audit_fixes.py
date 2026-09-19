@@ -39,10 +39,16 @@ class IdentityTests(unittest.TestCase):
         payload={'layout_sections':[{'page':1,'text':'投标单位：深圳市骑士动音商贸有限公司'},{'page':8,'text':'投标人：（加盖公章）深圳市骑士勋章商贸有限公司'}]}
         self.assertEqual(self.checker._bidder_name(payload,[]),'深圳市骑士动音商贸有限公司')
         self.assertEqual(self.checker._bidder_identity(payload)['reason'],'explicit_homepage_field')
-    def test_generic_suffix_and_near_matches_cannot_pass(self):
-        for name,seal in [('餐饮管理有限公司','上海天焮餐饮管理有限公司'),('上海天焮餐饮管理有限公司','上海天焱餐饮管理有限公司'),('餐饮管理有限公司','餐饮管理有限公司')]:
+    def test_generic_suffix_cannot_pass_but_complete_near_match_can(self):
+        for name,seal in [('餐饮管理有限公司','上海天焮餐饮管理有限公司'),('餐饮管理有限公司','餐饮管理有限公司')]:
             self.assertEqual(self.checker._seal_company_check(name,[seal])['status'],'pending')
+        self.assertEqual(self.checker._seal_company_check('上海天焮餐饮管理有限公司',['上海天焱餐饮管理有限公司'])['status'],'pass')
         self.assertEqual(self.checker._seal_company_check('捷飨（上海）餐饮管理有限公司',['捷飨(上海)餐饮管理有限公司'])['status'],'pass')
+    def test_seal_company_match_threshold_is_strictly_greater_than(self):
+        with patch.object(self.checker, '_company_score', return_value=0.75):
+            self.assertEqual(self.checker._seal_company_check('上海甲方科技有限公司',['上海乙方科技有限公司'])['status'],'pending')
+        with patch.object(self.checker, '_company_score', return_value=0.75001):
+            self.assertEqual(self.checker._seal_company_check('上海甲方科技有限公司',['上海乙方科技有限公司'])['status'],'pass')
     def test_detected_seal_without_identity_does_not_pass(self):
         result=self.checker._seal_check({'requirements':{'requires_seal':True}}, {'sections':[],'seal_texts':['上海其他有限公司'],'seal_locations':[]},None)
         self.assertTrue(result['detected']);self.assertEqual(result['status'],'pending')

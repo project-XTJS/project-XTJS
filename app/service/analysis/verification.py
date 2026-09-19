@@ -33,6 +33,7 @@ class VerificationChecker:
     SIGNATURE_ANCHORS = ("法定代表人", "授权代表", "授权委托人", "委托代理人", "被授权人", "代表人", "项目经理", "拟任项目经理")
     SIGNATURE_PLACEHOLDER_TEXTS = ("已签字", "已盖章", "已签章")
     SEAL_MARKERS = ("盖章", "公章", "加盖公章")
+    SEAL_COMPANY_MATCH_THRESHOLD = 0.75
     DATE_FIELD_ANCHORS = ("日期", "填写日期", "签署日期", "落款日期", "签订日期")
     COMPANY_ANCHORS = ("投标人名称", "投标人", "供应商名称", "供应商", "单位名称", "公司名称", "企业名称", "声明人")
     OPTIONAL_MARKERS = ("如有", "可选", "如适用", "如需")
@@ -1694,12 +1695,22 @@ class VerificationChecker:
         detected = bool(raw_seal_texts or seal_locations)
         matched = False
         best_match = None
+        best_match_score = None
         if bidder_name and seal_texts:
             for seal_text in seal_texts:
                 score = self._company_score(bidder_name, seal_text)
-                if best_match is None or score > best_match["score"]:
+                if best_match_score is None or score > best_match_score:
+                    best_match_score = score
                     best_match = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
-            matched = bool(best_match and best_match["score"] == 1.0)
+            matched = bool(
+                best_match
+                and best_match_score is not None
+                and self._seal_company_matches(
+                    bidder_name,
+                    best_match["seal_text"],
+                    best_match_score,
+                )
+            )
         return {
             "status": "pass" if detected and matched else "pending",
             "presence": "detected" if detected else "unknown",
@@ -1710,6 +1721,8 @@ class VerificationChecker:
             "seal_locations": seal_locations,
             "textual_seal_evidences": textual_seals,
             "best_match": best_match,
+            "match_threshold": self.SEAL_COMPANY_MATCH_THRESHOLD,
+            "match_operator": ">",
         }
 
     def _date_check(self, attachment: dict, bid_section: dict | None, deadline: dict | None) -> dict:
@@ -1876,18 +1889,44 @@ class VerificationChecker:
     def _company_score(self, bidder_name: str, seal_text: str) -> float:
         return bidder_identity.company_score(bidder_name, seal_text)
 
+    def _seal_company_matches(self, bidder_name: str, seal_text: str, score: float) -> bool:
+        """Accept a complete organization-name match above the configured score."""
+        seal_name = bidder_identity.name_value(seal_text) or seal_text
+        return bool(
+            score > self.SEAL_COMPANY_MATCH_THRESHOLD
+            and bidder_identity.sufficient_name(bidder_name)
+            and bidder_identity.sufficient_name(seal_name)
+        )
+
     def _seal_company_check(self, bidder_name: str | None, seal_texts: list[str]) -> dict:
         if not seal_texts:
             return {"status": "pending", "matched": False, "reason": "seal_text_not_found", "best_match": None}
         if not bidder_name:
             return {"status": "pending", "matched": False, "reason": "bidder_name_not_found", "best_match": None}
         best = None
+        best_score = None
         for seal_text in seal_texts:
             score = self._company_score(bidder_name, seal_text)
-            if best is None or score > best["score"]:
+            if best_score is None or score > best_score:
+                best_score = score
                 best = {"bidder_name": bidder_name, "seal_text": seal_text, "score": round(score, 4)}
-        matched = bool(best and best["score"] == 1.0)
-        return {"status": "pass" if matched else "pending", "matched": matched, "reason": "matched" if matched else "identity_requires_confirmation", "best_match": best}
+        matched = bool(
+            best
+            and best_score is not None
+            and self._seal_company_matches(
+                bidder_name,
+                best["seal_text"],
+                best_score,
+            )
+        )
+        return {
+            "status": "pass" if matched else "pending",
+            "matched": matched,
+            "reason": "matched" if matched else "identity_requires_confirmation",
+            "best_match": best,
+            "match_threshold": self.SEAL_COMPANY_MATCH_THRESHOLD,
+            "match_operator": ">",
+        }
 
     def _textual_seal_evidences(self, bid_section: dict | None, bidder_name: str | None) -> list[dict]:
         if not isinstance(bid_section, dict):
