@@ -313,6 +313,9 @@ class StructuredConsistencyEngine:
         for skeleton, result in zip(skeletons, results):
             result['is_optional'] = skeleton['is_optional']
             result['optionality_locations'] = skeleton.get('optionality_locations') or []
+            result['applicability_status'] = skeleton.get('applicability_status') or 'required'
+            result['condition_text'] = skeleton.get('condition_text') or ''
+            result['applicability_locations'] = skeleton.get('applicability_locations') or []
             if skeleton.get('optionality_conflict'):
                 result.update(status='unclear', is_passed=False, optionality_conflict=True,
                               difference_summary='招标对该附件的必交与可选声明冲突，需要人工确认。')
@@ -400,6 +403,9 @@ class StructuredConsistencyEngine:
             "is_optional": bool(template.get("is_optional")),
             "optionality_conflict": bool(template.get('optionality_conflict')),
             "optionality_locations": list(template.get('optionality_locations') or []),
+            "applicability_status": str(template.get('applicability_status') or 'required'),
+            "condition_text": str(template.get('condition_text') or ''),
+            "applicability_locations": list(template.get('applicability_locations') or []),
             "is_self_defined": self_defined,
             "items": deduped,
         }

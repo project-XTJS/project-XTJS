@@ -76,18 +76,234 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         self.assertTrue(any('2025年4月16日' in s['text'] for s in checked))
         self.assertFalse(any('附件10' in s['text'] for s in checked))
 
-    def test_unified_response_list_keeps_legacy_behavior(self):
+    def test_unified_response_list_without_business_boundary_is_unclear(self):
         t = {'layout_sections': [block('投标文件的组成', kind='heading'), block('1. 营业执照\n2. 授权委托书')]}
-        self.assertNotEqual(TemplateExtractor.extract_business_attachment_scope(t).get('scope_status'), 'unclear')
+        self.assertEqual(TemplateExtractor.extract_business_attachment_scope(t).get('scope_status'), 'unclear')
 
-    def test_separate_composition_headings_keep_legacy_parser(self):
+    def test_separate_composition_headings_use_unified_line_parser(self):
         t = {'layout_sections': [block('投标文件的组成', kind='heading'),
             block('（一）商务标文件', kind='heading'), block('A. 营业执照或事业单位法人证书'),
             block('如为分支机构则须提供总公司授权函'), block('（二）技术标文件', kind='heading')]}
-        self.assertEqual(TemplateExtractor.extract_business_attachment_scope(t),
-                         TemplateExtractor._legacy_business_attachment_scope(t))
+        scope = TemplateExtractor.extract_business_attachment_scope(t)
+        self.assertEqual(scope['scope_status'], 'resolved')
+        self.assertEqual(len(scope['item_entries']), 1)
+        self.assertIn('营业执照', scope['item_entries'][0]['content'])
 
-    def test_legacy_consistency_keeps_previous_template_scope(self):
+    def test_response_wording_and_text_blocks_extract_scope_and_templates(self):
+        sections = [
+            block('医院项目技术支持服务\n第五章 响应文件格式', 22),
+            block('一、响应文件的组成', 24),
+            block('响应文件由商务文件、技术文件两部分组成。', 24),
+            block('（一）商务文件', 24),
+            block('1.\n比选保证书（格式参见本章附件1）；', 24),
+            block('2.\n报价一览表（格式参见本章附件2）；', 24),
+            block('3. 分项报价表（格式参见本章附件3）；', 24),
+            block('（二）技术文件（包含但不限于以下内容）', 24),
+            block('医院项目技术支持服务\n二、响应文件部分格式附件', 25),
+        ]
+        attachment_titles = [
+            '附件1 比选保证书（格式）',
+            '附件2 报价一览表（格式）',
+            '附件3 分项报价表（格式自拟）',
+            '附件4 响应文件偏离表（格式）',
+            '附件5 参选人基本情况表（格式）',
+            '附件6 近三年完成的类似项目业绩清单（格式）',
+            '附件7-1 法定代表人资格证明书（格式）',
+            '附件7-2 法定代表人授权委托书（格式）',
+            '附件8 参选人承诺声明函（须加盖公章）',
+            '附件9 不参与围标串标承诺书（须加盖公章）',
+            '附件10 项目人员配置表（格式）',
+            '附件11 财务状况及税收、社会保障资金缴纳情况声明函',
+        ]
+        for index, title in enumerate(attachment_titles):
+            text = title + '\n模板固定正文内容不少于二十个字，用于执行一致性比较。'
+            if title.startswith('附件8 '):
+                text += '\n合计总价须与附件2保持一致。'
+            sections.append(block(text, 25 + index))
+        t = {'layout_sections': sections}
+
+        scope = TemplateExtractor.extract_business_attachment_scope(t)
+        attachments = TemplateExtractor.extract_response_format_attachments(t)
+        requirements, _ = TemplateExtractor.extract_requirements(t)
+
+        self.assertEqual(scope['scope_status'], 'resolved')
+        self.assertEqual(len(scope['item_entries']), 3)
+        self.assertEqual(
+            [item['attachment_number'] for item in attachments],
+            ['1', '2', '3', '4', '5', '6', '7-1', '7-2', '8', '9', '10', '11'],
+        )
+        self.assertTrue(requirements)
+        self.assertEqual(
+            sum(item['attachment_number'] == '2' for item in attachments),
+            1,
+        )
+
+    def test_hospital_layout_extracts_thirteen_forms_and_twelve_business_forms(self):
+        scope_lines = [
+            '1. 比选保证书（格式参见本章附件1）；',
+            '2. 报价一览表（格式参见本章附件2）；',
+            '3. 分项报价表（格式参见本章附件3）；',
+            '4. 响应文件偏离表（格式参见本章附件4）；',
+            '5. 参选人基本情况表（格式参见本章附件5）；',
+            '6. 业绩清单（格式参见本章附件6）；',
+            '7. 法定代表人直接参加或委托授权人参加（格式参见本章附件7-1、7-2）；',
+            '8. 承诺声明函（格式参见本章附件8）；',
+            '9. 围标串标承诺书（格式参见本章附件9）；',
+            '10. 财务声明函（格式参见本章附件11）；',
+            '11. 保证金缴纳凭证（如有，格式参见本章附件12）；',
+        ]
+        sections = [
+            block('一、响应文件的组成', 24),
+            block('（一）商务文件', 24),
+            *[block(line, 24) for line in scope_lines],
+            block('（二）技术文件', 24),
+            block('1. 项目人员配置表（格式参见本章附件10）；', 24),
+            block('第五章 响应文件格式', 22),
+            block('二、响应文件部分格式附件', 25),
+        ]
+        numbers = ['1', '2', '3', '4', '5', '6', '7-1', '7-2', '8', '9', '10', '11', '12']
+        for page, number in enumerate(numbers, 25):
+            sections.extend([
+                block(f'附件{number} 示例表单（格式）', page),
+                block('模板固定正文及待填写字段：__________。', page),
+            ])
+        payload = {'layout_sections': sections}
+        bundle = TemplateExtractor.extract_response_format_bundle(payload)
+        business, scoped = TemplateExtractor.filter_business_response_attachments(
+            payload,
+            bundle['attachments'],
+        )
+        self.assertEqual(len(bundle['attachments']), 13)
+        self.assertTrue(scoped)
+        self.assertEqual(len(business), 12)
+        self.assertNotIn('10', {item['attachment_number'] for item in business})
+
+    def test_blank_form_after_structure_heading_is_valid_template_evidence(self):
+        payload = {'layout_sections': [
+            block('第五章 响应文件格式', 20),
+            block('附件1 空白声明表（格式）', 21),
+        ]}
+        bundle = TemplateExtractor.extract_response_format_bundle(payload)
+        self.assertEqual(bundle['extraction_status'], 'resolved')
+        self.assertEqual(len(bundle['attachments']), 1)
+
+    def test_sentence_starting_with_attachment_number_is_not_a_template_title(self):
+        self.assertFalse(TemplateExtractor._explicit_template_heading(
+            '附件1 中列明的总价应与报价一览表保持一致'
+        ))
+
+    def test_regular_bid_security_section_does_not_validate_format_region(self):
+        payload = {'layout_sections': [
+            block('投标文件格式', 10),
+            block('15. 投标保证金', 12, 'heading'),
+            block('15.1 投标保证金递交方式见前附表。', 12),
+        ]}
+        bundle = TemplateExtractor.extract_response_format_bundle(payload)
+        self.assertEqual(bundle['extraction_status'], 'failed')
+        self.assertFalse(bundle['attachments'])
+
+    def test_zero_integrity_items_are_unclear_not_pass(self):
+        raw = IntegrityChecker().check_integrity(
+            {'layout_sections': [block('普通招标正文，没有文件组成或附件模板。')]},
+            bid('营业执照'),
+        )
+        normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
+        self.assertEqual(raw['scored_item_count'], 0)
+        self.assertEqual(normalized['review']['status'], 'unclear')
+        self.assertIn('未建立完整性检查项', normalized['review']['summary'])
+        self.assertNotIn('0/0项通过', normalized['review']['summary'])
+        self.assertTrue(normalized['issues']['unclear'])
+
+    def test_zero_consistency_segments_keep_extraction_reason(self):
+        normalized = UnifiedBusinessReviewService()._normalize_consistency({
+            'evaluated_segments': [],
+            'skipped_segments': [],
+            'original_segment_count': 0,
+            'extraction_status': 'failed',
+            'extraction_reason': '未定位到明确的响应文件格式区域。',
+            'structure_locations': [],
+        })
+        self.assertEqual(normalized['review']['status'], 'unclear')
+        self.assertEqual(
+            normalized['review']['summary'],
+            '未定位到明确的响应文件格式区域。',
+        )
+        self.assertTrue(normalized['issues']['unclear'])
+
+    def test_old_consistency_result_never_displays_none_reason(self):
+        normalized = UnifiedBusinessReviewService()._normalize_consistency({
+            'evaluated_segments': [],
+            'skipped_segments': [],
+            'extraction_reason': None,
+        })
+        self.assertNotEqual(normalized['review']['summary'], 'None')
+        self.assertIn('未提取到可比较的模板段', normalized['review']['summary'])
+
+    def test_all_consistency_templates_explicitly_skipped_are_not_counted_passed(self):
+        normalized = UnifiedBusinessReviewService()._normalize_consistency({
+            'evaluated_segments': [],
+            'skipped_segments': [
+                {'name': '附件12', 'skip_reason': {'type': 'optional_attachment_not_provided'}},
+            ],
+            'original_segment_count': 1,
+            'extraction_status': 'resolved',
+        })
+        self.assertEqual(normalized['review']['status'], 'not_applicable')
+        self.assertIn('均按明确规则跳过', normalized['review']['summary'])
+        self.assertEqual(normalized['metrics']['passed_segment_count'], 0)
+
+    def test_unstable_only_consistency_skip_is_unclear(self):
+        normalized = UnifiedBusinessReviewService()._normalize_consistency({
+            'evaluated_segments': [],
+            'skipped_segments': [
+                {'name': '附件1', 'skip_reason': {'type': 'body_too_short'}},
+            ],
+            'original_segment_count': 1,
+            'extraction_status': 'resolved',
+        })
+        self.assertEqual(normalized['review']['status'], 'unclear')
+        self.assertTrue(normalized['issues']['unclear'])
+
+    def test_directory_format_heading_does_not_preempt_real_template_region(self):
+        t = {'layout_sections': [
+            block('目录', 1, 'heading'),
+            block('第五章 响应文件格式', 1),
+            block('25', 1),
+            block('第四章 评审办法', 10, 'heading'),
+            block('第五章 响应文件格式', 20),
+            block('二、响应文件部分格式附件', 21),
+            block('附件1 比选保证书（格式）', 22),
+            block('致采购人：我方已经认真阅读并响应全部采购要求。', 22),
+        ]}
+        bundle = TemplateExtractor.extract_response_format_bundle(t)
+        self.assertEqual(bundle['extraction_status'], 'resolved')
+        self.assertEqual([item['attachment_number'] for item in bundle['attachments']], ['1'])
+        self.assertEqual(bundle['structure_locations'][0]['page'], 21)
+
+    def test_structure_line_view_does_not_restore_table_data_rows(self):
+        table = block('模板表头', 3, 'table')
+        table['lines'] = [
+            {'text': '项目名称 数量 单价', 'bbox': [10, 20, 500, 32]},
+            {'text': '服务器 2 10000', 'bbox': [10, 35, 500, 47]},
+        ]
+        repaired = TemplateExtractor._template_boundary_sections([table])
+        self.assertEqual(len(repaired), 1)
+        self.assertEqual(repaired[0]['text'], '模板表头')
+
+    def test_independent_writing_instruction_is_not_appended_to_last_requirement(self):
+        t = {'layout_sections': [
+            block('响应文件的组成', kind='heading'),
+            block('（一）商务文件', kind='heading'),
+            block('1. 比选保证书（格式参见本章附件1）；'),
+            block('注意：响应文件应编制目录并连续编码。'),
+            block('（二）技术文件', kind='heading'),
+        ]}
+        scope = TemplateExtractor.extract_business_attachment_scope(t)
+        self.assertEqual(len(scope['item_entries']), 1)
+        self.assertNotIn('注意', scope['item_entries'][0]['source_text'])
+        self.assertEqual(scope['scope_status'], 'resolved')
+
+    def test_consistency_does_not_restore_technical_template_outside_business_scope(self):
         t = {'layout_sections': [block('投标文件的组成', kind='heading'),
             block('（一）商务标文件', kind='heading'), block('1. 营业执照（附件1）'),
             block('（二）技术标文件', kind='heading'), block('2. 技术条款偏离表（附件2）'),
@@ -99,7 +315,7 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         with patch.object(TemplateExtractor, 'extract_requirements', return_value=(
             ['附件2 技术条款偏离表'], {'附件2 技术条款偏离表': ['2']})):
             templates = TemplateExtractor.extract_consistency_templates(t)
-        self.assertTrue(any('技术条款偏离表' in item['title'] for item in templates))
+        self.assertFalse(any('技术条款偏离表' in item['title'] for item in templates))
 
     def test_separate_text_blocks_on_same_page_are_split(self):
         sections = [block('附件8 分项报价表', 3, 'heading'), block('法定代表人签字：', 3),
@@ -129,6 +345,89 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         templates = TemplateExtractor.extract_consistency_templates(t)
         self.assertTrue(templates[0]['is_optional'])
         self.assertTrue(templates[0]['optionality_locations'])
+
+    def test_all_optional_absent_is_not_extraction_failure_or_pass(self):
+        t = tender(
+            '1. 残疾人福利性单位声明函（格式参见本章附件13）（如有）',
+            '附件13 残疾人福利性单位声明函（格式）\n单位名称（加盖公章）：',
+        )
+        raw = IntegrityChecker().check_integrity(t, bid('其他内容'))
+        normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
+        self.assertEqual(raw['extracted_item_count'], 1)
+        self.assertEqual(raw['actual_check_count'], 0)
+        self.assertEqual(normalized['review']['status'], 'not_applicable')
+        self.assertIn('本次无必检项', normalized['review']['summary'])
+        self.assertFalse(normalized['issues']['unclear'])
+
+    def test_catch_all_other_content_is_optional_when_absent(self):
+        t = tender('1. 投标人认为需加以说明的其他内容（如综合实力证明等）')
+        raw = IntegrityChecker().check_integrity(t, bid('已提交其他必备材料'))
+        detail = next(iter(raw['details'].values()))
+        self.assertTrue(detail['is_optional'])
+        self.assertFalse(detail['scored'])
+        self.assertEqual(detail['status'], '可选项未提供')
+        normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
+        self.assertEqual(normalized['review']['status'], 'not_applicable')
+
+    def test_conditional_absent_stays_pending_in_all_three_checks(self):
+        t = tender(
+            '1. 如为委托参加，提供法定代表人授权委托书（格式参见本章附件7-2）',
+            '附件7-2 法定代表人授权委托书（格式）\n法定代表人签字：\n被授权人签字：',
+        )
+        b = bid('其他内容')
+        raw = IntegrityChecker().check_integrity(t, b)
+        detail = next(iter(raw['details'].values()))
+        self.assertEqual(detail['applicability_status'], 'unclear')
+        self.assertFalse(detail['scored'])
+        templates = TemplateExtractor.extract_consistency_templates(t)
+        self.assertEqual(templates[0]['applicability_status'], 'unclear')
+        verified = VerificationChecker(None).check_seal_and_date(t, b)
+        result = verified['attachment_results'][0]
+        self.assertEqual(result['status'], 'pending')
+        self.assertIsNone(result['found'])
+
+    def test_conditional_material_found_is_checked_instead_of_forced_pending(self):
+        t = tender(
+            '1. 如为委托参加，提供法定代表人授权委托书（格式参见本章附件7-2）',
+            '附件7-2 法定代表人授权委托书（格式）\n法定代表人签字：\n被授权人签字：',
+        )
+        b = bid('附件7-2 法定代表人授权委托书（格式）\n法定代表人签字：张三\n被授权人签字：李四')
+        raw = IntegrityChecker().check_integrity(t, b)
+        detail = next(iter(raw['details'].values()))
+        self.assertEqual(detail['status'], '已找到')
+        self.assertEqual(detail['applicability_status'], 'conditional_satisfied')
+        self.assertTrue(detail['scored'])
+        self.assertTrue(detail['is_passed'])
+        self.assertEqual(raw['applicability_unclear_count'], 0)
+        normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
+        self.assertEqual(normalized['review']['status'], 'pass')
+        self.assertFalse(normalized['issues']['unclear'])
+
+    def test_direct_or_delegated_choice_accepts_one_actual_branch(self):
+        t = tender(
+            '1. 法定代表人直接参加的应提供法定代表人资格证明书及身份证；委托授权人参加的应提供法定代表人授权委托书及被授权人身份证',
+        )
+        b = bid('法定代表人授权委托书\n委托代理人：李四')
+        raw = IntegrityChecker().check_integrity(t, b)
+        detail = next(iter(raw['details'].values()))
+        self.assertEqual(detail['status'], '已找到')
+        self.assertEqual(detail['applicability_status'], 'conditional_satisfied')
+        self.assertEqual(detail['applicability_resolution'], 'delegated')
+        self.assertTrue(detail['is_passed'])
+
+    def test_business_license_or_legal_person_certificate_accepts_either_branch(self):
+        t = tender('1. 提供企业营业执照或事业单位法人证书，或其他性质单位组织的合法证明材料')
+        b = bid('1、事业单位法人证书\n统一社会信用代码：1234567890')
+        raw = IntegrityChecker().check_integrity(t, b)
+        detail = next(iter(raw['details'].values()))
+        self.assertTrue(detail['is_passed'])
+        self.assertEqual(detail['resolution_status'], 'matched')
+        self.assertEqual(detail['requirement_group']['operator'], 'any_of')
+        self.assertEqual(detail['material_resolution'], 'entity_proof_any_of')
+        self.assertTrue(any(
+            branch['title'] == '事业单位法人证书' and branch['matched']
+            for branch in detail['requirement_group']['branches']
+        ))
 
     def test_optional_extra_does_not_exempt_main_form(self):
         t = tender('1. 投标人基本情况表（格式参见本章附件10）可另外再附公司简介（如有）',

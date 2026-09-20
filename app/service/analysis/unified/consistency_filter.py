@@ -12,6 +12,8 @@ import re
 import time
 from typing import Any
 
+from ..compliance.template_extractor import TemplateExtractor
+
 
 class ConsistencyFilterMixin:
     """
@@ -49,10 +51,37 @@ class ConsistencyFilterMixin:
                 raw_segments,
                 integrity_raw,
             )
+            extraction_info = {}
+            if isinstance(integrity_raw, dict):
+                extraction_info = {
+                    "extraction_status": integrity_raw.get("template_extraction_status"),
+                    "extraction_reason": integrity_raw.get("template_extraction_reason"),
+                    "structure_locations": integrity_raw.get("template_structure_locations") or [],
+                }
+            if not extraction_info.get("extraction_status"):
+                # Compatibility path for historical/custom integrity payloads.
+                extraction_info = TemplateExtractor.response_format_extraction_info(
+                    tender_payload
+                )
+            if isinstance(raw_segments, list) and raw_segments:
+                extraction_info = {
+                    **extraction_info,
+                    "extraction_status": "resolved",
+                    "extraction_reason": f"已建立 {len(raw_segments)} 个模板一致性比对段。",
+                }
+            elif extraction_info.get("extraction_status") == "resolved":
+                extraction_info = {
+                    **extraction_info,
+                    "extraction_status": "unclear",
+                    "extraction_reason": "已定位附件模板，但未建立可比较的模板段。",
+                }
             raw_result = {
                 "evaluated_segments": evaluated_segments,
                 "skipped_segments": skipped_segments,
                 "original_segment_count": len(raw_segments) if isinstance(raw_segments, list) else 0,
+                "extraction_status": extraction_info.get("extraction_status"),
+                "extraction_reason": extraction_info.get("extraction_reason"),
+                "structure_locations": extraction_info.get("structure_locations") or [],
                 "engine_version": next(
                     (
                         segment.get("engine_version")

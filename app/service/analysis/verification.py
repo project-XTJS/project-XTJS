@@ -224,6 +224,18 @@ class VerificationChecker:
                     result[component]['status'] = 'pending'
                 results.append(result)
                 continue
+            if (
+                not result["found"]
+                and item.get('requirements', {}).get('applicability_status') == 'unclear'
+            ):
+                result['found'] = None
+                result['status'] = 'pending'
+                result['applicability_status'] = 'unclear'
+                result['condition_text'] = item.get('requirements', {}).get('condition_text') or ''
+                for component in ('date_check', 'seal_check', 'signature_check'):
+                    result[component]['status'] = 'pending'
+                results.append(result)
+                continue
             if not result["found"]:
                 if item.get('requirements', {}).get('optionality_conflict'):
                     results.append(result)
@@ -1150,6 +1162,9 @@ class VerificationChecker:
             template_req['optionality_conflict'] = bool(item.get('optionality_conflict'))
             template_req['optionality_locations'] = list(item.get('optionality_locations') or [])
             template_req['is_optional'] = (template_req['is_optional'] or bool(item.get('is_optional'))) and not template_req['optionality_conflict']
+            template_req['applicability_status'] = str(item.get('applicability_status') or 'required')
+            template_req['condition_text'] = str(item.get('condition_text') or '')
+            template_req['applicability_locations'] = list(item.get('applicability_locations') or [])
             attachment_number = self._attachment_number(title)
             key = attachment_number or title
             if key in seen:

@@ -317,7 +317,8 @@ class TemplateExtractor:
                 continue
             text = str(line.get('text') or '').strip()
             line_page = line.get('page') if isinstance(line.get('page'), int) else page
-            bbox = line.get('bbox') or line.get('box')
+            line_bbox = line.get('bbox') or line.get('box')
+            bbox = line_bbox or section.get('bbox') or section.get('box')
             if not text and line_page is None and bbox is None:
                 continue
             key = (line_page, tuple(bbox or []), text)
@@ -331,6 +332,7 @@ class TemplateExtractor:
                 "type": "line",
                 "section_type": section_type,
                 "coordinate_system": str(line.get('coordinate_system') or coordinate_system),
+                "location_precision": "line" if line_bbox else "block",
             }
             if block_index is not None:
                 location["block_index"] = block_index
@@ -677,13 +679,17 @@ class TemplateExtractor:
     def _is_response_format_attachment_heading(cls, section: dict) -> bool:
         text = str(section.get('text') or '').strip()
         compact = cls._compact(text)
-        if str(section.get('type') or '').strip().lower() != 'heading':
-            return False
         if not compact or compact in {"目录", "附"}:
             return False
         if "包括" in compact and ("商务标" in compact or "技术标" in compact):
             return False
         if "及其" in compact and ("、" in compact or "附录" in compact):
+            return False
+        # 明确的独立附件编号行不依赖 OCR 的 heading/text 分类。这里仍要求
+        # 行首附件编号和合法标题，正文中的“详见附件X”不会命中。
+        if cls._explicit_template_heading(text):
+            return True
+        if str(section.get('type') or '').strip().lower() != 'heading':
             return False
         attachment_number = cls._attachment_number(text)
         if attachment_number is not None:
@@ -698,17 +704,35 @@ class TemplateExtractor:
         )
 
     @classmethod
+    def _is_template_form_boundary(cls, section: dict) -> bool:
+        """A numbered attachment or a concrete form title inside a format chapter."""
+        text = str(section.get('text') or '').strip()
+        if cls._explicit_template_heading(text):
+            return True
+        if not cls._is_response_format_attachment_heading(section):
+            return False
+        compact = cls._compact(text).strip('：:；;。')
+        compact = re.sub(
+            r'^(?:[（(]?[一二三四五六七八九十百零\d]+[）)]?[、.．]?|\d+(?:\.\d+)+)\s*',
+            '',
+            compact,
+        )
+        return bool(
+            '格式' in compact
+            or re.search(r'(?:表|函|书|证明|承诺|材料|协议)$', compact)
+        )
+
+    @classmethod
     def _find_business_format_start_index(cls, sections: list[dict]) -> int | None:
         """跳过投标文件格式章内的目录，定位真正的“商务标”模板正文。"""
         for idx, section in enumerate(sections):
-            if str(section.get('type') or '').strip().lower() != 'heading':
-                continue
             compact = cls._compact(section.get('text') or '')
             if not compact:
                 continue
-            if "商务标" not in compact or "技术" in compact or "包括" in compact:
-                continue
-            if "：" in compact or ":" in compact or compact.endswith("商务标"):
+            if re.fullmatch(
+                r'(?:[（(]?[一二三四五六七八九十百零\d]+[）)、.．]?)?商务(?:标)?(?:文件)?[：:]?',
+                compact,
+            ):
                 return idx
         return None
 
@@ -720,7 +744,203 @@ class TemplateExtractor:
         return compact in cls.RESPONSE_FORMAT_CHAPTER_MARKERS
 
     @classmethod
-    def _response_format_sections(cls, model_raw_json: dict) -> list[dict]:
+    def _is_response_format_zone_heading(cls, text: str) -> bool:
+        compact = cls._compact(text).strip("：:；;。")
+        return bool(re.fullmatch(
+            r'(?:[（(]?[一二三四五六七八九十百零\d]+[）)]?[、.．]?)?'
+            r'(?:(?:响应|投标)文件(?:部分)?格式附件|部分格式附件)',
+            compact,
+        ))
+
+    @classmethod
+    def _is_chapter_structure_heading(cls, text: str) -> bool:
+        value = str(text or '').strip()
+        return bool(
+            len(cls._compact(value)) <= 60
+            and re.fullmatch(
+                r'第[一二三四五六七八九十百零\d]+章\s*[^。；;]{0,48}',
+                value,
+            )
+        )
+
+    @classmethod
+    def _is_business_structure_heading(cls, text: str) -> bool:
+        compact = cls._compact(text).strip("：:；;。")
+        return bool(re.fullmatch(
+            r'(?:[（(]?[一二三四五六七八九十百零\d]+[）)]?[、.．]?)?'
+            r'商务(?:标)?(?:文件)?',
+            compact,
+        ))
+
+    @classmethod
+    def _is_structure_line(cls, text: str, *, attachments_only: bool = False) -> bool:
+        if cls._explicit_template_heading(text):
+            return True
+        if attachments_only:
+            return False
+        return (
+            cls._is_response_format_chapter_heading(text)
+            or cls._is_response_format_zone_heading(text)
+            or cls._is_chapter_structure_heading(text)
+            or cls._is_business_structure_heading(text)
+        )
+
+    @classmethod
+    def _split_sections_at_structure_lines(
+        cls,
+        sections: list[dict],
+        *,
+        attachments_only: bool = False,
+    ) -> list[dict]:
+        """只在明确结构行处分块；正文和表格保持既有预处理结果。"""
+        result: list[dict] = []
+        for source_index, section in enumerate(sections):
+            if str(section.get('type') or '').strip().lower() == 'table':
+                result.append(dict(section, source_index=source_index))
+                continue
+
+            raw_lines = [
+                line for line in section.get('lines') or []
+                if isinstance(line, dict) and str(line.get('text') or '').strip()
+            ]
+            if not raw_lines:
+                raw_lines = [
+                    {'text': text}
+                    for text in str(section.get('text') or '').splitlines()
+                    if text.strip()
+                ]
+            if not raw_lines:
+                continue
+
+            structural = {
+                index
+                for index, line in enumerate(raw_lines)
+                if cls._is_structure_line(
+                    str(line.get('text') or '').strip(),
+                    attachments_only=attachments_only,
+                )
+            }
+            if not structural:
+                result.append(dict(section, source_index=source_index))
+                continue
+
+            # Existing headings and independently blocked numbered subforms already
+            # carry a stable boundary. Preserve them; promote top-level text titles
+            # below so legacy same-page attachment splitting still works.
+            if (
+                len(raw_lines) == 1
+                and structural == {0}
+                and str(section.get('text') or '').strip()
+                == str(raw_lines[0].get('text') or '').strip()
+                and (
+                    str(section.get('type') or '').strip().lower() == 'heading'
+                    or '-' in str(cls._attachment_number(section.get('text') or '') or '')
+                )
+            ):
+                result.append(dict(section))
+                continue
+
+            group: list[dict] = []
+
+            def flush_group(*, heading: bool = False) -> None:
+                if not group:
+                    return
+                item = dict(section)
+                item['source_index'] = source_index
+                item['text'] = '\n'.join(str(line.get('text') or '').strip() for line in group)
+                item['lines'] = [dict(line) for line in group]
+                item['type'] = 'heading' if heading else 'text'
+                if len(group) == 1:
+                    line_bbox = group[0].get('bbox') or group[0].get('box')
+                    if line_bbox:
+                        item['bbox'] = line_bbox
+                    item['line_index'] = raw_lines.index(group[0])
+                result.append(item)
+                group.clear()
+
+            for index, line in enumerate(raw_lines):
+                if index in structural:
+                    flush_group()
+                    group.append(line)
+                    flush_group(heading=True)
+                else:
+                    group.append(line)
+            flush_group()
+        return result
+
+    @classmethod
+    def _response_region_candidate(cls, sections: list[dict], start: int) -> dict:
+        end = len(sections)
+        for index in range(start + 1, len(sections)):
+            text = str(sections[index].get('text') or '').strip()
+            if (
+                cls._is_chapter_structure_heading(text)
+                and not cls._is_response_format_chapter_heading(text)
+            ):
+                end = index
+                break
+
+        attachment_indices = [
+            index
+            for index in range(start + 1, end)
+            if cls._is_template_form_boundary(sections[index])
+        ]
+        body_evidence = 0
+        empty_form_evidence = 0
+        start_page = sections[start].get('page')
+        for pos, attachment_index in enumerate(attachment_indices):
+            next_index = attachment_indices[pos + 1] if pos + 1 < len(attachment_indices) else end
+            has_body = False
+            has_separate_page_number = False
+            for section in sections[attachment_index + 1:next_index]:
+                text = str(section.get('text') or '').strip()
+                if re.fullmatch(r'\s*\d{1,4}\s*', text):
+                    has_separate_page_number = True
+                    continue
+                if (
+                    text
+                    and not cls._catalog_like(text)
+                    and not cls._is_chapter_structure_heading(text)
+                ):
+                    body_evidence += 1
+                    has_body = True
+                    break
+            attachment_page = sections[attachment_index].get('page')
+            if (
+                not has_body
+                and not has_separate_page_number
+                and isinstance(start_page, int)
+                and isinstance(attachment_page, int)
+                and attachment_page > start_page
+            ):
+                # A genuinely blank fill-in form can consist only of its title.
+                # Requiring it to start after the structural heading prevents a
+                # same-page directory title/page pair from becoming a template.
+                empty_form_evidence += 1
+        return {
+            'start': start,
+            'end': end,
+            'kind': (
+                'zone'
+                if cls._is_response_format_zone_heading(sections[start].get('text') or '')
+                else 'chapter'
+            ),
+            'attachment_indices': attachment_indices,
+            'attachment_numbers': {
+                number
+                for index in attachment_indices
+                if (number := cls._attachment_number(sections[index].get('text') or ''))
+            },
+            'body_evidence_count': body_evidence,
+            'empty_form_evidence_count': empty_form_evidence,
+            'location': cls._section_locations(sections[start]),
+        }
+
+    @classmethod
+    def _response_format_sections_with_status(
+        cls,
+        model_raw_json: dict,
+    ) -> tuple[list[dict], dict]:
         data_node = model_raw_json.get('data', model_raw_json)
         sections, _ = cls.preprocess_sections(
             data_node.get('layout_sections', []),
@@ -728,58 +948,110 @@ class TemplateExtractor:
             is_template=True,
         )
         if not sections:
-            return []
+            return [], {
+                "extraction_status": "failed",
+                "extraction_reason": "招标文件没有可用于定位响应文件格式的版面文本。",
+                "structure_locations": [],
+            }
 
-        start_index = None
-        for idx, section in enumerate(sections):
-            text = str(section.get('text') or '').strip()
-            if cls._is_noise(text, set(), section.get('type')):
-                continue
-            compact = cls._compact(text)
-            if any(
-                compact == marker or (compact.endswith(marker) and len(compact) <= len(marker) + 8)
-                for marker in cls.RESPONSE_FORMAT_ZONE_MARKERS
-            ):
-                start_index = idx
-                break
-        if start_index is None:
-            for idx, section in enumerate(sections):
-                text = str(section.get('text') or '').strip()
-                if str(section.get('type') or '').strip().lower() != 'heading':
-                    continue
-                if cls._is_noise(text, set(), section.get('type')):
-                    continue
-                if cls._is_response_format_chapter_heading(text):
-                    start_index = idx
+        # 仅对包含明确结构行的块做局部分段；表格及普通正文保持既有内容。
+        sections = cls._split_sections_at_structure_lines(sections)
+        starts = [
+            index
+            for index, section in enumerate(sections)
+            if cls._is_response_format_zone_heading(section.get('text') or '')
+            or cls._is_response_format_chapter_heading(section.get('text') or '')
+        ]
+        if not starts:
+            return [], {
+                "extraction_status": "failed",
+                "extraction_reason": "未定位到明确的响应文件格式或投标文件格式区域。",
+                "structure_locations": [],
+            }
+
+        candidates = [cls._response_region_candidate(sections, start) for start in starts]
+        valid = [
+            candidate
+            for candidate in candidates
+            if candidate['attachment_indices']
+            and (
+                candidate['body_evidence_count'] > 0
+                or candidate['empty_form_evidence_count'] > 0
+            )
+        ]
+        if not valid:
+            return [], {
+                "extraction_status": "failed",
+                "extraction_reason": "已发现响应文件格式标题，但后续未确认到带正文依据的附件模板区域。",
+                "structure_locations": [
+                    location for candidate in candidates for location in candidate['location']
+                ],
+                "candidate_locations": [candidate['location'] for candidate in candidates],
+            }
+
+        # 同一章内的“部分格式附件”比章标题更具体；若候选指向不同附件集合，
+        # 证据不足以确定适用区域，交由人工复核。
+        groups: list[list[dict]] = []
+        for candidate in valid:
+            for group in groups:
+                anchor = group[0]
+                regions_overlap = not (
+                    candidate['end'] <= anchor['start']
+                    or anchor['end'] <= candidate['start']
+                )
+                if (
+                    candidate['attachment_numbers'] & anchor['attachment_numbers']
+                    or regions_overlap
+                ):
+                    group.append(candidate)
                     break
-        if start_index is None:
-            return []
+            else:
+                groups.append([candidate])
+        if len(groups) > 1:
+            return [], {
+                "extraction_status": "unclear",
+                "extraction_reason": "存在多个相互独立的响应文件格式区域，无法自动确定适用范围。",
+                "structure_locations": [
+                    location for candidate in valid for location in candidate['location']
+                ],
+                "candidate_locations": [candidate['location'] for candidate in valid],
+            }
 
-        end_index = len(sections)
-        for idx in range(start_index + 1, len(sections)):
-            section = sections[idx]
-            if str(section.get('type') or '').strip().lower() != 'heading':
-                continue
-            text = str(section.get('text') or '').strip()
-            compact = cls._compact(text)
-            if cls.CHAPTER_HEADING_RE.match(text) and not any(
-                marker in compact for marker in cls.RESPONSE_FORMAT_CHAPTER_MARKERS
-            ):
-                end_index = idx
-                break
-        return sections[start_index:end_index]
+        selected = max(
+            groups[0],
+            key=lambda candidate: (
+                candidate['kind'] == 'zone',
+                len(candidate['attachment_indices']),
+                candidate['start'],
+            ),
+        )
+        return sections[selected['start']:selected['end']], {
+            "extraction_status": "resolved",
+            "extraction_reason": "已定位响应文件格式区域。",
+            "structure_locations": selected['location'],
+            "candidate_locations": [candidate['location'] for candidate in valid],
+        }
+
+    @classmethod
+    def _response_format_sections(cls, model_raw_json: dict) -> list[dict]:
+        sections, _status = cls._response_format_sections_with_status(model_raw_json)
+        return sections
 
     @classmethod
     def _local_line_sections(cls, sections: list[dict]) -> list[dict]:
         """A temporary line view for scope parsing; never mutate stored OCR blocks."""
         result = []
-        for section in sections:
+        for source_index, section in enumerate(sections):
+            if str(section.get('type') or '').strip().lower() == 'table':
+                result.append(dict(section, source_index=source_index))
+                continue
             lines = [line for line in section.get('lines') or [] if isinstance(line, dict) and str(line.get('text') or '').strip()]
             if not lines:
                 lines = [{'text': text} for text in str(section.get('text') or '').splitlines() if text.strip()]
             for index, line in enumerate(lines):
                 item = dict(section)
                 item.update(text=str(line['text']).strip(), lines=[dict(line)], line_index=index)
+                item['source_index'] = source_index
                 item['page'] = line.get('page', section.get('page'))
                 item['bbox'] = line.get('bbox') or line.get('box') or section.get('bbox')
                 result.append(item)
@@ -793,61 +1065,44 @@ class TemplateExtractor:
         # explicitly numbered “响应文件偏离表” is nevertheless a real form title.
         if re.fullmatch(r'\s*附件\s*\d+(?:\s*[-－]\s*\d+)*\s*[：:]?\s*(?:响应|投标)文件偏离表(?:\s*[（(]格式[）)])?\s*', str(text or '')):
             return True
-        return bool(re.match(r'^\s*附件\s*\d', str(text or ''))) and SectionClassifier.is_attachment_heading_text(text)
+        if not re.match(r'^\s*附件\s*\d', str(text or '')):
+            return False
+        if SectionClassifier.is_attachment_heading_text(text):
+            return True
+        # Explicit number + separator + short title is sufficient even when the
+        # OCR classifier labels an unfamiliar form name as ordinary text.
+        generic = re.fullmatch(
+            r'\s*附件\s*\d+(?:\s*-\s*\d+)*\s*(?:[：:、.)）．]\s*|\s+)'
+            r'([^。；;\n]{1,70})\s*',
+            str(text or ''),
+        )
+        if not generic:
+            return False
+        remainder = cls._compact(generic.group(1))
+        return not bool(re.match(
+            r'^(?:中(?:列明|所列|所述|规定|要求|的)|内(?:列明|所列|所述|规定|要求)|'
+            r'所列|所述|规定|要求|详见|与上述|应当|应|须|需)',
+            remainder,
+        ))
 
     @classmethod
     def _template_boundary_sections(cls, sections: list[dict]) -> list[dict]:
-        # This repair concerns multiple attachments on one page. Keep the old
-        # treatment of standalone pages and conditional authorization subforms.
-        titles_by_page: dict[int, set[str]] = {}
-        for line in cls._local_line_sections(sections):
-            if cls._explicit_template_heading(line['text']) and isinstance(line.get('page'), int):
-                titles_by_page.setdefault(line['page'], set()).add(cls._attachment_number(line['text']))
-        result = []
-        for section in sections:
-            lines = cls._local_line_sections([section])
-            starts = [i for i, line in enumerate(lines)
-                      if cls._explicit_template_heading(line['text'])
-                      and len(titles_by_page.get(line.get('page'), set())) > 1]
-            # Preserve existing headings/paragraph segmentation wherever no boundary was lost.
-            if not starts or (len(starts) == 1 and starts[0] == 0 and section.get('type') == 'heading'):
-                result.append(section)
-                continue
-            group = []
-            def flush() -> None:
-                if not group:
-                    return
-                item = dict(section)
-                item['text'] = '\n'.join(line['text'] for line in group)
-                item['lines'] = [dict(line['lines'][0]) for line in group]
-                boxes = [line.get('bbox') for line in group if isinstance(line.get('bbox'), (list, tuple)) and len(line['bbox']) == 4]
-                if boxes:
-                    item['bbox'] = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
-                result.append(item)
-                group.clear()
-            for index, line in enumerate(lines):
-                if index in starts:
-                    flush()
-                    result.append(dict(line, type='heading'))
-                else:
-                    group.append(line)
-            flush()
-        return result
+        return cls._split_sections_at_structure_lines(
+            sections,
+            attachments_only=True,
+        )
 
     @classmethod
-    def extract_response_format_attachments(cls, model_raw_json: dict) -> list[dict]:
-        """从“响应文件格式/响应文件格式附件”区域提取附件标题与内容。"""
-        sections = cls._template_boundary_sections(cls._response_format_sections(model_raw_json))
+    def _attachments_from_response_sections(cls, sections: list[dict]) -> list[dict]:
         if not sections:
             return []
-
         effective_start = cls._find_business_format_start_index(sections)
         section_offset = (effective_start + 1) if effective_start is not None else 0
         candidate_sections = sections[section_offset:]
         starts = [
             idx
             for idx, section in enumerate(candidate_sections)
-            if cls._is_response_format_attachment_heading(section)
+            if cls._is_template_form_boundary(section)
         ]
         attachments: list[dict] = []
         current_top_level_number: str | None = None
@@ -889,7 +1144,49 @@ class TemplateExtractor:
         return attachments
 
     @classmethod
-    def extract_requirements(cls, model_raw_json: dict) -> tuple:
+    def extract_response_format_bundle(cls, model_raw_json: dict) -> dict:
+        """一次解析并返回附件及区域状态，避免为状态说明重复解析。"""
+        sections, status = cls._response_format_sections_with_status(model_raw_json)
+        sections = cls._template_boundary_sections(sections)
+        attachments = cls._attachments_from_response_sections(sections)
+        if not sections:
+            return {**status, "attachments": []}
+        if not attachments:
+            return {
+                "extraction_status": "failed",
+                "extraction_reason": "已定位响应文件格式区域，但未识别到明确编号的附件模板。",
+                "structure_locations": status.get("structure_locations") or [],
+                "candidate_locations": status.get("candidate_locations") or [],
+                "attachments": [],
+            }
+        return {
+            "extraction_status": "resolved",
+            "extraction_reason": f"已提取 {len(attachments)} 个响应文件附件模板。",
+            "structure_locations": status.get("structure_locations") or [],
+            "candidate_locations": status.get("candidate_locations") or [],
+            "attachment_count": len(attachments),
+            "attachments": attachments,
+        }
+
+    @classmethod
+    def extract_response_format_attachments(cls, model_raw_json: dict) -> list[dict]:
+        """从“响应文件格式/响应文件格式附件”区域提取附件标题与内容。"""
+        return list(cls.extract_response_format_bundle(model_raw_json).get("attachments") or [])
+
+    @classmethod
+    def response_format_extraction_info(cls, model_raw_json: dict) -> dict:
+        """返回模板区域提取状态，供空结果说明使用。"""
+        bundle = cls.extract_response_format_bundle(model_raw_json)
+        return {key: value for key, value in bundle.items() if key != "attachments"}
+
+    @classmethod
+    def extract_requirements(
+        cls,
+        model_raw_json: dict,
+        *,
+        business_scope: dict | None = None,
+        response_attachments: list[dict] | None = None,
+    ) -> tuple:
         """提取完整性检查所需的条款清单，返回 (有序列表, 序号到附件编号映射)。
 
         Args:
@@ -900,8 +1197,12 @@ class TemplateExtractor:
             - ordered_list: 格式为 "序号. 内容" 的字符串列表。
             - attachment_mapping: 序号 → 附件编号列表。
         """
-        business_scope = cls.extract_business_attachment_scope(model_raw_json)
-        response_attachments, scoped = cls.filter_business_response_attachments(model_raw_json)
+        business_scope = business_scope or cls.extract_business_attachment_scope(model_raw_json)
+        if response_attachments is None:
+            response_attachments, _scoped = cls.filter_business_response_attachments(
+                model_raw_json,
+                scope=business_scope,
+            )
 
         attachments_by_number: dict[str, dict] = {}
         for attachment in response_attachments:
@@ -967,10 +1268,20 @@ class TemplateExtractor:
         return ordered_list, attachment_mapping
 
     @classmethod
-    def extract_requirement_locations(cls, model_raw_json: dict) -> dict[str, list[dict]]:
+    def extract_requirement_locations(
+        cls,
+        model_raw_json: dict,
+        *,
+        business_scope: dict | None = None,
+        response_attachments: list[dict] | None = None,
+    ) -> dict[str, list[dict]]:
         """Return tender-side source locations for business integrity requirements."""
-        business_scope = cls.extract_business_attachment_scope(model_raw_json)
-        response_attachments, _scoped = cls.filter_business_response_attachments(model_raw_json)
+        business_scope = business_scope or cls.extract_business_attachment_scope(model_raw_json)
+        if response_attachments is None:
+            response_attachments, _scoped = cls.filter_business_response_attachments(
+                model_raw_json,
+                scope=business_scope,
+            )
 
         attachments_by_number: dict[str, dict] = {}
         for attachment in response_attachments:
@@ -1016,14 +1327,27 @@ class TemplateExtractor:
     @classmethod
     def extract_consistency_templates(cls, model_raw_json: dict) -> list:
         """提取一致性比对所需的模板基准，来源与完整性检查保持一致。"""
-        requirements, attachment_mapping = cls.extract_requirements(model_raw_json)
-        response_attachments, _ = cls.filter_business_response_attachments(model_raw_json)
-        if cls.extract_business_attachment_scope(model_raw_json).get('scope_status') not in {'resolved', 'unclear'}:
-            # Preserve legacy consistency coverage; only the repaired embedded
-            # composition format changes scope. Still carry optional evidence.
+        business_scope = cls.extract_business_attachment_scope(model_raw_json)
+        response_bundle = cls.extract_response_format_bundle(model_raw_json)
+        all_response_attachments = list(response_bundle.get('attachments') or [])
+        response_attachments, _ = cls.filter_business_response_attachments(
+            model_raw_json,
+            all_response_attachments,
+            scope=business_scope,
+        )
+        requirements, attachment_mapping = cls.extract_requirements(
+            model_raw_json,
+            business_scope=business_scope,
+            response_attachments=response_attachments,
+        )
+        if business_scope.get('scope_status') not in {'resolved', 'unclear'}:
+            # Preserve legacy coverage when no explicit composition exists, while
+            # retaining any optional/applicability annotations already derived.
             annotated = {item['title']: item for item in response_attachments}
-            response_attachments = [annotated.get(item['title'], item)
-                                    for item in cls.extract_response_format_attachments(model_raw_json)]
+            response_attachments = [
+                annotated.get(item['title'], item)
+                for item in all_response_attachments
+            ]
         if not response_attachments:
             return []
 
@@ -1082,6 +1406,13 @@ class TemplateExtractor:
                     "is_optional": bool(attachment.get('is_optional')) or is_consistency_template_optional(normalized_title),
                     "optionality_conflict": bool(attachment.get('optionality_conflict')),
                     "optionality_locations": list(attachment.get('optionality_locations') or []),
+                    "applicability_status": str(
+                        attachment.get('applicability_status') or 'required'
+                    ),
+                    "condition_text": str(attachment.get('condition_text') or ''),
+                    "applicability_locations": list(
+                        attachment.get('applicability_locations') or []
+                    ),
                 }
             )
 
@@ -1130,213 +1461,250 @@ class TemplateExtractor:
 
     @classmethod
     def _extract_attachment_refs(cls, text: str) -> list[str]:
-        """提取“格式参见本章附件X”中的附件编号列表。"""
-        refs = re.findall(r'格式参见本章附件\s*([\d\-—，,、\s]+)', str(text or ""))
+        """提取组成条目中明确写出的附件编号。"""
+        refs = re.findall(
+            r'(?:格式参见本章)?附件\s*([\d]+(?:\s*[-－—]\s*\d+)?(?:[，,、\s]+[\d]+(?:\s*[-－—]\s*\d+)?)*)',
+            str(text or ""),
+        )
         numbers: list[str] = []
         for raw in refs:
             for num in re.split(r'[，,、\s]+', raw):
-                cleaned = num.strip().strip('—－-')
+                cleaned = re.sub(r'\s*[—－]\s*', '-', num.strip()).strip('-')
                 if cleaned:
                     numbers.append(cleaned)
         return numbers
 
     @classmethod
-    def extract_business_attachment_scope(cls, model_raw_json: dict) -> dict:
-        """Read explicit composition lists by line, without promoting arbitrary body text."""
-        data = model_raw_json.get('data', model_raw_json)
-        raw_sections = data.get('layout_sections') or []
-        # Only recover a boundary embedded with other text. A document with
-        # separate business/technical headings retains its existing list parser.
-        embedded_boundary = any(
-            len(str(section.get('text') or '').splitlines()) > 1
-            and re.search(r'(?:^|\n)\s*(?:[（(]?[一二三四五六七八九十\d]+[）)、.．]?\s*)?(?:商务|技术)标(?:文件)?(?:[（(:：]|\s*(?:\n|$))', str(section.get('text') or ''))
-            for section in raw_sections
+    def _composition_instruction_boundary(cls, text: str) -> bool:
+        compact = cls._compact(text)
+        return bool(re.match(
+            r'^(?:注意事项|注意|填写说明|填表说明|编写说明|说明|备注)[：:]',
+            compact,
+        ))
+
+    @classmethod
+    def _requirement_text_unfinished(cls, text: str) -> bool:
+        value = str(text or '').strip()
+        return bool(
+            value
+            and (
+                re.search(r'(?:或|或者|及|和|且|以及|并|、|，|,|：|:)$', value)
+                or value.count('《') > value.count('》')
+                or value.count('（') > value.count('）')
+                or value.count('(') > value.count(')')
+            )
         )
-        if not embedded_boundary:
-            return cls._legacy_business_attachment_scope(model_raw_json)
-        lines = cls._local_line_sections(raw_sections)
-        anchors = [i for i, line in enumerate(lines)
-                   if re.match(r'^(?:[一二三四五六七八九十\d]+[、.．]\s*)?(?:投标|响应)文件的?组成\s*[:：]?$', line['text'])
-                   and not cls._catalog_like(line['text'])]
+
+    @classmethod
+    def _composition_condition(cls, text: str) -> tuple[str, bool]:
+        """Return condition evidence and whether it controls the whole material."""
+        value = str(text or '').strip()
+        compact = cls._compact(value)
+        if not compact:
+            return '', False
+        has_condition = bool(re.search(
+            r'如为|若为|属于.{0,12}(?:人员|单位)|直接参加|直接投标|委托.{0,12}(?:参加|投标)|被授权人',
+            value,
+        ))
+        if not has_condition:
+            return '', False
+        controls_material = bool(
+            re.match(r'^(?:如为|若为|属于|委托)', compact)
+            or ('直接参加' in compact and re.search(r'委托.{0,12}(?:参加|投标)', compact))
+            or ('直接投标' in compact and re.search(r'委托.{0,12}(?:参加|投标)', compact))
+            or ('被授权人' in compact and not re.match(r'^营业执照', compact))
+        )
+        return value, controls_material
+
+    @classmethod
+    def extract_business_attachment_scope(cls, model_raw_json: dict) -> dict:
+        """提取明确归入商务部分的材料组成，不依赖 OCR 标题类型。"""
+        data = model_raw_json.get('data', model_raw_json)
+        sections, headers = cls.preprocess_sections(data.get('layout_sections') or [])
+        lines = cls._local_line_sections(sections)
+        prefix = r'(?:[（(]?[一二三四五六七八九十百零\d]+[）)]?[、.．]?\s*)?'
+        composition_re = re.compile(
+            rf'^\s*{prefix}(?:投标|响应)文件的?组成\s*[:：]?\s*$'
+        )
+        business_re = re.compile(
+            rf'^\s*{prefix}商务(?:标)?(?:文件)?\s*[:：]?\s*$'
+        )
+        technical_re = re.compile(
+            rf'^\s*{prefix}技术(?:标)?(?:文件)?(?:\s*[（(][^）)]*[）)])?\s*[:：]?\s*$'
+        )
+        anchors = [
+            index
+            for index, line in enumerate(lines)
+            if composition_re.fullmatch(str(line.get('text') or ''))
+            and not cls._catalog_like(str(line.get('text') or ''))
+        ]
+
+        empty_result = {
+            'has_business_composition': False,
+            'scope_status': 'not_found',
+            'extraction_status': 'not_found',
+            'extraction_reason': '未定位到明确的投标文件或响应文件组成标题。',
+            'scope_locations': [],
+            'ordered_items': [],
+            'item_entries': [],
+            'attachment_mapping': {},
+            'required_numbers': set(),
+            'required_titles': set(),
+        }
         if not anchors:
-            return cls._legacy_business_attachment_scope(model_raw_json)
+            return empty_result
+
+        # 目录通常位于正文之前；取最后一个明确组成标题，避免目录重复项。
         start = anchors[-1]
-        entries, pending = [], []
-        sequence = None
-        entered = stopped = False
-        section_prefix = r'^(?:[（(]?[一二三四五六七八九十\d]+[）)、.．]?\s*)?'
+        entries: list[dict] = []
+        pending: list[dict] = []
+        sequence: str | None = None
+        entered = False
+        stopped = False
+        range_unclear = False
+        business_locations: list[dict] = []
 
         def flush() -> None:
             nonlocal sequence
             if pending and sequence is not None:
-                content = ''.join(line['text'] for line in pending)
-                if cls._looks_like_requirement_leaf(content):
-                    cleaned = cls._clean_label(content)
-                    entries.append({'seq': sequence, 'content': cleaned,
-                                    'attachment_numbers': cls._extract_attachment_refs(content),
-                                    'title_core': cls._requirement_core_title(cleaned),
-                                    'locations': [loc for line in pending for loc in cls._section_locations(line)]})
+                source_text = ''.join(line['text'] for line in pending)
+                if cls._looks_like_requirement_leaf(source_text):
+                    cleaned = cls._clean_label(source_text)
+                    condition_text, condition_controls_material = cls._composition_condition(
+                        source_text
+                    )
+                    is_optional = cls._composition_entry_optional(source_text)
+                    entries.append({
+                        'seq': sequence,
+                        'content': cleaned,
+                        'source_text': source_text,
+                        'attachment_numbers': cls._extract_attachment_refs(source_text),
+                        'title_core': cls._requirement_core_title(cleaned),
+                        'is_optional': is_optional,
+                        'condition_text': condition_text,
+                        'applicability_status': (
+                            'unclear'
+                            if condition_controls_material
+                            else ('optional' if is_optional else 'required')
+                        ),
+                        'locations': [
+                            loc for line in pending for loc in cls._section_locations(line)
+                        ],
+                    })
             pending.clear()
             sequence = None
 
         for line in lines[start + 1:]:
-            text = line['text']
-            compact = cls._compact(text)
-            if re.match(section_prefix + r'技术标(?:文件)?(?:[（(:：]|$)', compact):
-                flush(); stopped = True; break
-            if cls._explicit_template_heading(text) or cls.CHAPTER_HEADING_RE.match(text) or cls._is_response_format_chapter_heading(text):
-                flush(); stopped = True; break
-            if re.match(section_prefix + r'商务标(?:文件)?(?:[（(:：]|$)', compact):
-                entered = True
+            text = str(line.get('text') or '').strip()
+            if not text or cls._is_noise(text, headers, line.get('type')):
                 continue
+            if technical_re.fullmatch(text):
+                flush()
+                stopped = True
+                break
+            if entered and cls._composition_instruction_boundary(text):
+                flush()
+                stopped = True
+                break
+            if business_re.fullmatch(text):
+                flush()
+                entered = True
+                business_locations.extend(cls._section_locations(line))
+                continue
+            if (
+                cls._explicit_template_heading(text)
+                or cls._is_response_format_chapter_heading(text)
+                or (
+                    cls.CHAPTER_HEADING_RE.match(text)
+                    and not composition_re.fullmatch(text)
+                )
+            ):
+                flush()
+                stopped = True
+                break
             if not entered:
                 continue
-            if re.match(r'^\s*\d+\s*$', text) or cls._catalog_like(text):
+            if cls._catalog_like(text):
                 continue
-            seq, body = cls._parse_requirement_item(text)
-            if seq is not None:
-                # An introductory parent ending in ':' is a group, not another document.
-                if seq.isalpha() and pending and pending[-1]['text'].endswith(('：', ':')):
-                    pending.clear(); sequence = None
+
+            detached = re.fullmatch(
+                r'\s*(?:[（(])?([A-Z]|\d+|[一二三四五六七八九十百零]+)(?:[）)]|[、.．)])\s*',
+                text,
+            )
+            if detached:
                 flush()
-                sequence = seq
-                pending.append(dict(line, text=body))
-            elif sequence is not None:
-                pending.append(line)
-        flush()
-        if not entered:
-            # A unified response list without business/technical subdivisions is a
-            # different legacy format, not an unterminated business list.
-            return cls._legacy_business_attachment_scope(model_raw_json)
-        numbers = {n for entry in entries for n in entry['attachment_numbers']}
-        return {'has_business_composition': entered,
-                'scope_status': 'resolved' if entered and stopped and entries else 'unclear',
-                'scope_locations': cls._section_locations(lines[start]),
-                'ordered_items': [f"{e['seq']}. {e['content']}" for e in entries],
-                'item_entries': entries,
-                'attachment_mapping': {e['seq']: e['attachment_numbers'] for e in entries if e['attachment_numbers']},
-                'required_numbers': numbers,
-                'required_titles': {cls._compact(e['content']) for e in entries}}
-
-    @classmethod
-    def _legacy_business_attachment_scope(cls, model_raw_json: dict) -> dict:
-        """提取“投标文件的组成”中明确归入商务标的条目和附件范围。"""
-        data_node = model_raw_json.get('data', model_raw_json)
-        from ..requirement_groups import continuation_view
-        sections, headers = cls.preprocess_sections(data_node.get('layout_sections', []))
-        sections = continuation_view(sections)
-
-        ordered_items: list[str] = []
-        item_entries: list[dict] = []
-        attachment_mapping: dict[str, list[str]] = {}
-        required_numbers: set[str] = set()
-        required_titles: set[str] = set()
-        stage = 0
-        found_composition = False
-        entered_business = False
-
-        for sec in sections:
-            text = sec['text']
-            if not text or cls._is_noise(text, headers, sec.get('type')):
+                sequence = detached.group(1)
                 continue
 
-            compact = cls._compact(text)
-            if sec['type'] == 'heading':
-                if stage == 0 and '投标文件' in text and '组成' in text:
-                    stage = 1
-                    found_composition = True
-                    continue
-
-            direct_business_heading = bool(
-                re.match(r"^(?:\d+(?:\.\d+)*|[（(]?[一二三四五六七八九十]+[)）]?、?)?商务标", compact)
-            )
-            if (
-                stage == 1
-                and (sec.get('type') == 'heading' or direct_business_heading)
-                and '商务' in compact
-                and '技术' not in compact
-            ):
-                stage = 2
-                entered_business = True
-                continue
-            direct_technical_heading = bool(
-                re.match(r"^(?:\d+(?:\.\d+)*|[（(]?[一二三四五六七八九十]+[)）]?、?)?技术标", compact)
-            )
-            if (
-                stage == 2
-                and (sec.get('type') == 'heading' or direct_technical_heading)
-                and '技术' in compact
-                and '商务' not in compact
-            ):
-                break
-
-            if stage != 2:
-                continue
-
-            def requirement_locations(requirement_text: str) -> list[dict]:
-                locations = []
-                for location in cls._section_locations(sec):
-                    if not isinstance(location, dict):
+            parts = cls._split_requirement_parts(text) or [text]
+            for part in parts:
+                seq, body = cls._parse_requirement_item(part)
+                if seq is not None:
+                    # “7.资格证明文件：A.营业执照”中的父级说明不是独立材料。
+                    if seq.isalpha() and pending and ''.join(
+                        str(item.get('text') or '') for item in pending
+                    ).endswith(('：', ':')):
+                        pending.clear()
+                        sequence = None
+                    flush()
+                    sequence = seq
+                    pending.append(dict(line, text=body))
+                elif sequence is not None:
+                    if not pending:
+                        pending.append(dict(line, text=part))
                         continue
-                    next_location = dict(location)
-                    if requirement_text:
-                        next_location["text"] = requirement_text
-                    locations.append(next_location)
-                return locations
+                    previous_text = ''.join(str(item.get('text') or '') for item in pending)
+                    previous_page = pending[-1].get('page')
+                    current_page = line.get('page')
+                    same_page = previous_page == current_page
+                    continuation_lead = bool(re.match(
+                        r'^(?:格式参见|见本章附件|后附|并附|以及|及|或|或者|且|委托|、|，|,|[（(])',
+                        part,
+                    ))
+                    if (
+                        cls._requirement_text_unfinished(previous_text)
+                        or (same_page and continuation_lead)
+                        or (
+                            same_page
+                            and not previous_text.rstrip().endswith(('；', ';', '。'))
+                        )
+                    ):
+                        pending.append(dict(line, text=part))
+                    else:
+                        flush()
+                        range_unclear = True
+        flush()
 
-            parsed_any = False
-            for part in cls._split_requirement_parts(text):
-                seq, content = cls._parse_requirement_item(part)
-                if not seq or not content:
-                    continue
-                if not cls._looks_like_requirement_leaf(content):
-                    continue
+        if not entered:
+            return {
+                **empty_result,
+                'scope_status': 'unclear',
+                'extraction_status': 'unclear',
+                'extraction_reason': '已定位文件组成标题，但未确定明确的商务文件范围。',
+                'scope_locations': cls._section_locations(lines[start]),
+            }
 
-                cleaned = cls._clean_label(content)
-                ordered_items.append(f"{seq}. {cleaned}")
-                required_titles.add(cls._compact(cleaned))
-
-                attach_numbers = cls._extract_attachment_refs(content)
-                item_entries.append(
-                    {
-                        "seq": seq,
-                        "content": cleaned,
-                        "attachment_numbers": attach_numbers,
-                        "title_core": cls._requirement_core_title(cleaned),
-                        "locations": requirement_locations(cleaned),
-                    }
-                )
-                if attach_numbers:
-                    attachment_mapping[seq] = attach_numbers
-                    required_numbers.update(attach_numbers)
-                parsed_any = True
-
-            if parsed_any:
-                continue
-
-            if cls._looks_like_requirement_leaf(text) and len(compact) <= 80:
-                cleaned = cls._clean_label(text)
-                if cleaned:
-                    seq = str(len(item_entries) + 1)
-                    ordered_items.append(f"{seq}. {cleaned}")
-                    required_titles.add(cls._compact(cleaned))
-                    item_entries.append(
-                        {
-                            "seq": seq,
-                            "content": cleaned,
-                            "attachment_numbers": [],
-                            "title_core": cls._requirement_core_title(cleaned),
-                            "locations": requirement_locations(cleaned),
-                        }
-                    )
-
+        numbers = {n for entry in entries for n in entry['attachment_numbers']}
+        resolved = bool(stopped and entries and not range_unclear)
         return {
-            "has_business_composition": found_composition and entered_business,
-            "ordered_items": ordered_items,
-            "item_entries": item_entries,
-            "attachment_mapping": attachment_mapping,
-            "required_numbers": required_numbers,
-            "required_titles": required_titles,
+            'has_business_composition': True,
+            'scope_status': 'resolved' if resolved else 'unclear',
+            'extraction_status': 'resolved' if resolved else 'unclear',
+            'extraction_reason': (
+                '已定位商务文件组成及其结束边界。'
+                if resolved
+                else '已定位商务文件范围，但材料续行或结束边界不完整。'
+            ),
+            'scope_locations': cls._section_locations(lines[start]) + business_locations,
+            'ordered_items': [f"{entry['seq']}. {entry['content']}" for entry in entries],
+            'item_entries': entries,
+            'attachment_mapping': {
+                entry['seq']: entry['attachment_numbers']
+                for entry in entries
+                if entry['attachment_numbers']
+            },
+            'required_numbers': numbers,
+            'required_titles': {cls._compact(entry['content']) for entry in entries},
         }
 
     @classmethod
@@ -1344,10 +1712,12 @@ class TemplateExtractor:
         cls,
         model_raw_json: dict,
         attachments: list[dict] | None = None,
+        *,
+        scope: dict | None = None,
     ) -> tuple[list[dict], bool]:
         """按“投标文件的组成”过滤商务标应包含的附件；无组成时回退全量附件。"""
         source_attachments = list(attachments or cls.extract_response_format_attachments(model_raw_json))
-        scope = cls.extract_business_attachment_scope(model_raw_json)
+        scope = scope or cls.extract_business_attachment_scope(model_raw_json)
         if not scope.get("has_business_composition"):
             return source_attachments, False
 
@@ -1367,16 +1737,46 @@ class TemplateExtractor:
             entries = [entry for entry in scope.get('item_entries') or []
                        if attachment_number and attachment_number in entry.get('attachment_numbers', [])]
             if entries:
-                optional_states = [cls._composition_entry_optional(entry['content']) for entry in entries]
+                optional_states = [
+                    bool(entry.get('is_optional'))
+                    or cls._composition_entry_optional(entry.get('source_text') or entry['content'])
+                    for entry in entries
+                ]
+                required_entries = [
+                    entry for entry in entries
+                    if entry.get('applicability_status') == 'required'
+                ]
+                conditional_entries = [
+                    entry for entry in entries
+                    if entry.get('applicability_status') == 'unclear'
+                ]
                 # Listing a form without repeating '(如有)' does not contradict
                 # an explicit optional declaration. Require mandatory wording.
                 explicitly_required = any(
-                    re.search(r'必须|应当|必交|(?:须|应|需)提供', entry['content']) and not optional
+                    re.search(
+                        r'必须|应当|必交|(?:须|应|需)提供',
+                        entry.get('source_text') or entry['content'],
+                    ) and not optional
                     for entry, optional in zip(entries, optional_states)
                 )
                 attachment['optionality_conflict'] = bool(explicitly_required and (any(optional_states) or '如有' in title))
                 attachment['is_optional'] = any(optional_states) and not attachment['optionality_conflict']
                 attachment['optionality_locations'] = [loc for entry in entries for loc in entry.get('locations') or []]
+                attachment['applicability_status'] = (
+                    'required'
+                    if required_entries
+                    else ('unclear' if conditional_entries else ('optional' if any(optional_states) else 'required'))
+                )
+                attachment['condition_text'] = '；'.join(
+                    str(entry.get('condition_text') or '')
+                    for entry in conditional_entries
+                    if str(entry.get('condition_text') or '').strip()
+                )
+                attachment['applicability_locations'] = [
+                    location
+                    for entry in conditional_entries
+                    for location in entry.get('locations') or []
+                ]
 
             if attachment_number and attachment_number in required_numbers:
                 filtered.append(attachment)
@@ -1398,6 +1798,9 @@ class TemplateExtractor:
     def _composition_entry_optional(text: str) -> bool:
         # Only an explicit trailing modifier of this material; not an optional extra.
         value = re.sub(r'\s+', '', str(text or '')).rstrip('；;。')
-        return bool(re.search(r'[（(]如有[）)]$', value)) and not bool(
-            re.search(r'(?:另附|另外|另行|可附|可再附)', value)
+        if re.search(r'(?:另附|另外|另行|可附|可再附)', value):
+            return False
+        return bool(
+            re.search(r'[（(]如有[）)]$', value)
+            or re.search(r'[（(]如有[，,][^）)]*附件\s*\d[^）)]*[）)]', value)
         )

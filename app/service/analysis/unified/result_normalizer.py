@@ -138,8 +138,29 @@ class ResultNormalizerMixin:
         missing = []
         unclear = []
         optional_skipped = []
+        applicability_unclear = []
         for item_name, detail in details.items():
             detail = detail or {}
+            if detail.get('applicability_status') == 'unclear':
+                evidence = {
+                    'condition_text': detail.get('condition_text'),
+                    'applicability_status': 'unclear',
+                    'template_locations': self._locations_with_document_role(
+                        detail.get('applicability_locations')
+                        or detail.get('template_locations')
+                        or [],
+                        'tender',
+                    ),
+                }
+                issue = self._issue(
+                    status='unclear',
+                    title=item_name,
+                    message='该材料适用条件取决于参选方式或主体情况，需要人工确认。',
+                    evidence=evidence,
+                )
+                unclear.append(issue)
+                applicability_unclear.append(item_name)
+                continue
             if not detail.get("scored", True):
                 if detail.get('is_optional'):
                     optional_skipped.append(item_name)
@@ -155,6 +176,8 @@ class ResultNormalizerMixin:
                 "is_optional": detail.get('is_optional', False),
                 "optionality_conflict": detail.get('optionality_conflict', False),
                 "optionality_locations": self._locations_with_document_role(detail.get('optionality_locations') or [], 'tender'),
+                "applicability_resolution": detail.get('applicability_resolution'),
+                "material_resolution": detail.get('material_resolution'),
                 "locations": self._locations_with_document_role(
                     detail.get("locations") or [],
                     "business_bid",
@@ -192,29 +215,77 @@ class ResultNormalizerMixin:
                     )
                 )
 
-        total = (
+        actual_check_count = (
             raw.get("scored_item_count")
             if isinstance(raw, dict) and isinstance(raw.get("scored_item_count"), int)
             else len(passed) + len(failed) + len(missing)
         )
-        if raw.get('scope_status') == 'unclear':
+        extracted_item_count = (
+            raw.get('extracted_item_count')
+            if isinstance(raw, dict) and isinstance(raw.get('extracted_item_count'), int)
+            else len(details)
+        )
+        if raw.get('scope_status') == 'unclear' and extracted_item_count > 0:
             unclear.append(self._issue(status='unclear', title='商务材料组成范围待确认', message='未能确定完整的商务材料组成范围，已识别材料继续检查。', evidence={'template_locations': self._locations_with_document_role(raw.get('scope_locations') or [], 'tender')}))
-        review_status = self._combine_review_status([issue['status'] for issue in passed + failed + missing + unclear])
+        extraction_failed = extracted_item_count == 0
+        no_applicable_items = bool(
+            extracted_item_count > 0
+            and actual_check_count == 0
+            and optional_skipped
+            and not applicability_unclear
+        )
+        if extraction_failed:
+            extraction_reason = str(
+                raw.get('extraction_reason')
+                or '未建立商务材料完整性检查项。'
+            )
+            unclear.append(
+                self._issue(
+                    status='unclear',
+                    title='商务材料完整性检查项未建立',
+                    message=extraction_reason,
+                    evidence={
+                        'extraction_status': raw.get('extraction_status') or 'unclear',
+                        'template_locations': self._locations_with_document_role(
+                            raw.get('structure_locations')
+                            or raw.get('scope_locations')
+                            or [],
+                            'tender',
+                        ),
+                    },
+                )
+            )
+        review_status = (
+            'not_applicable'
+            if no_applicable_items
+            else self._combine_review_status([issue['status'] for issue in passed + failed + missing + unclear])
+        )
         # 摘要使用“已命中/总数”的口径，避免直接使用“缺失 X 项”的表述。
-        summary = f"共校验 {total} 项，已命中 {len(passed)}/{total} 项"
-        if score is not None:
-            summary += f"，完整性得分 {score}"
-        summary += "。"
+        if extraction_failed:
+            summary = '未建立完整性检查项，请复核招标文件商务材料组成提取结果。'
+        elif no_applicable_items:
+            summary = '本次无必检项；已提取的材料均为明确可选且未提供，不计通过或失败。'
+        else:
+            summary = f"共提取 {extracted_item_count} 项，实际校验 {actual_check_count} 项，已命中 {len(passed)}/{actual_check_count} 项"
+            if score is not None:
+                summary += f"，完整性得分 {score}"
+            summary += "。"
         if optional_skipped:
             summary += f" 另有 {len(optional_skipped)} 个可选材料未提供／未定位，不计通过或计分：" + '、'.join(optional_skipped) + '。'
         if ignored_count > len(optional_skipped):
             summary += f" 另有 {ignored_count - len(optional_skipped)} 个条目不单独计分。"
-        if raw.get('scope_status') == 'unclear':
+        if applicability_unclear:
+            summary += f' 另有 {len(applicability_unclear)} 项适用条件待确认。'
+        if raw.get('scope_status') == 'unclear' and not extraction_failed:
             summary += ' 商务材料组成范围待确认。'
         return {
             "validation": {
-                "status": "correct" if isinstance(details, dict) else "failed",
-                "reason": "模块返回了完整性得分和逐项命中明细。",
+                "status": "unclear" if extraction_failed else ("correct" if isinstance(details, dict) else "failed"),
+                "reason": (
+                    str(raw.get('extraction_reason') or '未建立商务材料完整性检查项。')
+                    if extraction_failed
+                    else "模块返回了完整性得分和逐项命中明细。"
+                ),
             },
             "review": {
                 "status": review_status,
@@ -222,12 +293,16 @@ class ResultNormalizerMixin:
             },
             "metrics": {
                 "integrity_score": score,
-                "total_item_count": total,
+                "extracted_item_count": extracted_item_count,
+                "applicable_item_count": actual_check_count,
+                "actual_check_count": actual_check_count,
+                "total_item_count": actual_check_count,
                 "passed_item_count": len(passed),
                 "failed_item_count": len(failed),
                 "missing_item_count": len(missing),
                 "ignored_item_count": ignored_count,
                 "skipped_optional_item_count": len(optional_skipped),
+                "applicability_unclear_count": len(applicability_unclear),
                 "unclear_item_count": len(unclear),
             },
             "issues": {
@@ -249,6 +324,11 @@ class ResultNormalizerMixin:
         else:
             segments = raw if isinstance(raw, list) else []
             original_segment_count = len(segments)
+        extraction_reason = str(
+            (raw.get('extraction_reason') or '')
+            if isinstance(raw, dict)
+            else ''
+        ).strip()
         passed = []
         failed = []
         missing_items = []
@@ -269,6 +349,18 @@ class ResultNormalizerMixin:
                 self_defined_skipped += 1
             else:
                 integrity_skipped += 1
+
+        skip_types = {
+            str((item.get('skip_reason') or {}).get('type') or '')
+            for item in skipped_segments
+            if isinstance(item, dict)
+        }
+        all_templates_explicitly_skipped = bool(skipped_segments) and not segments and skip_types.issubset({
+            'self_defined_format',
+            'optional_attachment_not_provided',
+            'alternative_not_provided',
+            'integrity_attachment_missing',
+        })
 
         for segment in segments:
             title = str(segment.get("name") or "未命名模板段")
@@ -318,6 +410,12 @@ class ResultNormalizerMixin:
                 "is_optional": bool(segment.get('is_optional')),
                 "optionality_conflict": bool(segment.get('optionality_conflict')),
                 "optionality_locations": self._locations_with_document_role(segment.get('optionality_locations') or [], 'tender'),
+                "applicability_status": segment.get('applicability_status') or 'required',
+                "condition_text": segment.get('condition_text') or '',
+                "applicability_locations": self._locations_with_document_role(
+                    segment.get('applicability_locations') or [],
+                    'tender',
+                ),
             }
             segment_status = str(segment.get("status") or "").strip().lower()
             if segment_status not in {"pass", "missing", "unclear", "skipped"}:
@@ -354,6 +452,8 @@ class ResultNormalizerMixin:
                         title=title,
                         message=("招标对该附件的必交与可选声明冲突，需要人工确认。"
                                  if segment.get('optionality_conflict')
+                                 else "该附件的适用条件尚未确认，且未定位到对应投标内容。"
+                                 if segment.get('applicability_status') == 'unclear'
                                  else "存在多个附件候选，对应附件待确认。" if segment.get('location_status') == 'ambiguous'
                                  else "未定位到对应投标内容，需要人工复核。" if segment.get('location_status') == 'not_found'
                                  else "模板骨架存在疑似改写或对齐不确定项，需要人工复核。"),
@@ -362,6 +462,30 @@ class ResultNormalizerMixin:
                 )
 
         has_results = bool(segments or skipped_segments)
+        if not has_results:
+            unclear_items.append(
+                self._issue(
+                    status='unclear',
+                    title='模板一致性比对段未建立',
+                    message=extraction_reason or '未提取到可比较的模板段，需人工复核模板抽取是否成功。',
+                    evidence={
+                        'extraction_status': raw.get('extraction_status') if isinstance(raw, dict) else 'unclear',
+                        'template_locations': self._locations_with_document_role(
+                            raw.get('structure_locations') or [] if isinstance(raw, dict) else [],
+                            'tender',
+                        ),
+                    },
+                )
+            )
+        elif not segments and not all_templates_explicitly_skipped:
+            unclear_items.append(
+                self._issue(
+                    status='unclear',
+                    title='模板一致性未实际比对',
+                    message='模板段已提取，但因正文不足或附件定位不稳定，当前没有可确认的比对结论。',
+                    evidence={'skip_types': sorted(skip_types)},
+                )
+            )
         if skipped_segments:
             validation_status = "correct"
             validation_reason = "模块返回了逐模板段的一致性结果，并已跳过正文过短或完整性缺失的附件。"
@@ -370,10 +494,12 @@ class ResultNormalizerMixin:
             validation_reason = (
                 "模块返回了逐模板段的正文固定内容比对结果。"
                 if segments
-                else "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
+                else extraction_reason or "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
             )
 
-        if has_results:
+        if all_templates_explicitly_skipped:
+            review_status = 'not_applicable'
+        elif has_results:
             review_status = self._combine_review_status(
                 [
                     issue["status"]
@@ -383,7 +509,10 @@ class ResultNormalizerMixin:
         else:
             review_status = "unclear"
 
-        if has_results:
+        if all_templates_explicitly_skipped:
+            total_segments = original_segment_count or len(skipped_segments)
+            summary = f"共提取 {total_segments} 个模板段，均按明确规则跳过，本次无模板正文需要比对。"
+        elif has_results:
             total_segments = original_segment_count or (len(segments) + len(skipped_segments))
             # 一致性摘要统一改成“已通过/已校验”的数量表达。
             summary = (
@@ -395,7 +524,7 @@ class ResultNormalizerMixin:
                 f"因完整性结果跳过 {integrity_skipped} 个。"
             )
         else:
-            summary = "未提取到可比较的模板段。"
+            summary = extraction_reason or "未提取到可比较的模板段。"
 
         return {
             "validation": {"status": validation_status, "reason": validation_reason},
@@ -1124,6 +1253,8 @@ class ResultNormalizerMixin:
         def effective_attachment_status(item: dict[str, Any]) -> str:
             if (item.get('requirements') or {}).get('optionality_conflict'):
                 return 'pending'
+            if (item.get('requirements') or {}).get('applicability_status') == 'unclear' and item.get('found') is None:
+                return 'pending'
             status = status_of(item.get("status"))
             statuses = [
                 component_status(item, "signature_check"),
@@ -1151,6 +1282,8 @@ class ResultNormalizerMixin:
                 return ['存在多个附件候选，对应附件待确认']
             if (item.get('requirements') or {}).get('optionality_conflict'):
                 details.append('招标的必交与可选声明冲突')
+            if (item.get('requirements') or {}).get('applicability_status') == 'unclear':
+                details.append('该附件的适用条件尚未确认')
             from ..verification_evidence import component_message
             for kind in ('signature', 'seal', 'date'):
                 check = item.get(kind + '_check') or {}

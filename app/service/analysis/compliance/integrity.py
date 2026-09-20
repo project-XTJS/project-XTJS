@@ -542,7 +542,8 @@ class IntegrityChecker:
         if (
             "如有" in normalized
             or "认为需要补充" in compact
-            or ("其他内容" in compact and "前附表规定" in compact)
+            or "其他内容" in compact
+            or "其它内容" in compact
         ):
             return True
         # “其他材料”等兜底类目不认定为必须材料，无需在投标文件中查找。
@@ -592,9 +593,17 @@ class IntegrityChecker:
         model_json: dict,
         requirements: list[str],
         attachment_mapping: dict[str, list[str]],
+        *,
+        business_scope: dict | None = None,
+        response_attachments: list[dict] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
-        requirement_locations = TemplateExtractor.extract_requirement_locations(model_json)
-        response_attachments = TemplateExtractor.extract_response_format_attachments(model_json)
+        requirement_locations = TemplateExtractor.extract_requirement_locations(
+            model_json,
+            business_scope=business_scope,
+            response_attachments=response_attachments,
+        )
+        if response_attachments is None:
+            response_attachments = TemplateExtractor.extract_response_format_attachments(model_json)
         attachments_by_title: dict[str, dict[str, Any]] = {}
         attachments_by_number: dict[str, dict[str, Any]] = {}
 
@@ -929,16 +938,94 @@ class IntegrityChecker:
             return match_section
         return self._find_body_section(sections, headers, keyword, toc_pages)
 
+    @staticmethod
+    def _is_direct_or_delegated_participation_choice(item: str) -> bool:
+        """识别把直接参加和委托参加写在同一条中的选择条件。"""
+        compact = re.sub(r"\s+", "", str(item or ""))
+        return bool(
+            ("法定代表人" in compact or "单位负责人" in compact)
+            and ("直接参加" in compact or "直接投标" in compact)
+            and "委托" in compact
+            and ("授权委托书" in compact or "被授权人" in compact)
+        )
+
+    def _find_participation_choice_section(
+        self,
+        sections: list,
+        headers: set,
+        item: str,
+        toc_pages: set[int],
+    ) -> tuple[dict | None, str | None]:
+        """选择条件只需命中资格证明或授权委托中的一个实际分支。"""
+        if not self._is_direct_or_delegated_participation_choice(item):
+            return None, None
+        branch_targets = (
+            ("direct", "法定代表人资格证明书"),
+            ("delegated", "法定代表人授权委托书"),
+        )
+        hits: list[tuple[str, dict]] = []
+        for branch, target in branch_targets:
+            hit = self._find_required_section(sections, headers, target, toc_pages)
+            if hit:
+                hits.append((branch, hit))
+        if not hits:
+            return None, None
+        branches = "+".join(branch for branch, _ in hits)
+        first = dict(hits[0][1])
+        first["text"] = "；".join(str(hit.get("text") or "") for _, hit in hits)
+        return first, branches
+
+    def _find_entity_proof_choice_sections(
+        self,
+        sections: list,
+        headers: set,
+        item: str,
+        toc_pages: set[int],
+    ) -> list[tuple[str, dict]]:
+        """识别“营业执照或法人证书”等明确主体证明选择组。"""
+        compact = re.sub(r"\s+", "", str(item or ""))
+        if (
+            "营业执照" not in compact
+            or not any(token in compact for token in ("或", "或者"))
+            or not any(token in compact for token in ("事业单位法人证书", "法人登记证书"))
+        ):
+            return []
+        targets = ["营业执照"]
+        targets.extend(
+            target
+            for target in ("事业单位法人证书", "法人登记证书")
+            if target in compact
+        )
+        hits: list[tuple[str, dict]] = []
+        for target in targets:
+            hit = self._find_required_section(sections, headers, target, toc_pages)
+            if hit:
+                hits.append((target, hit))
+        return hits
+
     # 主校验入口
     def check_integrity(self, model_json: dict, test_json: dict) -> dict:
         """
         根据招标文件模型检查投标文件的完整性。
         返回完整性评分、各项详情及位置信息。
         """
-        reqs, attachment_mapping = TemplateExtractor.extract_requirements(model_json)
         scope = TemplateExtractor.extract_business_attachment_scope(model_json)
-        attachments, _ = TemplateExtractor.filter_business_response_attachments(model_json)
+        response_bundle = TemplateExtractor.extract_response_format_bundle(model_json)
+        attachments, _ = TemplateExtractor.filter_business_response_attachments(
+            model_json,
+            list(response_bundle.get('attachments') or []),
+            scope=scope,
+        )
+        reqs, attachment_mapping = TemplateExtractor.extract_requirements(
+            model_json,
+            business_scope=scope,
+            response_attachments=attachments,
+        )
         attributes = {str(a.get('attachment_number')): a for a in attachments if a.get('attachment_number')}
+        scope_entries = [
+            entry for entry in scope.get('item_entries') or []
+            if isinstance(entry, dict)
+        ]
         data_node = test_json.get('data', test_json)
         sections, headers = TemplateExtractor.preprocess_sections(data_node.get('layout_sections', []))
         toc_pages = self._collect_toc_pages(sections)
@@ -947,6 +1034,8 @@ class IntegrityChecker:
             model_json,
             reqs,
             attachment_mapping,
+            business_scope=scope,
+            response_attachments=attachments,
         )
 
         all_details = {}
@@ -957,11 +1046,70 @@ class IntegrityChecker:
             # 每个附件单独判断，不再允许证明书/授权委托书互替，也不再做父子项放宽。
             norm_item = self._normalize_target(item)
             match_section = self._find_required_section(sections, headers, norm_item, toc_pages)
+            entity_choice_hits = self._find_entity_proof_choice_sections(
+                sections,
+                headers,
+                item,
+                toc_pages,
+            )
+            if entity_choice_hits:
+                match_section = dict(entity_choice_hits[0][1])
+                match_section['text'] = '；'.join(
+                    str(hit.get('text') or '') for _, hit in entity_choice_hits
+                )
+            choice_section, applicability_resolution = self._find_participation_choice_section(
+                sections,
+                headers,
+                item,
+                toc_pages,
+            )
+            if choice_section is not None:
+                match_section = choice_section
             from ..requirement_groups import parse_group
             group = parse_group(item)
             group_locations = []
             resolution_status = None
-            if group['operator'] != 'single':
+            if entity_choice_hits:
+                branches = []
+                entity_branch_titles = ["营业执照"] + [
+                    title
+                    for title in ("事业单位法人证书", "法人登记证书")
+                    if title in re.sub(r'\s+', '', str(item or ''))
+                ]
+                for title in entity_branch_titles:
+                    hit = next((section for name, section in entity_choice_hits if name == title), None)
+                    locations = [self._location_from_section(hit)] if hit else []
+                    group_locations.extend(location for location in locations if location)
+                    branches.append({
+                        'title': title,
+                        'matched': bool(hit),
+                        'locations': [location for location in locations if location],
+                    })
+                group = {'operator': 'any_of', 'source_text': item, 'branches': branches}
+                resolution_status = 'matched'
+            elif applicability_resolution:
+                location = self._location_from_section(match_section)
+                if location:
+                    group_locations.append(location)
+                matched_branches = set(applicability_resolution.split('+'))
+                group = {
+                    'operator': 'any_of',
+                    'source_text': item,
+                    'branches': [
+                        {
+                            'title': '法定代表人/单位负责人资格证明书及身份证',
+                            'matched': 'direct' in matched_branches,
+                            'locations': group_locations if 'direct' in matched_branches else [],
+                        },
+                        {
+                            'title': '法定代表人/单位负责人授权委托书及被授权人身份证',
+                            'matched': 'delegated' in matched_branches,
+                            'locations': group_locations if 'delegated' in matched_branches else [],
+                        },
+                    ],
+                }
+                resolution_status = 'matched'
+            elif group['operator'] != 'single':
                 for branch in group['branches']:
                     hit = self._find_required_section(sections, headers, self._normalize_target(branch['title']), toc_pages)
                     # A staff certificate or a short contained synonym does not
@@ -983,40 +1131,145 @@ class IntegrityChecker:
             match = str(match_section.get("text") or "") if isinstance(match_section, dict) else None
             is_optional = self._is_optional_item(item)
             referenced = [attributes[n] for n in attachment_mapping.get(item, []) if n in attributes]
+            item_refs = {str(value).strip() for value in attachment_mapping.get(item, []) if str(value).strip()}
+            item_core = TemplateExtractor._requirement_core_title(item)
+            related_entries = [
+                entry
+                for entry in scope_entries
+                if (
+                    item_refs.intersection({str(value).strip() for value in entry.get('attachment_numbers') or []})
+                    or (
+                        not item_refs
+                        and TemplateExtractor._requirement_core_title(entry.get('content') or '') == item_core
+                    )
+                )
+            ]
             conflict = any(a.get('optionality_conflict') for a in referenced)
             if referenced:
                 is_optional = all(bool(a.get('is_optional')) or self._is_optional_item(a.get('title', '')) for a in referenced)
             is_optional = is_optional and not conflict
+            applicability_condition_unclear = (
+                any(
+                    entry.get('applicability_status') == 'unclear'
+                    for entry in related_entries
+                )
+                and not any(
+                    entry.get('applicability_status') == 'required'
+                    for entry in related_entries
+                )
+            ) or (
+                any(a.get('applicability_status') == 'unclear' for a in referenced)
+                and not any(a.get('applicability_status') == 'required' for a in referenced)
+            )
+            # 条件材料已经实际提交时，“是否必须提交”不再影响完整性结论：
+            # 该材料客观存在，仍应继续做模板和签章检查。只有材料未定位到时，
+            # 才需要人工确认参选方式或主体条件，避免把所有含授权分支的项目
+            # 一律降为待复核。
+            applicability_unclear = applicability_condition_unclear and not bool(match)
+            condition_text = '；'.join(dict.fromkeys(
+                str(value).strip()
+                for value in [
+                    *(entry.get('condition_text') for entry in related_entries),
+                    *(attachment.get('condition_text') for attachment in referenced),
+                ]
+                if str(value or '').strip()
+            ))
+            applicability_locations = [
+                location
+                for entry in related_entries
+                if entry.get('applicability_status') == 'unclear'
+                for location in entry.get('locations') or []
+            ] or [
+                location
+                for attachment in referenced
+                for location in attachment.get('applicability_locations') or []
+            ]
 
             all_details[item] = {
                 "status": (
-                    "待复核" if conflict or resolution_status == 'unclear' else "已找到"
+                    "待复核" if conflict or applicability_unclear or resolution_status == 'unclear' else "已找到"
                     if match
-                    else ("待复核" if conflict else ("可选项未提供" if is_optional else "缺失"))
+                    else ("待复核" if conflict or applicability_unclear else ("可选项未提供" if is_optional else "缺失"))
                 ),
                 "preview": match or "-",
-                "is_passed": bool(match) and not conflict and resolution_status != 'unclear',
-                "resolution_status": resolution_status,
+                "is_passed": bool(match) and not conflict and not applicability_unclear and resolution_status != 'unclear',
+                "resolution_status": 'unclear' if applicability_unclear else resolution_status,
                 "requirement_group": group if group['operator'] != 'single' else None,
                 "is_optional": is_optional,
                 "optionality_conflict": conflict,
                 "optionality_locations": [loc for a in referenced for loc in a.get('optionality_locations') or []],
+                "applicability_status": (
+                    "unclear" if applicability_unclear
+                    else ("conditional_satisfied" if applicability_condition_unclear else ("optional" if is_optional else "required"))
+                ),
+                "condition_text": condition_text,
+                "applicability_resolution": applicability_resolution,
+                "material_resolution": (
+                    'entity_proof_any_of' if entity_choice_hits else None
+                ),
+                "applicability_locations": applicability_locations,
                 "category": cat,
-                "scored": not (is_optional and not match),
+                "scored": not ((is_optional and not match) or applicability_unclear),
                 "locations": group_locations if group['operator'] != 'single' else [self._location_from_section(match_section)] if match_section else [],
                 "template_locations": template_locations_by_item.get(item) or [],
             }
 
         scored_details = [v for v in all_details.values() if v.get("scored", True)]
+        optional_skipped_count = len([
+            value for value in all_details.values()
+            if value.get('is_optional') and not value.get('scored', True)
+        ])
+        applicability_unclear_count = len([
+            value for value in all_details.values()
+            if value.get('applicability_status') == 'unclear'
+        ])
         passed = len([v for v in scored_details if v['is_passed']])
         total = len(scored_details)
         score = round((passed / total) * 100, 2) if total else 0
 
+        data_node = model_json.get('data', model_json)
+        has_tender_text = any(
+            str(section.get('text') or '').strip()
+            for section in data_node.get('layout_sections') or []
+            if isinstance(section, dict)
+        )
+        extracted_item_count = len(all_details)
+        if extracted_item_count:
+            extraction_status = 'resolved'
+            extraction_reason = f'已提取 {extracted_item_count} 个商务材料要求。'
+            structure_locations = scope.get('scope_locations') or []
+        else:
+            extraction_status = 'unclear' if has_tender_text else 'failed'
+            extraction_reason = str(
+                scope.get('extraction_reason')
+                if scope.get('extraction_status') == 'unclear'
+                else response_bundle.get('extraction_reason')
+                or scope.get('extraction_reason')
+                or '未建立商务材料完整性检查项。'
+            )
+            structure_locations = (
+                scope.get('scope_locations')
+                or response_bundle.get('structure_locations')
+                or []
+            )
+
         return {
             "scope_status": scope.get('scope_status', 'legacy'),
             "scope_locations": scope.get('scope_locations') or [],
+            "extraction_status": extraction_status,
+            "extraction_reason": extraction_reason,
+            "structure_locations": structure_locations,
+            "template_extraction_status": response_bundle.get('extraction_status'),
+            "template_extraction_reason": response_bundle.get('extraction_reason'),
+            "template_structure_locations": response_bundle.get('structure_locations') or [],
             "integrity_score": score,
             "details": all_details,
+            "extracted_item_count": extracted_item_count,
+            "applicable_item_count": total,
+            "actual_check_count": total,
+            "passed_item_count": passed,
+            "skipped_item_count": optional_skipped_count,
+            "applicability_unclear_count": applicability_unclear_count,
             "scored_item_count": total,
             "ignored_item_count": len(all_details) - total,
             "attachment_mapping": attachment_mapping,
