@@ -3,8 +3,8 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: project-xtjs:review-minimal-fix-20260914
+      dockerfile: Dockerfile.release
+    image: project-xtjs:review-hardening-v2-20260924
     container_name: project-xtjs
     ports:
       - "8080:8080"
@@ -65,6 +65,7 @@ services:
       - PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/app/.ocr_runtime/paddlex-cache}
       - OCR_RUNTIME_TEMP_DIR=${OCR_RUNTIME_TEMP_DIR:-/app/.ocr_runtime/runtime-tmp}
       - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
+      - CONSISTENCY_TEMPLATE_ENGINE_VERSION=${CONSISTENCY_TEMPLATE_ENGINE_VERSION:-fixed-template-exact-v3.2}
       - XTJS_IO_CONCURRENCY=${XTJS_IO_CONCURRENCY:-8}
       - XTJS_IO_QUEUE_TIMEOUT_SECONDS=${XTJS_IO_QUEUE_TIMEOUT_SECONDS:-10}
       - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
@@ -73,6 +74,19 @@ services:
       - XTJS_CACHE_REDIS_URL=${XTJS_CACHE_REDIS_URL:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://xtjs_redis:CHANGE_ME@r-bp1ujxecepi9bv97wu.redis.rds.aliyuncs.com:6379/0}
+      - BUSINESS_REVIEW_QUEUE=${BUSINESS_REVIEW_QUEUE:-business_review}
+      - BUSINESS_REVIEW_TASK_TIMEOUT_SECONDS=${BUSINESS_REVIEW_TASK_TIMEOUT_SECONDS:-900}
+      - BUSINESS_REVIEW_TASK_HEARTBEAT_SECONDS=${BUSINESS_REVIEW_TASK_HEARTBEAT_SECONDS:-5}
+      - BUSINESS_REVIEW_TASK_STALE_SECONDS=${BUSINESS_REVIEW_TASK_STALE_SECONDS:-30}
+      - BUSINESS_REVIEW_DISPATCH_INTERVAL_SECONDS=${BUSINESS_REVIEW_DISPATCH_INTERVAL_SECONDS:-10}
+      - BUSINESS_REVIEW_EVIDENCE_CACHE_ROOT=${BUSINESS_REVIEW_EVIDENCE_CACHE_ROOT:-/app/.ocr_runtime/business-evidence-cache}
+      - SIGNATURE_PRESENCE_ENABLED=${SIGNATURE_PRESENCE_ENABLED:-true}
+      - SIGNATURE_PRESENCE_MODEL_PATH=${SIGNATURE_PRESENCE_MODEL_PATH:-/app/models/yolos-small-signature-detection}
+      - SIGNATURE_PRESENCE_MODEL_REVISION=${SIGNATURE_PRESENCE_MODEL_REVISION:-238c12505dbfb4bbcfed325a00de9218b4ddeaa0}
+      - SIGNATURE_PRESENCE_DEVICE=${SIGNATURE_PRESENCE_DEVICE:-cpu}
+      - SIGNATURE_PRESENCE_THRESHOLD=${SIGNATURE_PRESENCE_THRESHOLD:-0.50}
+      - SIGNATURE_PRESENCE_TIMEOUT_SECONDS=${SIGNATURE_PRESENCE_TIMEOUT_SECONDS:-120}
+      - SIGNATURE_PRESENCE_RENDER_DPI=${SIGNATURE_PRESENCE_RENDER_DPI:-300}
       - XTJS_CACHE_KEY_PREFIX=${XTJS_CACHE_KEY_PREFIX:-xtjs}
       - XTJS_CACHE_PROJECT_LIST_TTL_SECONDS=${XTJS_CACHE_PROJECT_LIST_TTL_SECONDS:-30}
       - XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS=${XTJS_CACHE_PROJECT_DETAIL_TTL_SECONDS:-120}
@@ -81,6 +95,52 @@ services:
       - XTJS_CACHE_PREVIEW_META_TTL_SECONDS=${XTJS_CACHE_PREVIEW_META_TTL_SECONDS:-604800}
       - XTJS_CACHE_PREVIEW_OBJECT_PREFIX=${XTJS_CACHE_PREVIEW_OBJECT_PREFIX:-cache/previews}
       - XTJS_CACHE_SCAN_BATCH_SIZE=${XTJS_CACHE_SCAN_BATCH_SIZE:-500}
+    volumes:
+      - ocr_runtime:/app/.ocr_runtime
+      - app_logs:/app/logs
+    networks:
+      - app_network
+    restart: always
+
+  business-review-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.release
+    image: project-xtjs:review-hardening-v2-20260924
+    container_name: project-xtjs-business-review-worker
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=${LOG_DIR:-/app/logs}
+      - OCR_STORAGE_ROOT=${OCR_STORAGE_ROOT:-/app/.ocr_runtime}
+      - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
+      - CONSISTENCY_EMBEDDING_DEVICE=${BUSINESS_REVIEW_EMBEDDING_DEVICE:-cpu}
+      - CONSISTENCY_TEMPLATE_ENGINE_VERSION=${CONSISTENCY_TEMPLATE_ENGINE_VERSION:-fixed-template-exact-v3.2}
+      - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
+      - XTJS_CACHE_REQUIRED=${XTJS_CACHE_REQUIRED:-true}
+      - BUSINESS_REVIEW_QUEUE=${BUSINESS_REVIEW_QUEUE:-business_review}
+      - BUSINESS_REVIEW_TASK_TIMEOUT_SECONDS=${BUSINESS_REVIEW_TASK_TIMEOUT_SECONDS:-900}
+      - BUSINESS_REVIEW_TASK_HEARTBEAT_SECONDS=${BUSINESS_REVIEW_TASK_HEARTBEAT_SECONDS:-5}
+      - BUSINESS_REVIEW_TASK_STALE_SECONDS=${BUSINESS_REVIEW_TASK_STALE_SECONDS:-30}
+      - BUSINESS_REVIEW_EVIDENCE_CACHE_ROOT=${BUSINESS_REVIEW_EVIDENCE_CACHE_ROOT:-/app/.ocr_runtime/business-evidence-cache}
+      - SIGNATURE_PRESENCE_ENABLED=${SIGNATURE_PRESENCE_ENABLED:-true}
+      - SIGNATURE_PRESENCE_MODEL_PATH=${SIGNATURE_PRESENCE_MODEL_PATH:-/app/models/yolos-small-signature-detection}
+      - SIGNATURE_PRESENCE_MODEL_REVISION=${SIGNATURE_PRESENCE_MODEL_REVISION:-238c12505dbfb4bbcfed325a00de9218b4ddeaa0}
+      - SIGNATURE_PRESENCE_DEVICE=${SIGNATURE_PRESENCE_DEVICE:-cpu}
+      - SIGNATURE_PRESENCE_THRESHOLD=${SIGNATURE_PRESENCE_THRESHOLD:-0.50}
+      - SIGNATURE_PRESENCE_TIMEOUT_SECONDS=${SIGNATURE_PRESENCE_TIMEOUT_SECONDS:-120}
+      - SIGNATURE_PRESENCE_RENDER_DPI=${SIGNATURE_PRESENCE_RENDER_DPI:-300}
+    command:
+      - celery
+      - -A
+      - app.tasks:celery_app
+      - worker
+      - --queues=business_review
+      - --concurrency=2
+      - --prefetch-multiplier=1
+      - --hostname=business-review@%h
+      - --loglevel=INFO
     volumes:
       - ocr_runtime:/app/.ocr_runtime
       - app_logs:/app/logs

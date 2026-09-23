@@ -51,3 +51,7 @@ ocr_results/
 test_reports/
 tmp/
 models/typo/
+.artifacts/typo-training/
+reports/*_dryrun.json
+reports/*_applied.json
+reports/project_*_replay_*.json

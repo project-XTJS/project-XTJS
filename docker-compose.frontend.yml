@@ -3,6 +3,7 @@ services:
     build:
       context: ../XTJS-frontend
       dockerfile: Dockerfile.frontend
+    image: project-xtjs-frontend:review-hardening-v2-20260924
     container_name: xtjs-frontend
     ports:
       - "80:80"
