@@ -1021,6 +1021,22 @@ class IntegrityChecker:
             business_scope=scope,
             response_attachments=attachments,
         )
+        excluded_optional_items: dict[str, str] = {}
+        for value in [*(scope.get('item_entries') or []), *attachments]:
+            if not TemplateExtractor._review_material_excluded(value):
+                continue
+            title = str(
+                value.get('title')
+                or value.get('content')
+                or value.get('source_text')
+                or ''
+            ).strip()
+            key = (
+                TemplateExtractor._requirement_core_title(title)
+                or TemplateExtractor._compact(title)
+            )
+            if key:
+                excluded_optional_items.setdefault(key, title)
         attributes = {str(a.get('attachment_number')): a for a in attachments if a.get('attachment_number')}
         scope_entries = [
             entry for entry in scope.get('item_entries') or []
@@ -1238,6 +1254,10 @@ class IntegrityChecker:
             extraction_status = 'resolved'
             extraction_reason = f'已提取 {extracted_item_count} 个商务材料要求。'
             structure_locations = scope.get('scope_locations') or []
+        elif excluded_optional_items:
+            extraction_status = 'not_applicable'
+            extraction_reason = '招标文件中的商务材料均为可选项，已从审查范围排除。'
+            structure_locations = scope.get('scope_locations') or []
         else:
             extraction_status = 'unclear' if has_tender_text else 'failed'
             extraction_reason = str(
@@ -1265,6 +1285,9 @@ class IntegrityChecker:
             "integrity_score": score,
             "details": all_details,
             "extracted_item_count": extracted_item_count,
+            "excluded_optional_item_count": len(excluded_optional_items),
+            "excluded_optional_items": list(excluded_optional_items.values()),
+            "all_items_excluded": bool(excluded_optional_items and not extracted_item_count),
             "applicable_item_count": total,
             "actual_check_count": total,
             "passed_item_count": passed,

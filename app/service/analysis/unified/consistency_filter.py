@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ..compliance.template_extractor import TemplateExtractor
+from ..verification_evidence import refresh_verification_summary
 
 
 class ConsistencyFilterMixin:
@@ -35,6 +36,7 @@ class ConsistencyFilterMixin:
         tender_payload: dict[str, Any],
         business_payload: dict[str, Any],
         integrity_check: dict[str, Any],
+        prepared_skeletons: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """执行模板一致性审查，并依据完整性缺失对结果进行过滤。"""
         started = time.perf_counter()
@@ -42,10 +44,15 @@ class ConsistencyFilterMixin:
         check_name = "模板一致性审查"
         try:
             integrity_raw = integrity_check.get("raw_result")
+            all_items_excluded = bool(
+                isinstance(integrity_raw, dict)
+                and integrity_raw.get("all_items_excluded")
+            )
             raw_segments = self.consistency_checker.compare_raw_data(
                 tender_payload,
                 business_payload,
                 integrity_raw=integrity_raw,
+                prepared_skeletons=prepared_skeletons,
             )
             evaluated_segments, skipped_segments = self._filter_consistency_segments(
                 raw_segments,
@@ -82,6 +89,12 @@ class ConsistencyFilterMixin:
                 "extraction_status": extraction_info.get("extraction_status"),
                 "extraction_reason": extraction_info.get("extraction_reason"),
                 "structure_locations": extraction_info.get("structure_locations") or [],
+                "all_items_excluded": all_items_excluded,
+                "excluded_optional_items": (
+                    list(integrity_raw.get("excluded_optional_items") or [])
+                    if isinstance(integrity_raw, dict)
+                    else []
+                ),
                 "engine_version": next(
                     (
                         segment.get("engine_version")
@@ -269,6 +282,35 @@ class ConsistencyFilterMixin:
         """从验证结果中过滤掉已由完整性检查标记为缺失的附件标题。"""
         filtered = copy.deepcopy(raw_result)
         suppressed: list[dict[str, Any]] = []
+        suppressed_titles: set[str] = set()
+
+        def suppress(title: str, source: str) -> bool:
+            if title in suppressed_titles:
+                return True
+            skip_reason = self._verification_skip_reason_from_integrity(title, integrity_raw)
+            if skip_reason is None:
+                return False
+            suppressed_titles.add(title)
+            suppressed.append(
+                {
+                    "attachment": title,
+                    "source": source,
+                    **skip_reason,
+                }
+            )
+            return True
+
+        def filter_attachment_results(values: Any, source: str, *, only_unlocated: bool) -> list[dict[str, Any]]:
+            kept: list[dict[str, Any]] = []
+            for item in values or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                can_suppress = not only_unlocated or item.get("location_status") == "not_found"
+                if title and can_suppress and suppress(title, source):
+                    continue
+                kept.append(item)
+            return kept
 
         def filter_titles(values: Any, source: str) -> list[str]:
             kept: list[str] = []
@@ -278,18 +320,20 @@ class ConsistencyFilterMixin:
                 if not title or title in seen:
                     continue
                 seen.add(title)
-                skip_reason = self._verification_skip_reason_from_integrity(title, integrity_raw)
-                if skip_reason is None:
+                if not suppress(title, source):
                     kept.append(title)
-                    continue
-                suppressed.append(
-                    {
-                        "attachment": title,
-                        "source": source,
-                        **skip_reason,
-                    }
-                )
             return kept
+
+        filtered["attachment_results"] = filter_attachment_results(
+            filtered.get("attachment_results"),
+            "attachment_results",
+            only_unlocated=True,
+        )
+        filtered["missing_attachment_results"] = filter_attachment_results(
+            filtered.get("missing_attachment_results"),
+            "missing_attachment_results",
+            only_unlocated=False,
+        )
 
         position_check = filtered.get("position_check")
         if not isinstance(position_check, dict):
@@ -332,10 +376,10 @@ class ConsistencyFilterMixin:
         if not suppressed:
             return filtered
 
-        position_check["status"] = self._recompute_verification_position_status(position_check)
         date_check["status"] = self._recompute_verification_date_status(date_check)
-        filtered["compliance_status"] = self._recompute_verification_compliance_status(filtered)
         filtered["suppressed_by_integrity"] = suppressed
+        refresh_verification_summary(filtered)
+        filtered["compliance_status"] = self._recompute_verification_compliance_status(filtered)
 
         summary_text = str(filtered.get("summary") or "").strip()
         suffix = f"已排除与完整性缺失重复的 {len(suppressed)} 项附件核验。"
@@ -402,6 +446,8 @@ class ConsistencyFilterMixin:
             or "missing_date" in attachment_statuses
         ):
             return "missing"
+        if not attachment_statuses and raw_result.get("suppressed_by_integrity"):
+            return "pass"
         if (
             position_check.get("status") == "pending"
             or date_check.get("status") == "missing_deadline"

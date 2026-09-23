@@ -209,7 +209,7 @@ class ExtractionTablesMixin:
                     if tender_limit
                     else None
                 ),
-                status="extracted" if tender_limit.get("resolution") == "resolved" else ("not_applicable" if tender_limit.get("resolution") == "explicit_none" else "unclear"),
+                status="extracted" if tender_limit.get("resolution") == "resolved" else ("fail" if tender_limit.get("resolution") == "explicit_none" else "unclear"),
                 page_refs=self._coerce_page_refs(tender_limit),
                 expected_document_role="business",
                 evidence=(
@@ -336,7 +336,12 @@ class ExtractionTablesMixin:
         # 完整性
         integrity_raw = (checks.get("integrity_check") or {}).get("raw_result") or {}
         for item_name, detail in (integrity_raw.get("details") or {}).items():
-            if not isinstance(detail, dict) or not detail.get("scored", True):
+            if not isinstance(detail, dict):
+                continue
+            if not detail.get("scored", True) and not (
+                detail.get("is_optional")
+                or detail.get("applicability_status") == "not_applicable"
+            ):
                 continue
             detail_status = str(detail.get("status") or "").strip().lower()
             if detail.get("is_passed"):
@@ -344,7 +349,7 @@ class ExtractionTablesMixin:
             elif detail.get('resolution_status') == 'unclear':
                 status = 'unclear'
             elif "optional" in detail_status or "可选" in detail_status:
-                status = "optional"
+                status = "fail"
             else:
                 status = "missing"
             rows.append(
@@ -374,7 +379,9 @@ class ExtractionTablesMixin:
             unfilled_fields = list(segment.get("unfilled_fields") or [])
             segment_locations = [location for location in (segment.get("locations") or []) if isinstance(location, dict)]
             status = str(segment.get("status") or "").strip().lower()
-            if status not in {"pass", "missing", "unclear", "skipped"}:
+            if status in {"not_applicable", "skipped", "optional"}:
+                status = "fail"
+            if status not in {"pass", "fail", "unclear", "not_applicable", "missing", "skipped"}:
                 status = "pass" if segment.get("is_passed") else (
                     "missing" if missing_anchors or unfilled_fields else "unclear"
                 )
@@ -395,6 +402,9 @@ class ExtractionTablesMixin:
                         "difference_items": list(segment.get("difference_items") or []),
                         "difference_summary": segment.get("difference_summary") or "",
                         "element_results": list(segment.get("element_results") or []),
+                        "coverage": segment.get("coverage") or {},
+                        "unclear_reasons": list(segment.get("unclear_reasons") or []),
+                        "unresolved_ranges": list(segment.get("unresolved_ranges") or []),
                         "template_attachment_locations": segment.get("template_attachment_locations")
                         or segment.get("template_locations")
                         or [],
@@ -410,6 +420,8 @@ class ExtractionTablesMixin:
                         or segment.get("template_locations")
                         or [],
                         "template_locations": segment.get("template_locations") or [],
+                        "unclear_reasons": list(segment.get("unclear_reasons") or []),
+                        "unresolved_ranges": list(segment.get("unresolved_ranges") or []),
                     },
                     locations=segment_locations,
                 )
@@ -439,9 +451,10 @@ class ExtractionTablesMixin:
                         "attachment_match": segment.get("attachment_match") or {},
                         "engine_version": segment.get("engine_version"),
                         "model_status": segment.get("model_status") or {},
-                        "manual_status": "skipped",
+                        "manual_status": "fail",
+                        "applicability_status": "not_applicable",
                     },
-                    status="skipped",
+                    status="fail",
                     page_refs=self._coerce_page_refs(segment.get("pages"), segment_locations),
                     evidence={
                         "skip_reason": segment.get("skip_reason"),
@@ -631,7 +644,7 @@ class ExtractionTablesMixin:
                         field_group="deviation_response",
                         field_name="deviation_response",
                         value={"summary": deviation_raw.get("summary")},
-                        status="skipped"
+                        status="fail"
                         if deviation_raw.get("deviation_status") == "no_star_requirements"
                         else "missing",
                     )
@@ -667,29 +680,90 @@ class ExtractionTablesMixin:
                 )
             )
         for item in verification_raw.get("attachment_results") or []:
+            requirements = item.get("requirements") or {}
+            attachment_not_applicable = bool(
+                item.get("applicability_status") == "not_applicable"
+                or requirements.get("applicability_status") == "not_applicable"
+            )
+            signature_required = bool(
+                not attachment_not_applicable
+                and
+                requirements.get("requires_signature")
+                or int(requirements.get("signature_field_count") or 0) > 0
+            )
+            if attachment_not_applicable:
+                signature_required = False
             signature_evidence = self._attachment_signature_evidence_texts(item)
             signature_check = item.get("signature_check") or {}
             signature_status = signature_check.get("status") if isinstance(signature_check, dict) else None
             signature_parse_status = None
-            if signature_evidence:
+            signature_values = signature_check.get("filled_values") or [] if isinstance(signature_check, dict) else []
+            has_image_presence = any(
+                isinstance(value, dict) and value.get("mode") == "image_signature_presence"
+                for value in signature_values
+            )
+            if has_image_presence:
+                signature_parse_status = "presence_only"
+            elif signature_evidence:
                 signature_parse_status = "parsed"
             elif str(signature_status or "").strip().lower() in {"pass", "found", "pending"}:
                 signature_parse_status = "unparsed"
             seal_evidence = self._attachment_seal_evidence_texts(item)
             date_check = item.get("date_check") or {}
             date_text = None
+            date_page = None
+            date_bbox = None
+            date_reason_code = None
             deadline_date = None
             deadline_text = None
             deadline_page = None
             deadline_locations = []
             if isinstance(date_check, dict):
                 date_text = date_check.get("matched_sign_text") or date_check.get("sign_date")
+                date_page = date_check.get("matched_sign_page")
+                date_bbox = date_check.get("matched_sign_bbox")
+                date_reason_code = date_check.get("reason_code")
                 deadline_date = date_check.get("deadline_date")
                 deadline_text = date_check.get("matched_deadline_text")
                 deadline_page = date_check.get("matched_deadline_page")
                 deadline_locations = date_check.get("deadline_locations") or []
             date_status = date_check.get("status") if isinstance(date_check, dict) else None
             row_status = str(item.get("status") or ("found" if item.get("found") else "missing"))
+            attachment_value = {
+                "requirements": requirements,
+                "applicability_status": item.get("applicability_status") or requirements.get("applicability_status"),
+                "applicability_reason_code": item.get("applicability_reason_code"),
+                "applicability_evidence": item.get("applicability_evidence") or {},
+                "deadline_resolution": date_check.get("deadline_resolution"),
+                "attachment_number": item.get("attachment_number"),
+                "matched_bid_title": item.get("matched_bid_title"),
+            }
+            # A template without a signature requirement has no signature result:
+            # omit all signature keys so the UI cannot display or count it.
+            if signature_required:
+                attachment_value.update({
+                    "signature_status": signature_status,
+                    "signature_parse_status": signature_parse_status,
+                    "signature_evidence": signature_evidence,
+                })
+            if not attachment_not_applicable and requirements.get("requires_seal"):
+                attachment_value.update({
+                    "seal_status": (item.get("seal_check") or {}).get("status"),
+                    "seal_texts": seal_evidence,
+                    "seal_evidence": seal_evidence,
+                })
+            if not attachment_not_applicable and requirements.get("requires_date"):
+                attachment_value.update({
+                    "date_status": date_status,
+                    "date_text": date_text,
+                    "date_page": date_page,
+                    "date_bbox": date_bbox,
+                    "date_reason_code": date_reason_code,
+                    "deadline_date": deadline_date,
+                    "deadline_text": deadline_text,
+                    "deadline_page": deadline_page,
+                    "deadline_locations": deadline_locations,
+                })
             rows.append(
                 self._make_extraction_row(
                     row_index=len(rows) + 1,
@@ -698,30 +772,18 @@ class ExtractionTablesMixin:
                     check_code="verification_check",
                     field_group="attachment_result",
                     field_name=str(item.get("title") or "attachment_result"),
-                    value={
-                        "requirements": item.get("requirements") or {},
-                        "deadline_resolution": date_check.get("deadline_resolution"),
-                        "attachment_number": item.get("attachment_number"),
-                        "matched_bid_title": item.get("matched_bid_title"),
-                        "signature_status": signature_status,
-                        "signature_parse_status": signature_parse_status,
-                        "seal_status": (item.get("seal_check") or {}).get("status"),
-                        "date_status": date_status,
-                        "date_text": date_text,
-                        "deadline_date": deadline_date,
-                        "deadline_text": deadline_text,
-                        "deadline_page": deadline_page,
-                        "deadline_locations": deadline_locations,
-                        "signature_evidence": signature_evidence,
-                        "seal_texts": seal_evidence,
-                        "seal_evidence": seal_evidence,
-                    },
+                    value=attachment_value,
                     status=row_status,
                     page_refs=self._coerce_page_refs(
                         item.get("check_pages") or item.get("pages"),
                         item.get("locations") or [],
                     ),
-                    evidence={"requirements": item.get("requirements") or {}},
+                    evidence={
+                        "requirements": requirements,
+                        "applicability_status": item.get("applicability_status") or requirements.get("applicability_status"),
+                        "applicability_reason_code": item.get("applicability_reason_code"),
+                        "applicability_evidence": item.get("applicability_evidence") or {},
+                    },
                 )
             )
 
@@ -818,12 +880,14 @@ class ExtractionTablesMixin:
         ocr_evidence_modes = {
             "",
             "text_inline",
+            "ocr_inline_text",
             "ocr_signature_section",
             "ocr_signature_region",
             "ocr_signature_location",
             "ocr_signature_location_fallback",
             "nearby_text_mark",
             "personal_seal_as_alternative",
+            "image_signature_presence",
         }
         non_content_values = {
             "",

@@ -34,13 +34,40 @@ BUSINESS_FORMAT_EDITABLE_GROUPS = {
 BUSINESS_SIGNATURE_OCR_EVIDENCE_MODES = {
     "",
     "text_inline",
+    "ocr_inline_text",
     "ocr_signature_section",
     "ocr_signature_region",
     "ocr_signature_location",
     "ocr_signature_location_fallback",
     "nearby_text_mark",
     "personal_seal_as_alternative",
+    "image_signature_presence",
 }
+LEGACY_VERIFICATION_CONFIRMATION_FIELDS = {
+    "signature_manually_confirmed",
+    "seal_manually_confirmed",
+}
+NON_EDITABLE_PRICING_CONTEXT_FIELDS = {"basis", "package"}
+
+
+def _without_legacy_verification_confirmations(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key not in LEGACY_VERIFICATION_CONFIRMATION_FIELDS
+    }
+
+
+def _without_manual_pricing_context(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key not in NON_EDITABLE_PRICING_CONTEXT_FIELDS
+    }
 
 
 def _utc_timestamp() -> str:
@@ -449,6 +476,10 @@ def _enrich_business_attachment_value(original_value: Any, attachment: dict[str,
     if isinstance(attachment.get('found'), bool):
         value['bid_content_found'] = attachment['found']
     value['requirements'] = deepcopy(attachment.get('requirements') or value.get('requirements') or {})
+    attachment_not_applicable = bool(
+        attachment.get("applicability_status") == "not_applicable"
+        or value["requirements"].get("applicability_status") == "not_applicable"
+    )
     value['template_locations'] = deepcopy(attachment.get('template_locations') or value.get('template_locations') or [])
     for key in ('location_status', 'location_candidates', 'locations', 'pages'):
         if key in attachment:
@@ -456,18 +487,46 @@ def _enrich_business_attachment_value(original_value: Any, attachment: dict[str,
     signature_evidence = _business_attachment_signature_evidence_texts(attachment)
     signature_check = attachment.get("signature_check") or {}
     signature_status = str(signature_check.get("status") or value.get("signature_status") or "").strip().lower() if isinstance(signature_check, dict) else str(value.get("signature_status") or "").strip().lower()
-    if signature_evidence and not value.get("signature_evidence") and not value.get("signature_texts"):
-        value["signature_evidence"] = signature_evidence[:10]
-    if not value.get("signature_evidence") and not value.get("signature_texts") and signature_status in {"pass", "found", "pending"}:
-        value["signature_parse_status"] = "unparsed"
-    elif signature_evidence and not value.get("signature_parse_status"):
-        value["signature_parse_status"] = "parsed"
+    signature_required = bool(
+        not attachment_not_applicable
+        and (
+            value["requirements"].get("requires_signature")
+            or int(value["requirements"].get("signature_field_count") or 0) > 0
+        )
+    )
+    if not signature_required:
+        for key in ("signature_status", "signature_parse_status", "signature_evidence", "signature_texts", "signature_text"):
+            value.pop(key, None)
+    else:
+        if signature_evidence and not value.get("signature_evidence") and not value.get("signature_texts"):
+            value["signature_evidence"] = signature_evidence[:10]
+        signature_values = (
+            signature_check.get("filled_values") or []
+            if isinstance(signature_check, dict)
+            else []
+        )
+        has_image_presence = any(
+            isinstance(item, dict) and item.get("mode") == "image_signature_presence"
+            for item in signature_values
+        )
+        if has_image_presence:
+            value["signature_parse_status"] = "presence_only"
+        elif not value.get("signature_evidence") and not value.get("signature_texts") and signature_status in {"pass", "found", "pending"}:
+            value["signature_parse_status"] = "unparsed"
+        elif signature_evidence and not value.get("signature_parse_status"):
+            value["signature_parse_status"] = "parsed"
     seal_evidence = _business_attachment_seal_evidence_texts(attachment)
-    if seal_evidence and not value.get("seal_texts") and not value.get("seal_evidence"):
+    if attachment_not_applicable or not value["requirements"].get("requires_seal"):
+        for key in ("seal_status", "seal_texts", "seal_evidence", "seal_text"):
+            value.pop(key, None)
+    elif seal_evidence and not value.get("seal_texts") and not value.get("seal_evidence"):
         value["seal_texts"] = seal_evidence[:10]
         value["seal_evidence"] = seal_evidence[:10]
     date_check = attachment.get("date_check") or {}
-    if isinstance(date_check, dict):
+    if attachment_not_applicable or not value["requirements"].get("requires_date"):
+        for key in ("date_status", "date", "date_text", "date_page", "date_bbox", "date_reason_code", "deadline_date", "deadline_text", "deadline_page", "deadline_locations"):
+            value.pop(key, None)
+    elif isinstance(date_check, dict):
         if not value.get("date_text"):
             date_text = date_check.get("matched_sign_text") or date_check.get("sign_date")
             if date_text:
@@ -623,6 +682,12 @@ def _make_business_editable_item(
     )
     saved = manual_by_id.get(editable_id) or {}
     has_manual = _manual_value_present(saved)
+    manual_value = saved.get("manual_value")
+    if field_group == "attachment_result":
+        original_value = _without_legacy_verification_confirmations(original_value)
+        manual_value = _without_legacy_verification_confirmations(manual_value)
+    elif field_group in {"opening_amount", "price_constraint"}:
+        manual_value = _without_manual_pricing_context(manual_value)
     return {
         "editable_id": editable_id,
         "result_key": BUSINESS_FORMAT_RESULT_KEY,
@@ -633,9 +698,9 @@ def _make_business_editable_item(
         "field_group": field_group,
         "field_name": field_name,
         "original_value": original_value,
-        "manual_value": saved.get("manual_value"),
+        "manual_value": manual_value,
         "has_manual_value": has_manual,
-        "effective_value": saved.get("manual_value") if has_manual else original_value,
+        "effective_value": manual_value if has_manual else original_value,
         "page_refs": list(page_refs or []),
         "document_identifier_id": (
             document.get("identifier_id")
@@ -856,6 +921,20 @@ def _normalize_business_manual_items(
             merged.pop(editable_id, None)
             continue
         item = dict(raw)
+        if (
+            str(item.get("check_code") or "") == "verification_check"
+            and str(item.get("field_group") or "") == "attachment_result"
+        ):
+            item["manual_value"] = _without_legacy_verification_confirmations(
+                item.get("manual_value")
+            )
+        elif (
+            str(item.get("check_code") or "") == "pricing_check"
+            and str(item.get("field_group") or "") in {"opening_amount", "price_constraint"}
+        ):
+            item["manual_value"] = _without_manual_pricing_context(
+                item.get("manual_value")
+            )
         item["updated_at"] = str(item.get("updated_at") or now)
         merged[editable_id] = item
     return {
@@ -921,6 +1000,9 @@ def _manual_issue(status: str, title: str, message: str, items: list[dict[str, A
 
 
 def _set_manual_check_summary(check: dict[str, Any], status: str, summary: str, items: list[dict[str, Any]]) -> None:
+    if status == "not_applicable":
+        if not summary.startswith("该项不适用"):
+            summary = "该项不适用：" + summary
     issue = _manual_issue(status, "Manual corrected recognition", summary, items)
     check["manual_review"] = {
         "applied": True,
@@ -934,7 +1016,8 @@ def _set_manual_check_summary(check: dict[str, Any], status: str, summary: str, 
         "passed": [issue] if status == "pass" else [],
         "failed": [issue] if status == "fail" else [],
         "missing": [issue] if status == "missing" else [],
-        "unclear": [issue] if status not in {"pass", "fail", "missing"} else [],
+        "unclear": [issue] if status == "unclear" else [],
+        "not_applicable": [issue] if status == "not_applicable" else [],
     }
     metrics = dict(check.get("metrics") or {})
     metrics["manual_input_count"] = len(items)
@@ -944,6 +1027,8 @@ def _set_manual_check_summary(check: dict[str, Any], status: str, summary: str, 
 def _recompute_manual_consistency(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
     has_missing = False
     has_unclear = False
+    applicable_count = 0
+    not_applicable_count = 0
     for item in items:
         value = item.get("effective_value")
         if not isinstance(value, dict):
@@ -957,22 +1042,42 @@ def _recompute_manual_consistency(check: dict[str, Any], items: list[dict[str, A
             or ""
         ).strip().lower()
         if manual_status in {"pass", "found", "ok", "true", "通过", "一致"}:
+            applicable_count += 1
             continue
         if manual_status in {"fail", "missing", "late", "false", "不通过", "不一致", "缺失"}:
+            applicable_count += 1
             has_missing = True
+            continue
+        if manual_status in {"unclear", "pending", "ambiguous", "待核验", "待确认"}:
+            applicable_count += 1
+            has_unclear = True
+            continue
+        if manual_status in {"not_applicable", "skipped", "不适用"}:
+            not_applicable_count += 1
             continue
         if value.get("missing_anchors") or value.get("unfilled_fields"):
             has_missing = True
         elif not manual_status:
             has_unclear = True
-    status = "fail" if has_missing else ("unclear" if has_unclear else "pass")
+        applicable_count += 1
+    status = (
+        "fail" if has_missing
+        else "unclear" if has_unclear
+        else "not_applicable" if not_applicable_count and not applicable_count
+        else "pass"
+    )
     summary = (
+        "该项不适用：人工复核确认所选模板项不适用于当前材料。"
+        if not_applicable_count
+        else
         "Manual template consistency review passed."
         if status == "pass"
         else (
             "Manual template consistency review failed by business confirmation."
             if status == "fail"
             else "Manual template consistency review needs confirmation."
+            if status == "unclear"
+            else "Manual review confirmed that no fixed template applies."
         )
     )
     _set_manual_check_summary(check, status, summary, items)
@@ -995,9 +1100,12 @@ def _recompute_manual_pricing(check: dict[str, Any], items: list[dict[str, Any]]
         # A rate response never exempts a separately applicable monetary limit.
         limit_check = raw.get("tender_limit_check") or {}
         state = limit_check.get("status", "unclear")
-        if not has_opening and state != "not_applicable":
-            statuses.append(state)
-            details.extend(limit_check.get("summary") or ["总金额限价依据需复核"])
+        if not has_opening:
+            statuses.append("fail" if state == "not_applicable" else state)
+            limit_details = limit_check.get("summary") or ["总金额限价依据需复核"]
+            if state == "not_applicable":
+                limit_details = ["该项不适用：" + str(item) for item in limit_details]
+            details.extend(limit_details)
     if not rate_items or has_opening:
         openings = [x.get("effective_value") for x in items if x.get("field_group") == "opening_amount"]
         limits = [x.get("effective_value") for x in items if x.get("field_group") == "price_constraint"]
@@ -1014,12 +1122,17 @@ def _recompute_manual_pricing(check: dict[str, Any], items: list[dict[str, Any]]
                 limit_status, reason = "not_applicable", "explicit_no_limit"
             else:
                 limit_status, reason = compare_money(bid, manual_money(limit))
-            if limit_status != "not_applicable":
-                statuses.append(limit_status)
+            statuses.append("fail" if limit_status == "not_applicable" else limit_status)
             details.append(REASONS.get(reason,"招标明确不设最高限价" if reason=="explicit_no_limit" else "最高限价依据需复核"))
             normalized_quotes.append({**(opening if isinstance(opening,dict) else {}), **bid,
                 "status":case_status,"case_consistency_status":case_status, "capital_amount_yuan":float(capital) if capital is not None else None})
-            comparisons.append({"status":limit_status,"reason_code":reason,"bid_amount":bid,"tender_limit":limit})
+            comparisons.append({
+                "status": "fail" if limit_status == "not_applicable" else limit_status,
+                "applicability_status": limit_status if limit_status == "not_applicable" else None,
+                "reason_code": reason,
+                "bid_amount": bid,
+                "tender_limit": limit,
+            })
         raw["self_check"] = {**(raw.get("self_check") or {}), **normalized_quotes[0], "amount_facts":normalized_quotes if len(normalized_quotes)>1 else [],
             "status":"fail" if any(x['status']=='fail' for x in normalized_quotes) or "fail" in rate_states else ("pass" if all(x['status']=='pass' for x in normalized_quotes) and all(x=="pass" for x in rate_states) else "unclear")}
         states = [x['status'] for x in comparisons]
@@ -1145,6 +1258,15 @@ def _verification_value_status(value: Any, field_group: str) -> str:
     return aggregate_status(statuses or [value.get("status", "pending")])
 
 
+def _manual_signature_evidence_present(value: dict[str, Any]) -> bool:
+    for key in ("signature_text", "signature_texts", "signature_evidence"):
+        raw = value.get(key)
+        candidates = raw if isinstance(raw, list) else [raw]
+        if any(_business_signature_content_value(candidate) for candidate in candidates):
+            return True
+    return False
+
+
 def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, Any]]) -> None:
     raw = check.setdefault("raw_result", {})
     attachments = (raw.get("attachment_results") or []) + (raw.get("missing_attachment_results") or [])
@@ -1168,10 +1290,10 @@ def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, 
         original = item.get('original_value') or {}
         if item.get('has_manual_value'):
             for kind, fields in (('signature', ('signature_text','signature_texts','signature_evidence')), ('seal', ('seal_text','seal_texts','seal_evidence'))):
-                if value.get(kind + '_manually_confirmed') is True:
-                    value[kind + '_status'] = 'pass'
-                elif any(value.get(f) != original.get(f) for f in fields):
-                    value[kind + '_status'] = 'pending'
+                if any(value.get(f) != original.get(f) for f in fields):
+                    value[kind + '_status'] = (
+                        'pass' if _manual_signature_evidence_present(value) else 'fail'
+                    ) if kind == 'signature' else 'pending'
                 else:
                     value[kind + '_status'] = original.get(kind + '_status', 'pending')
         if matched:
@@ -1196,6 +1318,9 @@ def _recompute_manual_verification(check: dict[str, Any], items: list[dict[str, 
     elif any(status == "unclear" for status in statuses):
         status = "unclear"
         summary = "Manual signature/seal/date review has unclear items."
+    elif statuses and all(status == "not_applicable" for status in statuses):
+        status = "fail"
+        summary = "该项不适用：签字、盖章、日期均无需核验。"
     else:
         status = "pass"
         summary = "Manual signature/seal/date review passed."
@@ -1227,7 +1352,10 @@ def _apply_manual_business_review_inputs(
                 item["manual_value"]["required_min_float_rate"] = rule.get("threshold")
                 item["manual_value"]["rule_operator"] = rule.get("op")
             if item.get('field_group') == 'attachment_result':
-                for key in ('requirements', 'template_locations', 'bid_content_found'):
+                for key in (
+                    'requirements', 'template_locations', 'bid_content_found',
+                    'applicability_status', 'applicability_reason_code', 'applicability_evidence',
+                ):
                     if key in original:
                         item['manual_value'][key] = deepcopy(original[key])
         _set_path_value(corrected, str(item.get("result_path") or ""), item.get("manual_value"))

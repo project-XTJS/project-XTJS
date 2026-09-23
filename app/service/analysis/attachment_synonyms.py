@@ -13,6 +13,7 @@ ATTACHMENT_TITLE_SYNONYMS: dict[str, list[str]] = {
     ],
     "开标一览表": [
         "报价一览表",
+        "首次报价一览表",
     ],
     "分项报价表": [
         "报价明细",
@@ -172,6 +173,11 @@ def _matches_alias(target_norm: str, candidate_norm: str) -> bool:
     # 伞形核心词（承诺函/承诺书/声明函/证明书/证书等）只允许完全相等，
     # 避免“付款要求承诺函”被“承诺函”这类泛化词子串误归入“供应商承诺声明函”组。
     if _is_generic_title_core(target_norm) or _is_generic_title_core(candidate_norm):
+        return False
+    # Two- or three-character section labels such as “商务” and “技术” are
+    # common sub-headings inside a form.  They must not become independent
+    # attachment titles through substring matching.
+    if min(len(target_norm), len(candidate_norm)) < 4:
         return False
     return target_norm in candidate_norm or candidate_norm in target_norm
 

@@ -303,6 +303,7 @@ class HelpersMixin:
             "failed": [],
             "missing": [],
             "unclear": [],
+            "not_applicable": [],
         }
 
     # 文本处理
@@ -335,10 +336,12 @@ class HelpersMixin:
 
     # 状态映射与合并
     def _map_generic_status(self, raw_status: Any) -> str:
-        """将原始状态字符串映射到标准状态：pass / fail / missing / unclear。"""
+        """将原始状态字符串映射到标准审查状态。"""
         text = str(raw_status or "").strip().lower()
         if text in {"pass", "passed", "ok", "success", "合格"}:
             return "pass"
+        if text in {"not_applicable", "not applicable", "skipped", "optional", "不适用"}:
+            return "not_applicable"
         if text in {
             "missing",
             "not_found",
@@ -408,6 +411,13 @@ class HelpersMixin:
                 return "missing"
             if counts.get("unclear", 0) > 0:
                 return "unclear"
+            if counts.get("pass", 0) > 0:
+                return "pass"
+            if any(
+                counts.get(status, 0) > 0
+                for status in ("not_applicable", "skipped", "optional")
+            ):
+                return "not_applicable"
             return "pass"
 
         if any(status == "fail" for status in statuses):
@@ -416,6 +426,10 @@ class HelpersMixin:
             return "missing"
         if any(status == "unclear" for status in statuses):
             return "unclear"
+        if any(status == "pass" for status in statuses):
+            return "pass"
+        if any(status in {"not_applicable", "skipped", "optional"} for status in statuses):
+            return "not_applicable"
         return "pass"
 
     def _combine_validation_status(self, counts: dict[str, int]) -> str:
@@ -430,8 +444,8 @@ class HelpersMixin:
     def _review_status_sort_key(self, status: Any) -> int:
         """用于将状态字符串映射为排序权重，fail 优先。"""
         text = str(status or "").strip().lower()
-        order = {"fail": 0, "missing": 1, "unclear": 2, "pass": 3}
-        return order.get(text, 3)
+        order = {"fail": 0, "missing": 1, "unclear": 2, "pass": 3, "not_applicable": 4}
+        return order.get(text, 4)
 
     def _check_display_index(self, check_code: Any) -> int:
         """返回检查项在预定展示顺序中的索引，未知项排最后。"""
@@ -471,7 +485,7 @@ class HelpersMixin:
         bucket = self._empty_issue_bucket()
         for check_code, check in checks.items():
             check_name = check["check_name"]
-            for status_key in ("passed", "failed", "missing", "unclear"):
+            for status_key in ("passed", "failed", "missing", "unclear", "not_applicable"):
                 for issue in (check.get("issues") or {}).get(status_key, []):
                     bucket[status_key].append(
                         {
@@ -484,7 +498,7 @@ class HelpersMixin:
 
     def _summarize_bidder_checks(self, checks: dict[str, Any]) -> dict[str, Any]:
         """汇总单个投标人各审查项的状态计数。"""
-        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0}
+        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0, "not_applicable": 0}
         validation_status_counts = {"correct": 0, "failed": 0, "unclear": 0}
         execution_status_counts = {"ok": 0, "error": 0}
 
@@ -509,7 +523,7 @@ class HelpersMixin:
 
     def _summarize_review(self, bidders: list[dict[str, Any]]) -> dict[str, Any]:
         """汇总所有投标人的整体审查状态。"""
-        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0}
+        review_status_counts = {"pass": 0, "fail": 0, "unclear": 0, "missing": 0, "not_applicable": 0}
         validation_status_counts = {"correct": 0, "failed": 0, "unclear": 0}
         execution_status_counts = {"ok": 0, "error": 0}
 
@@ -541,7 +555,7 @@ class HelpersMixin:
                         "check_name": check["check_name"],
                         "execution_status_counts": {"ok": 0, "error": 0},
                         "validation_status_counts": {"correct": 0, "failed": 0, "unclear": 0},
-                        "review_status_counts": {"pass": 0, "fail": 0, "unclear": 0, "missing": 0},
+                        "review_status_counts": {"pass": 0, "fail": 0, "unclear": 0, "missing": 0, "not_applicable": 0},
                     },
                 )
                 entry["execution_status_counts"][check["execution"]["status"]] += 1

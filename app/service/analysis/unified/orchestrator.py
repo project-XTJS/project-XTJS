@@ -15,6 +15,7 @@ from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
 from app.core.document_types import DOCUMENT_TYPE_BUSINESS_BID, DOCUMENT_TYPE_TECHNICAL_BID
+from ..compliance.template_extractor import TemplateExtractor
 from .parallel_worker import run_business_bidder_review
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,8 @@ class OrchestratorMixin:
         *,
         project_identifier: str,
         payload_data: dict[str, Any],
+        progress_callback=None,
+        force_sequential: bool = False,
     ) -> dict[str, Any]:
         """通过数据库查询获得的文档记录执行审查流程。"""
         document_records = list(payload_data.get("documents") or [])
@@ -225,7 +228,11 @@ class OrchestratorMixin:
 
         # 各投标方审查相互独立，用多进程并行执行，充分利用多核 CPU；
         # 进程池不可用时（如环境限制）回退为串行。
-        bidders = self._parallel_review_bidders(bidder_tasks)
+        bidders = self._parallel_review_bidders(
+            bidder_tasks,
+            progress_callback=progress_callback,
+            force_sequential=force_sequential,
+        )
 
         extraction_tables = self._build_review_extraction_tables(
             tender_payload=tender_payload,
@@ -514,8 +521,32 @@ class OrchestratorMixin:
         bidder: dict[str, Any],
     ) -> dict[str, Any]:
         """对单个投标人执行完整的商务标+技术标审查。"""
-        business_payload = bidder["business"]["content"]
+        business_payload = dict(bidder["business"]["content"])
         business_meta = bidder["business"]["meta"]
+        business_payload["_template_source"] = {
+            "file_url": business_meta.get("file_path"),
+            "identifier_id": business_meta.get("identifier_id"),
+            "role": "business",
+            "content_checksum": business_meta.get("sha256"),
+        }
+        from app.service.analysis.signature_presence import (
+            EVIDENCE_KEY as SIGNATURE_EVIDENCE_KEY,
+            signature_presence_for,
+        )
+        required_signature_fields = self.verification_checker.required_signature_image_fields(
+            tender_payload,
+            business_payload,
+        )
+        signature_evidence = signature_presence_for(
+            business_payload,
+            required_fields=required_signature_fields,
+        )
+        if isinstance(business_payload.get("data"), dict):
+            data_node = dict(business_payload["data"])
+            data_node[SIGNATURE_EVIDENCE_KEY] = signature_evidence
+            business_payload["data"] = data_node
+        else:
+            business_payload[SIGNATURE_EVIDENCE_KEY] = signature_evidence
         identity = self._identify_bidder(business_payload, (bidder.get("technical") or {}).get("content"))
 
         integrity_check = self._execute_check(
@@ -525,8 +556,8 @@ class OrchestratorMixin:
             normalizer=self._normalize_integrity,
         )
         consistency_check = self._execute_consistency_check(
-            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender"}),
-            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid"}),
+            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender", "content_checksum": tender_meta.get("sha256")}),
+            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid", "content_checksum": business_meta.get("sha256")}),
             integrity_check=integrity_check,
         )
 
@@ -545,15 +576,6 @@ class OrchestratorMixin:
                 },
                 normalizer=self._normalize_pricing,
             ),
-            "itemized_pricing_check": self._execute_check(
-                check_code="itemized_pricing_check",
-                check_name="分项报价表审查",
-                runner=lambda: self.itemized_checker.check_itemized_logic(
-                    business_payload,
-                    tender_text=tender_payload,
-                ),
-                normalizer=self._normalize_itemized,
-            ),
             "verification_check": self._execute_check(
                 check_code="verification_check",
                 check_name="签字盖章日期审查",
@@ -561,6 +583,19 @@ class OrchestratorMixin:
                 normalizer=self._normalize_verification,
             ),
         }
+        if not TemplateExtractor.is_business_review_title_excluded(
+            tender_payload,
+            "分项报价表",
+        ):
+            checks["itemized_pricing_check"] = self._execute_check(
+                check_code="itemized_pricing_check",
+                check_name="分项报价表审查",
+                runner=lambda: self.itemized_checker.check_itemized_logic(
+                    business_payload,
+                    tender_text=tender_payload,
+                ),
+                normalizer=self._normalize_itemized,
+            )
         checks["verification_check"] = self._suppress_integrity_duplicates_in_verification(
             verification_check=checks["verification_check"],
             integrity_check=integrity_check,
@@ -595,37 +630,115 @@ class OrchestratorMixin:
         }
 
     # 单个投标人审查（仅商务标）
-    def _parallel_review_bidders(self, bidder_tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _parallel_review_bidders(
+        self,
+        bidder_tasks: list[dict[str, Any]],
+        *,
+        progress_callback=None,
+        force_sequential: bool = False,
+    ) -> list[dict[str, Any]]:
         """多进程并行审查各投标方；单个任务或进程池不可用时回退串行。"""
-        if len(bidder_tasks) <= 1:
-            return [
-                self._review_business_bidder(**task)
-                for task in bidder_tasks
-            ]
+        def report(stage: str, completed: int, total: int, message: str) -> None:
+            if callable(progress_callback):
+                progress_callback(stage, completed, total, message)
 
-        # Resolve PDF line evidence in the parent process. GPU OCR pipelines and
-        # their locks must never be initialized or inherited for use by fork workers.
-        from app.service.analysis.compliance.template_extractor import TemplateExtractor
+        # Resolve exact PDF evidence ranges once in the parent process. Workers
+        # receive immutable prepared payloads and never initialize OCR pipelines.
         from app.service.analysis.compliance.template_pdf_evidence import evidence_for
         from app.service.analysis.compliance.underline_projection import EVIDENCE_KEY
+        from app.service.analysis.signature_presence import (
+            EVIDENCE_KEY as SIGNATURE_EVIDENCE_KEY,
+            signature_presence_for,
+        )
+        total = len(bidder_tasks)
+        report("preparing", 0, total, "正在准备招标模板")
+
+        first = bidder_tasks[0]
+        tender_payload = dict(first["tender_payload"])
+        tender_meta = first["tender_meta"]
+        tender_payload["_template_source"] = {
+            "file_url": tender_meta.get("file_path"),
+            "identifier_id": tender_meta.get("identifier_id"),
+            "role": "tender",
+            "content_checksum": tender_meta.get("sha256"),
+        }
+        # Skeleton construction resolves each tender attachment to its bounded
+        # body and requests only those evidence pages.
+        skeletons = self.consistency_checker.build_template_skeleton(tender_payload)
+        final_tender_pages = sorted({
+            int(page)
+            for skeleton in skeletons
+            for page in (skeleton.get("template_pages") or [])
+            if isinstance(page, int) and page > 0
+        })
+        tender_payload[EVIDENCE_KEY] = evidence_for(tender_payload, final_tender_pages)
+        expected_templates = [
+            {"title": item.get("title"), "text": item.get("reference_text")}
+            for item in skeletons
+            if item.get("title")
+        ]
+
         prepared = []
-        for task in bidder_tasks:
+        for index, task in enumerate(bidder_tasks, start=1):
             task = dict(task)
-            for role in ('tender', 'business'):
-                key = role + '_payload'
-                payload = dict(task[key])
-                meta = task[role + '_meta']
-                payload['_template_source'] = {'file_url': meta.get('file_path'), 'identifier_id': meta.get('identifier_id'), 'role': role}
-                if role == 'tender':
-                    templates = TemplateExtractor.extract_consistency_templates(payload)
-                    pages = sorted({int(loc['page']) for template in templates for loc in template.get('locations', []) if loc.get('page')})
-                else:
-                    _, sections = self.consistency_checker._build_attachment_lookup(payload, templates)
-                    pages = sorted({int(page) for section in sections for page in section.get('pages', []) if page})
-                payload[EVIDENCE_KEY] = evidence_for(payload, pages)
-                task[key] = payload
+            business_payload = dict(task["business_payload"])
+            business_meta = task["business_meta"]
+            business_payload["_template_source"] = {
+                "file_url": business_meta.get("file_path"),
+                "identifier_id": business_meta.get("identifier_id"),
+                "role": "business",
+                "content_checksum": business_meta.get("sha256"),
+            }
+            _, sections = self.consistency_checker._build_attachment_lookup(
+                business_payload, expected_templates
+            )
+            business_pages: list[int] = []
+            for skeleton in skeletons:
+                scope = self.consistency_checker._structured_engine.resolve_attachment_scope(
+                    skeleton, sections
+                )
+                business_pages.extend(scope.get("evidence_pages") or [])
+            business_pages = sorted(set(business_pages))
+            logger.info(
+                "business review evidence scope bidder=%s pages=%s page_count=%s",
+                task.get("bidder_key"), business_pages, len(business_pages),
+            )
+            report(
+                "evidence",
+                index - 1,
+                total,
+                f"正在核验第 {index}/{total} 家投标方的 {len(business_pages)} 个附件页",
+            )
+            business_payload[EVIDENCE_KEY] = evidence_for(business_payload, business_pages)
+            required_signature_fields = self.verification_checker.required_signature_image_fields(
+                tender_payload,
+                business_payload,
+            )
+            signature_evidence = signature_presence_for(
+                business_payload,
+                required_fields=required_signature_fields,
+            )
+            data_node = business_payload.get("data")
+            if isinstance(data_node, dict):
+                data_node = dict(data_node)
+                data_node[SIGNATURE_EVIDENCE_KEY] = signature_evidence
+                business_payload["data"] = data_node
+            else:
+                business_payload[SIGNATURE_EVIDENCE_KEY] = signature_evidence
+            task["tender_payload"] = tender_payload
+            task["business_payload"] = business_payload
+            task["consistency_skeletons"] = skeletons
             prepared.append(task)
         bidder_tasks = prepared
+
+        if force_sequential or len(bidder_tasks) <= 1:
+            bidders = []
+            for index, task in enumerate(bidder_tasks, start=1):
+                report("reviewing", index - 1, total, f"正在审查第 {index}/{total} 家投标方")
+                bidders.append(self._review_business_bidder(**task))
+                report("reviewing", index, total, f"已完成第 {index}/{total} 家投标方")
+            return bidders
+
         # 取可用核数的一半（上限 8），既充分利用多核，又给其他容器/任务留余量。
         workers = min(
             len(bidder_tasks),
@@ -636,16 +749,21 @@ class OrchestratorMixin:
             # 用 fork：子进程继承内存、不重跑主模块（spawn 在 uvicorn 下会再次启动服务）。
             context = multiprocessing.get_context("fork")
             with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:
-                return list(pool.map(run_business_bidder_review, bidder_tasks))
+                bidders = []
+                for index, bidder in enumerate(pool.map(run_business_bidder_review, bidder_tasks), start=1):
+                    bidders.append(bidder)
+                    report("reviewing", index, total, f"已完成第 {index}/{total} 家投标方")
+                return bidders
         except Exception as exc:  # pragma: no cover - 环境/平台限制时降级
             logger.warning(
                 "商务标审查多进程并行失败，回退串行执行：%s",
                 exc,
             )
-            return [
-                self._review_business_bidder(**task)
-                for task in bidder_tasks
-            ]
+            bidders = []
+            for index, task in enumerate(bidder_tasks, start=1):
+                bidders.append(self._review_business_bidder(**task))
+                report("reviewing", index, total, f"已完成第 {index}/{total} 家投标方")
+            return bidders
 
     def _review_business_bidder(
         self,
@@ -656,6 +774,7 @@ class OrchestratorMixin:
         business_payload: dict[str, Any],
         business_meta: dict[str, Any],
         technical_payload: dict[str, Any] | None = None,
+        consistency_skeletons: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """对提供商务标的投标人执行审查。"""
         identity = self._identify_bidder(business_payload, technical_payload)
@@ -666,9 +785,10 @@ class OrchestratorMixin:
             normalizer=self._normalize_integrity,
         )
         consistency_check = self._execute_consistency_check(
-            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender"}),
-            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid"}),
+            tender_payload=dict(tender_payload, _template_source={"file_url": tender_meta.get("file_path"), "identifier_id": tender_meta.get("identifier_id"), "role": "tender", "content_checksum": tender_meta.get("sha256")}),
+            business_payload=dict(business_payload, _template_source={"file_url": business_meta.get("file_path"), "identifier_id": business_meta.get("identifier_id"), "role": "business_bid", "content_checksum": business_meta.get("sha256")}),
             integrity_check=integrity_check,
+            prepared_skeletons=consistency_skeletons,
         )
 
         checks = {
@@ -686,15 +806,6 @@ class OrchestratorMixin:
                 },
                 normalizer=self._normalize_pricing,
             ),
-            "itemized_pricing_check": self._execute_check(
-                check_code="itemized_pricing_check",
-                check_name="分项报价表审查",
-                runner=lambda: self.itemized_checker.check_itemized_logic(
-                    business_payload,
-                    tender_text=tender_payload,
-                ),
-                normalizer=self._normalize_itemized,
-            ),
             "verification_check": self._execute_check(
                 check_code="verification_check",
                 check_name="签字盖章日期审查",
@@ -702,6 +813,19 @@ class OrchestratorMixin:
                 normalizer=self._normalize_verification,
             ),
         }
+        if not TemplateExtractor.is_business_review_title_excluded(
+            tender_payload,
+            "分项报价表",
+        ):
+            checks["itemized_pricing_check"] = self._execute_check(
+                check_code="itemized_pricing_check",
+                check_name="分项报价表审查",
+                runner=lambda: self.itemized_checker.check_itemized_logic(
+                    business_payload,
+                    tender_text=tender_payload,
+                ),
+                normalizer=self._normalize_itemized,
+            )
         checks["verification_check"] = self._suppress_integrity_duplicates_in_verification(
             verification_check=checks["verification_check"],
             integrity_check=integrity_check,

@@ -1232,6 +1232,8 @@ class TemplateExtractor:
         grouped_branches = set()
         # 有附件引用的组成条目优先落到附件模板标题；没有附件引用的材料项直接保留。
         for entry in business_scope.get("item_entries") or []:
+            if cls._review_material_excluded(entry):
+                continue
             numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
             group = parse_group(entry.get('content', ''))
             if group['operator'] != 'single':
@@ -1240,13 +1242,17 @@ class TemplateExtractor:
                 continue
             if numbers:
                 matched_any = False
+                resolved_attachment = False
                 for number in numbers:
                     attachment = attachments_by_number.get(number)
                     if attachment is None:
                         continue
+                    resolved_attachment = True
+                    if cls._review_material_excluded(attachment):
+                        continue
                     push_requirement(str(attachment.get("title") or "").strip(), [number])
                     matched_any = True
-                if not matched_any:
+                if not matched_any and not resolved_attachment:
                     push_requirement(str(entry.get("content") or "").strip(), numbers)
                 continue
             push_requirement(str(entry.get("content") or "").strip())
@@ -1257,7 +1263,7 @@ class TemplateExtractor:
         # push_requirement 以归一化标题去重，保证每项只计一次。
         for attachment in response_attachments:
             title = str(attachment.get("title") or "").strip()
-            if not title or attachment.get("is_composite"):
+            if not title or attachment.get("is_composite") or cls._review_material_excluded(attachment):
                 continue
             attachment_number = str(attachment.get("attachment_number") or "").strip()
             core = cls._attachment_core_title(title)
@@ -1303,6 +1309,8 @@ class TemplateExtractor:
         for entry in business_scope.get("item_entries") or []:
             if not isinstance(entry, dict):
                 continue
+            if cls._review_material_excluded(entry):
+                continue
             entry_locations = [dict(location) for location in entry.get("locations") or [] if isinstance(location, dict)]
             if not entry_locations:
                 continue
@@ -1312,14 +1320,19 @@ class TemplateExtractor:
                 continue
             numbers = [str(num).strip() for num in entry.get("attachment_numbers") or [] if str(num).strip()]
             matched_any = False
+            resolved_attachment = False
             for number in numbers:
                 attachment = attachments_by_number.get(number)
+                if attachment is not None:
+                    resolved_attachment = True
+                if cls._review_material_excluded(attachment):
+                    continue
                 title = str((attachment or {}).get("title") or "").strip()
                 if not title:
                     continue
                 add_locations(title, entry_locations)
                 matched_any = True
-            if not matched_any:
+            if not matched_any and not resolved_attachment:
                 add_locations(str(entry.get("content") or "").strip(), entry_locations)
 
         return locations_by_title
@@ -1356,7 +1369,7 @@ class TemplateExtractor:
         attachments_by_number: dict[str, dict] = {}
         for attachment in response_attachments:
             title = str(attachment.get("title") or "").strip()
-            if not title or attachment.get("is_composite"):
+            if not title or attachment.get("is_composite") or cls._review_material_excluded(attachment):
                 continue
             compact_title = cls._compact(title)
             if compact_title and compact_title not in attachments_by_title:
@@ -1719,12 +1732,12 @@ class TemplateExtractor:
         source_attachments = list(attachments or cls.extract_response_format_attachments(model_raw_json))
         scope = scope or cls.extract_business_attachment_scope(model_raw_json)
         if not scope.get("has_business_composition"):
-            return source_attachments, False
+            return [cls._apply_template_applicability(item) for item in source_attachments], False
 
         required_numbers = {str(x).strip() for x in scope.get("required_numbers") or set() if str(x).strip()}
         required_titles = {str(x).strip() for x in scope.get("required_titles") or set() if str(x).strip()}
         if not required_numbers and not required_titles:
-            return source_attachments, False
+            return [cls._apply_template_applicability(item) for item in source_attachments], False
 
         filtered: list[dict] = []
         for attachment in source_attachments:
@@ -1778,6 +1791,8 @@ class TemplateExtractor:
                     for location in entry.get('locations') or []
                 ]
 
+            attachment = cls._apply_template_applicability(attachment)
+
             if attachment_number and attachment_number in required_numbers:
                 filtered.append(attachment)
                 continue
@@ -1794,6 +1809,87 @@ class TemplateExtractor:
 
         return filtered, True
 
+    @classmethod
+    def _apply_template_applicability(cls, source: dict) -> dict:
+        attachment = dict(source)
+        applicability = cls._template_applicability(attachment)
+        # Preserve applicability evidence before title normalisation removes
+        # parenthesised notes.  An unconditional tender declaration wins;
+        # a conditional exemption remains unresolved until the bid itself
+        # contains a clear, non-conflicting declaration.
+        if applicability['status'] == 'not_applicable':
+            attachment['applicability_status'] = 'not_applicable'
+            attachment['is_optional'] = True
+            attachment['optionality_conflict'] = False
+        elif applicability['status'] == 'conditional':
+            attachment['conditional_exemption'] = True
+            if attachment.get('applicability_status', 'required') == 'required':
+                attachment['applicability_status'] = 'unclear'
+        if applicability['condition_text']:
+            attachment['condition_text'] = applicability['condition_text']
+            attachment['applicability_locations'] = applicability['locations']
+        return attachment
+
+    @classmethod
+    def _template_applicability(cls, attachment: dict) -> dict:
+        """Read explicit applicability notes without altering stored OCR text."""
+        title = str(attachment.get('title') or '').strip()
+        content = [
+            line.strip()
+            for item in attachment.get('content') or []
+            for line in str(item or '').splitlines()
+            if line.strip()
+        ]
+        lines = [title, *content]
+
+        def matching_locations(text: str, *, title_only: bool = False) -> list[dict]:
+            source = (
+                attachment.get('title_locations')
+                if title_only
+                else attachment.get('locations') or attachment.get('title_locations')
+            ) or []
+            exact = [
+                location
+                for location in source
+                if isinstance(location, dict)
+                and text in str(location.get('text') or '')
+            ]
+            return list(exact or source)[:6]
+
+        unconditional = next(
+            (
+                line
+                for line in lines
+                if re.search(r'(?:本项目|不项目|本项日)\s*(?:为)?\s*不适用', line)
+            ),
+            None,
+        )
+        if unconditional:
+            return {
+                'status': 'not_applicable',
+                'condition_text': unconditional,
+                'locations': matching_locations(unconditional, title_only=unconditional == title),
+            }
+
+        conditional = next(
+            (
+                line for line in lines
+                if re.search(
+                    r'(?:如|若).{0,60}(?:不符合|不属于|未达到|不具备).{0,60}'
+                    r'(?:无需|不需)(?:填写|提供|提交)',
+                    line,
+                )
+            ),
+            None,
+        )
+        if conditional:
+            return {
+                'status': 'conditional',
+                'condition_text': conditional,
+                'locations': matching_locations(conditional),
+            }
+        return {'status': 'required', 'condition_text': '', 'locations': []}
+
     @staticmethod
     def _composition_entry_optional(text: str) -> bool:
         # Only an explicit trailing modifier of this material; not an optional extra.
@@ -1803,4 +1899,86 @@ class TemplateExtractor:
         return bool(
             re.search(r'[（(]如有[）)]$', value)
             or re.search(r'[（(]如有[，,][^）)]*附件\s*\d[^）)]*[）)]', value)
+            or re.search(r'(?:本项目|不项目|本项日)(?:为)?不适用', value)
+            or any(token in value for token in (
+                '其他材料', '其它材料', '其他内容', '其它内容',
+            ))
         )
+
+    @classmethod
+    def _review_material_excluded(cls, value: dict | None) -> bool:
+        """Return whether an explicitly optional material is outside review scope."""
+        if not isinstance(value, dict) or value.get('optionality_conflict'):
+            return False
+        status = str(value.get('applicability_status') or '').strip().lower()
+        content = value.get('content')
+        if isinstance(content, (list, tuple)):
+            content_text = '\n'.join(str(item or '') for item in content)
+        else:
+            content_text = str(content or '')
+        source_text = '\n'.join(
+            part
+            for part in (
+                str(value.get('source_text') or ''),
+                str(value.get('title') or ''),
+                content_text,
+            )
+            if part
+        )
+        return bool(
+            value.get('is_optional')
+            or status in {'optional', 'not_applicable', 'skipped'}
+            or any(
+                cls._composition_entry_optional(line)
+                for line in source_text.splitlines()
+                if line.strip()
+            )
+        )
+
+    @classmethod
+    def review_excluded_response_attachments(
+        cls,
+        model_raw_json: dict,
+        *,
+        scope: dict | None = None,
+    ) -> list[dict]:
+        """List tender attachments excluded from every business-bid check."""
+        resolved_scope = scope or cls.extract_business_attachment_scope(model_raw_json)
+        attachments, _ = cls.filter_business_response_attachments(
+            model_raw_json,
+            scope=resolved_scope,
+        )
+        return [item for item in attachments if cls._review_material_excluded(item)]
+
+    @classmethod
+    def is_business_review_title_excluded(
+        cls,
+        model_raw_json: dict,
+        title: str,
+    ) -> bool:
+        """Whether every tender requirement matching ``title`` is optional."""
+        target = cls._requirement_core_title(title)
+        if not target:
+            return False
+        scope = cls.extract_business_attachment_scope(model_raw_json)
+        attachments, _ = cls.filter_business_response_attachments(
+            model_raw_json,
+            scope=scope,
+        )
+        entry_candidates: list[dict] = []
+        attachment_candidates: list[dict] = []
+        for entry in scope.get('item_entries') or []:
+            core = cls._requirement_core_title(entry.get('content') or entry.get('source_text') or '')
+            if core and (core == target or core in target or target in core):
+                entry_candidates.append(entry)
+        for attachment in attachments:
+            core = cls._attachment_core_title(attachment.get('title') or '')
+            compact_core = re.sub(r'\s+', '', core)
+            if compact_core and (
+                compact_core == target
+                or compact_core in target
+                or target in compact_core
+            ):
+                attachment_candidates.append(attachment)
+        candidates = attachment_candidates or entry_candidates
+        return bool(candidates) and all(cls._review_material_excluded(item) for item in candidates)

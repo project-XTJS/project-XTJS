@@ -120,10 +120,16 @@ def attachment_counts(raw):
     skipped = set(raw.get('skipped_optional_attachments') or [])
     skipped.update(x.get('attachment') for x in raw.get('suppressed_by_integrity', []) if isinstance(x,dict) and x.get('attachment'))
     for item in unique.values():
-        if item.get('suppressed_by_integrity') or item.get('skipped') or item.get('title') in skipped:
+        requirements = item.get('requirements') or {}
+        if (
+            item.get('suppressed_by_integrity')
+            or item.get('skipped')
+            or item.get('title') in skipped
+            or item.get('status') == 'not_applicable'
+            or requirements.get('applicability_status') == 'not_applicable'
+        ):
             skipped.add(item.get('title') or str(item.get('attachment_number')))
             continue
-        requirements = item.get('requirements') or {}
         dc = str((item.get('date_check') or {}).get('status') or '')
         if requirements.get('requires_date',dc not in {'','not_required'}):
             counts['date_required_count']+=1
@@ -145,7 +151,11 @@ def attachment_counts(raw):
 
 
 def attachment_summary(counts):
-    text = f"签章核验通过 {counts['position_pass_count']}/{counts['position_required_count']} 个附件"
+    text = (
+        f"签章核验通过 {counts['position_pass_count']}/{counts['position_required_count']} 个附件"
+        if counts['position_required_count']
+        else "无可单独核验的签章附件"
+    )
     if counts['date_required_count']:
         text += f"；日期校验通过 {counts['date_pass_count']}/{counts['date_required_count']} 个，缺日期 {counts['date_missing_count']} 个、日期过晚 {counts['date_late_count']} 个、截止日期或日期依据待复核 {counts['date_unclear_count']} 个"
     else:
@@ -154,19 +164,25 @@ def attachment_summary(counts):
 
 
 """Single projection of independent signature, seal and date conclusions."""
-VERSION = 'independent-verification-v1'
+VERSION = 'first-ocr-verification-v2'
 
 def aggregate_status(statuses):
-    states = [str(s or 'pending').lower() for s in statuses if s not in ('not_required','not_applicable','skipped')]
+    states = []
+    for status in statuses:
+        state = str(status or 'pending').lower()
+        if state == 'not_required':
+            continue
+        states.append('not_applicable' if state in {'not_applicable', 'skipped', 'optional'} else state)
     if any(s in {'fail','late'} for s in states): return 'fail'
     if any(s in {'missing','missing_date'} for s in states): return 'missing'
+    if states and all(s == 'not_applicable' for s in states): return 'not_applicable'
     if any(s not in {'pass','found'} for s in states): return 'unclear'
-    return 'pass' if states else 'not_applicable'
+    return 'pass'
 
 def component_message(kind, check):
     label = {'signature':'签字','seal':'盖章','date':'落款日期'}[kind]
     state = check.get('status')
-    if state in ('not_required','not_applicable','skipped'): return f'无需核验{label}'
+    if state in ('not_required','not_applicable','skipped'): return ''
     if state == 'pass': return f'{label}核验通过'
     if kind != 'date' and check.get('presence') == 'detected' and check.get('text_status') == 'unparsed':
         return f'已检测到{label}区域，内容未稳定识别，待复核'
@@ -179,15 +195,26 @@ def project_attachment(attachment):
     for kind in ('signature','seal','date'):
         check = attachment.get(kind+'_check') or {}
         check['message'] = component_message(kind, check)
-    if (attachment.get('requirements') or {}).get('optionality_conflict'):
+    if (
+        attachment.get('applicability_status') == 'not_applicable'
+        or (attachment.get('requirements') or {}).get('applicability_status') == 'not_applicable'
+    ):
+        attachment['status'] = 'not_applicable'
+        reason = attachment.get('applicability_evidence') or {}
+        detail = str(reason.get('text') or reason.get('reason') or attachment.get('message') or '当前材料不适用该检查').strip()
+        attachment['message'] = detail if detail.startswith('该项不适用') else f'该项不适用：{detail}'
+    elif (attachment.get('requirements') or {}).get('optionality_conflict'):
         attachment['status'] = 'pending'
     elif attachment.get('found') is False:
         attachment['status'] = 'missing'
     else:
         state = aggregate_status((attachment.get(kind+'_check') or {}).get('status') for kind in ('signature','seal','date'))
-        attachment['status'] = 'pending' if state == 'unclear' else state
+        attachment['status'] = state
     attachment['verification_rule_version'] = VERSION
-    attachment['summary'] = '；'.join(component_message(k, attachment.get(k+'_check') or {}) for k in ('signature','seal','date'))
+    messages = [component_message(k, attachment.get(k+'_check') or {}) for k in ('signature','seal','date')]
+    if attachment.get('applicability_status') == 'not_applicable':
+        messages.insert(0, attachment.get('message') or '该项不适用')
+    attachment['summary'] = '；'.join(message for message in messages if message)
     return attachment
 
 
@@ -195,7 +222,7 @@ def refresh_verification_summary(raw):
     """Auto and manual paths report the same effective attachment evidence."""
     counts = attachment_counts(raw)
     position = raw.setdefault('position_check', {})
-    position['status'] = ('missing' if counts['position_missing_count'] else 'pending' if counts['position_unclear_count'] else 'pass' if counts['position_required_count'] else 'not_applicable')
+    position['status'] = ('missing' if counts['position_missing_count'] else 'unclear' if counts['position_unclear_count'] else 'pass')
     attachments = (raw.get('attachment_results') or []) + (raw.get('missing_attachment_results') or [])
     for kind in ('signature', 'seal'):
         for category, states in [('missing', {'missing','fail'}), ('pending', {'pending','unclear'})]:

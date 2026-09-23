@@ -42,6 +42,22 @@ class AttachmentTitleMatchingTests(unittest.TestCase):
             )
         )
 
+    def test_first_quote_and_opening_quote_are_complete_aliases(self) -> None:
+        self.assertTrue(
+            self.verifier._attachment_titles_compatible(
+                "附件7 首次报价一览表（格式）",
+                "三、开标一览表",
+            )
+        )
+
+    def test_short_business_subheading_is_not_an_attachment_alias(self) -> None:
+        self.assertFalse(
+            self.verifier._attachment_titles_compatible(
+                "A、商务",
+                "商务条款偏离表",
+            )
+        )
+
     def test_nested_parenthetical_content_is_stripped(self) -> None:
         from app.service.analysis.attachment_synonyms import (
             strip_attachment_title_parenthetical_noise,
@@ -67,8 +83,8 @@ class AttachmentDateCheckTests(unittest.TestCase):
     @staticmethod
     def _bid_section(*section_texts: str) -> dict:
         sections = [
-            {"type": "text", "text": value, "page": 3}
-            for value in section_texts
+            {"type": "text", "text": value, "page": 3, "bbox": [10, 20 + index * 30, 500, 40 + index * 30]}
+            for index, value in enumerate(section_texts)
         ]
         return {
             "text": "\n".join(section_texts),
@@ -76,21 +92,21 @@ class AttachmentDateCheckTests(unittest.TestCase):
             "pages": [3],
         }
 
-    def test_single_date_passes_without_complete_date_label(self) -> None:
+    def test_damaged_date_label_stays_pending(self) -> None:
         result = self.verifier._date_check(
             self.attachment,
             self._bid_section("期：2026年09月08日"),
             self.deadline,
         )
 
-        self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["sign_date"], "2026-09-08")
-        self.assertEqual(result["match_method"], "single_date_fallback")
+        self.assertEqual(result["status"], "pending")
+        self.assertIsNone(result["sign_date"])
+        self.assertEqual(result["reason_code"], "sign_date_not_reliably_located")
 
     def test_single_date_after_deadline_is_late(self) -> None:
         result = self.verifier._date_check(
             self.attachment,
-            self._bid_section("期：2026年09月10日"),
+            self._bid_section("日期：2026年09月10日"),
             self.deadline,
         )
 
@@ -111,7 +127,7 @@ class AttachmentDateCheckTests(unittest.TestCase):
         self.assertEqual(result["sign_date"], "2026-09-08")
         self.assertEqual(result["match_method"], "contextual_date")
 
-    def test_multiple_dates_accept_ocr_damaged_date_field_context(self) -> None:
+    def test_multiple_dates_reject_ocr_damaged_date_field_context(self) -> None:
         result = self.verifier._date_check(
             self.attachment,
             self._bid_section(
@@ -121,9 +137,8 @@ class AttachmentDateCheckTests(unittest.TestCase):
             self.deadline,
         )
 
-        self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["sign_date"], "2026-09-08")
-        self.assertEqual(result["match_method"], "contextual_date")
+        self.assertEqual(result["status"], "pending")
+        self.assertIsNone(result["sign_date"])
 
     def test_quality_period_is_not_treated_as_damaged_date_field(self) -> None:
         self.assertFalse(
@@ -139,7 +154,7 @@ class AttachmentDateCheckTests(unittest.TestCase):
             self.deadline,
         )
 
-        self.assertEqual(result["status"], "missing_date")
+        self.assertEqual(result["status"], "pending")
 
 
 class ConsistencyOptionalAndReferenceTests(unittest.TestCase):

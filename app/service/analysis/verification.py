@@ -183,6 +183,9 @@ class VerificationChecker:
         bidder_name = identity["name"]
         deadline = self._deadline_from_doc(tender)
         deadline_resolution = self.resolve_deadline(tender)
+        excluded_optional_attachments = TemplateExtractor.review_excluded_response_attachments(
+            tender
+        )
         template_required = self._required_attachments(tender)
         expected_attachments = self._attachment_title_hints(template_required)
         bid_sections = self._attachment_sections(bid, seal_bundle["locations"], signature_bundle["locations"], expected_attachments)
@@ -201,25 +204,68 @@ class VerificationChecker:
             from .compliance.integrity import IntegrityChecker
             group_details = IntegrityChecker().check_integrity(tender, bid)['details']
 
-        results, missing_attachment_results, skipped_missing_attachments, skipped_optional_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, late_dates = [], [], [], [], [], [], [], [], []
+        results, missing_attachment_results, skipped_missing_attachments, skipped_optional_attachments, missing_signatures, pending_signatures, missing_seals, missing_dates, pending_dates, late_dates = [], [], [], [], [], [], [], [], [], []
         for item in required:
+            if item.get('requirements', {}).get('applicability_status') == 'not_applicable':
+                results.append(self._not_applicable_attachment_result(
+                    item,
+                    None,
+                    reason_code='tender_explicit_not_applicable',
+                    evidence={
+                        'text': item.get('requirements', {}).get('condition_text'),
+                        'locations': item.get('requirements', {}).get('applicability_locations') or [],
+                        'document_role': 'tender',
+                    },
+                ))
+                continue
             resolution = self._resolve_attachment(item, bid_sections)
             branch_state = alternative_state(self, item['title'], group_details)
             if branch_state == 'alternative_not_provided' and resolution['location_status'] == 'not_found':
                 skipped_optional_attachments.append(item['title'])
+                results.append(self._not_applicable_attachment_result(
+                    item,
+                    None,
+                    reason_code='alternative_attachment_not_provided',
+                    evidence={
+                        'reason': '招标要求为备选材料，当前投标文件未选择该分支。',
+                        'document_role': 'tender',
+                    },
+                ))
                 continue
             if branch_state == 'ambiguous' and resolution['location_status'] == 'not_found':
                 resolution['location_status'] = 'ambiguous'
             section = resolution['section']
+            applicability = self._bid_applicability_decision(item, section)
+            if applicability and applicability['status'] == 'not_applicable':
+                result = self._not_applicable_attachment_result(
+                    item,
+                    section,
+                    reason_code=applicability['reason_code'],
+                    evidence=applicability,
+                )
+                result['location_status'] = resolution['location_status']
+                results.append(result)
+                continue
             result = self._evaluate_attachment(item, section, deadline, bidder_name)
             result['location_status'] = resolution['location_status']
             result['location_candidates'] = resolution.get('candidates', []) if section is None else []
             result["date_check"]["deadline_resolution"] = deadline_resolution
             if deadline is None:
                 result["date_check"]["deadline_locations"] = deadline_resolution["locations"]
+            if applicability and applicability['status'] == 'unclear':
+                result['status'] = 'unclear'
+                result['applicability_status'] = 'unclear'
+                result['applicability_reason_code'] = applicability['reason_code']
+                result['applicability_evidence'] = applicability
+                for component in ('date_check', 'seal_check', 'signature_check'):
+                    if result[component].get('status') != 'not_required':
+                        result[component]['status'] = 'pending'
+                        result[component]['reason_code'] = applicability['reason_code']
+                results.append(result)
+                continue
             if resolution['location_status'] == 'ambiguous':
                 result['found'] = None
-                result['status'] = 'pending'
+                result['status'] = 'unclear'
                 for component in ('date_check', 'seal_check', 'signature_check'):
                     result[component]['status'] = 'pending'
                 results.append(result)
@@ -229,7 +275,7 @@ class VerificationChecker:
                 and item.get('requirements', {}).get('applicability_status') == 'unclear'
             ):
                 result['found'] = None
-                result['status'] = 'pending'
+                result['status'] = 'unclear'
                 result['applicability_status'] = 'unclear'
                 result['condition_text'] = item.get('requirements', {}).get('condition_text') or ''
                 for component in ('date_check', 'seal_check', 'signature_check'):
@@ -237,14 +283,30 @@ class VerificationChecker:
                 results.append(result)
                 continue
             if not result["found"]:
-                if item.get('requirements', {}).get('optionality_conflict'):
-                    results.append(result)
-                    continue
-                if bool(item.get("requirements", {}).get("is_optional")):
+                if (
+                    bool(item.get("requirements", {}).get("is_optional"))
+                    and not item.get('requirements', {}).get('optionality_conflict')
+                ):
                     skipped_optional_attachments.append(result["title"])
+                    results.append(self._not_applicable_attachment_result(
+                        item,
+                        None,
+                        reason_code='optional_attachment_not_provided',
+                        evidence={
+                            'reason': '招标文件将该附件列为可选，投标文件未提供。',
+                            'document_role': 'tender',
+                        },
+                    ))
                     continue
-                skipped_missing_attachments.append(result["title"])
-                missing_attachment_results.append(result)
+                # Failure to locate an attachment boundary is not proof that its
+                # signature, seal, or date is absent.  Keep it reviewable and let
+                # the integrity check own any confirmed missing-attachment issue.
+                result['found'] = None
+                result['status'] = 'unclear'
+                for component in ('date_check', 'seal_check', 'signature_check'):
+                    if result[component].get('status') != 'not_required':
+                        result[component]['status'] = 'pending'
+                results.append(result)
                 continue
             results.append(result)
             if result["signature_check"]["status"] in {"fail", "missing"}:
@@ -255,27 +317,57 @@ class VerificationChecker:
                 missing_seals.append(result["title"])
             if result["date_check"]["status"] == "missing_date":
                 missing_dates.append(result["title"])
+            if result["date_check"]["status"] in {"pending", "missing_deadline"}:
+                pending_dates.append(result["title"])
             if result["date_check"]["status"] == "late":
                 late_dates.append(result["title"])
 
         checked_count = len(results)
+        applicable_results = [
+            item for item in results
+            if item.get('applicability_status') != 'not_applicable'
+            and (item.get('requirements') or {}).get('applicability_status') != 'not_applicable'
+        ]
         has_missing = bool(skipped_missing_attachments or missing_signatures or missing_seals or missing_dates)
         if late_dates:
             compliance_status = "fail"
         elif has_missing:
             compliance_status = "missing"
-        elif checked_count <= 0 or deadline is None:
-            compliance_status = "missing"
         elif any(x["status"] == "fail" for x in results):
             compliance_status = "fail"
-        elif any(x["status"] == "pending" for x in results):
-            compliance_status = "pending"
+        elif checked_count <= 0 and excluded_optional_attachments:
+            compliance_status = "pass"
+        elif checked_count <= 0 or deadline is None:
+            compliance_status = "unclear"
+        elif any(x["status"] in {"pending", "unclear"} for x in results):
+            compliance_status = "unclear"
         else:
             compliance_status = "pass"
 
-        date_status = "missing_deadline" if deadline is None else ("fail" if late_dates else ("missing" if missing_dates else "pass"))
+        has_required_dates = any(
+            (item.get('requirements') or {}).get('requires_date')
+            for item in applicable_results
+        )
+        date_status = (
+            "pass"
+            if not has_required_dates
+            else "missing_deadline"
+            if deadline is None
+            else "fail"
+            if late_dates
+            else "missing"
+            if missing_dates
+            else "pending"
+            if pending_dates
+            else "pass"
+        )
         position_status = "missing" if skipped_missing_attachments or missing_signatures or missing_seals else ("pending" if pending_signatures else "pass")
         deadline_locations = deadline.get("locations") if isinstance(deadline, dict) else []
+        seal_company_check = (
+            self._seal_company_check(bidder_name, seal_bundle["texts"])
+            if required
+            else {}
+        )
         return refresh_verification_summary({
             "deadline_resolution": deadline_resolution,
             "mode": "tender_vs_bid",
@@ -288,6 +380,12 @@ class VerificationChecker:
             "bidder_name": bidder_name,
             "bidder_identity": identity,
             "required_attachment_count": len(required),
+            "excluded_optional_attachment_count": len(excluded_optional_attachments),
+            "excluded_optional_attachments": [
+                str(item.get("title") or "").strip()
+                for item in excluded_optional_attachments
+                if str(item.get("title") or "").strip()
+            ],
             "checked_attachment_count": checked_count,
             "required_attachments": [x["title"] for x in required],
             "skipped_missing_attachments": skipped_missing_attachments,
@@ -295,9 +393,9 @@ class VerificationChecker:
             "missing_attachment_results": missing_attachment_results,
             "attachment_results": results,
             "position_check": {"status": position_status, "missing_attachments": skipped_missing_attachments, "missing_signature_attachments": missing_signatures, "pending_signature_attachments": pending_signatures, "missing_seal_attachments": missing_seals},
-            "date_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "matched_deadline_page": deadline.get("page") if isinstance(deadline, dict) else None, "deadline_locations": deadline_locations, "missing_date_attachments": missing_dates, "late_date_attachments": late_dates},
+            "date_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "matched_deadline_page": deadline.get("page") if isinstance(deadline, dict) else None, "deadline_locations": deadline_locations, "missing_date_attachments": missing_dates, "pending_date_attachments": pending_dates, "late_date_attachments": late_dates},
             "deadline_check": {"status": date_status, "deadline_date": deadline["date"].isoformat() if deadline else None, "matched_deadline_text": deadline["text"] if deadline else None, "matched_deadline_page": deadline.get("page") if isinstance(deadline, dict) else None, "deadline_locations": deadline_locations, "source": "tender_document"},
-            "seal_company_check": self._seal_company_check(bidder_name, seal_bundle["texts"]),
+            "seal_company_check": seal_company_check,
             "compliance_status": compliance_status,
         })
 
@@ -327,7 +425,7 @@ class VerificationChecker:
             "attachment_results": [],
             "position_check": {"status": signature_status if seal_bundle["detected"] or signature_status != "missing" else "missing", "missing_attachments": [], "missing_signature_attachments": [] if has_signature or signature_status == "pending" else ["全文未识别到有效签字内容或签字区域"], "pending_signature_attachments": ["全文识别到签字位或签字区域，但未回填出稳定签名文本，建议人工复核"] if signature_status == "pending" else [], "missing_seal_attachments": [], "pending_seal_attachments": [] if seal_bundle["detected"] else ["全文未定位到盖章，需对照原件核验"]},
             "date_check": {"status": "pass" if sign_date else "missing_date", "deadline_date": None, "matched_deadline_text": None, "missing_date_attachments": [] if sign_date else ["全文未识别到落款日期"], "late_date_attachments": []},
-            "deadline_check": {"status": "not_applicable", "deadline_date": None, "matched_deadline_text": None, "source": None},
+            "deadline_check": {"status": "unclear", "reason_code": "tender_document_missing", "deadline_date": None, "matched_deadline_text": None, "source": None},
             "seal_company_check": seal_company_check,
             "compliance_status": "pending",
         }
@@ -429,7 +527,9 @@ class VerificationChecker:
             if key in seen:
                 continue
             seen.add(key)
-            normalized = {"page": page}
+            normalized = dict(item)
+            normalized["page"] = page
+            normalized.pop("bbox", None)
             if box is not None:
                 normalized["box"] = box
             result.append(normalized)
@@ -488,6 +588,14 @@ class VerificationChecker:
     def _signature_bundle(self, payload: dict | None) -> dict:
         container = self._container(payload)
         signature_node = container.get("signature") if isinstance(container.get("signature"), dict) else {}
+        presence_evidence = container.get("_signature_presence_evidence") if isinstance(container.get("_signature_presence_evidence"), dict) else {}
+        image_locations = [
+            detection
+            for field in presence_evidence.get("fields") or []
+            if isinstance(field, dict) and field.get("status") == "detected"
+            for detection in field.get("detections") or []
+            if isinstance(detection, dict)
+        ]
         signature_texts = []
         signature_locations = []
         for source in (signature_node.get("texts"), container.get("signature_texts"), [s["text"] for s in self._sections(payload) if s["type"] == "signature" and not s.get("_synthetic")]):
@@ -499,6 +607,7 @@ class VerificationChecker:
             signature_node.get("locations"),
             container.get("signature_locations"),
             [{"page": s.get("page"), "box": s.get("bbox")} for s in self._sections(payload) if s["type"] == "signature" and not s.get("_synthetic") and s.get("bbox")],
+            image_locations,
         ):
             if isinstance(source, dict):
                 source = [source]
@@ -516,7 +625,13 @@ class VerificationChecker:
         signature_count = max(signature_count, len(deduped_texts), len(deduped_locations))
         detected = signature_node.get("detected", container.get("signature_detected"))
         detected = bool(detected) if detected is not None else bool(signature_count or deduped_texts or deduped_locations)
-        return {"detected": detected or bool(deduped_texts or deduped_locations), "count": signature_count, "texts": deduped_texts, "locations": deduped_locations}
+        return {
+            "detected": detected or bool(deduped_texts or deduped_locations),
+            "count": signature_count,
+            "texts": deduped_texts,
+            "locations": deduped_locations,
+            "presence_evidence": presence_evidence,
+        }
 
     def _date_candidates(self, text: str) -> list[dict]:
         items, seen = [], set()
@@ -1156,6 +1271,8 @@ class VerificationChecker:
             self._extract_response_format_attachments(tender_payload),
         )
         for item in response_attachments:
+            if TemplateExtractor._review_material_excluded(item):
+                continue
             title = self._attachment_title(item.get("title"))
             text = "\n".join(item.get("content") or [])
             template_req = self._requirements(title, text)
@@ -1165,6 +1282,7 @@ class VerificationChecker:
             template_req['applicability_status'] = str(item.get('applicability_status') or 'required')
             template_req['condition_text'] = str(item.get('condition_text') or '')
             template_req['applicability_locations'] = list(item.get('applicability_locations') or [])
+            template_req['conditional_exemption'] = bool(item.get('conditional_exemption'))
             attachment_number = self._attachment_number(title)
             key = attachment_number or title
             if key in seen:
@@ -1263,6 +1381,101 @@ class VerificationChecker:
             "date_check": date_check,
         })
 
+    def _not_applicable_attachment_result(
+        self,
+        attachment: dict,
+        bid_section: dict | None,
+        *,
+        reason_code: str,
+        evidence: dict,
+    ) -> dict:
+        component = {
+            'status': 'not_required',
+            'reason_code': reason_code,
+        }
+        return project_attachment({
+            'title': attachment['title'],
+            'attachment_number': attachment.get('attachment_number'),
+            'found': bid_section is not None,
+            'matched_bid_title': bid_section.get('title') if bid_section else None,
+            'pages': list(bid_section.get('pages') or []) if bid_section else [],
+            'check_pages': list(bid_section.get('check_pages') or []) if bid_section else [],
+            'locations': self._attachment_heading_locations(bid_section),
+            'template_locations': list(attachment.get('template_locations') or [])[:6],
+            'requirements': attachment['requirements'],
+            'applicability_status': 'not_applicable',
+            'applicability_reason_code': reason_code,
+            'applicability_evidence': evidence,
+            'status': 'not_applicable',
+            'message': '该项不适用：' + str(evidence.get('text') or evidence.get('reason') or '当前材料不适用该检查'),
+            'signature_check': dict(component),
+            'seal_check': dict(component),
+            'date_check': dict(component),
+        })
+
+    def _bid_applicability_decision(
+        self,
+        attachment: dict,
+        bid_section: dict | None,
+    ) -> dict | None:
+        """Resolve a conditional exemption from the stored first-OCR evidence."""
+        requirements = attachment.get('requirements') or {}
+        if not requirements.get('conditional_exemption') or not isinstance(bid_section, dict):
+            return None
+
+        negative_pattern = re.compile(
+            r'(?:我公司|我方|本公司|本单位).{0,24}(?:不符合|不属于|不是|未达到|不具备)'
+            r'.{0,100}(?:不适用|无需|不需|不提供|不填写)'
+            r'|(?:本项目|本声明函|本声明|此声明函|此内容).{0,24}不适用'
+            r'.{0,40}(?:不提供|不填写|无需|不需)'
+        )
+        positive_pattern = re.compile(
+            r'(?:我公司|我方|本公司).{0,16}(?:(?<!不)符合|(?<!不)属于|(?<!不)是)'
+            r'.{0,40}(?:条件|福利性单位|中小企业|监狱企业)'
+        )
+        negatives: list[dict] = []
+        positives: list[dict] = []
+        for section in bid_section.get('sections') or []:
+            if not isinstance(section, dict) or str(section.get('type') or '').lower() == 'seal':
+                continue
+            text = str(section.get('text') or '').strip()
+            if not text:
+                continue
+            compact_text = re.sub(r'\s+', '', text)
+            location = {
+                'page': section.get('page'),
+                'bbox': self._layout_box_xywh(section),
+                'text': text,
+                'document_role': 'bid',
+            }
+            if negative_pattern.search(compact_text):
+                negatives.append(location)
+            if positive_pattern.search(compact_text):
+                positives.append(location)
+        if not negatives:
+            return None
+        if positives:
+            return {
+                'status': 'unclear',
+                'reason_code': 'bid_applicability_conflict',
+                'condition_text': requirements.get('condition_text'),
+                'negative_locations': negatives,
+                'positive_locations': positives,
+            }
+        if any(item.get('page') is None or item.get('bbox') is None for item in negatives):
+            return {
+                'status': 'unclear',
+                'reason_code': 'bid_not_applicable_coordinates_missing',
+                'condition_text': requirements.get('condition_text'),
+                'locations': negatives,
+            }
+        return {
+            'status': 'not_applicable',
+            'reason_code': 'conditional_exemption_confirmed_by_bid',
+            'condition_text': requirements.get('condition_text'),
+            'locations': negatives,
+        }
+
     def _attachment_heading_locations(self, bid_section: dict | None) -> list[dict]:
         if not isinstance(bid_section, dict):
             return []
@@ -1305,7 +1518,16 @@ class VerificationChecker:
         used_signature_keys, used_seal_keys = set(), set()
 
         for slot in slots:
-            direct_value = self._signature_value(slot["line"])
+            if slot.get('page') is None or slot.get('bbox') is None:
+                pending.append({
+                    "line": slot["line"],
+                    "page": slot.get("page"),
+                    "reason": "signature_field_coordinates_missing",
+                    "presence": "detected",
+                })
+                continue
+            raw_direct_value = self._signature_value(slot["line"])
+            direct_value = self._normalize_signature_candidate(raw_direct_value) if raw_direct_value else None
             placeholder_direct_value = (
                 direct_value
                 if direct_value and self._is_signature_placeholder_value(direct_value)
@@ -1313,7 +1535,29 @@ class VerificationChecker:
             )
             placeholder_nearby_signature = None
             if direct_value and placeholder_direct_value is None:
-                filled.append({"line": slot["line"], "page": slot.get("page"), "mode": "text_inline", "value": direct_value})
+                filled.append({
+                    "line": slot["line"], "page": slot.get("page"), "box": slot.get('bbox'),
+                    "mode": "ocr_inline_text", "value": direct_value,
+                    "signature_text": direct_value, "signature_box": slot.get("bbox"),
+                    "recognition_status": "parsed",
+                })
+                continue
+            inline_mark = self._normalize_inline_signature_mark(raw_direct_value)
+            if inline_mark is not None:
+                # Handwritten names are frequently only partly decoded by the
+                # first OCR pass.  A non-placeholder mark inside the bounded
+                # signature field is still reliable evidence that the field
+                # was signed, even when the complete name is unreadable.
+                filled.append({
+                    "line": slot["line"],
+                    "page": slot.get("page"),
+                    "box": slot.get("bbox"),
+                    "mode": "ocr_inline_text",
+                    "value": inline_mark,
+                    "signature_text": inline_mark,
+                    "signature_box": slot.get("bbox"),
+                    "recognition_status": "partial",
+                })
                 continue
 
             nearby_signature = self._signature_nearby_detected_signature(slot, bid_section)
@@ -1327,7 +1571,18 @@ class VerificationChecker:
                 if self._is_signature_placeholder_value(nearby_signature.get("text") or nearby_signature.get("value")):
                     placeholder_nearby_signature = nearby_signature
                 else:
-                    filled.append({"line": slot["line"], "page": slot.get("page"), "mode": nearby_signature.get("mode") or "ocr_signature_region", "value": nearby_signature.get("value") or self._signature_placeholder_text(), "signature_page": nearby_signature.get("page"), "signature_box": nearby_signature.get("box"), "signature_text": nearby_signature.get("text")})
+                    filled.append({
+                        "line": slot["line"], "page": slot.get("page"),
+                        "mode": nearby_signature.get("mode") or "ocr_signature_region",
+                        "value": nearby_signature.get("value") or self._signature_placeholder_text(),
+                        "signature_page": nearby_signature.get("page"),
+                        "signature_box": nearby_signature.get("box"),
+                        "signature_text": nearby_signature.get("text"),
+                        "confidence": nearby_signature.get("confidence"),
+                        "model": nearby_signature.get("model"),
+                        "field_box": nearby_signature.get("field_box"),
+                        "recognition_status": nearby_signature.get("recognition_status"),
+                    })
                     continue
 
             nearby_personal_seal = self._signature_nearby_personal_seal(slot, bid_section)
@@ -1339,17 +1594,6 @@ class VerificationChecker:
                     used_seal_keys.add(seal_key)
             if slot["allows_seal"] and nearby_personal_seal is not None:
                 filled.append({"line": slot["line"], "page": slot.get("page"), "mode": "personal_seal_as_alternative", "value": nearby_personal_seal.get("person_name"), "seal_page": nearby_personal_seal.get("page"), "seal_box": nearby_personal_seal.get("box"), "seal_text": nearby_personal_seal.get("seal_text")})
-                continue
-
-            nearby_seal = self._signature_nearby_seal_evidence(slot, bid_section)
-            if slot["allows_seal"] and nearby_seal is not None:
-                seal_key = self._evidence_key(nearby_seal.get("page"), nearby_seal.get("box"), nearby_seal.get("seal_text"))
-                if seal_key in used_seal_keys:
-                    nearby_seal = None
-                else:
-                    used_seal_keys.add(seal_key)
-            if slot["allows_seal"] and nearby_seal is not None:
-                filled.append({"line": slot["line"], "page": slot.get("page"), "mode": "seal_region_as_alternative", "value": self._signature_placeholder_text(), "seal_page": nearby_seal.get("page"), "seal_box": nearby_seal.get("box"), "seal_text": nearby_seal.get("seal_text")})
                 continue
 
             nearby_text = self._signature_nearby_text_evidence(slot, bid_section)
@@ -1371,10 +1615,76 @@ class VerificationChecker:
             pending.append({"reason": "signature_slot_not_reliably_located", "presence": "unknown"})
         status = "pass" if len(filled) >= required else "pending"
         detected = bool(filled or any(p.get('presence') == 'detected' for p in pending))
-        return {"status": status, "presence": "detected" if detected else "unknown",
+        return {"status": status, "reason_code": "signature_evidence_confirmed" if status == "pass" else (pending[0].get('reason') if pending else "signature_evidence_insufficient"), "presence": "detected" if detected else "unknown",
                 "text_status": "parsed" if filled else "unparsed", "required_count": required,
                 "filled_count": len(filled), "pending_count": len(pending), "filled_values": filled,
                 "pending_fields": pending, "empty_fields": empty}
+
+    def required_signature_image_fields(
+        self,
+        tender_payload: dict | None,
+        bid_payload: dict | None,
+    ) -> list[dict]:
+        """Return located, required signature fields that may need pixel evidence.
+
+        Applicability and attachment boundaries are resolved from the saved first
+        OCR.  The image stage therefore never scans unrelated pages or fields.
+        """
+        tender = self._as_document(tender_payload) or {}
+        bid = self._as_document(bid_payload) or {}
+        seal_bundle = self._seal_bundle(bid)
+        signature_bundle = self._signature_bundle(bid)
+        initial_required = self._required_attachments(tender)
+        expected = self._attachment_title_hints(initial_required)
+        bid_sections = self._attachment_sections(
+            bid,
+            seal_bundle["locations"],
+            signature_bundle["locations"],
+            expected,
+        )
+        bid_by_no: dict[str, list[dict]] = {}
+        for section in bid_sections:
+            number = section.get("attachment_number")
+            if number:
+                bid_by_no.setdefault(number, []).append(section)
+        required = self._required_attachments(tender, bid_by_no, bid_sections)
+        fields: list[dict] = []
+        seen: set[tuple[int, tuple[int, ...]]] = set()
+        for attachment in required:
+            requirements = attachment.get("requirements") or {}
+            if (
+                not requirements.get("requires_signature")
+                or requirements.get("applicability_status") == "not_applicable"
+            ):
+                continue
+            resolution = self._resolve_attachment(attachment, bid_sections)
+            if resolution.get("location_status") in {"ambiguous", "not_found"}:
+                continue
+            section = resolution.get("section")
+            if not isinstance(section, dict):
+                continue
+            applicability = self._bid_applicability_decision(attachment, section)
+            if applicability and applicability.get("status") == "not_applicable":
+                continue
+            section = self._scoped_bid_section_for_checks(section) or section
+            for slot in self._collect_signature_slots(attachment, section):
+                page = slot.get("page")
+                box = self._normalize_bbox(slot.get("bbox"))
+                if not isinstance(page, int) or box is None:
+                    continue
+                x, y, width, height = box
+                key = (page, tuple(box))
+                if key in seen:
+                    continue
+                seen.add(key)
+                fields.append({
+                    "page": page,
+                    "field_box": [float(x), float(y), float(x + width), float(y + height)],
+                    "field_text": str(slot.get("line") or ""),
+                    "attachment_number": attachment.get("attachment_number"),
+                    "attachment_title": attachment.get("title"),
+                })
+        return fields
 
     def _signature_value(self, line: str) -> str | None:
         text, compact = str(line or "").strip(), self._compact(line)
@@ -1390,6 +1700,15 @@ class VerificationChecker:
         value = re.sub(r"(?:签字或盖章|签字|签章|签名|手签|盖章)", "", value)
         value = re.sub(r"[（）()【】\[\]_:：,，;；\.\-—/\\\s_]+", "", value)
         return value[:40] if value and re.search(r"[A-Za-z0-9\u4e00-\u9fa5]", value) else None
+
+    def _normalize_inline_signature_mark(self, text: Any) -> str | None:
+        """Accept a partial handwritten mark only inside a located signature field."""
+        value = re.sub(r"[^\u4e00-\u9fa5]", "", str(text or ""))
+        if not re.fullmatch(r"[\u4e00-\u9fa5]", value):
+            return None
+        if value in set("签字章盖名无空年月日"):
+            return None
+        return value
 
     def _signature_placeholder_text(self) -> str:
         return self.SIGNATURE_PLACEHOLDER_TEXTS[0]
@@ -1429,17 +1748,6 @@ class VerificationChecker:
             line = str(section.get("text") or "").strip()
             if self._is_signature_requirement_line(line):
                 append_slot(line, section.get("page"), self._layout_box_xywh(section), "section")
-
-        if not slots:
-            fallback_page = (bid_section.get("pages") or [None])[-1]
-            for line in self._lines(bid_section.get("text") or ""):
-                if self._is_signature_requirement_line(line):
-                    append_slot(line, fallback_page, None, "fallback_text")
-
-        if not slots:
-            fallback_page = (bid_section.get("pages") or [None])[-1]
-            for line in attachment["requirements"].get("signature_field_examples") or []:
-                append_slot(line, fallback_page, None, "template")
 
         return slots
 
@@ -1485,6 +1793,30 @@ class VerificationChecker:
         below = 0 <= cand_top - slot_bottom <= max_dy and cand_right >= slot_left - 24 and cand_left <= slot_right + 120
         return (same_line and to_right) or below
 
+    def _box_in_signature_value_row(
+        self,
+        slot_box: list[int] | None,
+        candidate_box: list[int] | None,
+        *,
+        max_gap: int = 96,
+    ) -> bool:
+        """Require OCR text/signature evidence to belong to this exact field row."""
+        if slot_box is None or candidate_box is None:
+            return False
+        slot_left, slot_top, slot_width, slot_height = slot_box
+        cand_left, cand_top, cand_width, cand_height = candidate_box
+        slot_right = slot_left + slot_width
+        slot_bottom = slot_top + slot_height
+        cand_right = cand_left + cand_width
+        cand_center_y = cand_top + cand_height / 2
+        vertical_margin = max(6.0, min(max(slot_height, cand_height) * 0.35, 12.0))
+        same_row = slot_top - vertical_margin <= cand_center_y <= slot_bottom + vertical_margin
+        horizontal_match = (
+            cand_right >= slot_left
+            and cand_left <= slot_right + max_gap
+        )
+        return same_row and horizontal_match
+
     def _signature_nearby_text_evidence(self, slot: dict, bid_section: dict) -> dict | None:
         slot_page = slot.get("page")
         slot_box = self._normalize_bbox(slot.get("bbox"))
@@ -1499,7 +1831,7 @@ class VerificationChecker:
                 if section.get("_synthetic") or section.get("type") not in {"text", "signature"}:
                     continue
                 candidate_box = self._layout_box_xywh(section)
-                if not self._box_near_signature_slot(slot_box, candidate_box):
+                if not self._box_in_signature_value_row(slot_box, candidate_box):
                     continue
                 candidate_text = str(section.get("text") or "").strip()
                 candidate_value = self._normalize_signature_candidate(candidate_text)
@@ -1551,7 +1883,9 @@ class VerificationChecker:
             if slot_page is not None and section.get("page") != slot_page:
                 continue
             candidate_box = self._layout_box_xywh(section)
-            if slot_box is not None and candidate_box is not None and not self._box_near_signature_slot(slot_box, candidate_box, max_dx=420, max_dy=180):
+            if candidate_box is None:
+                continue
+            if slot_box is not None and candidate_box is not None and not self._box_in_signature_value_row(slot_box, candidate_box):
                 continue
             candidate_text = str(section.get("text") or "").strip()
             distance = 0
@@ -1572,13 +1906,41 @@ class VerificationChecker:
             if slot_page is not None and item.get("page") != slot_page:
                 continue
             candidate_box = self._normalize_bbox(item.get("box"))
-            if slot_box is not None and candidate_box is not None and not self._box_near_signature_slot(slot_box, candidate_box, max_dx=420, max_dy=180):
+            if candidate_box is None:
                 continue
+            image_evidence = item.get("source") == "signature_image_detector"
+            if image_evidence:
+                evidence_field_box = self._normalize_bbox(item.get("field_box"))
+                if slot_box is None or evidence_field_box is None:
+                    continue
+                slot_left, slot_top, slot_width, slot_height = slot_box
+                field_left, field_top, field_width, field_height = evidence_field_box
+                horizontal_overlap = min(slot_left + slot_width, field_left + field_width) - max(slot_left, field_left)
+                vertical_overlap = min(slot_top + slot_height, field_top + field_height) - max(slot_top, field_top)
+                if horizontal_overlap <= 0 or vertical_overlap < min(slot_height, field_height) * 0.5:
+                    continue
+            if slot_box is not None and candidate_box is not None:
+                if image_evidence:
+                    if not self._box_near_signature_slot(slot_box, candidate_box, max_dx=420, max_dy=180):
+                        continue
+                elif not self._box_in_signature_value_row(slot_box, candidate_box):
+                    continue
             distance = 0
             if slot_box is not None and candidate_box is not None:
                 distance = max(candidate_box[0] - (slot_box[0] + slot_box[2]), 0) + abs(candidate_box[1] - slot_box[1])
             if best is None or distance < best["score"]:
-                best = {"score": distance, "page": item.get("page"), "box": candidate_box, "text": None, "value": self._signature_placeholder_text(), "mode": "ocr_signature_location"}
+                best = {
+                    "score": distance,
+                    "page": item.get("page"),
+                    "box": candidate_box,
+                    "text": None,
+                    "value": "已检测到签字" if image_evidence else self._signature_placeholder_text(),
+                    "mode": "image_signature_presence" if image_evidence else "ocr_signature_location",
+                    "confidence": item.get("confidence"),
+                    "model": item.get("model"),
+                    "field_box": item.get("field_box"),
+                    "recognition_status": "presence_only" if image_evidence else "unparsed",
+                }
 
         if best is not None:
             best.pop("score", None)
@@ -1627,7 +1989,12 @@ class VerificationChecker:
             if slot_page is not None and section_page != slot_page:
                 continue
             seal_text = str(section.get("text") or "").strip()
-            person_name = self._normalize_person_name(seal_text)
+            compact_seal_text = self._compact(seal_text)
+            if re.search(r'(?:公安局|财政局|税务局|委员会|管理局|银行|学校|中心|政府)$', compact_seal_text):
+                continue
+            person_name = self._normalize_person_name(
+                re.sub(r'(?:之?印|章)$', '', compact_seal_text)
+            )
             if person_name is None or self._is_company_like_seal_text(seal_text):
                 continue
             candidate_box = self._layout_box_xywh(section)
@@ -1699,15 +2066,18 @@ class VerificationChecker:
     def _seal_check(self, attachment: dict, bid_section: dict | None, bidder_name: str | None) -> dict:
         requires_seal = bool(attachment["requirements"].get("requires_seal"))
         if not requires_seal:
-            return {"status": "not_required", "detected": False, "matched": None, "seal_texts": [], "best_match": None}
+            return {"status": "not_required", "reason_code": "seal_not_required", "detected": False, "matched": None, "seal_texts": [], "best_match": None}
         if bid_section is None:
-            return {"status": "missing", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
+            return {"status": "pending", "reason_code": "attachment_not_located", "detected": False, "matched": False, "seal_texts": [], "best_match": None}
         bid_section = self._scoped_bid_section_for_checks(bid_section) or bid_section
         raw_seal_texts = list(dict.fromkeys(str(x).strip() for x in (bid_section.get("seal_texts") or []) if str(x).strip()))
         seal_texts = self._official_seal_texts(raw_seal_texts, bidder_name)
         seal_locations = self._dedupe_locations(bid_section.get("seal_locations") or [])
         textual_seals = self._textual_seal_evidences(bid_section, bidder_name)
-        detected = bool(raw_seal_texts or seal_locations)
+        # Preserve the OCR detector's presence signal even when its coordinates
+        # are missing.  Coordinates remain mandatory for a passing result.
+        seal_located = bool(seal_locations)
+        detected = seal_located or bool(raw_seal_texts)
         matched = False
         best_match = None
         best_match_score = None
@@ -1727,7 +2097,20 @@ class VerificationChecker:
                 )
             )
         return {
-            "status": "pass" if detected and matched else "pending",
+            "status": "pass" if seal_located and matched else "pending",
+            "reason_code": (
+                "seal_company_match_confirmed"
+                if seal_located and matched
+                else "seal_coordinates_missing"
+                if raw_seal_texts and not seal_locations
+                else "seal_not_detected"
+                if not detected
+                else "bidder_name_not_resolved"
+                if not bidder_name
+                else "seal_text_unparsed"
+                if not seal_texts
+                else "seal_company_match_unclear"
+            ),
             "presence": "detected" if detected else "unknown",
             "text_status": "parsed" if seal_texts else "unparsed",
             "detected": detected,
@@ -1747,32 +2130,22 @@ class VerificationChecker:
         deadline_page = deadline.get("page") if isinstance(deadline, dict) else None
         requires_date = bool(attachment["requirements"].get("requires_date"))
         if not requires_date:
-            return {"status": "not_required", "sign_date": None, "deadline_date": deadline_date_iso, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline_text, "matched_deadline_page": deadline_page, "deadline_locations": deadline_locations}
+            return {"status": "not_required", "reason_code": "date_not_required", "sign_date": None, "deadline_date": deadline_date_iso, "matched_sign_text": None, "matched_sign_page": None, "matched_sign_bbox": None, "matched_deadline_text": deadline_text, "matched_deadline_page": deadline_page, "deadline_locations": deadline_locations}
         if bid_section is None:
-            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline_date_iso, "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline_text, "matched_deadline_page": deadline_page, "deadline_locations": deadline_locations}
+            return {"status": "pending", "reason_code": "attachment_not_located", "sign_date": None, "deadline_date": deadline_date_iso, "matched_sign_text": None, "matched_sign_page": None, "matched_sign_bbox": None, "matched_deadline_text": deadline_text, "matched_deadline_page": deadline_page, "deadline_locations": deadline_locations}
         bid_section = self._scoped_bid_section_for_checks(bid_section) or bid_section
         section_text = bid_section.get("text") or ""
         section_nodes = bid_section.get("sections") or []
-        all_dates = self._section_date_candidates(section_text, section_nodes)
-        distinct_dates = {candidate["date"] for candidate in all_dates}
-        if len(distinct_dates) == 1:
-            # 附件范围内只有一个唯一日期时，不再要求“日期”字段或签章上下文。
-            # 优先沿用严格规则的定位信息；严格规则未命中时使用唯一候选。
-            sign_date = self._section_date(section_text, section_nodes) or all_dates[0]
-            date_match_method = "single_date_fallback"
-        elif len(distinct_dates) > 1:
-            # 多个不同日期仍按原规则定位落款日期，避免把成立、合同、打印等日期混入。
-            sign_date = self._section_date(section_text, section_nodes)
-            date_match_method = "contextual_date"
-        else:
-            sign_date = None
-            date_match_method = None
+        sign_date = self._section_date(section_text, section_nodes)
+        date_match_method = "contextual_date" if sign_date else None
         if deadline is None:
-            return {"status": "missing_deadline", "sign_date": sign_date["date"].isoformat() if sign_date else None, "deadline_date": None, "matched_sign_text": sign_date["text"] if sign_date else None, "matched_sign_page": sign_date.get("page") if sign_date else None, "matched_deadline_text": None, "matched_deadline_page": None, "deadline_locations": [], "match_method": date_match_method}
+            return {"status": "missing_deadline", "reason_code": "deadline_not_resolved", "sign_date": sign_date["date"].isoformat() if sign_date else None, "deadline_date": None, "matched_sign_text": sign_date["text"] if sign_date else None, "matched_sign_page": sign_date.get("page") if sign_date else None, "matched_sign_bbox": sign_date.get("bbox") if sign_date else None, "matched_deadline_text": None, "matched_deadline_page": None, "deadline_locations": [], "match_method": date_match_method}
         if sign_date is None:
-            return {"status": "missing_date", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_sign_page": None, "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations}
+            return {"status": "pending", "reason_code": "sign_date_not_reliably_located", "sign_date": None, "deadline_date": deadline["date"].isoformat(), "matched_sign_text": None, "matched_sign_page": None, "matched_sign_bbox": None, "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations}
+        if sign_date.get('page') is None or sign_date.get('bbox') is None:
+            return {"status": "pending", "reason_code": "sign_date_coordinates_missing", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_sign_bbox": sign_date.get("bbox"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations, "match_method": date_match_method}
         ok = sign_date["date"] <= deadline["date"]
-        return {"status": "pass" if ok else "late", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations, "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days, "match_method": date_match_method}
+        return {"status": "pass" if ok else "late", "reason_code": "date_within_deadline" if ok else "date_after_deadline", "sign_date": sign_date["date"].isoformat(), "deadline_date": deadline["date"].isoformat(), "matched_sign_text": sign_date["text"], "matched_sign_page": sign_date.get("page"), "matched_sign_bbox": sign_date.get("bbox"), "matched_deadline_text": deadline["text"], "matched_deadline_page": deadline.get("page"), "deadline_locations": deadline_locations, "is_before_deadline": ok, "days_gap": (deadline["date"] - sign_date["date"]).days, "match_method": date_match_method}
 
     def _section_date_candidates(
         self,
@@ -1808,10 +2181,7 @@ class VerificationChecker:
         for i, line in enumerate(lines):
             if self._is_blocked_sign_date_context(line):
                 continue
-            if not (
-                self._is_date_requirement_line(line)
-                or self._is_ocr_damaged_date_field_line(line)
-            ):
+            if not self._is_date_requirement_line(line):
                 continue
             line_items = self._date_candidates(line)
             items.extend(line_items)
@@ -1819,11 +2189,32 @@ class VerificationChecker:
                 items.extend(self._date_candidates(lines[i + 1]))
         if items:
             best = max(items, key=lambda x: x["date"])
-            for section in sections or []:
+            located_matches: list[tuple[int, int, dict]] = []
+            for index, section in enumerate(sections or []):
                 section_text = str(section.get("text") or "").strip()
                 if best.get("text") and best["text"] in section_text:
                     page = section.get("page") if isinstance(section.get("page"), int) else None
-                    return {**best, "page": page}
+                    return {**best, "page": page, "bbox": self._layout_box_xywh(section)}
+                # Structured OCR may insert markup between year/month/day, for
+                # example ``\underline{2026}年\underline{9}月...``.  The date
+                # parser intentionally normalizes that to ``2026年9月14日``, so
+                # a literal substring lookup cannot map it back to its source
+                # section.  Match the parsed calendar value as a fallback and
+                # prefer an explicit date field over unrelated occurrences of
+                # the same date inside the attachment.
+                if not any(
+                    candidate["date"] == best["date"]
+                    for candidate in self._date_candidates(section_text)
+                ):
+                    continue
+                score = 2 if self._is_date_requirement_line(section_text) else 0
+                if self._is_pure_date_line(section_text):
+                    score += 1
+                located_matches.append((score, -index, section))
+            if located_matches:
+                _, _, section = max(located_matches, key=lambda item: (item[0], item[1]))
+                page = section.get("page") if isinstance(section.get("page"), int) else None
+                return {**best, "page": page, "bbox": self._layout_box_xywh(section)}
             return best
 
         fallback_items = []
@@ -1836,7 +2227,7 @@ class VerificationChecker:
                 continue
             if any(anchor in compact for anchor in self.DATE_FIELD_ANCHORS):
                 for candidate in self._date_candidates(section_text):
-                    fallback_items.append({**candidate, "page": section.get("page") if isinstance(section.get("page"), int) else None})
+                    fallback_items.append({**candidate, "page": section.get("page") if isinstance(section.get("page"), int) else None, "bbox": self._layout_box_xywh(section)})
         if fallback_items:
             return max(fallback_items, key=lambda x: x["date"])
 
@@ -1872,7 +2263,7 @@ class VerificationChecker:
             if not nearby_context:
                 continue
             for candidate in self._date_candidates(section_text):
-                pure_date_items.append({**candidate, "page": current_page})
+                pure_date_items.append({**candidate, "page": current_page, "bbox": self._layout_box_xywh(section)})
         if pure_date_items:
             return max(pure_date_items, key=lambda x: x["date"])
 

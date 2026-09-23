@@ -8,7 +8,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-VERSION = "underline-spans-v2"
+from .exact_template import is_explicit_slot_content
+
+VERSION = "underline-spans-v4"
 EVIDENCE_KEY = "_template_underline_evidence"
 
 
@@ -27,7 +29,12 @@ def _brace_end(text: str, start: int) -> int | None:
 
 
 def markup_spans(text: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse balanced LaTeX/HTML underline markup, including nested commands."""
+    """Parse only template-declared fillable underline markup.
+
+    Underlining ordinary text is emphasis, not permission to replace it.  This
+    function is used for tender projection only; bid-authored underlines never
+    expand the allowed range.
+    """
     spans: list[dict[str, Any]] = []
     issues: list[str] = []
     cursor = 0
@@ -46,8 +53,16 @@ def markup_spans(text: str) -> tuple[list[dict[str, Any]], list[str]]:
             issues.append("下划线标记未闭合，无法确定排除范围")
             cursor = match.end()
             continue
-        spans.append({"start": match.start(), "end": end, "text": text[match.start():end],
-                      "source": "ocr_underline_markup"})
+        raw = text[match.start():end]
+        if raw.lstrip().startswith("\\"):
+            content = raw[raw.find("{") + 1:-1]
+            content = re.sub(r"^\s*\\text\s*\{(.*)\}\s*$", r"\1", content, flags=re.S)
+        else:
+            content = re.sub(r"^<u(?:\s[^>]*)?>|</u>$", "", raw, flags=re.I)
+        if is_explicit_slot_content(content):
+            spans.append({"start": match.start(), "end": end, "text": raw,
+                          "slot_label": content.strip(),
+                          "source": "template_underline_prompt"})
         cursor = end
     # Empty literal underline glyphs contain no semantic value.
     spans.extend({"start": m.start(), "end": m.end(), "text": m.group(),
@@ -106,7 +121,11 @@ def project_text(text: Any, *, evidence: dict | None = None, pages: list[int] | 
         if key in seen:
             continue
         seen.add(key)
-        target, _ = compact_offsets(str(span.get("text") or ""))
+        physical_text = str(span.get("text") or "")
+        if physical_text and not is_explicit_slot_content(physical_text):
+            # A physical line under ordinary prose is emphasis and remains fixed.
+            continue
+        target, _ = compact_offsets(physical_text)
         if not target:
             continue
         starts = [m.start() for m in re.finditer(re.escape(target), compact)]

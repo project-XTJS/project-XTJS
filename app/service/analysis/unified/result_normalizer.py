@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -225,9 +226,13 @@ class ResultNormalizerMixin:
             if isinstance(raw, dict) and isinstance(raw.get('extracted_item_count'), int)
             else len(details)
         )
-        if raw.get('scope_status') == 'unclear' and extracted_item_count > 0:
-            unclear.append(self._issue(status='unclear', title='商务材料组成范围待确认', message='未能确定完整的商务材料组成范围，已识别材料继续检查。', evidence={'template_locations': self._locations_with_document_role(raw.get('scope_locations') or [], 'tender')}))
-        extraction_failed = extracted_item_count == 0
+        all_items_excluded = bool(raw.get('all_items_excluded'))
+        excluded_optional_items = [
+            str(item).strip()
+            for item in raw.get('excluded_optional_items') or []
+            if str(item).strip()
+        ]
+        extraction_failed = extracted_item_count == 0 and not all_items_excluded
         no_applicable_items = bool(
             extracted_item_count > 0
             and actual_check_count == 0
@@ -255,29 +260,29 @@ class ResultNormalizerMixin:
                     },
                 )
             )
-        review_status = (
-            'not_applicable'
-            if no_applicable_items
-            else self._combine_review_status([issue['status'] for issue in passed + failed + missing + unclear])
-        )
+        not_applicable = []
+        review_status = self._combine_review_status([
+            issue['status'] for issue in passed + failed + missing + unclear + not_applicable
+        ])
         # 摘要使用“已命中/总数”的口径，避免直接使用“缺失 X 项”的表述。
         if extraction_failed:
             summary = '未建立完整性检查项，请复核招标文件商务材料组成提取结果。'
+        elif all_items_excluded:
+            summary = '招标文件中的商务材料均为可选项，已从完整性审查范围排除。'
         elif no_applicable_items:
-            summary = '本次无必检项；已提取的材料均为明确可选且未提供，不计通过或失败。'
+            summary = '该项不适用：本次无必检项，已提取的材料均为明确可选且未提供。'
         else:
             summary = f"共提取 {extracted_item_count} 项，实际校验 {actual_check_count} 项，已命中 {len(passed)}/{actual_check_count} 项"
             if score is not None:
                 summary += f"，完整性得分 {score}"
             summary += "。"
-        if optional_skipped:
-            summary += f" 另有 {len(optional_skipped)} 个可选材料未提供／未定位，不计通过或计分：" + '、'.join(optional_skipped) + '。'
+        excluded_names = list(dict.fromkeys([*excluded_optional_items, *optional_skipped]))
+        if excluded_names and not all_items_excluded:
+            summary += f" 另有 {len(excluded_names)} 个可选材料已从审查范围排除：" + '、'.join(excluded_names) + '。'
         if ignored_count > len(optional_skipped):
             summary += f" 另有 {ignored_count - len(optional_skipped)} 个条目不单独计分。"
         if applicability_unclear:
             summary += f' 另有 {len(applicability_unclear)} 项适用条件待确认。'
-        if raw.get('scope_status') == 'unclear' and not extraction_failed:
-            summary += ' 商务材料组成范围待确认。'
         return {
             "validation": {
                 "status": "unclear" if extraction_failed else ("correct" if isinstance(details, dict) else "failed"),
@@ -301,7 +306,8 @@ class ResultNormalizerMixin:
                 "failed_item_count": len(failed),
                 "missing_item_count": len(missing),
                 "ignored_item_count": ignored_count,
-                "skipped_optional_item_count": len(optional_skipped),
+                "skipped_optional_item_count": len(excluded_names),
+                "excluded_optional_item_count": len(excluded_names),
                 "applicability_unclear_count": len(applicability_unclear),
                 "unclear_item_count": len(unclear),
             },
@@ -310,6 +316,7 @@ class ResultNormalizerMixin:
                 "failed": failed,
                 "missing": missing,
                 "unclear": unclear,
+                "not_applicable": not_applicable,
             },
         }
 
@@ -329,14 +336,25 @@ class ResultNormalizerMixin:
             if isinstance(raw, dict)
             else ''
         ).strip()
+        all_items_excluded = bool(
+            isinstance(raw, dict) and raw.get('all_items_excluded')
+        )
+        excluded_optional_items = [
+            str(item).strip()
+            for item in ((raw.get('excluded_optional_items') or []) if isinstance(raw, dict) else [])
+            if str(item).strip()
+        ]
         passed = []
         failed = []
         missing_items = []
         unclear_items = []
+        not_applicable_items = []
         short_body_skipped = 0
         attachment_not_found_skipped = 0
         integrity_skipped = 0
         self_defined_skipped = 0
+        fixed_item_counts = {"pass": 0, "fail": 0, "unclear": 0, "not_applicable": 0}
+        unclear_reason_counts: dict[str, int] = {}
 
         for skipped in skipped_segments:
             skip_reason = skipped.get("skip_reason") or {}
@@ -349,6 +367,26 @@ class ResultNormalizerMixin:
                 self_defined_skipped += 1
             else:
                 integrity_skipped += 1
+            if skip_type in {
+                "self_defined_format",
+                "alternative_not_provided",
+                "integrity_attachment_missing",
+            }:
+                not_applicable_items.append(
+                    self._issue(
+                        status="not_applicable",
+                        title=str(skipped.get("name") or "不适用模板附件"),
+                        message="该项不适用：" + str(skip_reason.get("reason") or "该附件有明确依据不适用本次一致性比对。"),
+                        evidence={
+                            "skip_reason": skip_reason,
+                            "engine_version": skipped.get("engine_version"),
+                            "template_locations": self._locations_with_document_role(
+                                skipped.get("template_locations") or [],
+                                "tender",
+                            ),
+                        },
+                    )
+                )
 
         skip_types = {
             str((item.get('skip_reason') or {}).get('type') or '')
@@ -361,6 +399,9 @@ class ResultNormalizerMixin:
             'alternative_not_provided',
             'integrity_attachment_missing',
         })
+        all_optional_templates_excluded = bool(skipped_segments) and not segments and skip_types == {
+            'optional_attachment_not_provided'
+        }
 
         for segment in segments:
             title = str(segment.get("name") or "未命名模板段")
@@ -407,6 +448,9 @@ class ResultNormalizerMixin:
                 "element_results": segment.get("element_results") or [],
                 "difference_category": segment.get("difference_category"),
                 "difference_items": segment.get("difference_items") or [],
+                "coverage": segment.get("coverage") or {},
+                "unclear_reasons": segment.get("unclear_reasons") or [],
+                "unresolved_ranges": segment.get("unresolved_ranges") or [],
                 "is_optional": bool(segment.get('is_optional')),
                 "optionality_conflict": bool(segment.get('optionality_conflict')),
                 "optionality_locations": self._locations_with_document_role(segment.get('optionality_locations') or [], 'tender'),
@@ -417,8 +461,26 @@ class ResultNormalizerMixin:
                     'tender',
                 ),
             }
+            item_counts = (segment.get("coverage") or {}).get("item_status_counts") or {}
+            if not item_counts:
+                item_counts = {
+                    status: sum(
+                        str(item.get("status") or "").lower() == status
+                        for item in segment.get("element_results") or []
+                        if item.get("required", True) and item.get("enabled", True)
+                    )
+                    for status in fixed_item_counts
+                }
+            for status in fixed_item_counts:
+                fixed_item_counts[status] += int(item_counts.get(status) or 0)
+            for reason in segment.get("unclear_reasons") or []:
+                code = str(reason.get("code") or "unknown")
+                unclear_reason_counts[code] = (
+                    unclear_reason_counts.get(code, 0)
+                    + int(reason.get("affected_item_count") or 1)
+                )
             segment_status = str(segment.get("status") or "").strip().lower()
-            if segment_status not in {"pass", "missing", "unclear", "skipped"}:
+            if segment_status not in {"pass", "fail", "missing", "unclear", "not_applicable", "skipped"}:
                 segment_status = (
                     "pass"
                     if segment.get("is_passed")
@@ -433,19 +495,27 @@ class ResultNormalizerMixin:
                         evidence=evidence,
                     )
                 )
-            elif segment_status == "missing":
+            elif segment_status in {"fail", "missing"}:
                 parts = []
                 if missing:
                     parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
-                issue_status = "missing"
+                difference_count = len(segment.get("difference_items") or [])
+                if difference_count:
+                    parts.append(f"发现 {difference_count} 处固定内容逐字差异")
+                issue_status = "fail" if segment_status == "fail" else "missing"
                 issue = self._issue(
                     status=issue_status,
                     title=title,
                     message="；".join(parts) or "模板正文固定内容疑似被修改。",
                     evidence=evidence,
                 )
-                missing_items.append(issue)
+                (failed if segment_status == "fail" else missing_items).append(issue)
             elif segment_status == "unclear":
+                reason_messages = [
+                    str(reason.get("message") or "").strip()
+                    for reason in segment.get("unclear_reasons") or []
+                    if str(reason.get("message") or "").strip()
+                ]
                 unclear_items.append(
                     self._issue(
                         status="unclear",
@@ -456,13 +526,24 @@ class ResultNormalizerMixin:
                                  if segment.get('applicability_status') == 'unclear'
                                  else "存在多个附件候选，对应附件待确认。" if segment.get('location_status') == 'ambiguous'
                                  else "未定位到对应投标内容，需要人工复核。" if segment.get('location_status') == 'not_found'
+                                 else "；".join(reason_messages[:3])
+                                 if reason_messages
                                  else "模板骨架存在疑似改写或对齐不确定项，需要人工复核。"),
+                        evidence=evidence,
+                    )
+                )
+            elif segment_status in {"not_applicable", "skipped"}:
+                not_applicable_items.append(
+                    self._issue(
+                        status="not_applicable",
+                        title=title,
+                        message="该项不适用：该模板段按适用性规则跳过。",
                         evidence=evidence,
                     )
                 )
 
         has_results = bool(segments or skipped_segments)
-        if not has_results:
+        if not has_results and not all_items_excluded:
             unclear_items.append(
                 self._issue(
                     status='unclear',
@@ -486,7 +567,10 @@ class ResultNormalizerMixin:
                     evidence={'skip_types': sorted(skip_types)},
                 )
             )
-        if skipped_segments:
+        if all_items_excluded or all_optional_templates_excluded:
+            validation_status = "correct"
+            validation_reason = "可选材料已在建立模板比对段前从审查范围排除。"
+        elif skipped_segments:
             validation_status = "correct"
             validation_reason = "模块返回了逐模板段的一致性结果，并已跳过正文过短或完整性缺失的附件。"
         else:
@@ -497,31 +581,45 @@ class ResultNormalizerMixin:
                 else extraction_reason or "未提取到可比较的模板段，需人工复核模板抽取是否成功。"
             )
 
-        if all_templates_explicitly_skipped:
+        if all_items_excluded or all_optional_templates_excluded:
+            review_status = 'pass'
+        elif all_templates_explicitly_skipped:
             review_status = 'not_applicable'
         elif has_results:
             review_status = self._combine_review_status(
                 [
                     issue["status"]
-                    for issue in passed + failed + missing_items + unclear_items
+                    for issue in passed + failed + missing_items + unclear_items + not_applicable_items
                 ]
             )
         else:
             review_status = "unclear"
 
-        if all_templates_explicitly_skipped:
+        if all_items_excluded or all_optional_templates_excluded:
+            total_segments = 0
+            summary = (
+                f"{len(excluded_optional_items) or len(skipped_segments)} 个可选材料已从模板一致性审查范围排除。"
+            )
+        elif all_templates_explicitly_skipped:
             total_segments = original_segment_count or len(skipped_segments)
-            summary = f"共提取 {total_segments} 个模板段，均按明确规则跳过，本次无模板正文需要比对。"
+            summary = f"该项不适用：共提取 {total_segments} 个模板段，均按明确适用性规则跳过。"
         elif has_results:
             total_segments = original_segment_count or (len(segments) + len(skipped_segments))
             # 一致性摘要统一改成“已通过/已校验”的数量表达。
             summary = (
                 f"共比对 {total_segments} 个模板段，实际校验 {len(segments)} 个，"
-                f"已通过 {len(passed)}/{len(segments)} 个；"
+                f"一致 {len(passed)} 个，不一致 {len(failed) + len(missing_items)} 个，"
+                f"待核验 {len(unclear_items)} 个，不适用 {len(not_applicable_items)} 个；"
                 f"正文不足20字跳过 {short_body_skipped} 个，"
                 f"格式自拟跳过 {self_defined_skipped} 个，"
                 f"附件未稳定定位跳过 {attachment_not_found_skipped} 个，"
                 f"因完整性结果跳过 {integrity_skipped} 个。"
+            )
+            summary += (
+                f" 固定内容项一致 {fixed_item_counts['pass']} 项，"
+                f"不一致 {fixed_item_counts['fail']} 项，"
+                f"待核验 {fixed_item_counts['unclear']} 项，"
+                f"不适用 {fixed_item_counts['not_applicable']} 项。"
             )
         else:
             summary = extraction_reason or "未提取到可比较的模板段。"
@@ -541,6 +639,14 @@ class ResultNormalizerMixin:
                 "failed_segment_count": len(failed),
                 "missing_segment_count": len(missing_items),
                 "unclear_segment_count": len(unclear_items),
+                "not_applicable_segment_count": len(not_applicable_items),
+                "fixed_item_count": sum(fixed_item_counts.values()),
+                "passed_fixed_item_count": fixed_item_counts["pass"],
+                "failed_fixed_item_count": fixed_item_counts["fail"],
+                "unclear_fixed_item_count": fixed_item_counts["unclear"],
+                "not_applicable_fixed_item_count": fixed_item_counts["not_applicable"],
+                "excluded_optional_item_count": len(excluded_optional_items),
+                "unclear_reason_counts": unclear_reason_counts,
                 "fillable_field_count": 0,
                 "unfilled_field_count": 0,
             },
@@ -549,6 +655,7 @@ class ResultNormalizerMixin:
                 "failed": failed,
                 "missing": missing_items,
                 "unclear": unclear_items,
+                "not_applicable": not_applicable_items,
             },
         }
 
@@ -606,8 +713,11 @@ class ResultNormalizerMixin:
             if subcheck_code == "price_reasonableness" and payload.get("quote_mode") == "rate":
                 label = "费率是否符合招标规则"
             summary_text = self._join_text(payload.get("summary"))
-            status = payload.get("status") if payload.get("status") in {"pass", "fail", "missing", "unclear", "not_applicable"} else self._map_price_result(payload.get("result"), summary_text)
+            raw_subcheck_status = payload.get("status")
+            status = self._map_generic_status(raw_subcheck_status) if raw_subcheck_status in {"pass", "fail", "missing", "unclear", "not_applicable", "skipped", "optional"} else self._map_price_result(payload.get("result"), summary_text)
             message = summary_text or "未返回明确结论。"
+            if str(raw_subcheck_status or "").strip().lower() in {"not_applicable", "skipped", "optional"}:
+                message = "该项不适用：" + message
             message_parts.append(f"{label}：{message}")
 
             subcheck_locations = [
@@ -660,9 +770,7 @@ class ResultNormalizerMixin:
 
         business_pages = positive_pages(business_pages)
         tender_pages = positive_pages(tender_pages)
-        review_status = self._combine_review_status(
-            [subcheck["status"] for subcheck in subchecks if subcheck["status"] != "not_applicable"]
-        )
+        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks])
         issue_evidence: dict[str, Any] = {
             "subcheck_code": "pricing_reasonableness",
             "self_check": self_check,
@@ -710,7 +818,7 @@ class ResultNormalizerMixin:
                 "summary": issue["message"],
             },
             "metrics": {
-                "not_applicable_subcheck_count": sum(1 for subcheck in subchecks if subcheck["status"] == "not_applicable"),
+                "not_applicable_subcheck_count": 0,
                 "passed_subcheck_count": status_counts["pass"],
                 "failed_subcheck_count": status_counts["fail"],
                 "missing_subcheck_count": status_counts["missing"],
@@ -863,12 +971,11 @@ class ResultNormalizerMixin:
             if not isinstance(payload, dict) or not payload:
                 continue
             sub_status = str(payload.get("status") or "").strip().lower()
-            if sub_status == "not_applicable":
-                continue
-
             normalized_status = self._map_generic_status(sub_status)
             label = subcheck_labels.get(subcheck_code, subcheck_code)
             message = self._summarize_itemized_subcheck(subcheck_code, payload)
+            if sub_status in {"not_applicable", "skipped", "optional"}:
+                message = "该项不适用：" + message
             evidence = dict(payload)
             if not evidence.get("locations"):
                 locations = itemized_locations_for_subcheck(subcheck_code, evidence)
@@ -928,7 +1035,7 @@ class ResultNormalizerMixin:
         if itemized_evidence.get("total_candidates"):
             issue_evidence["total_candidates"] = itemized_evidence.get("total_candidates")
 
-        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks if subcheck["status"] != "not_applicable"])
+        review_status = self._combine_review_status([subcheck["status"] for subcheck in subchecks])
         message_parts = [
             f"{subcheck['label']}：{subcheck['message']}"
             for subcheck in subchecks
@@ -990,7 +1097,6 @@ class ResultNormalizerMixin:
         failed: list[dict[str, Any]] = []
         missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
-
         no_star_requirements = raw.get("deviation_status") == "no_star_requirements"
 
         for item in missing_items:
@@ -1185,7 +1291,11 @@ class ResultNormalizerMixin:
         if isinstance(item.get('found'), bool):
             evidence['bid_content_found'] = item['found']
 
-        for key in ("pages", "locations", "attachment_number", "matched_bid_title", "template_locations"):
+        for key in (
+            "pages", "locations", "attachment_number", "matched_bid_title", "template_locations",
+            "applicability_status", "applicability_reason_code", "applicability_evidence",
+            "verification_rule_version",
+        ):
             value = item.get(key)
             if value not in (None, "", []):
                 evidence[key] = (
@@ -1229,7 +1339,7 @@ class ResultNormalizerMixin:
         failed: list[dict[str, Any]] = []
         missing: list[dict[str, Any]] = []
         unclear: list[dict[str, Any]] = []
-
+        not_applicable: list[dict[str, Any]] = []
         missing_attachments = position_check.get("missing_attachments") or []
         missing_signature = position_check.get("missing_signature_attachments") or []
         pending_signature = position_check.get("pending_signature_attachments") or []
@@ -1237,8 +1347,35 @@ class ResultNormalizerMixin:
         missing_date = date_check.get("missing_date_attachments") or []
         late_date = date_check.get("late_date_attachments") or []
         attachment_lookup = self._verification_attachment_lookup(raw)
-        attachment_results = [item for item in (raw.get("attachment_results") or []) if isinstance(item, dict)]
-        handled_attachment_titles: set[str] = set()
+        attachment_results_by_key: dict[str, dict[str, Any]] = {}
+
+        def attachment_key(value: Any) -> str:
+            if isinstance(value, dict):
+                number = str(value.get('attachment_number') or '').strip()
+                title_value = str(value.get('title') or value.get('matched_bid_title') or '').strip()
+            else:
+                number = ''
+                title_value = str(value or '').strip()
+            if not number:
+                matched = re.search(r'(?:附件|附表)\s*(\d+(?:\s*[-－–—]\s*\d+)*)', title_value)
+                number = re.sub(r'\s*[－–—]\s*', '-', matched.group(1)) if matched else ''
+            if number:
+                return 'number:' + number
+            normalized = re.sub(r'[\s：:；;，,。()（）【】\[\]]+', '', title_value)
+            normalized = re.sub(r'^(?:附件|附表)', '', normalized)
+            return 'title:' + normalized
+
+        # Legacy payloads can place the same attachment in both arrays.  Keep
+        # one effective row, preferring the normal attachment result because it
+        # carries the component-level evidence.
+        for item in raw.get("missing_attachment_results") or []:
+            if isinstance(item, dict):
+                attachment_results_by_key[attachment_key(item)] = item
+        for item in raw.get("attachment_results") or []:
+            if isinstance(item, dict):
+                attachment_results_by_key[attachment_key(item)] = item
+        attachment_results = list(attachment_results_by_key.values())
+        handled_attachment_keys: set[str] = set()
 
         def status_of(value: Any) -> str:
             return str(value or "").strip().lower()
@@ -1253,6 +1390,12 @@ class ResultNormalizerMixin:
         def effective_attachment_status(item: dict[str, Any]) -> str:
             if (item.get('requirements') or {}).get('optionality_conflict'):
                 return 'pending'
+            if (
+                status_of(item.get('status')) in {'not_applicable', 'skipped', 'optional'}
+                or item.get('applicability_status') == 'not_applicable'
+                or (item.get('requirements') or {}).get('applicability_status') == 'not_applicable'
+            ):
+                return 'not_applicable'
             if (item.get('requirements') or {}).get('applicability_status') == 'unclear' and item.get('found') is None:
                 return 'pending'
             status = status_of(item.get("status"))
@@ -1278,8 +1421,19 @@ class ResultNormalizerMixin:
 
         def attachment_status_details(item: dict[str, Any]) -> list[str]:
             details: list[str] = []
+            if (
+                status_of(item.get('status')) in {'not_applicable', 'skipped', 'optional'}
+                or
+                item.get('applicability_status') == 'not_applicable'
+                or (item.get('requirements') or {}).get('applicability_status') == 'not_applicable'
+            ):
+                evidence = item.get('applicability_evidence') or {}
+                reason = str(evidence.get('text') or evidence.get('reason') or item.get('message') or '当前材料不适用该检查').strip()
+                return [reason if reason.startswith('该项不适用') else '该项不适用：' + reason]
             if item.get('location_status') == 'ambiguous':
                 return ['存在多个附件候选，对应附件待确认']
+            if item.get('location_status') == 'not_found':
+                return ['未定位到对应附件，签字、盖章及日期待人工复核']
             if (item.get('requirements') or {}).get('optionality_conflict'):
                 details.append('招标的必交与可选声明冲突')
             if (item.get('requirements') or {}).get('applicability_status') == 'unclear':
@@ -1295,7 +1449,7 @@ class ResultNormalizerMixin:
             title = attachment_title(item)
             if not title:
                 continue
-            handled_attachment_titles.add(title)
+            handled_attachment_keys.add(attachment_key(item))
             status = effective_attachment_status(item)
             evidence = self._verification_attachment_evidence(
                 title,
@@ -1326,7 +1480,11 @@ class ResultNormalizerMixin:
                     self._issue(
                         status="unclear",
                         title=title,
-                        message="附件签字盖章日期要求待复核：" + ("；".join(details) if details else "存在待确认项") + "。",
+                        message=(
+                            "未定位到对应附件，签字、盖章及日期待人工复核。"
+                            if item.get('location_status') == 'not_found'
+                            else "附件签字盖章日期要求待复核：" + ("；".join(details) if details else "存在待确认项") + "。"
+                        ),
                         evidence=evidence,
                     )
                 )
@@ -1339,7 +1497,15 @@ class ResultNormalizerMixin:
                         evidence=evidence,
                     )
                 )
-
+            elif status in {"not_applicable", "skipped", "optional"}:
+                not_applicable.append(
+                    self._issue(
+                        status="not_applicable",
+                        title=title,
+                        message="；".join(details) or "该项不适用。",
+                        evidence=evidence,
+                    )
+                )
         seal_company_status = status_of(seal_company_check.get("status"))
         if seal_company_status == "fail":
             failed.append(
@@ -1347,7 +1513,7 @@ class ResultNormalizerMixin:
             )
 
         for attachment in missing_attachments:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             missing.append(
                 self._issue(
@@ -1362,7 +1528,7 @@ class ResultNormalizerMixin:
                 )
             )
         for attachment in missing_signature:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             missing.append(
                 self._issue(
@@ -1377,7 +1543,7 @@ class ResultNormalizerMixin:
                 )
             )
         for attachment in missing_seal:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             missing.append(
                 self._issue(
@@ -1393,7 +1559,7 @@ class ResultNormalizerMixin:
             )
 
         for attachment in pending_signature:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             unclear.append(
                 self._issue(
@@ -1409,7 +1575,7 @@ class ResultNormalizerMixin:
             )
 
         for attachment in missing_date:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             missing.append(
                 self._issue(
@@ -1424,7 +1590,7 @@ class ResultNormalizerMixin:
                 )
             )
         for attachment in late_date:
-            if str(attachment or "").strip() in handled_attachment_titles:
+            if attachment_key(attachment) in handled_attachment_keys:
                 continue
             failed.append(
                 self._issue(
@@ -1449,7 +1615,7 @@ class ResultNormalizerMixin:
                 else " 公章单位匹配需进一步确认。"
             )
 
-        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear]
+        issue_statuses = [issue["status"] for issue in passed + failed + missing + unclear + not_applicable]
         review_status = self._combine_review_status(issue_statuses) if issue_statuses else compliance_status
 
         return {
@@ -1465,5 +1631,5 @@ class ResultNormalizerMixin:
                 "missing_date_count": len(missing_date),
                 "late_date_count": len(late_date),
             },
-            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear},
+            "issues": {"passed": passed, "failed": failed, "missing": missing, "unclear": unclear, "not_applicable": not_applicable},
         }

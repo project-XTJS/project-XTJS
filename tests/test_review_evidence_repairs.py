@@ -3,11 +3,14 @@ import unittest
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
+from unittest.mock import Mock
 
 from app.service.analysis.verification import VerificationChecker
 from app.service.analysis.compliance.consistency import ConsistencyChecker
 from app.service.analysis.compliance.structured_consistency import StructuredConsistencyEngine
 from app.service.analysis.itemized import ItemizedPricingChecker
+from app.service.analysis.manual_review.business_bid_format import _recompute_manual_verification
+from app.service.analysis.unified import UnifiedBusinessReviewService
 
 
 def block(text, page=1, kind='text', bbox=None):
@@ -17,6 +20,164 @@ def block(text, page=1, kind='text', bbox=None):
 class ReviewEvidenceRepairs(unittest.TestCase):
     def setUp(self):
         self.v = VerificationChecker(None)
+
+    def _signature_seal_fixture(self, *, include_attachment_title=False):
+        tender = {'layout_sections': [
+            block('响应截止时间：2026年09月09日', 1),
+            block('一、投标文件的组成', 1, 'heading'),
+            block('（一）商务标文件\n1. 授权委托书（格式参见本章附件1）\n（二）技术标文件', 1),
+            block('第五章 投标文件格式', 2, 'heading'),
+            block('一、商务标', 2, 'heading'),
+            block('附件1 授权委托书（格式）\n法定代表人签字：\n投标人名称（盖章）：\n日期：', 3, 'heading'),
+        ]}
+        bid_sections = [block('投标人：上海测试有限公司', 1, bbox=[10, 20, 300, 40])]
+        if include_attachment_title:
+            bid_sections.append(block('附件1 授权委托书', 5, 'heading', [10, 50, 300, 70]))
+        bid_sections.extend([
+            block('法定代表人签字：张三', 5, bbox=[70, 500, 350, 520]),
+            block('张三', 5, 'signature', [360, 500, 390, 520]),
+            block('上海测试有限公司', 5, 'seal', [300, 550, 450, 680]),
+            block('日期：2026年09月08日', 5, bbox=[380, 700, 530, 720]),
+        ])
+        return self.v.check_seal_and_date(tender, {'layout_sections': bid_sections})
+
+    def test_unlocated_attachment_signature_and_seal_are_pending(self):
+        raw = self._signature_seal_fixture()
+        self.assertTrue(raw['signature_detected'])
+        self.assertTrue(raw['seal_detected'])
+        self.assertFalse(raw['missing_attachment_results'])
+        self.assertFalse(raw['skipped_missing_attachments'])
+        attachment = raw['attachment_results'][0]
+        self.assertIsNone(attachment['found'])
+        self.assertEqual(attachment['location_status'], 'not_found')
+        self.assertEqual(attachment['status'], 'unclear')
+        for key in ('signature_check', 'seal_check', 'date_check'):
+            self.assertEqual(attachment[key]['status'], 'pending')
+
+        normalized = UnifiedBusinessReviewService()._normalize_verification(raw)
+        self.assertFalse(normalized['issues']['missing'])
+        self.assertEqual(len(normalized['issues']['unclear']), 1)
+        self.assertEqual(
+            normalized['issues']['unclear'][0]['message'],
+            '未定位到对应附件，签字、盖章及日期待人工复核。',
+        )
+        rows = UnifiedBusinessReviewService()._build_bid_extraction_rows(
+            bidder={
+                'bidder_key': 'test-bidder',
+                'bidder_name': '上海测试有限公司',
+                'checks': {'verification_check': {'raw_result': raw}},
+            },
+            business_payload=None,
+            technical_payload=None,
+        )
+        review_row = next(row for row in rows if row.get('field_group') == 'attachment_result')
+        self.assertEqual(review_row['status'], 'unclear')
+        self.assertEqual(review_row['value']['signature_status'], 'pending')
+        self.assertEqual(review_row['value']['seal_status'], 'pending')
+
+    def test_located_attachment_signature_seal_and_date_still_pass(self):
+        raw = self._signature_seal_fixture(include_attachment_title=True)
+        attachment = raw['attachment_results'][0]
+        self.assertTrue(attachment['found'])
+        self.assertEqual(attachment['status'], 'pass')
+        for key in ('signature_check', 'seal_check', 'date_check'):
+            self.assertEqual(attachment[key]['status'], 'pass')
+
+    def test_verification_uses_saved_ocr_without_calling_ocr_service(self):
+        ocr_service = Mock()
+        self.v.ocr_service = ocr_service
+        self._signature_seal_fixture(include_attachment_title=True)
+        ocr_service.assert_not_called()
+
+    def test_image_stage_only_selects_located_required_signature_fields(self):
+        tender = {'layout_sections': [
+            block('响应截止时间：2026年09月09日', 1),
+            block('一、投标文件的组成', 1, 'heading'),
+            block('（一）商务标文件\n1. 授权委托书（格式参见本章附件1）\n（二）技术标文件', 1),
+            block('第五章 投标文件格式', 2, 'heading'),
+            block('一、商务标', 2, 'heading'),
+            block('附件1 授权委托书（格式）\n法定代表人签字：', 3, 'heading'),
+        ]}
+        business = {'layout_sections': [
+            block('附件1 授权委托书', 5, 'heading', [10, 50, 300, 70]),
+            block('法定代表人签字：___', 5, bbox=[70, 500, 350, 520]),
+            block('附件2 说明', 6, 'heading', [10, 50, 300, 70]),
+            block('经办人签字：___', 6, bbox=[70, 500, 350, 520]),
+        ]}
+        fields = self.v.required_signature_image_fields(tender, business)
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]['page'], 5)
+        self.assertIn('法定代表人', fields[0]['field_text'])
+
+    def test_manual_confirmation_of_blank_signature_is_fail(self):
+        raw = self._signature_seal_fixture(include_attachment_title=True)
+        attachment = raw['attachment_results'][0]
+        original = {
+            'requirements': attachment['requirements'],
+            'signature_status': 'pass',
+            'signature_evidence': ['张三'],
+            'seal_status': 'pass',
+            'seal_evidence': attachment['seal_check'].get('seal_texts') or ['上海测试有限公司'],
+            'date_status': 'pass',
+            'date_text': attachment['date_check']['matched_sign_text'],
+            'deadline_date': attachment['date_check']['deadline_date'],
+            'deadline_resolution': attachment['date_check']['deadline_resolution'],
+        }
+        value = deepcopy(original)
+        value['signature_evidence'] = []
+        check = {'raw_result': deepcopy(raw)}
+        _recompute_manual_verification(check, [{
+            'field_name': attachment['title'],
+            'original_value': original,
+            'effective_value': value,
+            'has_manual_value': True,
+            'editable_id': 'verification-blank-signature',
+        }])
+        self.assertEqual(value['signature_status'], 'fail')
+        self.assertEqual(check['review']['status'], 'fail')
+
+    def test_integrity_missing_suppresses_unlocated_verification(self):
+        service = UnifiedBusinessReviewService()
+        raw = self._signature_seal_fixture()
+        title = raw['attachment_results'][0]['title']
+        filtered = service._filter_verification_raw_result(raw, {
+            'details': {title: {'is_passed': False, 'scored': True, 'status': 'missing'}},
+        })
+        self.assertFalse(filtered['attachment_results'])
+        self.assertEqual(filtered['suppressed_by_integrity'][0]['attachment'], title)
+        normalized = service._normalize_verification(filtered)
+        self.assertFalse(any(normalized['issues'].values()))
+        self.assertNotIn('签章核验通过', normalized['review']['summary'])
+
+    def test_legacy_manual_confirmation_does_not_override_first_ocr_evidence(self):
+        raw = self._signature_seal_fixture()
+        attachment = raw['attachment_results'][0]
+        original = {
+            'signature_status': 'pending',
+            'seal_status': 'pending',
+            'date_status': 'pending',
+            'deadline_date': attachment['date_check']['deadline_date'],
+            'deadline_resolution': attachment['date_check']['deadline_resolution'],
+        }
+        manual = {
+            **original,
+            'signature_manually_confirmed': True,
+            'seal_manually_confirmed': True,
+            'date_text': '2026年09月08日',
+        }
+        check = {'raw_result': deepcopy(raw)}
+        _recompute_manual_verification(check, [{
+            'field_name': attachment['title'],
+            'original_value': original,
+            'effective_value': manual,
+            'has_manual_value': True,
+            'editable_id': 'verification-attachment-1',
+        }])
+        self.assertEqual(check['review']['status'], 'unclear')
+        corrected = check['raw_result']['attachment_results'][0]
+        self.assertEqual(corrected['signature_check']['status'], 'pending')
+        self.assertEqual(corrected['seal_check']['status'], 'pending')
+        self.assertEqual(corrected['date_check']['status'], 'pass')
 
     def test_submission_deadline_and_explicit_amendment(self):
         payload = {'layout_sections': [block('提交响应文件截止时间：2026年8月18日下午13时30分')]}
@@ -34,7 +195,7 @@ class ReviewEvidenceRepairs(unittest.TestCase):
         sections = [block('附件3 分项报价表', 7, 'heading'),
                     block('此表合计总价须与', 7),
                     block('附件2报价一览表的报价一致。', 8),
-                    block('日期：2026年8月10日', 8),
+                    block('日期：2026年8月10日', 8, bbox=[380, 700, 530, 720]),
                     block('附件4 商务条款偏离表', 8)]
         checked = self.v._effective_attachment_check_chunk(sections)
         self.assertEqual(checked, sections[:4])
@@ -43,6 +204,23 @@ class ReviewEvidenceRepairs(unittest.TestCase):
             {'date': date(2026, 8, 11), 'text': '截止时间', 'page': 1})
         self.assertEqual(result['status'], 'pass')
         self.assertEqual(result['matched_sign_page'], 8)
+
+    def test_underlined_ocr_date_maps_back_to_source_coordinates(self):
+        raw_date = (
+            r'日期： $ \underline{2026} $年 $ \underline{9} $月 '
+            r'$ \underline{14} $日'
+        )
+        section = block(raw_date, 17, bbox=[59, 607, 256, 624])
+        result = self.v._date_check(
+            {'requirements': {'requires_date': True}},
+            {'text': raw_date, 'sections': [section], 'pages': [17]},
+            {'date': date(2026, 9, 14), 'text': '截止时间', 'page': 4},
+        )
+
+        self.assertEqual(result['status'], 'pass')
+        self.assertEqual(result['reason_code'], 'date_within_deadline')
+        self.assertEqual(result['matched_sign_page'], 17)
+        self.assertEqual(result['matched_sign_bbox'], [59, 607, 197, 17])
 
     def test_multiple_forms_in_text_block_keep_independent_content(self):
         payload = {'layout_sections': [block('附件8 分项报价表\n法定代表人签字：张三\n附件9 商务条款偏离表\n法定代表人签字：李四', 3)]}
@@ -106,7 +284,109 @@ class ReviewEvidenceRepairs(unittest.TestCase):
         result = self.v._signature_check({'requirements': {'signature_field_count': 2}},
                                         section, {'status': 'missing'}, {'status': 'pass'})
         self.assertEqual(result['filled_count'], 1)
+        self.assertEqual(result['filled_values'][0]['line'], '被授权人签字：')
         self.assertNotEqual(result['status'], 'pass')
+
+    def test_printed_name_on_adjacent_row_cannot_fill_signature_slot(self):
+        field = block('法定代表人签字：', 3, bbox=[65, 550, 269, 570])
+        section = {
+            'pages': [3],
+            'sections': [field, block('张三', 3, bbox=[280, 605, 315, 626])],
+            'text': field['text'] + '\n张三',
+        }
+        result = self.v._signature_check(
+            {'requirements': {'signature_field_count': 1}}, section,
+            {'status': 'missing'}, {'status': 'pass'},
+        )
+        self.assertEqual(result['filled_count'], 0)
+        self.assertEqual(result['status'], 'pending')
+
+    def test_image_signature_presence_fills_only_matching_slot(self):
+        legal = block('法定代表人签字：___', 3, bbox=[65, 550, 269, 570])
+        delegate = block('被授权人签字：___', 3, bbox=[65, 590, 269, 610])
+        section = {
+            'pages': [3], 'sections': [legal, delegate], 'text': '',
+            'signature_locations': [{
+                'page': 3, 'box': [280, 548, 55, 24],
+                'source': 'signature_image_detector', 'confidence': 0.91,
+                'model': 'signature-model:test', 'field_box': [65, 550, 204, 20],
+            }],
+        }
+        self.assertIsNone(self.v._signature_nearby_detected_signature(
+            {'line': delegate['text'], 'page': 3, 'bbox': [65, 590, 204, 20]},
+            section,
+        ))
+        result = self.v._signature_check(
+            {'requirements': {'signature_field_count': 2}}, section,
+            {'status': 'missing'}, {'status': 'pass'},
+        )
+        self.assertEqual(result['filled_count'], 1)
+        self.assertEqual(result['filled_values'][0]['mode'], 'image_signature_presence')
+        self.assertEqual(result['filled_values'][0]['recognition_status'], 'presence_only')
+        self.assertEqual(result['pending_count'], 1)
+
+    def test_company_seal_cannot_fill_a_personal_signature_slot(self):
+        field = block('法定代表人签字或盖章：___', 3, bbox=[65, 594, 369, 610])
+        section = {
+            'sections': [
+                field,
+                block('上海测试有限公司', 3, 'seal', [280, 585, 430, 715]),
+            ],
+            'pages': [3],
+            'text': field['text'],
+            'seal_locations': [{'page': 3, 'box': [280, 585, 150, 130]}],
+            'seal_texts': ['上海测试有限公司'],
+        }
+        result = self.v._signature_check(
+            {'requirements': {'signature_field_count': 1}},
+            section,
+            {'status': 'pass'},
+            {'status': 'pass'},
+        )
+        self.assertEqual(result['status'], 'pending')
+        self.assertFalse(result['filled_values'])
+
+    def test_signature_field_without_coordinates_stays_pending(self):
+        section = {
+            'sections': [block('法定代表人签字：张三', 3)],
+            'pages': [3],
+            'text': '法定代表人签字：张三',
+        }
+        result = self.v._signature_check(
+            {'requirements': {'signature_field_count': 1}},
+            section,
+            {'status': 'pass'},
+            {'status': 'pass'},
+        )
+        self.assertEqual(result['status'], 'pending')
+        self.assertEqual(result['pending_fields'][0]['reason'], 'signature_field_coordinates_missing')
+
+    def test_legacy_missing_lists_merge_into_one_attachment_issue(self):
+        item = {
+            'title': '附件7 首次报价一览表（格式）',
+            'attachment_number': '7',
+            'found': False,
+            'status': 'missing',
+            'requirements': {'requires_signature': True, 'requires_seal': True, 'requires_date': False},
+            'signature_check': {'status': 'missing'},
+            'seal_check': {'status': 'missing'},
+            'date_check': {'status': 'not_required'},
+        }
+        raw = {
+            'compliance_status': 'missing',
+            'missing_attachment_results': [item],
+            'attachment_results': [],
+            'position_check': {
+                'missing_attachments': [item['title']],
+                'missing_signature_attachments': [item['title']],
+                'missing_seal_attachments': [item['title']],
+            },
+            'date_check': {},
+        }
+        normalized = UnifiedBusinessReviewService()._normalize_verification(raw)
+        issues = normalized['issues']['missing']
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['title'], item['title'])
 
     def test_prefixed_numbered_form_title_still_matches(self):
         self.assertTrue(self.v._is_attachment_heading(block('1.附件1 比选保证书')))

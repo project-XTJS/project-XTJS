@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     XTJS_IO_QUEUE_TIMEOUT_SECONDS: float = Field(default=10, gt=0)
 
     DATABASE_URL: str = "postgresql://admin:password@localhost:5432/xtjs_db"
+    XTJS_REVIEW_INDEX_ENABLED: bool = True
+    XTJS_CACHE_MAX_ENTRY_BYTES: int = Field(default=8 * 1024 * 1024, ge=64 * 1024)
 
     # —— 日志：JSON 结构化输出，文件按天/大小滚动并保留 N 天 ——
     LOG_LEVEL: str = "INFO"
@@ -140,6 +142,7 @@ class Settings(BaseSettings):
     CONSISTENCY_MATCH_MARGIN: float = 0.05
     CONSISTENCY_TEXT_PASS_THRESHOLD: float = 0.93
     CONSISTENCY_DETERMINISTIC_MISSING_MAX_LEXICAL: float = 0.30
+    CONSISTENCY_TEMPLATE_ENGINE_VERSION: str = "fixed-template-exact-v3.2"
 
     # 偏离表 ★/△ 响应的语义符合度阈值（复用 BGE 向量），≥该值记为“符合”，否则“存疑”待人工。
     DEVIATION_SEMANTIC_PASS_THRESHOLD: float = 0.70
@@ -151,6 +154,21 @@ class Settings(BaseSettings):
 
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    BUSINESS_REVIEW_QUEUE: str = "business_review"
+    BUSINESS_REVIEW_TASK_TIMEOUT_SECONDS: int = Field(default=15 * 60, ge=60)
+    BUSINESS_REVIEW_TASK_HEARTBEAT_SECONDS: int = Field(default=5, ge=1)
+    BUSINESS_REVIEW_TASK_STALE_SECONDS: int = Field(default=30, ge=10)
+    BUSINESS_REVIEW_DISPATCH_INTERVAL_SECONDS: int = Field(default=10, ge=2)
+    BUSINESS_REVIEW_EVIDENCE_CACHE_ROOT: Path = Field(
+        default_factory=lambda: _default_ocr_storage_root() / "business-evidence-cache"
+    )
+    SIGNATURE_PRESENCE_ENABLED: bool = True
+    SIGNATURE_PRESENCE_MODEL_PATH: str = "/app/models/yolos-small-signature-detection"
+    SIGNATURE_PRESENCE_MODEL_REVISION: str = "238c12505dbfb4bbcfed325a00de9218b4ddeaa0"
+    SIGNATURE_PRESENCE_DEVICE: str = "cpu"
+    SIGNATURE_PRESENCE_THRESHOLD: float = Field(default=0.50, ge=0.0, le=1.0)
+    SIGNATURE_PRESENCE_TIMEOUT_SECONDS: int = Field(default=120, ge=1)
+    SIGNATURE_PRESENCE_RENDER_DPI: int = Field(default=300, ge=72, le=600)
 
     # —— 认证与账号安全 ——
     # 生产环境必须在 .env 中用强随机长串覆盖此默认值，切勿沿用默认。

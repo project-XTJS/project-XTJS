@@ -8,7 +8,10 @@ from app.service.analysis.compliance.structured_consistency import StructuredCon
 from app.service.analysis.verification import VerificationChecker
 from app.service.analysis.deviation import DeviationChecker
 from app.service.analysis.unified import UnifiedBusinessReviewService
-from app.service.analysis.manual_review.business_bid_format import _enrich_business_attachment_value
+from app.service.analysis.manual_review.business_bid_format import (
+    _enrich_business_attachment_value,
+    _recompute_manual_consistency,
+)
 
 
 def block(text, page=1, kind='text'):
@@ -28,6 +31,17 @@ def bid(text):
 
 
 class CompositionAndAttachmentTests(unittest.TestCase):
+    def test_manual_not_applicable_keeps_independent_status(self):
+        check = {}
+        _recompute_manual_consistency(check, [{
+            "editable_id": "one",
+            "effective_value": {"manual_status": "not_applicable"},
+        }])
+        self.assertEqual(check["review"]["status"], "not_applicable")
+        self.assertTrue(check["issues"]["not_applicable"])
+        self.assertIn("该项不适用", check["review"]["summary"])
+        self.assertFalse(check["issues"]["passed"])
+
     def test_composition_stays_in_list_and_keeps_letter_items(self):
         t = tender('1. 资格证明文件：\nA. 营业执照\nB. 食品安全许可证\nC. 具备履行合同所必需的设备和专业技术\n能力的证明材料\n2. 授权委托书（格式参见本章附件1）',
                    '附件1 授权委托书（格式）\n本授权书声明：\n人无转委托权\n特此声明')
@@ -42,12 +56,14 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         self.assertNotIn('特此声明', reqs)
         self.assertEqual(t, original)
 
-    def test_unclosed_composition_is_reviewed_not_silently_complete(self):
+    def test_unclosed_composition_does_not_create_redundant_scope_issue(self):
         t = {'layout_sections': [block('投标文件的组成', kind='heading'), block('（一）商务标文件\n1. 营业执照')]}
         result = IntegrityChecker().check_integrity(t, bid('营业执照'))
         normalized = UnifiedBusinessReviewService()._normalize_integrity(result)
         self.assertEqual(result['scope_status'], 'unclear')
-        self.assertTrue(normalized['issues']['unclear'])
+        self.assertEqual(normalized['review']['status'], 'pass')
+        self.assertFalse(normalized['issues']['unclear'])
+        self.assertNotIn('商务材料组成范围待确认', normalized['review']['summary'])
 
     def test_same_page_text_heading_starts_next_attachment(self):
         t = tender('1. 分项报价表（格式参见本章附件8）\n2. 商务条款偏离表（格式参见本章附件9）',
@@ -239,7 +255,7 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         self.assertNotEqual(normalized['review']['summary'], 'None')
         self.assertIn('未提取到可比较的模板段', normalized['review']['summary'])
 
-    def test_all_consistency_templates_explicitly_skipped_are_not_counted_passed(self):
+    def test_all_optional_consistency_templates_are_excluded(self):
         normalized = UnifiedBusinessReviewService()._normalize_consistency({
             'evaluated_segments': [],
             'skipped_segments': [
@@ -248,9 +264,12 @@ class CompositionAndAttachmentTests(unittest.TestCase):
             'original_segment_count': 1,
             'extraction_status': 'resolved',
         })
-        self.assertEqual(normalized['review']['status'], 'not_applicable')
-        self.assertIn('均按明确规则跳过', normalized['review']['summary'])
+        self.assertEqual(normalized['review']['status'], 'pass')
+        self.assertIn('从模板一致性审查范围排除', normalized['review']['summary'])
         self.assertEqual(normalized['metrics']['passed_segment_count'], 0)
+        self.assertEqual(normalized['metrics']['not_applicable_segment_count'], 0)
+        self.assertFalse(normalized['issues']['not_applicable'])
+        self.assertFalse(normalized['issues']['failed'])
 
     def test_unstable_only_consistency_skip_is_unclear(self):
         normalized = UnifiedBusinessReviewService()._normalize_consistency({
@@ -263,6 +282,7 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         })
         self.assertEqual(normalized['review']['status'], 'unclear')
         self.assertTrue(normalized['issues']['unclear'])
+        self.assertFalse(normalized['issues']['not_applicable'])
 
     def test_directory_format_heading_does_not_preempt_real_template_region(self):
         t = {'layout_sections': [
@@ -328,46 +348,46 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         sections = [block('附件8 业绩清单', 3, 'heading'), block('附件9-1 法定代表人资格证明书', 4)]
         self.assertEqual(TemplateExtractor._template_boundary_sections(sections), sections)
 
-    def test_optional_absent_is_not_counted_as_pass(self):
+    def test_optional_absent_is_excluded_from_all_business_checks(self):
         t = tender('1. 营业执照\n2. 残疾人福利性单位声明函（格式参见本章附件13）（如有）',
                    '附件13 残疾人福利性单位声明函（格式）\n单位名称（加盖公章）：')
         b = bid('营业执照')
         raw = IntegrityChecker().check_integrity(t, b)
-        detail = next(v for k, v in raw['details'].items() if '声明函' in k)
-        self.assertFalse(detail['scored'])
-        self.assertFalse(detail['is_passed'])
-        self.assertTrue(detail['optionality_locations'])
+        self.assertFalse(any('声明函' in k for k in raw['details']))
+        self.assertIn('声明函', '、'.join(raw['excluded_optional_items']))
         normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
         self.assertEqual(normalized['metrics']['passed_item_count'], 1)
         self.assertEqual(normalized['issues']['missing'], [])
         verified = VerificationChecker(None).check_seal_and_date(t, b)
-        self.assertTrue(verified['skipped_optional_attachments'])
+        self.assertFalse(verified['skipped_optional_attachments'])
+        self.assertEqual(verified['required_attachment_count'], 0)
+        self.assertFalse(verified['attachment_results'])
         templates = TemplateExtractor.extract_consistency_templates(t)
-        self.assertTrue(templates[0]['is_optional'])
-        self.assertTrue(templates[0]['optionality_locations'])
+        self.assertFalse(any('声明函' in item['title'] for item in templates))
 
-    def test_all_optional_absent_is_not_extraction_failure_or_pass(self):
+    def test_all_optional_absent_is_cleanly_excluded(self):
         t = tender(
             '1. 残疾人福利性单位声明函（格式参见本章附件13）（如有）',
             '附件13 残疾人福利性单位声明函（格式）\n单位名称（加盖公章）：',
         )
         raw = IntegrityChecker().check_integrity(t, bid('其他内容'))
         normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
-        self.assertEqual(raw['extracted_item_count'], 1)
+        self.assertEqual(raw['extracted_item_count'], 0)
         self.assertEqual(raw['actual_check_count'], 0)
-        self.assertEqual(normalized['review']['status'], 'not_applicable')
-        self.assertIn('本次无必检项', normalized['review']['summary'])
+        self.assertTrue(raw['all_items_excluded'])
+        self.assertEqual(normalized['review']['status'], 'pass')
+        self.assertIn('从完整性审查范围排除', normalized['review']['summary'])
         self.assertFalse(normalized['issues']['unclear'])
+        self.assertFalse(normalized['issues']['failed'])
+        self.assertFalse(normalized['issues']['not_applicable'])
 
-    def test_catch_all_other_content_is_optional_when_absent(self):
+    def test_catch_all_other_content_is_excluded_when_optional(self):
         t = tender('1. 投标人认为需加以说明的其他内容（如综合实力证明等）')
         raw = IntegrityChecker().check_integrity(t, bid('已提交其他必备材料'))
-        detail = next(iter(raw['details'].values()))
-        self.assertTrue(detail['is_optional'])
-        self.assertFalse(detail['scored'])
-        self.assertEqual(detail['status'], '可选项未提供')
+        self.assertFalse(raw['details'])
+        self.assertTrue(raw['all_items_excluded'])
         normalized = UnifiedBusinessReviewService()._normalize_integrity(raw)
-        self.assertEqual(normalized['review']['status'], 'not_applicable')
+        self.assertEqual(normalized['review']['status'], 'pass')
 
     def test_conditional_absent_stays_pending_in_all_three_checks(self):
         t = tender(
@@ -383,7 +403,7 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         self.assertEqual(templates[0]['applicability_status'], 'unclear')
         verified = VerificationChecker(None).check_seal_and_date(t, b)
         result = verified['attachment_results'][0]
-        self.assertEqual(result['status'], 'pending')
+        self.assertEqual(result['status'], 'unclear')
         self.assertIsNone(result['found'])
 
     def test_conditional_material_found_is_checked_instead_of_forced_pending(self):
@@ -446,7 +466,7 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         self.assertFalse(normalized['issues']['passed'])
         v = VerificationChecker(None).check_seal_and_date(t, bid('其他内容'))
         self.assertFalse(v['skipped_optional_attachments'])
-        self.assertEqual(v['attachment_results'][0]['status'], 'pending')
+        self.assertEqual(v['attachment_results'][0]['status'], 'unclear')
         normalized = UnifiedBusinessReviewService()._normalize_verification(v)
         self.assertTrue(normalized['issues']['unclear'])
         self.assertFalse(normalized['issues']['missing'])
@@ -455,8 +475,72 @@ class CompositionAndAttachmentTests(unittest.TestCase):
         t = tender('1. 保证金缴纳凭证（格式参见本章附件1）',
                    '附件1 保证金缴纳凭证（格式）（如有）\n单位名称（加盖公章）：')
         v = VerificationChecker(None).check_seal_and_date(t, bid('其他内容'))
-        self.assertTrue(v['skipped_optional_attachments'])
+        self.assertFalse(v['skipped_optional_attachments'])
+        self.assertEqual(v['required_attachment_count'], 0)
         self.assertFalse(v['missing_attachment_results'])
+
+    def test_tender_explicit_not_applicable_skips_all_field_checks(self):
+        t = tender(
+            '1. 首次分项报价表（格式参见本章附件8-1）',
+            '附件8-1 首次分项报价表（格式自拟）（本项目不适用）\n'
+            '供应商（名称加盖公章）：\n法定代表人或授权代表签字或盖章：\n日期： 年 月 日',
+        )
+        raw = VerificationChecker(None).check_seal_and_date(t, bid('其他内容'))
+        self.assertEqual(raw['required_attachment_count'], 0)
+        self.assertEqual(raw['excluded_optional_attachment_count'], 1)
+        self.assertFalse(raw['attachment_results'])
+        normalized = UnifiedBusinessReviewService()._normalize_verification(raw)
+        self.assertEqual(normalized['review']['status'], 'pass')
+        self.assertFalse(normalized['issues']['not_applicable'])
+        self.assertFalse(normalized['issues']['failed'])
+        rows = UnifiedBusinessReviewService()._build_bid_extraction_rows(
+            bidder={
+                'bidder_key': 'one',
+                'bidder_name': '',
+                'checks': {'verification_check': {'raw_result': raw}},
+            },
+            business_payload=None,
+            technical_payload=None,
+        )
+        self.assertFalse(any(row.get('field_group') == 'attachment_result' for row in rows))
+
+    def test_ocr_damaged_not_applicable_marker_is_excluded(self):
+        t = tender(
+            '1. 分项报价表（格式参见本章附件8）',
+            '附件8 分项报价表（不项目不适用）\n供应商（名称加盖公章）：',
+        )
+        self.assertTrue(
+            TemplateExtractor.is_business_review_title_excluded(t, '分项报价表')
+        )
+        self.assertFalse(TemplateExtractor.extract_consistency_templates(t))
+        verified = VerificationChecker(None).check_seal_and_date(t, bid('其他内容'))
+        self.assertEqual(verified['required_attachment_count'], 0)
+        self.assertFalse(verified['attachment_results'])
+
+    def test_optional_conditional_form_is_excluded_even_when_submitted(self):
+        t = tender(
+            '1. 残疾人福利性单位声明函（格式参见本章附件13）（如有）',
+            '附件13 残疾人福利性单位声明函（格式）\n'
+            '如供应商不符合残疾人福利性单位条件，无需填写本声明。\n'
+            '本单位为符合条件的残疾人福利性单位。\n单位名称（加盖公章）：\n日期：',
+        )
+        explicit = bid(
+            '附件13 残疾人福利性单位声明函\n'
+            '我公司不符合残疾人福利性单位条件，此声明函不适用，故不提供。\n'
+            '本单位为符合条件的残疾人福利性单位。\n单位名称（加盖公章）：\n日期：'
+        )
+        result = VerificationChecker(None).check_seal_and_date(t, explicit)
+        self.assertEqual(result['required_attachment_count'], 0)
+        self.assertFalse(result['attachment_results'])
+
+        conflicting = bid(
+            '附件13 残疾人福利性单位声明函\n'
+            '我公司不符合残疾人福利性单位条件，此声明函不适用，故不提供。\n'
+            '我公司符合残疾人福利性单位条件。'
+        )
+        result = VerificationChecker(None).check_seal_and_date(t, conflicting)
+        self.assertEqual(result['required_attachment_count'], 0)
+        self.assertFalse(result['attachment_results'])
 
     def test_consistency_conflict_stays_reviewed_even_when_form_matches(self):
         checker = Mock()

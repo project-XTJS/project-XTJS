@@ -751,6 +751,7 @@ class ConsistencyChecker:
         model_json: dict,
         test_json: dict,
         integrity_raw: dict | None = None,
+        prepared_skeletons: List[Dict] | None = None,
     ) -> List[Dict]:
         """
         主比对方法：将招标文件模板与投标文件段落进行比对，
@@ -760,4 +761,5 @@ class ConsistencyChecker:
             model_json,
             test_json,
             integrity_raw=integrity_raw,
+            prepared_skeletons=prepared_skeletons,
         )

@@ -184,11 +184,13 @@ class PricingEvidenceTests(unittest.TestCase):
         self.assertEqual(constraint['value']['basis'],'annual')
         editables=_build_business_format_editable_items(review)
         opening=next(x for x in editables if x['field_group']=='opening_amount')
-        payload={'items':[{'editable_id':opening['editable_id'],'manual_value':{'small_amount_yuan':'20万元','capital_amount_yuan':200000}}]}
+        payload={'items':[{'editable_id':opening['editable_id'],'manual_value':{'small_amount_yuan':'20万元','capital_amount_yuan':200000,'basis':'unit','package':'legacy-special-case'}}]}
         corrected=_apply_manual_business_review_inputs(json.loads(json.dumps(review)),json.loads(json.dumps(payload)))
         check=corrected['bidders'][0]['checks']['pricing_check']
         self.assertEqual(check['review']['status'],'unclear')
         self.assertEqual(check['raw_result']['self_check']['amount_yuan'],200000)
+        self.assertEqual(check['raw_result']['self_check']['basis'],'contract')
+        self.assertNotEqual(check['raw_result']['self_check'].get('package'),'legacy-special-case')
         reopened=_build_business_format_editable_items(json.loads(json.dumps(corrected)))
         self.assertEqual(next(x for x in reopened if x['field_group']=='price_constraint')['original_value']['basis'],'annual')
         self.assertEqual(next(x for x in reopened if x['field_group']=='opening_amount')['original_value']['basis'],'contract')
@@ -225,10 +227,10 @@ class DeadlineEvidenceTests(unittest.TestCase):
         self.assertEqual(self.v.resolve_deadline(doc('投标截止时间2026年9月1日','投标截止时间2026年9月1日'))['date'],'2026-09-01')
 
     def test_sign_date_retained_without_deadline(self):
-        result=self.v._date_check({'requirements':{'requires_date':True}}, {'text':'期：2026年09月08日','sections':[]}, None)
+        result=self.v._date_check({'requirements':{'requires_date':True}}, {'text':'日期：2026年09月08日','sections':[]}, None)
         self.assertEqual(result['status'],'missing_deadline')
         self.assertEqual(result['sign_date'],'2026-09-08')
-        self.assertEqual(result['match_method'],'single_date_fallback')
+        self.assertEqual(result['match_method'],'contextual_date')
 
     def test_manual_compares_dates_by_day(self):
         self.assertEqual(compare_dates('2026年9月10日','2026-09-10'),'pass')
