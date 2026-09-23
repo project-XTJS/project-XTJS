@@ -169,6 +169,20 @@ def compare_business_similarity_blocks(
                 "right_type": right_unit.get("type"),
                 "left_text": clip(left_unit.get("text") or "", 4000),
                 "right_text": clip(right_unit.get("text") or "", 4000),
+                "left_analysis_text": str(left_unit.get("text") or ""),
+                "right_analysis_text": str(right_unit.get("text") or ""),
+                "left_segments": [{
+                    "start": 0,
+                    "end": len(str(left_unit.get("text") or "").strip()),
+                    "page": left_unit.get("page"),
+                    "bbox": left_unit.get("bbox"),
+                }],
+                "right_segments": [{
+                    "start": 0,
+                    "end": len(str(right_unit.get("text") or "").strip()),
+                    "page": right_unit.get("page"),
+                    "bbox": right_unit.get("bbox"),
+                }],
                 "similarity": round(ratio, 4),
             }
         )
@@ -211,6 +225,8 @@ def compare_business_similarity_sections(
                 "similarity": round(ratio, 4),
                 "left_preview": clip(left_unit.get("text") or left_unit.get("preview") or "", 4000),
                 "right_preview": clip(right_unit.get("text") or right_unit.get("preview") or "", 4000),
+                "left_analysis_text": str(left_unit.get("text") or left_unit.get("preview") or ""),
+                "right_analysis_text": str(right_unit.get("text") or right_unit.get("preview") or ""),
             }
         )
     return {

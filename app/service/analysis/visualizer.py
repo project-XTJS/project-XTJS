@@ -2707,6 +2707,8 @@ class ReportVisualizer:
         return sorted(set(collected))
 
     def _project_is_duplicate_issue(self, item):
+        if bool(item.get("review_only")):
+            return True
         if bool(item.get("suspicious")) or bool(item.get("exact_duplicate")):
             return True
         risk_level = str(item.get("risk_level") or "").strip().lower()

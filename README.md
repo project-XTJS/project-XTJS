@@ -20,7 +20,8 @@
 - python -m venv venv
 - ./venv/Scripts/activate
 - pip install -r requirements.txt
-- 错别字检查仅处理两份投标文件的重复片段，使用独立的按需模型服务；模型通过质量验收后才同时启用 `TYPO_CHECK_ENABLED=true` 和 `TYPO_CHECK_VISIBLE=true`。默认不执行也不展示，且不会回退到已删除的旧纠错器。
+- 错别字检查仅处理查重证据内两侧对齐的重复片段，使用独立的按需 MacBERT 服务。候选生成采用 `0.60 / 10倍` 门槛；只有命中版本化词语纠错对且达到 `0.90 / 20倍` 的单字替换才确认为错字，其余候选进入待复核且不触发“不通过”。上线前可用 `tools/evaluate_duplicate_typo_candidates.py` 执行分组评测门槛。
+- 公开数据训练使用 `download_typo_public_data.py`、`prepare_typo_training_data.py`、`train_typo_macbert.py` 和 `evaluate_typo_training.py`。模型候选层与词语规则层分别评测，审核词对必须经 `manage_typo_word_rules.py` 的两次不同审核后才能编译。完整命令见 `docs/错别字公开数据训练与评测.md`。
 - 需要手动安装对应的cuda版本 pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu130/ 
 - python run.py
 

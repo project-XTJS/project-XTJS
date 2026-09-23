@@ -106,8 +106,8 @@ def _build_block_run_item(
     right_units = [pair[1] for pair in run]
     first_left = left_units[0]
     first_right = right_units[0]
-    left_text = _join_unit_text(left_units)
-    right_text = _join_unit_text(right_units)
+    left_text, left_segments = _join_unit_text(left_units)
+    right_text, right_segments = _join_unit_text(right_units)
     sentence_count = len(run)
     left_pages = _ordered_pages(left_units)
     right_pages = _ordered_pages(right_units)
@@ -128,11 +128,36 @@ def _build_block_run_item(
         "text": clip(left_text, 4000),
         "left_text": clip(left_text, 4000),
         "right_text": clip(right_text, 4000),
+        "left_analysis_text": left_text,
+        "right_analysis_text": right_text,
+        "left_segments": left_segments,
+        "right_segments": right_segments,
     }
 
 
-def _join_unit_text(units: list[dict[str, Any]]) -> str:
-    return " ".join(str(unit.get("text") or "").strip() for unit in units if str(unit.get("text") or "").strip())
+def _join_unit_text(units: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    parts: list[str] = []
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    for unit in units:
+        value = str(unit.get("text") or "").strip()
+        if not value:
+            continue
+        if parts:
+            cursor += 1
+        start = cursor
+        cursor += len(value)
+        parts.append(value)
+        segments.append(
+            {
+                "start": start,
+                "end": cursor,
+                "page": unit.get("page"),
+                "bbox": unit.get("bbox"),
+                "sequence": unit.get("sequence"),
+            }
+        )
+    return " ".join(parts), segments
 
 
 def _ordered_pages(units: list[dict[str, Any]]) -> list[int]:
@@ -188,6 +213,8 @@ def compare_sections(
                 "exact": True,
                 "left_preview": clip(left_section.get("text") or left_section.get("preview") or "", 4000),
                 "right_preview": clip(right_section.get("text") or right_section.get("preview") or "", 4000),
+                "left_analysis_text": str(left_section.get("text") or left_section.get("preview") or ""),
+                "right_analysis_text": str(right_section.get("text") or right_section.get("preview") or ""),
             }
         )
         if len(items) >= max_evidence_sections:

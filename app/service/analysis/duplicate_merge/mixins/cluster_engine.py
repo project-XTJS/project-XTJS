@@ -45,6 +45,7 @@ class ClusterEngineMixin:
     def _occurrence_signature(self, occurrence: dict[str, Any]) -> str:
         """生成单条聚类证据的稳定签名，用于去重。"""
         docs = occurrence.get("docs") or {}
+        evidence = occurrence.get("evidence") or {}
         normalized_docs = {
             str(file_name): {
                 "pages": list((doc or {}).get("pages") or []),
@@ -56,6 +57,7 @@ class ClusterEngineMixin:
             "duplicate-occurrence",
             str(occurrence.get("family") or "").strip(),
             str(occurrence.get("mode") or "").strip(),
+            str(evidence.get("typo_evidence_id") or "").strip(),
             json.dumps(normalized_docs, ensure_ascii=False, sort_keys=True),
             json.dumps(list(occurrence.get("tokens") or []), ensure_ascii=False),
             str(occurrence.get("similarity") or ""),

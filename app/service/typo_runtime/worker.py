@@ -25,12 +25,12 @@ class MacBertWorker:
         )
         self.model.eval().to(self.device)
 
-    def correct(
+    def analyze(
         self,
         text: str,
         min_probability: float,
         min_probability_ratio: float,
-    ) -> str:
+    ) -> dict:
         encoded = self.tokenizer(
             text,
             return_offsets_mapping=True,
@@ -50,21 +50,43 @@ class MacBertWorker:
                 positions, inputs["input_ids"][0]
             ]
         output = list(text)
+        candidates = []
         for index, (start, end) in enumerate(offsets):
             if end - start != 1 or not CHINESE_CHARACTER.fullmatch(text[start:end]):
                 continue
             predicted = self.tokenizer.convert_ids_to_tokens(int(token_ids[index]))
+            candidate_probability = float(confidence[index])
+            original_probability = float(source_probability[index])
+            probability_ratio = candidate_probability / max(original_probability, 1e-12)
             if (
                 len(predicted) == 1
                 and CHINESE_CHARACTER.fullmatch(predicted)
                 and predicted != text[start:end]
-                and float(confidence[index]) >= min_probability
-                and float(confidence[index])
-                / max(float(source_probability[index]), 1e-12)
-                >= min_probability_ratio
+                and candidate_probability >= min_probability
+                and probability_ratio >= min_probability_ratio
             ):
                 output[start] = predicted
-        return "".join(output)
+                candidates.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "original": text[start:end],
+                        "replacement": predicted,
+                        "candidate_probability": candidate_probability,
+                        "source_probability": original_probability,
+                        "probability_ratio": probability_ratio,
+                    }
+                )
+        return {"corrected_text": "".join(output), "candidates": candidates}
+
+    def correct(
+        self,
+        text: str,
+        min_probability: float,
+        min_probability_ratio: float,
+    ) -> str:
+        """Compatibility wrapper for callers that only need corrected text."""
+        return self.analyze(text, min_probability, min_probability_ratio)["corrected_text"]
 
 
 def main():
@@ -109,16 +131,12 @@ def main():
                     or min_probability_ratio < 1.0
                 ):
                     raise ValueError("invalid_request")
-                self.reply(
-                    200,
-                    {
-                        "corrected_text": worker.correct(
-                            text, min_probability, min_probability_ratio
-                        ),
-                        "min_probability": min_probability,
-                        "min_probability_ratio": min_probability_ratio,
-                    },
-                )
+                result = worker.analyze(text, min_probability, min_probability_ratio)
+                self.reply(200, {
+                    **result,
+                    "min_probability": min_probability,
+                    "min_probability_ratio": min_probability_ratio,
+                })
             except (ValueError, KeyError, TypeError) as exc:
                 self.reply(400, {"error": str(exc)})
 

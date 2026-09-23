@@ -1,0 +1,6 @@
+# Install in an isolated training environment; runtime dependencies are unchanged.
+torch>=2.5,<3
+transformers>=4.41,<6
+safetensors>=0.4
+jieba==0.42.1
+gdown==5.2.0

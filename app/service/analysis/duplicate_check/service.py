@@ -45,8 +45,12 @@ from .risk_scorer import (
     business_risk_level,
     risk_rank,
 )
-from app.service.analysis.typo_client import DuplicateTypoService, common_edits
-from app.service.typo_runtime.contract import TypoUnavailable, VERSION as TYPO_VERSION
+from app.service.analysis.typo_client import DuplicateTypoService, common_word_edits
+from app.service.typo_runtime.contract import (
+    TypoUnavailable,
+    VERSION as TYPO_VERSION,
+    word_rule_version,
+)
 
 
 def _bbox_overlap(a: list[float], b: list[float]) -> bool:
@@ -169,7 +173,9 @@ class DuplicateCheckService:
             ]
             total_pair_count = len(compared_pair_items)
             pair_items = [
-                item for item in compared_pair_items if str(item.get("risk_level") or "none") != "none"
+                item
+                for item in compared_pair_items
+                if str(item.get("risk_level") or "none") != "none" or item.get("review_only")
             ]
             pair_items.sort(key=self._pair_sort_key, reverse=True)
 
@@ -1248,53 +1254,95 @@ class DuplicateCheckService:
         )
         suppressed_count = 0
         kept_count = 0
+        conclusive_kept_count = 0
+        review_only_count = 0
         for evidence_key in text_evidence_keys:
             kept_items: list[dict[str, Any]] = []
-            for evidence in issue.get(evidence_key) or []:
+            for evidence_index, evidence in enumerate(issue.get(evidence_key) or []):
                 if not isinstance(evidence, dict):
                     continue
                 next_evidence = dict(evidence)
-                decision = self._short_duplicate_report_decision(next_evidence)
+                evidence_id = "|".join(
+                    [
+                        str(issue.get("left_document_identifier") or issue.get("left_file_name") or "left"),
+                        str(issue.get("right_document_identifier") or issue.get("right_file_name") or "right"),
+                        evidence_key,
+                        str(evidence_index),
+                    ]
+                )
+                next_evidence["typo_evidence_id"] = evidence_id
+                decision = self._short_duplicate_report_decision(
+                    next_evidence,
+                    evidence_key=evidence_key,
+                    source_issue=issue,
+                )
                 next_evidence["duplicate_text_length"] = decision["text_length"]
                 next_evidence["duplicate_report_reason"] = decision["reason"]
+                next_evidence["review_only"] = bool(decision.get("review_only"))
                 default_typo_status = "completed" if settings.TYPO_CHECK_ENABLED else "disabled"
-                next_evidence["typo_check"] = decision.get(
+                next_evidence["typo_check"] = dict(decision.get(
                     "typo_check",
-                    {"status": default_typo_status, "rule_version": TYPO_VERSION},
+                    {
+                        "status": default_typo_status,
+                        "rule_version": TYPO_VERSION,
+                        "word_rule_version": word_rule_version(),
+                    },
+                ))
+                next_evidence["typo_check"].setdefault(
+                    "confirmed_count", len(decision.get("typo_issues") or [])
+                )
+                next_evidence["typo_check"].setdefault(
+                    "review_candidate_count", len(decision.get("review_candidates") or [])
+                )
+                next_evidence["typo_check"].setdefault("rule_version", TYPO_VERSION)
+                next_evidence["typo_check"].setdefault(
+                    "word_rule_version", word_rule_version()
                 )
                 if decision.get("typo_issues"):
                     next_evidence["short_duplicate_typo_issues"] = decision["typo_issues"]
+                if decision.get("review_candidates"):
+                    next_evidence["typo_review_candidates"] = decision["review_candidates"]
                 if decision["report"]:
                     kept_items.append(next_evidence)
                     kept_count += 1
+                    if decision.get("review_only"):
+                        review_only_count += 1
+                    else:
+                        conclusive_kept_count += 1
                 else:
                     suppressed_count += 1
             issue[evidence_key] = kept_items
 
-        # 汇总该对文档全部证据中的错别字，去重后挂到 issue 层，供合并/前端展示。
+        # Pair-level values are diagnostic only. Cluster serialization later selects
+        # candidates from the exact occurrence instead of leaking candidates across pages.
         aggregated_typo_issues: list[dict[str, Any]] = []
-        seen_typo_keys: set[tuple] = set()
+        aggregated_review_candidates: list[dict[str, Any]] = []
+        seen_confirmed: set[str] = set()
+        seen_review: set[str] = set()
         for evidence_key in text_evidence_keys:
             for evidence in issue.get(evidence_key) or []:
-                for typo in evidence.get("short_duplicate_typo_issues") or []:
-                    if not isinstance(typo, dict):
-                        continue
-                    key = (
-                        str(typo.get("matched_text") or ""),
-                        str(typo.get("suggestion") or ""),
-                        typo.get("side"), typo.get("page"), typo.get("start"), typo.get("end"),
-                        str(typo.get("bbox") or ""),
-                    )
-                    if not key[0] or key in seen_typo_keys:
-                        continue
-                    seen_typo_keys.add(key)
-                    aggregated_typo_issues.append(typo)
+                for source_key, target, seen in (
+                    ("short_duplicate_typo_issues", aggregated_typo_issues, seen_confirmed),
+                    ("typo_review_candidates", aggregated_review_candidates, seen_review),
+                ):
+                    for typo in evidence.get(source_key) or []:
+                        if not isinstance(typo, dict):
+                            continue
+                        identifier = str(typo.get("shared_id") or "")
+                        if not identifier or identifier in seen:
+                            continue
+                        seen.add(identifier)
+                        target.append(typo)
         issue["short_duplicate_typo_issues"] = aggregated_typo_issues
+        issue["typo_review_candidates"] = aggregated_review_candidates
         incomplete = any(e.get("typo_check", {}).get("status") == "incomplete" for k in text_evidence_keys for e in issue.get(k, []))
         typo_status = "incomplete" if incomplete else ("completed" if settings.TYPO_CHECK_ENABLED else "disabled")
         issue["typo_check"] = {
             "status": typo_status,
             "rule_version": TYPO_VERSION,
+            "word_rule_version": word_rule_version(),
+            "confirmed_count": len(aggregated_typo_issues),
+            "review_candidate_count": len(aggregated_review_candidates),
             "message": (
                 "错别字检查未完成，请重试"
                 if incomplete
@@ -1309,42 +1357,72 @@ class DuplicateCheckService:
             "threshold_chars": 30,
             "suppressed_evidence_count": suppressed_count,
             "reported_evidence_count": kept_count,
+            "conclusive_evidence_count": conclusive_kept_count,
+            "review_only_evidence_count": review_only_count,
         }
         issue["locations"] = self._build_duplicate_issue_locations(issue)
         has_image_evidence = bool(issue.get("duplicate_images"))
-        if kept_count == 0 and not has_image_evidence:
+        if conclusive_kept_count == 0 and not has_image_evidence:
             issue["risk_level"] = "none"
             issue["suspicious"] = False
+            if review_only_count:
+                issue["status"] = "unclear"
+                issue["review_only"] = True
+        elif str(issue.get("risk_level") or "none") == "none":
+            # A retained long/numeric/shared-typo evidence is itself a report basis.
+            issue["risk_level"] = "low"
+            issue["suspicious"] = True
+            issue["status"] = "failed"
+            issue["review_only"] = False
         return issue
 
-    def _short_duplicate_report_decision(self, evidence: dict[str, Any]) -> dict[str, Any]:
-        left_text, right_text = self._duplicate_evidence_pair_text(evidence)
+    def _short_duplicate_report_decision(
+        self,
+        evidence: dict[str, Any],
+        *,
+        evidence_key: str = "",
+        source_issue: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        left_text, right_text = self._duplicate_evidence_pair_text(evidence, evidence_key=evidence_key)
         representative_text = left_text or right_text
         text_length = self._duplicate_text_length(representative_text)
         typo_issues: list[dict[str, Any]] = []
+        review_candidates: list[dict[str, Any]] = []
+        typo_check: dict[str, Any] | None = None
         if settings.TYPO_CHECK_ENABLED:
-            # 对所有重复证据文本（不限长度）检测错别字，只保留两边一致的错字。
             try:
-                typo_issues = self._short_duplicate_typo_issues(
+                typo_issues, review_candidates = self._short_duplicate_typo_results(
                     evidence,
                     left_text=left_text,
                     right_text=right_text,
+                    evidence_key=evidence_key,
+                    source_issue=source_issue or {},
                 )
             except TypoUnavailable as exc:
-                # Preserve evidence that could contain a shared typo; never turn failure into zero issues.
-                return {"report": True, "reason": "typo_check_incomplete", "text_length": text_length,
-                        "typo_check": {"status": "incomplete", "message": str(exc), "rule_version": TYPO_VERSION}}
+                typo_check = {
+                    "status": "incomplete",
+                    "message": str(exc),
+                    "rule_version": TYPO_VERSION,
+                }
 
         if text_length >= 30:
             decision = {"report": True, "reason": "duplicate_text_at_least_30_chars", "text_length": text_length}
+            if typo_check:
+                decision["typo_check"] = typo_check
             if typo_issues:
                 decision["typo_issues"] = typo_issues
+            if review_candidates:
+                decision["review_candidates"] = review_candidates
             return decision
 
         if self._has_identical_non_serial_numbers(left_text, right_text):
             decision = {"report": True, "reason": "identical_non_serial_numbers", "text_length": text_length}
+            if typo_check:
+                decision["typo_check"] = typo_check
             if typo_issues:
                 decision["typo_issues"] = typo_issues
+            if review_candidates:
+                decision["review_candidates"] = review_candidates
             return decision
 
         if typo_issues:
@@ -1354,41 +1432,45 @@ class DuplicateCheckService:
                 "text_length": text_length,
                 "typo_issues": typo_issues,
             }
+        if typo_check:
+            return {
+                "report": True,
+                "review_only": True,
+                "reason": "typo_check_incomplete",
+                "text_length": text_length,
+                "typo_check": typo_check,
+            }
+        if review_candidates:
+            return {
+                "report": True,
+                "review_only": True,
+                "reason": "short_duplicate_typo_review",
+                "text_length": text_length,
+                "review_candidates": review_candidates,
+            }
         return {"report": False, "reason": "short_duplicate_without_typo", "text_length": text_length}
 
-    def _duplicate_evidence_pair_text(self, evidence: dict[str, Any]) -> tuple[str, str]:
-        left_candidates = (
-            evidence.get("left_text"),
-            evidence.get("left_preview"),
-            evidence.get("left_rows"),
-            evidence.get("left_sample_rows"),
-            evidence.get("sample_rows"),
-            evidence.get("text"),
-        )
-        right_candidates = (
-            evidence.get("right_text"),
-            evidence.get("right_preview"),
-            evidence.get("right_rows"),
-            evidence.get("right_sample_rows"),
-            evidence.get("sample_rows"),
-            evidence.get("text"),
-        )
-        return self._join_evidence_text(left_candidates), self._join_evidence_text(right_candidates)
-
-    def _join_evidence_text(self, values: tuple[Any, ...]) -> str:
-        parts: list[str] = []
-        for value in values:
-            if value in (None, "", []):
-                continue
+    def _duplicate_evidence_pair_text(
+        self,
+        evidence: dict[str, Any],
+        *,
+        evidence_key: str = "",
+    ) -> tuple[str, str]:
+        def text(value: Any) -> str:
             if isinstance(value, list):
-                parts.extend(str(item or "").strip() for item in value if str(item or "").strip())
-            else:
-                parts.append(str(value or "").strip())
-        deduped: list[str] = []
-        for part in parts:
-            if part and part not in deduped:
-                deduped.append(part)
-        return "\n".join(deduped).strip()
+                return "\n".join(str(item or "").strip() for item in value if str(item or "").strip())
+            return str(value or "").strip()
+
+        if evidence_key in {"duplicate_tables", "similar_tables"}:
+            left = evidence.get("left_rows") or evidence.get("left_sample_rows") or evidence.get("sample_rows")
+            right = evidence.get("right_rows") or evidence.get("right_sample_rows") or evidence.get("sample_rows")
+        elif evidence_key in {"duplicate_sections", "similar_sections"}:
+            left = evidence.get("left_analysis_text") or evidence.get("left_preview") or evidence.get("text")
+            right = evidence.get("right_analysis_text") or evidence.get("right_preview") or evidence.get("text")
+        else:
+            left = evidence.get("left_analysis_text") or evidence.get("left_text") or evidence.get("text")
+            right = evidence.get("right_analysis_text") or evidence.get("right_text") or evidence.get("text")
+        return text(left), text(right)
 
     def _duplicate_text_length(self, text: str) -> int:
         compact = compact_raw_text(text)
@@ -1416,6 +1498,141 @@ class DuplicateCheckService:
         cleaned = "\n".join(cleaned_lines)
         return re.findall(r"(?<![A-Za-z])\d+(?:[.,]\d+)?%?", cleaned)
 
+    def _short_duplicate_typo_results(
+        self,
+        evidence: dict[str, Any],
+        *,
+        left_text: str,
+        right_text: str,
+        evidence_key: str,
+        source_issue: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        left = self._check_short_duplicate_side_typos("left", left_text, evidence, evidence_key, source_issue)
+        right = self._check_short_duplicate_side_typos("right", right_text, evidence, evidence_key, source_issue)
+        shared = common_word_edits(
+            left_text,
+            right_text,
+            list(left.get("issues") or []) + list(left.get("review_candidates") or []),
+            list(right.get("issues") or []) + list(right.get("review_candidates") or []),
+        )
+        return (
+            [item for item in shared if item.get("verification_status") == "confirmed"],
+            [item for item in shared if item.get("verification_status") != "confirmed"],
+        )
+
+    def _check_short_duplicate_side_typos(
+        self,
+        side: str,
+        text: str,
+        evidence: dict[str, Any],
+        evidence_key: str,
+        source_issue: dict[str, Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        if not str(text or "").strip():
+            return {"issues": [], "review_candidates": []}
+        page = evidence.get(f"{side}_page")
+        if page is None:
+            pages = evidence.get(f"{side}_pages") or []
+            page = pages[0] if isinstance(pages, list) and pages else evidence.get("page")
+        else:
+            pages = evidence.get(f"{side}_pages") or [page]
+        if not pages and isinstance(page, int):
+            pages = [page]
+        segments = self._duplicate_evidence_segments(
+            evidence,
+            side=side,
+            evidence_key=evidence_key,
+            text=text,
+            pages=pages,
+        )
+        location_reliable = bool(segments) and all(
+            value.get("page") is not None for value in segments
+        )
+        snippet = {
+            "side": side,
+            "text": text,
+            "page": page,
+            "bbox": evidence.get(f"{side}_bbox"),
+            "document_identifier_id": source_issue.get(f"{side}_document_identifier"),
+            "file_name": source_issue.get(f"{side}_file_name"),
+            "segments": segments,
+            "source_location_reliable": location_reliable,
+            "source_ref": {
+                "evidence_id": evidence.get("typo_evidence_id"),
+                "kind": evidence_key,
+            },
+        }
+        result = self._get_short_duplicate_typo_service().check_text_snippets_for_typos([snippet])
+        return {
+            key: [dict(item) for item in result.get(key) or [] if isinstance(item, dict)]
+            for key in ("issues", "review_candidates")
+        }
+
+    @staticmethod
+    def _duplicate_evidence_segments(
+        evidence: dict[str, Any],
+        *,
+        side: str,
+        evidence_key: str,
+        text: str,
+        pages: Any,
+    ) -> list[dict[str, Any]]:
+        """Map sentence/row units back to offsets in the authoritative evidence text."""
+        raw_segments = evidence.get(f"{side}_segments")
+        if isinstance(raw_segments, list) and raw_segments:
+            valid = [
+                dict(value)
+                for value in raw_segments
+                if isinstance(value, dict)
+                and isinstance(value.get("start"), int)
+                and isinstance(value.get("end"), int)
+                and 0 <= value["start"] < value["end"] <= len(text)
+            ]
+            if valid:
+                return valid
+
+        if evidence_key in {"duplicate_tables", "similar_tables"}:
+            parts = (
+                evidence.get(f"{side}_rows")
+                or evidence.get(f"{side}_sample_rows")
+                or evidence.get("sample_rows")
+                or []
+            )
+        elif evidence_key in {"duplicate_sections", "similar_sections"}:
+            parts = text.splitlines()
+        else:
+            parts = [text]
+
+        normalized_pages = (
+            [value for value in pages if isinstance(value, int)]
+            if isinstance(pages, list)
+            else []
+        )
+        unambiguous_page = (
+            normalized_pages[0] if len(set(normalized_pages)) == 1 else None
+        )
+        bbox = evidence.get(f"{side}_bbox")
+        segments: list[dict[str, Any]] = []
+        cursor = 0
+        for raw in parts:
+            value = str(raw or "").strip()
+            if not value:
+                continue
+            start = text.find(value, cursor)
+            if start < 0:
+                continue
+            end = start + len(value)
+            segments.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "page": unambiguous_page,
+                    "bbox": bbox,
+                }
+            )
+            cursor = end
+        return segments
+
     def _short_duplicate_typo_issues(
         self,
         evidence: dict[str, Any],
@@ -1423,33 +1640,15 @@ class DuplicateCheckService:
         left_text: str,
         right_text: str,
     ) -> list[dict[str, Any]]:
-        left_issues = self._check_short_duplicate_side_typos("left", left_text, evidence)
-        right_issues = self._check_short_duplicate_side_typos("right", right_text, evidence)
-        return common_edits(left_text, right_text, left_issues, right_issues)
-
-    def _check_short_duplicate_side_typos(
-        self,
-        side: str,
-        text: str,
-        evidence: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        if not str(text or "").strip():
-            return []
-        snippet = {
-            "side": side,
-            "text": text,
-            "page": evidence.get(f"{side}_page"),
-            "bbox": evidence.get(f"{side}_bbox"),
-        }
-        issues = self._get_short_duplicate_typo_service().check_text_snippets_for_typos([snippet])
-        normalized: list[dict[str, Any]] = []
-        for issue in issues or []:
-            if not isinstance(issue, dict):
-                continue
-            item = dict(issue)
-            item.setdefault("side", side)
-            normalized.append(item)
-        return normalized
+        """Compatibility helper returning only confirmed v2 word edits."""
+        confirmed, _ = self._short_duplicate_typo_results(
+            evidence,
+            left_text=left_text,
+            right_text=right_text,
+            evidence_key="",
+            source_issue={},
+        )
+        return confirmed
 
     def _get_short_duplicate_typo_service(self) -> Any:
         if self._short_duplicate_typo_service is None:

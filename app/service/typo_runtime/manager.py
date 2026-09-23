@@ -15,7 +15,15 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .contract import VERSION, TypoUnavailable, validate_edits
+from .contract import (
+    DEFAULT_AUTO_MIN_PROBABILITY,
+    DEFAULT_AUTO_MIN_PROBABILITY_RATIO,
+    VERSION,
+    TypoUnavailable,
+    classify_candidates,
+    validate_candidates,
+    word_rule_version,
+)
 
 
 class ModelManager:
@@ -28,6 +36,8 @@ class ModelManager:
         cache_path,
         min_probability=0.60,
         min_probability_ratio=10.0,
+        auto_min_probability=DEFAULT_AUTO_MIN_PROBABILITY,
+        auto_min_probability_ratio=DEFAULT_AUTO_MIN_PROBABILITY_RATIO,
         idle_seconds=1800,
         startup_seconds=300,
         request_seconds=30,
@@ -39,6 +49,8 @@ class ModelManager:
         self.model_id = model_id
         self.min_probability = float(min_probability)
         self.min_probability_ratio = float(min_probability_ratio)
+        self.auto_min_probability = float(auto_min_probability)
+        self.auto_min_probability_ratio = float(auto_min_probability_ratio)
         self.idle_seconds = idle_seconds
         self.startup_seconds = startup_seconds
         self.request_seconds = request_seconds
@@ -51,6 +63,16 @@ class ModelManager:
         self.pending = 0
         self.last_used = None
         self.error = None
+        self.metrics = {
+            "checks": 0,
+            "completed": 0,
+            "incomplete": 0,
+            "cache_hits": 0,
+            "inference_checks": 0,
+            "confirmed_results": 0,
+            "review_candidates": 0,
+            "inference_seconds": 0.0,
+        }
         self.cache_path = str(cache_path)
         Path(self.cache_path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.cache_path) as db:
@@ -69,10 +91,22 @@ class ModelManager:
                 "model": self.model_id,
                 "min_probability": self.min_probability,
                 "min_probability_ratio": self.min_probability_ratio,
+                "auto_min_probability": self.auto_min_probability,
+                "auto_min_probability_ratio": self.auto_min_probability_ratio,
+                "rule_version": VERSION,
+                "word_rule_version": word_rule_version(),
                 "pending": self.pending,
                 "idle_seconds": self.idle_seconds,
                 "error": self.error,
+                "metrics": dict(self.metrics),
             }
+
+    def _record_completed(self, result, *, cache_hit):
+        with self.lock:
+            self.metrics["completed"] += 1
+            self.metrics["cache_hits"] += int(cache_hit)
+            self.metrics["confirmed_results"] += int(result.get("confirmed_count") or 0)
+            self.metrics["review_candidates"] += int(result.get("review_candidate_count") or 0)
 
     def _request(self, path, payload=None, timeout=3):
         request = urllib.request.Request(
@@ -148,9 +182,14 @@ class ModelManager:
         return False
 
     def check(self, text):
+        with self.lock:
+            self.metrics["checks"] += 1
         key_material = (
             f"{self.model_id}\0{VERSION}\0{self.min_probability:.6f}"
-            f"\0{self.min_probability_ratio:.6f}\0{text}"
+            f"\0{self.min_probability_ratio:.6f}"
+            f"\0{self.auto_min_probability:.6f}"
+            f"\0{self.auto_min_probability_ratio:.6f}"
+            f"\0{word_rule_version()}\0{text}"
         )
         key = hashlib.sha256(key_material.encode()).hexdigest()
         with sqlite3.connect(self.cache_path) as db:
@@ -158,12 +197,15 @@ class ModelManager:
                 "SELECT result FROM checks WHERE key=?", (key,)
             ).fetchone()
         if row:
-            return dict(json.loads(row[0]), cache_hit=True)
+            result = json.loads(row[0])
+            self._record_completed(result, cache_hit=True)
+            return dict(result, cache_hit=True)
         with self.lock:
             if self.pending >= 16:
                 raise TypoUnavailable("纠错服务繁忙，请稍后重试")
             self.pending += 1
         inference_started = False
+        inference_started_at = None
         try:
             with self.serial:
                 with sqlite3.connect(self.cache_path) as db:
@@ -171,11 +213,17 @@ class ModelManager:
                         "SELECT result FROM checks WHERE key=?", (key,)
                     ).fetchone()
                 if row:
-                    return dict(json.loads(row[0]), cache_hit=True)
+                    result = json.loads(row[0])
+                    self._record_completed(result, cache_hit=True)
+                    return dict(result, cache_hit=True)
                 self._start()
                 for attempt in range(2):
                     try:
-                        inference_started = True
+                        if not inference_started:
+                            inference_started = True
+                            inference_started_at = self.clock()
+                            with self.lock:
+                                self.metrics["inference_checks"] += 1
                         response = self._request(
                             "/correct",
                             {
@@ -185,29 +233,38 @@ class ModelManager:
                             },
                             timeout=self.request_seconds,
                         )
-                        corrected = response.get("corrected_text")
-                        if not isinstance(corrected, str):
-                            raise TypoUnavailable("纠错输出缺少完整文本")
+                        if "candidates" not in response:
+                            if response.get("corrected_text") != text:
+                                raise TypoUnavailable("纠错输出缺少字符候选")
+                            response = {**response, "candidates": []}
+                        candidates = validate_candidates(text, response)
+                        issues, review_candidates = classify_candidates(
+                            text,
+                            candidates,
+                            auto_min_probability=self.auto_min_probability,
+                            auto_min_probability_ratio=self.auto_min_probability_ratio,
+                        )
                         result = {
                             "status": "completed",
-                            "issues": validate_edits(
-                                text,
-                                {
-                                    "edits": [
-                                        {"original": text, "replacement": corrected}
-                                    ]
-                                },
-                            ),
+                            "issues": issues,
+                            "review_candidates": review_candidates,
+                            "candidate_count": len(candidates),
+                            "confirmed_count": len(issues),
+                            "review_candidate_count": len(review_candidates),
                             "model": self.model_id,
                             "min_probability": self.min_probability,
                             "min_probability_ratio": self.min_probability_ratio,
+                            "auto_min_probability": self.auto_min_probability,
+                            "auto_min_probability_ratio": self.auto_min_probability_ratio,
                             "rule_version": VERSION,
+                            "word_rule_version": word_rule_version(),
                         }
                         with sqlite3.connect(self.cache_path) as db:
                             db.execute(
                                 "INSERT OR REPLACE INTO checks VALUES (?,?)",
                                 (key, json.dumps(result, ensure_ascii=False)),
                             )
+                        self._record_completed(result, cache_hit=False)
                         return dict(result, cache_hit=False)
                     except (urllib.error.URLError, TimeoutError) as exc:
                         self._stop()
@@ -218,6 +275,7 @@ class ModelManager:
         except Exception as exc:
             with self.lock:
                 self.error = str(exc)
+                self.metrics["incomplete"] += 1
             if isinstance(exc, TypoUnavailable):
                 raise
             raise TypoUnavailable("纠错输出无效或执行失败") from exc
@@ -226,6 +284,10 @@ class ModelManager:
                 self.pending -= 1
                 if inference_started and self.worker is not None:
                     self.last_used = self.clock()
+                if inference_started_at is not None:
+                    self.metrics["inference_seconds"] += max(
+                        0.0, self.clock() - inference_started_at
+                    )
 
 
 def main():
@@ -254,6 +316,12 @@ def main():
         min_probability=float(os.environ.get("TYPO_MIN_PROBABILITY", "0.60")),
         min_probability_ratio=float(
             os.environ.get("TYPO_MIN_PROBABILITY_RATIO", "10.0")
+        ),
+        auto_min_probability=float(
+            os.environ.get("TYPO_AUTO_MIN_PROBABILITY", "0.90")
+        ),
+        auto_min_probability_ratio=float(
+            os.environ.get("TYPO_AUTO_MIN_PROBABILITY_RATIO", "20.0")
         ),
         idle_seconds=int(os.environ.get("TYPO_IDLE_SECONDS", "1800")),
         startup_seconds=int(os.environ.get("TYPO_STARTUP_SECONDS", "300")),
