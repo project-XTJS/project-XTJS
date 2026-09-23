@@ -22,3 +22,7 @@ celery_app.conf.update(
 
 # 自动发现任务：它会自动去寻找 app/tasks 目录下所有文件里带有 @celery_app.task 的函数
 celery_app.autodiscover_tasks(['app'])
+
+# Explicit import is required because this project uses an ``app.tasks`` package
+# rather than Celery's conventional ``tasks.py`` module.
+from app.tasks import business_review as _business_review  # noqa: E402,F401

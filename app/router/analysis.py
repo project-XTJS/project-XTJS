@@ -38,8 +38,10 @@ from app.core.document_types import DOCUMENT_TYPE_TENDER
 from app.service import document_blob_store
 from app.service.analysis import TenderComplianceChecker
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service.business_review_tasks import run_business_review_compatibility
 from app.service.document_ingest_service import upload_extract_and_create_document
 from app.service.postgresql_service import PostgreSQLService
+from app.service.resource_access import actor_id
 from app.service.table_parser import build_logical_tables, build_table_structure
 from app.utils.text_utils import cleanup_temp_file, preprocess_text, save_temp_file
 
@@ -529,7 +531,6 @@ async def _run_selected_project_services(
     - 错别字检查
     返回包含各服务执行状态和结果的聚合响应。
     """
-    review_service = UnifiedBusinessReviewService(db_service=db_service)
     items: list[dict] = []
     results: dict[str, Any] = {}
     business_review_response: dict[str, Any] | None = None
@@ -547,9 +548,11 @@ async def _run_selected_project_services(
                 analysis_name="商务标形式审查",
             )
             business_review_response = await run_in_threadpool(
-                review_service.persist_project_business_review,
+                run_business_review_compatibility,
                 project_identifier=identifier_id,
-                result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+                requested_by=actor_id(),
+                expected_input_revision=int(project.get("input_revision") or 0),
+                mode="standard",
             )
         return business_review_response
 

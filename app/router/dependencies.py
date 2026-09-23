@@ -46,6 +46,9 @@ def get_db_service(request: Request) -> PostgreSQLService:
         if not revision.isdigit():
             raise ConsistencyConflict("无效的材料版本，请刷新项目")
         service.expect_input_revision(identifier, int(revision))
+    result_version = request.headers.get("X-XTJS-Result-Version")
+    if result_version and identifier and "/projects/" in request.url.path:
+        service.assert_project_review_version(identifier, result_version)
     return service
 
 

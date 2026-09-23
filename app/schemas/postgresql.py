@@ -7,7 +7,8 @@ PostgreSQL 相关请求模型定义。
 """
 
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -160,6 +161,15 @@ class ProjectReportExportRequest(BaseModel):
     result: dict[str, Any] = Field(..., description="Filtered display result used only for this export.")
 
 
+class ProjectReviewExportRequest(BaseModel):
+    """Server-side export request for an immutable indexed result version."""
+    model_config = ConfigDict(extra="forbid")
+
+    result_version: str = Field(..., min_length=16)
+    format: Literal["word", "json"] = "word"
+    review_statuses: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
 class ProjectWorkflowScopeRequest(BaseModel):
     """Workflow scope controls such as soft-excluded bidders."""
     model_config = ConfigDict(extra="allow")
@@ -175,6 +185,14 @@ class ProjectManualReviewRerunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     services: list[str] = Field(default_factory=list, min_length=1)
+
+
+class BusinessReviewTaskCreateRequest(BaseModel):
+    """Idempotent submission for one material revision."""
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+    input_revision: int = Field(..., ge=0)
 
 
 class DuplicateCheckScope(str, Enum):

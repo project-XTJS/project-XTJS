@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 from uuid import uuid4
+import hashlib
+import json
 
 from app.service.minio_service import MinioService
 
@@ -30,6 +32,7 @@ CONTENT_OBJECT_PREFIX = "JSON识别/content"
 REVIEW_OBJECT_PREFIX = "JSON识别/review"
 # 独立招标文件审查结果对象前缀
 TENDER_REVIEW_OBJECT_PREFIX = "JSON识别/tender-review"
+REVIEW_INDEX_OBJECT_PREFIX = "JSON识别/review-index"
 
 _minio_singleton: Optional[MinioService] = None
 
@@ -255,6 +258,28 @@ def save_project_result(
     # Immutable versions: SQL rollback must leave the previously referenced object intact.
     key = key.removesuffix(".json.gz") + f".{uuid4().hex}.json.gz"
     _put_new_object(key, result)
+    return key
+
+
+def save_review_index_object(
+    value: Any,
+    *,
+    project_identifier_id: Any,
+    result_version: str,
+    kind: str,
+    identity: str,
+) -> str:
+    """Persist one content-addressed review component/detail/evidence object."""
+    project_id = MinioService._safe_segment(project_identifier_id or "project", maxlen=80)
+    version = MinioService._safe_segment(result_version or "unknown", maxlen=80)
+    object_kind = MinioService._safe_segment(kind or "item", maxlen=40)
+    object_identity = MinioService._safe_segment(identity or "item", maxlen=120)
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    key = f"{REVIEW_INDEX_OBJECT_PREFIX}/{project_id}/{version}/{object_kind}/{object_identity}.{digest}.json.gz"
+    client = _client()
+    if not client._object_exists(key):
+        _put_new_object(key, value)
     return key
 
 

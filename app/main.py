@@ -6,7 +6,9 @@ FastAPI 应用主入口模块。
 并自定义 OpenAPI schema 以注入项目标识可选值。
 """
 
+import asyncio
 import logging
+from contextlib import suppress
 
 import uvicorn
 from pathlib import Path
@@ -27,6 +29,7 @@ from app.router.postgresql import router as postgresql_router
 from app.router.postgresql_batch import router as postgresql_batch_router
 from app.service.user_service import UserService
 from app.service.document_blob_store import BlobReadError
+from app.service.business_review_tasks import dispatch_pending_tasks
 # 服务层（用于获取项目列表）
 from app.service.cache_service import CacheUnavailableError, get_cache_service
 from app.service.analysis.compliance.embedding_service import (
@@ -308,6 +311,37 @@ def bootstrap_initial_admin() -> None:
         UserService().ensure_initial_admin()
     except Exception as exc:  # 数据库尚未就绪等情况不应阻断启动
         logger.warning("初始管理员引导失败（可忽略，稍后可手动创建）：%s", exc)
+
+
+async def _business_review_dispatch_loop() -> None:
+    while True:
+        try:
+            published = await asyncio.to_thread(dispatch_pending_tasks)
+            if published:
+                logger.info("补投商务审查任务：count=%s", published)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("商务审查待投递任务扫描失败")
+        await asyncio.sleep(settings.BUSINESS_REVIEW_DISPATCH_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def start_business_review_dispatcher() -> None:
+    app.state.business_review_dispatcher = asyncio.create_task(
+        _business_review_dispatch_loop(),
+        name="business-review-dispatcher",
+    )
+
+
+@app.on_event("shutdown")
+async def stop_business_review_dispatcher() -> None:
+    task = getattr(app.state, "business_review_dispatcher", None)
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 @app.get("/", summary="系统根目录", tags=["系统"])

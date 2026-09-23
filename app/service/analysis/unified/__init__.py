@@ -205,6 +205,8 @@ class UnifiedBusinessReviewService(
         self,
         *,
         project_identifier: str,
+        progress_callback=None,
+        force_sequential: bool = False,
     ) -> dict[str, Any]:
         """从数据库中读取项目绑定的招投标文档并执行审查。"""
         payload_data = ProjectAnalysisInputLoader(self.db_service).load(
@@ -215,6 +217,8 @@ class UnifiedBusinessReviewService(
         return self._review_project_business_documents(
             project_identifier=project_identifier,
             payload_data=payload_data,
+            progress_callback=progress_callback,
+            force_sequential=force_sequential,
         )
 
     def review_project_deviation_documents(

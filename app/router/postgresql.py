@@ -59,6 +59,7 @@ from app.router.uploaded_json_support import (
     read_uploaded_json_file,
 )
 from app.schemas.postgresql import (
+    BusinessReviewTaskCreateRequest,
     BusinessBidManualReviewInputsRequest,
     DuplicateCheckScope,
     DocumentReviewContentUpdateRequest,
@@ -73,6 +74,7 @@ from app.schemas.postgresql import (
     ProjectManualReviewRerunRequest,
     ProjectManualReviewResultInputsRequest,
     ProjectReportExportRequest,
+    ProjectReviewExportRequest,
     ProjectResultUpdateRequest,
     ProjectResultUpsertRequest,
     ProjectRelationUpdateRequest,
@@ -100,6 +102,10 @@ from app.service.analysis.manual_review.business_bid_format import (
 )
 from app.service.analysis.project_input_loader import ProjectAnalysisInputLoader
 from app.service import document_blob_store
+from app.service.review_index import (
+    is_excluded_business_review_issue,
+    is_optional_business_review_issue,
+)
 from app.service.manual_review_state import (
     MANUAL_REVIEW_RESULTS_KEY,
     WORKFLOW_SCOPE_KEY,
@@ -117,6 +123,11 @@ from app.service.workflow_scope import (
     workflow_scope_from_result_record,
 )
 from app.service.analysis.unified import UnifiedBusinessReviewService
+from app.service.business_review_tasks import (
+    BusinessReviewTaskService,
+    publish_task as publish_business_review_task,
+    run_business_review_compatibility,
+)
 from app.service.document_ingest_service import normalize_file_url, upload_extract_and_create_document
 from app.service.minio_service import MinioService
 from app.service.postgresql_service import PostgreSQLService
@@ -146,6 +157,7 @@ def _cache_get_or_set_payload(
     ttl_seconds: int,
     response: Optional[Response],
     factory,
+    allow_degraded: bool = False,
 ):
     from app.service.resource_access import cache_scope, restricted
     if restricted():
@@ -159,7 +171,13 @@ def _cache_get_or_set_payload(
         _set_cache_header(response, "disabled")
         return factory()
     try:
-        payload, cache_status = cache_service.get_or_set_json(cache_key, ttl_seconds, factory)
+        payload, cache_status = cache_service.get_or_set_json(
+            cache_key,
+            ttl_seconds,
+            factory,
+            allow_degraded_read=allow_degraded,
+            allow_degraded_write=allow_degraded,
+        )
         _set_cache_header(response, cache_status)
         return payload
     except CacheUnavailableError as exc:
@@ -1809,11 +1827,13 @@ def _persist_project_personnel_reuse_draft(
             },
         )
     if confirmation_status == "confirmed":
-        db_service.update_project_manual_review_result(
+        result_record = db_service.update_project_manual_review_result(
             project_identifier_id=identifier_id,
             result_key="personnel_reuse_check",
             result_value=personnel_result,
         )
+        personnel_result = dict(personnel_result)
+        personnel_result["_result_version"] = result_record.get("result_version")
     _invalidate_project_cache_by_identifier(identifier_id)
     return personnel_result
 
@@ -1871,6 +1891,7 @@ def _build_result_record_meta(result_record: Optional[dict[str, Any]]) -> Option
         "project_identifier_id": result_record.get("project_identifier_id"),
         "create_time": result_record.get("create_time"),
         "update_time": result_record.get("update_time"),
+        "result_version": result_record.get("result_version"),
     }
 
 
@@ -2407,6 +2428,7 @@ async def save_project_manual_review_result_inputs(
 async def rerun_project_manual_review_results(
     identifier_id: str,
     payload: ProjectManualReviewRerunRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
     db_service: PostgreSQLService = Depends(get_db_service),
     duplicate_check_service: DuplicateCheckService = Depends(get_duplicate_check_service),
     bid_document_review_service: BidDocumentReviewService = Depends(get_bid_document_review_service),
@@ -2436,11 +2458,12 @@ async def rerun_project_manual_review_results(
                         required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
                         analysis_name="商务标形式重审",
                     )
-                    review_service = UnifiedBusinessReviewService(db_service=db_service)
                     rerun_result = await run_in_threadpool(
-                        review_service.persist_project_business_review,
+                        run_business_review_compatibility,
                         project_identifier=identifier_id,
-                        result_key=BUSINESS_FORMAT_RESULT_KEY,
+                        requested_by=str(current_user["identifier_id"]),
+                        expected_input_revision=int(project.get("input_revision") or 0),
+                        mode="manual-rerun",
                     )
                     review = rerun_result.get("review") or {}
                     manual_payload = await run_in_threadpool(
@@ -2910,14 +2933,16 @@ def _add_report_issue_table(
 
 
 def _report_row_color(row: list[str]) -> RGBColor | None:
-    """审查明细行着色：通过=绿色，不通过=红色，人工复核=黄色，其他=黑色。"""
+    """审查明细行着色：通过=绿色，不通过=红色，待核验=黄色，不适用=灰色。"""
     status = str(row[5] if len(row) > 5 else "").strip().lower()
-    if status in {"pass", "passed"}:
+    if status in {"pass", "passed", "一致/通过"}:
         return RGBColor(0x00, 0x80, 0x00)
-    if status in {"fail", "failed", "missing", "error"}:
+    if status in {"fail", "failed", "missing", "error", "不一致/不通过", "不一致/缺失"}:
         return RGBColor(0xC0, 0x00, 0x00)
-    if status in {"unclear", "warning", "pending", "review", "待复核"}:
+    if status in {"unclear", "warning", "pending", "review", "待复核", "待核验"}:
         return RGBColor(0xFF, 0xCC, 0x00)
+    if status in {"not_applicable", "skipped", "optional", "不适用"}:
+        return RGBColor(0x80, 0x80, 0x80)
     return None
 
 
@@ -3042,7 +3067,37 @@ def _report_issue_row(
     reason_text = _report_compact_text(reason, max_length=500)
     file_text = _report_compact_text(file_name, max_length=260)
     page_text = _report_compact_text(page, max_length=120)
-    status_text = _report_compact_text(status, max_length=30)
+    raw_status = str(status or "").strip().lower()
+    review_note = {
+        "unclear": "【需人工复核】当前证据不足或存在歧义。",
+        "pending": "【需人工复核】当前证据不足或存在歧义。",
+        "review": "【需人工复核】当前证据不足或存在歧义。",
+        "ambiguous": "【需人工复核】当前证据不足或存在歧义。",
+        "not_applicable": "【该项不适用】本次检查不适用于当前材料。",
+        "skipped": "【该项不适用】本次检查不适用于当前材料。",
+        "optional": "【该项不适用】本次检查不适用于当前材料。",
+    }.get(raw_status, "")
+    if review_note:
+        description_text = _report_compact_text(
+            _report_join_parts([review_note, description_text]),
+            max_length=700,
+        )
+    # Word 报告只展示“通过/不通过”两类结论；待复核和不适用的
+    # 原始语义写入问题描述，JSON 导出仍保留原始状态。
+    status_text = {
+        "pass": "一致/通过",
+        "passed": "一致/通过",
+        "fail": "不一致/不通过",
+        "failed": "不一致/不通过",
+        "missing": "不一致/缺失",
+        "unclear": "不一致/不通过",
+        "pending": "不一致/不通过",
+        "review": "不一致/不通过",
+        "ambiguous": "不一致/不通过",
+        "not_applicable": "不一致/不通过",
+        "skipped": "不一致/不通过",
+        "optional": "不一致/不通过",
+    }.get(raw_status, _report_compact_text(status, max_length=30))
     if not any((problem_text, description_text, reason_text, file_text, page_text)):
         return
     rows.append([
@@ -3144,10 +3199,25 @@ def _collect_business_format_issue_rows(payload: dict[str, Any]) -> list[list[st
     rows: list[list[str]] = []
     frontend_items = payload.get("issues") if isinstance(payload.get("issues"), list) else []
     if frontend_items:
+        optional_titles = {
+            _report_issue_title(
+                item.get("issue") if isinstance(item.get("issue"), dict) else item
+            )
+            for item in frontend_items
+            if isinstance(item, dict)
+            and is_optional_business_review_issue(
+                item.get("issue") if isinstance(item.get("issue"), dict) else item
+            )
+        }
         for item in frontend_items:
             if not isinstance(item, dict):
                 continue
             issue = item.get("issue") if isinstance(item.get("issue"), dict) else item
+            if (
+                is_excluded_business_review_issue(issue)
+                or _report_issue_title(issue) in optional_titles
+            ):
+                continue
             file_name, page = _report_file_and_page(item)
             issue_file, issue_page = _report_file_and_page(issue)
             _report_issue_row(
@@ -3178,6 +3248,8 @@ def _collect_business_format_issue_rows(payload: dict[str, Any]) -> list[list[st
                 continue
             for issue in issues:
                 if not isinstance(issue, dict):
+                    continue
+                if is_excluded_business_review_issue(issue):
                     continue
                 file_name, page = _report_file_and_page(issue)
                 _report_issue_row(
@@ -3231,7 +3303,7 @@ def _collect_duplicate_issue_rows(payload: dict[str, Any]) -> list[list[str]]:
                     f"右：{right_page}" if right_page else "",
                     _report_page_text(item),
                 ], max_length=180),
-                status="fail",
+                status=item.get("status") or item.get("source_status") or "fail",
             )
     return rows
 
@@ -3289,7 +3361,7 @@ def _collect_duplicate_cluster_issue_rows(payload: dict[str, Any]) -> list[list[
             ]),
             file_name=cluster.get("files"),
             page=_report_ranges_by_file(cluster.get("doc_ranges_by_file")),
-            status="fail",
+            status=cluster.get("status") or cluster.get("source_status") or "fail",
         )
     return rows
 
@@ -3306,6 +3378,8 @@ def _collect_generic_issue_rows(section_key: str, payload: Any) -> list[list[str
         if not isinstance(value, dict):
             if parent_key in {"issues", "failed", "missing", "unclear"}:
                 _report_issue_row(rows, problem=label, reason=value, status=parent_key)
+            return
+        if is_excluded_business_review_issue(value):
             return
 
         has_issue_key = any(
@@ -3403,8 +3477,17 @@ def _is_passed_export_item(item: dict[str, Any]) -> bool:
         return False
     if review_status == "passed":
         return True
+    issue = item.get("issue") if isinstance(item.get("issue"), dict) else {}
+    explicit_status = str(item.get("status") or issue.get("status") or "").strip().lower()
+    if explicit_status in {
+        "fail", "failed", "missing", "error", "unclear", "pending",
+        "ambiguous", "review", "not_applicable", "skipped", "optional",
+    }:
+        return False
+    if explicit_status in {"pass", "passed", "success", "ok"}:
+        return True
     for field in ("source_status", "original_source_status", "status"):
-        if str(item.get(field) or "").strip().lower() == "passed":
+        if str(item.get(field) or "").strip().lower() in {"pass", "passed"}:
             return True
     result_key = str(item.get("result_key") or item.get("source_result_key") or "").strip()
     if result_key.endswith("_passed") or result_key == "business_bid_format_review_passed":
@@ -4331,7 +4414,252 @@ def delete_project(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
-# 项目分析结果
+# 轻量结果审核读取
+@router.get("/projects/{identifier_id}/review/summary", summary="查询项目审核摘要")
+@bounded_sync
+def get_project_review_summary(
+    identifier_id: str,
+    response: Response,
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    try:
+        summary = db_service.get_project_review_summary(identifier_id)
+        cache_key = cache_service.key(
+            "project", identifier_id, "review", summary.get("project", {}).get("input_revision", 0),
+            summary.get("result_version") or "none", "summary-v3",
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=lambda: summary,
+            allow_degraded=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/review/results/{result_key}", summary="按需查询单类审核结果")
+@bounded_sync
+def get_project_review_component(
+    identifier_id: str,
+    result_key: str,
+    response: Response,
+    result_version: str = Query(..., min_length=16),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    try:
+        version_head = db_service.assert_project_review_version(identifier_id, result_version)
+        cache_key = cache_service.key(
+            "project", identifier_id, "review", version_head["input_revision"],
+            result_version, "component", result_key,
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=lambda: db_service.get_project_review_component(identifier_id, result_key, result_version),
+            allow_degraded=True,
+        )
+    except ConsistencyConflict:
+        raise
+    except KeyError as exc:
+        raise HTTPException(404, detail="result_key not found") from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/review/issues", summary="分页查询项目审核问题")
+@bounded_sync
+def list_project_review_issues(
+    identifier_id: str,
+    response: Response,
+    result_version: str = Query(..., min_length=16),
+    result_key: Optional[str] = Query(default=None),
+    risk_level: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    check_code: Optional[str] = Query(default=None),
+    file_name: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    filters = {"result_key": result_key, "risk_level": risk_level, "status": status,
+               "check_code": check_code, "file_name": file_name, "limit": limit, "offset": offset}
+    try:
+        version_head = db_service.assert_project_review_version(identifier_id, result_version)
+        cache_key = cache_service.key(
+            "project", identifier_id, "review", version_head["input_revision"],
+            result_version, "issues-v3", cache_service.digest(filters),
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=lambda: db_service.list_project_review_issues(
+                identifier_id,
+                result_version=result_version,
+                result_key=result_key,
+                risk_level=risk_level,
+                status=status,
+                check_code=check_code,
+                file_name=file_name,
+                limit=limit,
+                offset=offset,
+            ),
+            allow_degraded=True,
+        )
+    except ConsistencyConflict:
+        raise
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/review/issue-ids", summary="查询筛选范围内的审核问题标识")
+@bounded_sync
+def list_project_review_issue_ids(
+    identifier_id: str,
+    result_version: str = Query(..., min_length=16),
+    result_key: Optional[str] = Query(default=None),
+    risk_level: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    check_code: Optional[str] = Query(default=None),
+    file_name: Optional[str] = Query(default=None),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        return db_service.list_project_review_issues(
+            identifier_id,
+            result_version=result_version,
+            result_key=result_key,
+            risk_level=risk_level,
+            status=status,
+            check_code=check_code,
+            file_name=file_name,
+            ids_only=True,
+        )
+    except ConsistencyConflict:
+        raise
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/review/issues/{issue_id}", summary="查询审核问题详情")
+@bounded_sync
+def get_project_review_issue_detail(
+    identifier_id: str,
+    issue_id: str,
+    response: Response,
+    result_version: str = Query(..., min_length=16),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    try:
+        version_head = db_service.assert_project_review_version(identifier_id, result_version)
+        cache_key = cache_service.key(
+            "project", identifier_id, "review", version_head["input_revision"],
+            result_version, "detail", issue_id,
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=lambda: db_service.get_project_review_issue(
+                identifier_id, issue_id, result_version=result_version,
+            ),
+            allow_degraded=True,
+        )
+    except ConsistencyConflict:
+        raise
+    except KeyError as exc:
+        raise HTTPException(404, detail="issue not found") from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/review/issues/{issue_id}/evidence", summary="查询审核问题证据")
+@bounded_sync
+def get_project_review_issue_evidence(
+    identifier_id: str,
+    issue_id: str,
+    response: Response,
+    result_version: str = Query(..., min_length=16),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    cache_service: RedisCacheService = Depends(get_cache_service),
+):
+    try:
+        version_head = db_service.assert_project_review_version(identifier_id, result_version)
+        cache_key = cache_service.key(
+            "project", identifier_id, "review", version_head["input_revision"],
+            result_version, "evidence", issue_id, limit, offset,
+        )
+        return _cache_get_or_set_payload(
+            cache_service=cache_service,
+            cache_key=cache_key,
+            ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
+            response=response,
+            factory=lambda: db_service.get_project_review_issue(
+                identifier_id,
+                issue_id,
+                result_version=result_version,
+                evidence=True,
+                limit=limit,
+                offset=offset,
+            ),
+            allow_degraded=True,
+        )
+    except ConsistencyConflict:
+        raise
+    except KeyError as exc:
+        raise HTTPException(404, detail="issue not found") from exc
+    except ValueError as exc:
+        raise HTTPException(404, detail=str(exc)) from exc
+
+
+@router.post("/projects/{identifier_id}/review/exports", summary="按结果版本导出完整审核报告")
+async def export_indexed_project_review(
+    identifier_id: str,
+    payload: ProjectReviewExportRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db_service: PostgreSQLService = Depends(get_db_service),
+    oss_service: MinioService = Depends(get_oss_service),
+):
+    try:
+        export_payload = await run_in_threadpool(
+            db_service.get_project_review_export_payload,
+            identifier_id,
+            result_version=payload.result_version,
+            review_statuses=payload.review_statuses,
+        )
+        if payload.format == "json":
+            return {
+                "project_identifier_id": identifier_id,
+                "result_version": payload.result_version,
+                **export_payload,
+            }
+        return await _export_result_word_report(
+            project_identifier_id=identifier_id,
+            result_payload=export_payload,
+            operator_name=_report_operator_name(current_user),
+            db_service=db_service,
+            oss_service=oss_service,
+        )
+    except ConsistencyConflict:
+        raise
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+
+
+# 项目分析结果（兼容旧客户端）
 @router.get("/projects/{identifier_id}/results", summary="查询项目分析结果")
 @bounded_sync
 def get_project_results(
@@ -4408,6 +4736,7 @@ def get_project_results(
             ttl_seconds=settings.XTJS_CACHE_PROJECT_RESULTS_TTL_SECONDS,
             response=response,
             factory=_load_results,
+            allow_degraded=True,
         )
     except HTTPException:
         raise
@@ -4765,13 +5094,84 @@ async def project_duplicate_check(
         raise HTTPException(status_code=500, detail=f"数据库错误：{exc}") from exc
 
 
+@router.post("/projects/{identifier_id}/business-review/tasks", summary="提交商务审查后台任务")
+async def create_business_review_task(
+    identifier_id: str,
+    payload: BusinessReviewTaskCreateRequest,
+    response: Response,
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
+        _ensure_project_ocr_idle(project, analysis_name="商务标形式审查")
+        _ensure_project_analysis_status(
+            project,
+            required_status=PostgreSQLService.PARSING_STATUS_BUSINESS_OCR_COMPLETED,
+            analysis_name="商务标形式审查",
+        )
+        coordinator = BusinessReviewTaskService(db_service)
+        task, created = await run_in_threadpool(
+            coordinator.submit,
+            project_identifier=identifier_id,
+            request_id=str(payload.request_id),
+            expected_input_revision=payload.input_revision,
+            requested_by=str(current_user["identifier_id"]),
+            request_payload={"mode": "standard", "source": "project_page"},
+        )
+        if created:
+            await run_in_threadpool(publish_business_review_task, task["task_id"])
+            response.status_code = 202
+        return task
+    except ConsistencyConflict:
+        raise
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        if "not found" in str(exc).lower():
+            raise HTTPException(status_code=404, detail="项目不存在") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/projects/{identifier_id}/business-review/tasks/latest", summary="查询最近商务审查任务")
+async def get_latest_business_review_task(
+    identifier_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        return await run_in_threadpool(BusinessReviewTaskService(db_service).get_latest, identifier_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在") from exc
+
+
+@router.get("/projects/{identifier_id}/business-review/tasks/{task_id}", summary="查询商务审查任务进度")
+async def get_business_review_task(
+    identifier_id: str,
+    task_id: str,
+    db_service: PostgreSQLService = Depends(get_db_service),
+):
+    try:
+        task = await run_in_threadpool(
+            BusinessReviewTaskService(db_service).get,
+            identifier_id,
+            task_id,
+        )
+        if not task:
+            raise HTTPException(status_code=404, detail="商务审查任务不存在")
+        return task
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="项目不存在") from exc
+
+
 @router.post("/projects/business-bid-format-review", summary="项目商务标形式审查")
 async def project_business_bid_format_review(
     identifier_id: str = Query(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     """对项目中的商务标进行格式合规性检查。"""
-    review_service = UnifiedBusinessReviewService(db_service=db_service)
     try:
         project = await run_in_threadpool(_refresh_project_or_404, db_service, identifier_id)
         _ensure_project_ocr_idle(project, analysis_name="商务标形式审查")
@@ -4781,9 +5181,11 @@ async def project_business_bid_format_review(
             analysis_name="商务标形式审查",
         )
         result = await run_in_threadpool(
-            review_service.persist_project_business_review,
+            run_business_review_compatibility,
             project_identifier=identifier_id,
-            result_key=UnifiedBusinessReviewService.BUSINESS_RESULT_KEY,
+            requested_by=str(current_user["identifier_id"]),
+            expected_input_revision=int(project.get("input_revision") or 0),
+            mode="standard",
         )
         _invalidate_project_cache_by_identifier(identifier_id)
         return result
@@ -4868,6 +5270,7 @@ async def save_business_bid_format_review_manual_inputs(
 async def rerun_business_bid_format_review_with_manual_inputs(
     identifier_id: str,
     payload: Optional[BusinessBidManualReviewInputsRequest] = Body(default=None),
+    current_user: dict[str, Any] = Depends(get_current_user),
     db_service: PostgreSQLService = Depends(get_db_service),
 ):
     try:
@@ -4889,11 +5292,12 @@ async def rerun_business_bid_format_review_with_manual_inputs(
             identifier_id=identifier_id,
             db_service=db_service,
         )
-        review_service = UnifiedBusinessReviewService(db_service=db_service)
         rerun_result = await run_in_threadpool(
-            review_service.persist_project_business_review,
+            run_business_review_compatibility,
             project_identifier=identifier_id,
-            result_key=BUSINESS_FORMAT_RESULT_KEY,
+            requested_by=str(current_user["identifier_id"]),
+            expected_input_revision=int(project.get("input_revision") or 0),
+            mode="manual-rerun",
         )
         review = rerun_result["review"]
         corrected_review = _apply_manual_business_review_inputs(

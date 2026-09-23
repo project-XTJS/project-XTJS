@@ -35,7 +35,12 @@ from app.service.analysis.location_utils import (
 )
 from app.service.minio_service import MinioService
 from app.service import document_blob_store
-from app.service.project_result_summary import build_project_result_summary
+from app.service.project_result_summary import build_project_result_summary, is_result_key_visible
+from app.service.review_index import (
+    REMOVED_BUSINESS_SCOPE_ISSUE_TITLE,
+    build_result_version,
+    prepare_review_storage,
+)
 from app.service.upload_manifest import upload_summary
 from app.core.consistency import ConsistencyConflict
 from app.service.upload_recovery import UploadRecoveryMixin
@@ -59,6 +64,132 @@ UUID_TEXT = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 UUID_TEXT_PATTERN = re.compile(rf"(?i)\b{UUID_TEXT}\b")
 UUID_SUFFIX_PATTERN = re.compile(rf"(?i)\(({UUID_TEXT})\)\s*$")
 MISSING_UUID_SENTINEL = "00000000-0000-0000-0000-000000000000"
+LEGACY_NOT_APPLICABLE_STATUSES = {"not_applicable", "skipped", "optional"}
+
+
+def _canonical_review_issue_status(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"pass", "passed", "success", "ok"}:
+        return "pass"
+    if raw in {"fail", "failed", "missing", "error"}:
+        return "fail"
+    if raw in LEGACY_NOT_APPLICABLE_STATUSES:
+        return "not_applicable"
+    if raw in {"unclear", "pending", "ambiguous", "review"}:
+        return "unclear"
+    return raw
+
+
+def _canonical_review_status_counts(value: Any) -> dict[str, int]:
+    counts = value if isinstance(value, dict) else {}
+    result = {"pass": 0, "fail": 0, "unclear": 0, "not_applicable": 0}
+    for status, count in counts.items():
+        canonical = _canonical_review_issue_status(status)
+        if canonical in result:
+            try:
+                result[canonical] += int(count or 0)
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def _canonical_review_summary(value: dict[str, Any]) -> dict[str, Any]:
+    """Map legacy N/A buckets at read time without rewriting stored indexes."""
+    summary = dict(value)
+    counts = _canonical_review_status_counts(summary.get("status_counts"))
+    summary["status_counts"] = counts
+    summary["review_item_count"] = sum(counts.values())
+    summary["inconsistent_count"] = counts["fail"]
+    summary["unclear_count"] = counts["unclear"]
+    summary["not_applicable_count"] = counts["not_applicable"]
+    categories = []
+    for category in summary.get("categories") or []:
+        if not isinstance(category, dict):
+            continue
+        normalized = dict(category)
+        category_counts = _canonical_review_status_counts(normalized.get("status_counts"))
+        normalized["status_counts"] = category_counts
+        normalized["review_item_count"] = sum(category_counts.values())
+        normalized["inconsistent_count"] = category_counts["fail"]
+        normalized["unclear_count"] = category_counts["unclear"]
+        normalized["not_applicable_count"] = category_counts["not_applicable"]
+        categories.append(normalized)
+    summary["categories"] = categories
+    return summary
+
+
+def _subtract_removed_review_issue_counts(
+    value: dict[str, Any],
+    removed_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Keep legacy persisted summaries consistent with retired issue rows."""
+    summary = dict(value)
+    summary["risk_counts"] = dict(summary.get("risk_counts") or {})
+    summary["status_counts"] = dict(summary.get("status_counts") or {})
+    categories = [dict(item) for item in summary.get("categories") or [] if isinstance(item, dict)]
+    by_key = {str(item.get("result_key") or ""): item for item in categories}
+    for category in categories:
+        category["risk_counts"] = dict(category.get("risk_counts") or {})
+        category["status_counts"] = dict(category.get("status_counts") or {})
+
+    def decrement(target: dict[str, Any], key: str, amount: int) -> None:
+        try:
+            current = int(target.get(key) or 0)
+        except (TypeError, ValueError):
+            current = 0
+        target[key] = max(0, current - amount)
+
+    for row in removed_rows:
+        try:
+            count = max(0, int(row.get("count") or 0))
+        except (TypeError, ValueError):
+            count = 0
+        if count == 0:
+            continue
+        risk = str(row.get("risk_level") or "").strip().lower()
+        status = _canonical_review_issue_status(row.get("status"))
+        decrement(summary, "issue_count", count)
+        decrement(summary["risk_counts"], risk, count)
+        decrement(summary["status_counts"], status, count)
+        category = by_key.get(str(row.get("result_key") or ""))
+        if category is None:
+            continue
+        decrement(category, "issue_count", count)
+        decrement(category["risk_counts"], risk, count)
+        decrement(category["status_counts"], status, count)
+
+    for target in [summary, *categories]:
+        counts = _canonical_review_status_counts(target.get("status_counts"))
+        target["status_counts"] = counts
+        target["review_item_count"] = sum(counts.values())
+        target["inconsistent_count"] = counts["fail"]
+        target["unclear_count"] = counts["unclear"]
+        target["not_applicable_count"] = counts["not_applicable"]
+        if target is not summary:
+            risks = target.get("risk_counts") or {}
+            target["has_risk"] = sum(int(risks.get(key) or 0) for key in ("high", "medium", "low")) > 0
+    summary["categories"] = categories
+    return summary
+
+
+def _canonical_review_issue_row(value: dict[str, Any]) -> dict[str, Any]:
+    row = dict(value)
+    payload = dict(row.get("list_payload") or {})
+    raw = payload.get("status") or row.get("status")
+    canonical = _canonical_review_issue_status(raw)
+    if canonical:
+        row["status"] = canonical
+        payload["status"] = canonical
+    if str(raw or "").strip().lower() in LEGACY_NOT_APPLICABLE_STATUSES:
+        payload.setdefault("applicability_status", "not_applicable")
+        description = str(row.get("description") or payload.get("summary") or "当前材料不适用该检查").strip()
+        if not description.startswith("该项不适用"):
+            description = f"该项不适用：{description}"
+        row["description"] = description
+        payload["summary"] = description
+    if payload:
+        row["list_payload"] = payload
+    return row
 
 # 全局连接池（模块级单例）
 _db_pool = None
@@ -798,6 +929,14 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         """
         with self._get_connection() as conn:
             with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM xtjs_review_issues WHERE project_identifier_id = ANY(%s::uuid[])",
+                    (normalized_ids,),
+                )
+                cursor.execute(
+                    "DELETE FROM xtjs_result_components WHERE project_identifier_id = ANY(%s::uuid[])",
+                    (normalized_ids,),
+                )
                 cursor.execute(query, (normalized_ids,))
                 return int(cursor.rowcount or 0)
 
@@ -3350,6 +3489,401 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 row["result_summary"] = None
             return self._sanitize_project_result_record(row)
 
+    def _get_project_review_head(self, cursor, project_identifier_id: str) -> dict[str, Any] | None:
+        pid = self._resolve_project_identifier(cursor, project_identifier_id)
+        cursor.execute(
+            """SELECT p.identifier_id,p.project_name,p.input_revision,p.parsing_status,
+                      r.result_version,r.review_summary,r.review_index_status,r.result_summary,
+                      r.result_keys,r.result_object_key,r.input_revision AS result_input_revision,
+                      r.update_time AS result_update_time
+               FROM xtjs_projects p
+               LEFT JOIN xtjs_result r ON r.project_identifier_id=p.identifier_id
+               WHERE p.identifier_id=%s AND NOT p.deleted""",
+            (pid,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _assert_review_version(head: dict[str, Any], result_version: str | None) -> None:
+        expected = str(head.get("result_version") or "").strip()
+        requested = str(result_version or "").strip()
+        if requested and requested != expected:
+            raise ConsistencyConflict("审查结果已更新，请重新加载摘要")
+        if head.get("result_input_revision") is not None and int(head.get("result_input_revision") or 0) != int(head.get("input_revision") or 0):
+            raise ConsistencyConflict("材料已变更，旧结果已过期")
+
+    @access_check(project_identifier_id='project')
+    def get_project_review_summary(self, project_identifier_id: str) -> dict[str, Any]:
+        """Read the first-screen summary without hydrating the full result object."""
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+        result_exists = bool(head.get("result_object_key") or head.get("result_keys"))
+        stale = result_exists and head.get("result_input_revision") != head.get("input_revision")
+        indexed = (
+            settings.XTJS_REVIEW_INDEX_ENABLED
+            and head.get("review_index_status") == "ready"
+            and isinstance(head.get("review_summary"), dict)
+            and bool(head.get("result_version"))
+            and not stale
+        )
+        if indexed:
+            summary = _canonical_review_summary(head["review_summary"])
+            with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    """WITH excluded_titles AS (
+                           SELECT DISTINCT title
+                           FROM xtjs_review_issues
+                           WHERE project_identifier_id=%s AND result_version=%s
+                             AND title IS NOT NULL
+                             AND (
+                               title=%s
+                               OR COALESCE(list_payload #>> '{evidence,is_optional}', '')='true'
+                               OR COALESCE(list_payload #>> '{evidence,requirements,is_optional}', '')='true'
+                               OR COALESCE(list_payload #>> '{evidence,applicability_status}', '') IN ('optional','not_applicable')
+                               OR COALESCE(list_payload #>> '{evidence,skip_reason,type}', '')='optional_attachment_not_provided'
+                               OR description LIKE '%%列为可选%%'
+                               OR title ~ '(本项目|不项目|本项日)[[:space:]]*(为)?[[:space:]]*不适用'
+                             )
+                       )
+                       SELECT result_key,risk_level,status,COUNT(*) AS count
+                       FROM xtjs_review_issues
+                       WHERE project_identifier_id=%s AND result_version=%s
+                         AND title IN (SELECT title FROM excluded_titles)
+                       GROUP BY result_key,risk_level,status""",
+                    (
+                        head["identifier_id"],
+                        head.get("result_version"),
+                        REMOVED_BUSINESS_SCOPE_ISSUE_TITLE,
+                        head["identifier_id"],
+                        head.get("result_version"),
+                    ),
+                )
+                removed_rows = [dict(row) for row in cursor.fetchall()]
+            summary = _subtract_removed_review_issue_counts(summary, removed_rows)
+        else:
+            basic = head.get("result_summary") or {}
+            summary = {
+                "schema_version": 0,
+                "result_version": head.get("result_version"),
+                "status": "stale" if stale else ("legacy" if result_exists else "unavailable"),
+                "issue_count": None,
+                "risk_counts": {},
+                "categories": [
+                    {
+                        "result_key": key,
+                        "status": "legacy",
+                        "issue_count": None,
+                        "risk_counts": {},
+                        "has_risk": bool(basic.get("has_suspicious")),
+                    }
+                    for key in (basic.get("result_keys") or head.get("result_keys") or [])
+                    if is_result_key_visible(str(key))
+                ],
+            }
+        return {
+            "project": {
+                "identifier_id": head["identifier_id"],
+                "project_name": head.get("project_name"),
+                "parsing_status": head.get("parsing_status"),
+                "input_revision": head.get("input_revision"),
+            },
+            "result_version": head.get("result_version"),
+            "result_update_time": head.get("result_update_time"),
+            "results_stale": bool(stale),
+            "compatibility_mode": not indexed,
+            **summary,
+        }
+
+    @access_check(project_identifier_id='project')
+    def assert_project_review_version(
+        self,
+        project_identifier_id: str,
+        result_version: str | None,
+    ) -> dict[str, Any]:
+        """Validate an immutable result version before consulting a response cache."""
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+            self._assert_review_version(head, result_version)
+            return {
+                "project_identifier_id": str(head["identifier_id"]),
+                "input_revision": int(head.get("input_revision") or 0),
+                "result_version": str(head.get("result_version") or ""),
+            }
+
+    @access_check(project_identifier_id='project')
+    def get_project_review_component(
+        self,
+        project_identifier_id: str,
+        result_key: str,
+        result_version: str | None,
+    ) -> dict[str, Any]:
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+            self._assert_review_version(head, result_version)
+            cursor.execute(
+                """SELECT object_key FROM xtjs_result_components
+                   WHERE project_identifier_id=%s AND result_version=%s AND result_key=%s""",
+                (head["identifier_id"], head.get("result_version"), result_key),
+            )
+            row = cursor.fetchone()
+        if not row:
+            raise KeyError(result_key)
+        payload = document_blob_store.read_blob(row["object_key"])
+        if not isinstance(payload, dict):
+            raise ValueError("review component is invalid")
+        return {
+            "result_version": head.get("result_version"),
+            "result_key": result_key,
+            "result": payload,
+        }
+
+    @access_check(project_identifier_id='project')
+    def list_project_review_issues(
+        self,
+        project_identifier_id: str,
+        *,
+        result_version: str | None,
+        result_key: str | None = None,
+        risk_level: str | None = None,
+        status: str | None = None,
+        check_code: str | None = None,
+        file_name: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        ids_only: bool = False,
+    ) -> dict[str, Any]:
+        normalized_limit = max(1, min(int(limit), 100))
+        normalized_offset = max(0, int(offset))
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+            self._assert_review_version(head, result_version)
+            conditions = ["project_identifier_id=%s", "result_version=%s"]
+            values: list[Any] = [head["identifier_id"], head.get("result_version")]
+            conditions.append(
+                """(title IS NULL OR title NOT IN (
+                       SELECT DISTINCT optional_issue.title
+                       FROM xtjs_review_issues AS optional_issue
+                       WHERE optional_issue.project_identifier_id=%s
+                         AND optional_issue.result_version=%s
+                         AND optional_issue.title IS NOT NULL
+                         AND (
+                           optional_issue.title=%s
+                           OR COALESCE(optional_issue.list_payload #>> '{evidence,is_optional}', '')='true'
+                           OR COALESCE(optional_issue.list_payload #>> '{evidence,requirements,is_optional}', '')='true'
+                           OR COALESCE(optional_issue.list_payload #>> '{evidence,applicability_status}', '') IN ('optional','not_applicable')
+                           OR COALESCE(optional_issue.list_payload #>> '{evidence,skip_reason,type}', '')='optional_attachment_not_provided'
+                           OR optional_issue.description LIKE '%%列为可选%%'
+                           OR optional_issue.title ~ '(本项目|不项目|本项日)[[:space:]]*(为)?[[:space:]]*不适用'
+                         )
+                     ))"""
+            )
+            values.extend([
+                head["identifier_id"],
+                head.get("result_version"),
+                REMOVED_BUSINESS_SCOPE_ISSUE_TITLE,
+            ])
+            for column, value in (
+                ("result_key", result_key),
+                ("risk_level", risk_level),
+                ("check_code", check_code),
+            ):
+                normalized = str(value or "").strip()
+                if normalized:
+                    conditions.append(f"{column}=%s")
+                    values.append(normalized)
+            normalized_status = str(status or "").strip().lower()
+            if normalized_status:
+                # Prefer the payload status for indexes produced before duplicate
+                # review-only states were preserved in the status column.
+                effective_status = "COALESCE(NULLIF(list_payload->>'status', ''), status)"
+                normalized_status = _canonical_review_issue_status(normalized_status)
+                if normalized_status == "not_pass":
+                    conditions.append(f"{effective_status} NOT IN (%s,%s)")
+                    values.extend(["pass", "passed"])
+                elif normalized_status == "fail":
+                    conditions.append(f"LOWER({effective_status}) IN (%s,%s,%s,%s)")
+                    values.extend(["fail", "failed", "missing", "error"])
+                elif normalized_status == "not_applicable":
+                    conditions.append(f"LOWER({effective_status}) IN (%s,%s,%s)")
+                    values.extend(["not_applicable", "skipped", "optional"])
+                elif normalized_status == "unclear":
+                    conditions.append(f"LOWER({effective_status}) IN (%s,%s,%s,%s)")
+                    values.extend(["unclear", "pending", "ambiguous", "review"])
+                elif normalized_status == "pass":
+                    conditions.append(f"LOWER({effective_status}) IN (%s,%s,%s,%s)")
+                    values.extend(["pass", "passed", "success", "ok"])
+                else:
+                    conditions.append(f"{effective_status}=%s")
+                    values.append(normalized_status)
+            normalized_file = str(file_name or "").strip()
+            if normalized_file:
+                conditions.append("file_names ? %s")
+                values.append(normalized_file)
+            where = " AND ".join(conditions)
+            cursor.execute(f"SELECT COUNT(*) AS total FROM xtjs_review_issues WHERE {where}", tuple(values))
+            total = int(cursor.fetchone()["total"])
+            selected = "issue_id" if ids_only else "issue_id,result_key,issue_order,risk_level,status,check_code,title,description,file_names,list_payload,evidence_count"
+            paging = "" if ids_only else " LIMIT %s OFFSET %s"
+            params = tuple(values if ids_only else values + [normalized_limit, normalized_offset])
+            cursor.execute(
+                f"SELECT {selected} FROM xtjs_review_issues WHERE {where} ORDER BY result_key,issue_order,issue_id{paging}",
+                params,
+            )
+            items = [_canonical_review_issue_row(dict(row)) for row in cursor.fetchall()]
+        return {
+            "result_version": head.get("result_version"),
+            "total": total,
+            "limit": total if ids_only else normalized_limit,
+            "offset": 0 if ids_only else normalized_offset,
+            "items": items,
+        }
+
+    @access_check(project_identifier_id='project')
+    def get_project_review_issue(
+        self,
+        project_identifier_id: str,
+        issue_id: str,
+        *,
+        result_version: str | None,
+        evidence: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+            self._assert_review_version(head, result_version)
+            cursor.execute(
+                """SELECT result_key,issue_id,risk_level,status,title,description,
+                          detail_object_key,evidence_object_key,evidence_count
+                   FROM xtjs_review_issues
+                   WHERE project_identifier_id=%s AND result_version=%s AND issue_id=%s""",
+                (head["identifier_id"], head.get("result_version"), issue_id),
+            )
+            row = cursor.fetchone()
+        if not row:
+            raise KeyError(issue_id)
+        object_key = row["evidence_object_key"] if evidence else row["detail_object_key"]
+        payload = document_blob_store.read_blob(object_key)
+        if evidence and isinstance(payload, dict) and isinstance(payload.get("occurrences"), list):
+            normalized_limit = max(1, min(int(limit), 100))
+            normalized_offset = max(0, int(offset))
+            all_occurrences = payload.get("occurrences") or []
+            occurrences = all_occurrences[normalized_offset:normalized_offset + normalized_limit]
+            referenced_ids = {
+                str(occurrence.get("source_item_id"))
+                for occurrence in occurrences
+                if isinstance(occurrence, dict) and occurrence.get("source_item_id")
+            }
+            source_items: dict[str, Any] = {}
+            for identifier, source_key in (payload.get("source_item_object_keys") or {}).items():
+                if referenced_ids and str(identifier) not in referenced_ids:
+                    continue
+                source_item = document_blob_store.read_blob(source_key)
+                if not isinstance(source_item, dict):
+                    raise ValueError(f"review source item is invalid: {identifier}")
+                source_items[str(identifier)] = source_item
+            payload = {
+                "issue_id": payload.get("issue_id"),
+                "occurrences": occurrences,
+                "source_items": source_items,
+                "total": len(all_occurrences),
+                "limit": normalized_limit,
+                "offset": normalized_offset,
+            }
+        return {
+            "result_version": head.get("result_version"),
+            "result_key": row["result_key"],
+            "issue_id": row["issue_id"],
+            "evidence_count": row["evidence_count"],
+            "data": payload,
+        }
+
+    @access_check(project_identifier_id='project')
+    def get_project_review_export_payload(
+        self,
+        project_identifier_id: str,
+        *,
+        result_version: str,
+        review_statuses: Optional[dict[str, dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Build a complete lightweight export list without browser pagination."""
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            head = self._get_project_review_head(cursor, project_identifier_id)
+            if not head:
+                raise ValueError("project not found")
+            self._assert_review_version(head, result_version)
+            cursor.execute(
+                """SELECT issue_id,result_key,risk_level,status,title,description,file_names,list_payload,
+                          detail_object_key,evidence_object_key,evidence_count
+                   FROM xtjs_review_issues
+                   WHERE project_identifier_id=%s AND result_version=%s
+                   ORDER BY result_key,issue_order,issue_id""",
+                (head["identifier_id"], head.get("result_version")),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        statuses = review_statuses or {}
+        items: list[dict[str, Any]] = []
+        object_cache: dict[str, Any] = {}
+        source_items: dict[str, dict[str, Any]] = {}
+
+        def read_once(object_key: Any) -> Any:
+            normalized_key = str(object_key or "").strip()
+            if not normalized_key:
+                return None
+            if normalized_key not in object_cache:
+                object_cache[normalized_key] = document_blob_store.read_blob(normalized_key)
+            return object_cache[normalized_key]
+
+        for row in rows:
+            row = _canonical_review_issue_row(row)
+            payload = dict(row.get("list_payload") or {})
+            detail = read_once(row.get("detail_object_key"))
+            evidence = read_once(row.get("evidence_object_key"))
+            if isinstance(evidence, dict) and evidence.get("source_item_object_keys"):
+                evidence = dict(evidence)
+                source_object_keys = evidence.pop("source_item_object_keys", {})
+                evidence["source_item_ids"] = list(source_object_keys)
+                for source_id, source_key in source_object_keys.items():
+                    source_item = read_once(source_key)
+                    if not isinstance(source_item, dict):
+                        raise ValueError(f"review source item is invalid: {source_id}")
+                    source_items[str(source_id)] = source_item
+            item = {
+                **payload,
+                "id": row["issue_id"],
+                "issue_id": row["issue_id"],
+                "result_key": row["result_key"],
+                "source_result_key": row["result_key"],
+                "title": row.get("title") or payload.get("title"),
+                "summary": row.get("description") or payload.get("summary"),
+                "risk_level": row.get("risk_level"),
+                # Payload status repairs older duplicate indexes where a
+                # review-only item was stored as passed solely because risk=none.
+                "source_status": _canonical_review_issue_status(payload.get("status") or row.get("status")),
+                "file_names": row.get("file_names") or payload.get("files") or [],
+                "issue": detail if isinstance(detail, dict) else payload,
+                "evidence": evidence if isinstance(evidence, dict) else {},
+            }
+            status = statuses.get(row["issue_id"])
+            if isinstance(status, dict):
+                item["frontend_review_status"] = status.get("status")
+                item["frontend_reviewed_at"] = status.get("reviewedAt") or status.get("reviewed_at")
+                if status.get("note"):
+                    item["frontend_review_note"] = status["note"]
+            items.append(item)
+        return {"result": items, "source_items": source_items}
+
     def list_project_results(
         self,
         limit: int = 20,
@@ -3407,8 +3941,12 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
     # 结果外置：把完整 result 写 MinIO，DB 行只留 result_object_key + 轻量 result_keys，
     # result 列置 NULL。
     _RESULT_UPSERT_SQL = """
-        INSERT INTO xtjs_result (project_identifier_id, result, result_object_key, result_keys, result_summary, workflow_scope, input_revision)
-        VALUES (%s, NULL, %s, %s, %s, %s, %s)
+        INSERT INTO xtjs_result (
+            project_identifier_id, result, result_object_key, result_keys,
+            result_summary, workflow_scope, input_revision, result_version,
+            review_summary, review_index_status
+        )
+        VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (project_identifier_id)
         DO UPDATE
         SET
@@ -3418,12 +3956,18 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
             result_summary = EXCLUDED.result_summary,
             workflow_scope = EXCLUDED.workflow_scope,
             input_revision = EXCLUDED.input_revision,
+            result_version = EXCLUDED.result_version,
+            review_summary = EXCLUDED.review_summary,
+            review_index_status = EXCLUDED.review_index_status,
             update_time = CURRENT_TIMESTAMP
         RETURNING
             id,
             project_identifier_id,
             result,
             result_object_key,
+            result_version,
+            review_summary,
+            review_index_status,
             create_time,
             update_time
     """
@@ -3441,15 +3985,82 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         """
         pid = str(project["identifier_id"])
         encoded = jsonable_encoder(full_result)
+        review_summary = None
+        component_rows: list[dict[str, Any]] = []
+        issue_rows: list[dict[str, Any]] = []
+        review_index_status = "missing"
+        if settings.XTJS_REVIEW_INDEX_ENABLED and UUID_TEXT_PATTERN.fullmatch(pid):
+            encoded, result_version, review_summary, component_rows, issue_rows = prepare_review_storage(
+                encoded,
+                project_identifier_id=pid,
+            )
+            review_index_status = "ready"
+        else:
+            result_version = build_result_version(encoded)
         result_object_key = document_blob_store.save_project_result(
             encoded,
             project_name=project.get("project_name"),
             project_identifier_id=pid,
         )
         result_keys = sorted(k for k in (encoded or {}).keys()) if isinstance(encoded, dict) else []
+        if review_index_status == "ready":
+            cursor.execute("DELETE FROM xtjs_review_issues WHERE project_identifier_id=%s", (pid,))
+            cursor.execute("DELETE FROM xtjs_result_components WHERE project_identifier_id=%s", (pid,))
+            if component_rows:
+                cursor.executemany(
+                    """INSERT INTO xtjs_result_components
+                       (project_identifier_id,result_version,result_key,object_key,summary,issue_count)
+                       VALUES (%s,%s,%s,%s,%s,%s)""",
+                    [
+                        (
+                            pid,
+                            result_version,
+                            item["result_key"],
+                            item["object_key"],
+                            Json(item["summary"]),
+                            item["issue_count"],
+                        )
+                        for item in component_rows
+                    ],
+                )
+            if issue_rows:
+                cursor.executemany(
+                    """INSERT INTO xtjs_review_issues
+                       (project_identifier_id,result_version,result_key,issue_id,issue_order,
+                        risk_level,status,check_code,title,description,file_names,list_payload,
+                        detail_object_key,evidence_object_key,evidence_count)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    [
+                        (
+                            pid,
+                            result_version,
+                            item["result_key"],
+                            item["issue_id"],
+                            item["issue_order"],
+                            item["risk_level"],
+                            item["status"],
+                            item["check_code"],
+                            item["title"],
+                            item["description"],
+                            Json(item["file_names"]),
+                            Json(item["list_payload"]),
+                            item["detail_object_key"],
+                            item["evidence_object_key"],
+                            item["evidence_count"],
+                        )
+                        for item in issue_rows
+                    ],
+                )
         cursor.execute(self._RESULT_UPSERT_SQL, (
-            pid, result_object_key, Json(result_keys), Json(build_project_result_summary(encoded)),
-            Json(workflow_scope_from_result_record({"result": encoded})), project.get("input_revision", 0),
+            pid,
+            result_object_key,
+            Json(result_keys),
+            Json(build_project_result_summary(encoded)),
+            Json(workflow_scope_from_result_record({"result": encoded})),
+            project.get("input_revision", 0),
+            result_version,
+            Json(review_summary) if review_summary is not None else None,
+            review_index_status,
         ))
         record = dict(cursor.fetchone())
         # 注入刚写入的内容，避免 _sanitize 立刻再读一次 MinIO。
@@ -3504,6 +4115,14 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 normalized_project_identifier = self._resolve_project_identifier(
                     cursor,
                     project_identifier_id,
+                )
+                cursor.execute(
+                    "DELETE FROM xtjs_review_issues WHERE project_identifier_id = %s",
+                    (normalized_project_identifier,),
+                )
+                cursor.execute(
+                    "DELETE FROM xtjs_result_components WHERE project_identifier_id = %s",
+                    (normalized_project_identifier,),
                 )
                 cursor.execute(query, (normalized_project_identifier,))
                 return cursor.rowcount > 0

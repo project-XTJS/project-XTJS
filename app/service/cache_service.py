@@ -26,6 +26,10 @@ class CacheUnavailableError(RuntimeError):
     """Raised when the configured production cache cannot be used."""
 
 
+class CacheEntryTooLargeError(CacheUnavailableError):
+    """Raised before sending a value that exceeds the configured cache limit."""
+
+
 @dataclass(frozen=True)
 class CacheResult:
     hit: bool
@@ -91,6 +95,11 @@ class RedisCacheService:
     def set_json(self, key: str, value: Any, ttl_seconds: int) -> None:
         try:
             payload = json.dumps(jsonable_encoder(value), ensure_ascii=False, separators=(",", ":"))
+            payload_bytes = len(payload.encode("utf-8"))
+            if payload_bytes > settings.XTJS_CACHE_MAX_ENTRY_BYTES:
+                raise CacheEntryTooLargeError(
+                    f"缓存条目过大，已跳过写入（{payload_bytes} bytes）。"
+                )
             self._redis().setex(key, max(1, int(ttl_seconds)), payload)
         except CacheUnavailableError:
             raise
@@ -99,12 +108,35 @@ class RedisCacheService:
             logger.exception("cache set failed key=%s", key)
             raise CacheUnavailableError("缓存写入失败，请检查 Redis。") from exc
 
-    def get_or_set_json(self, key: str, ttl_seconds: int, factory: Callable[[], Any]) -> tuple[Any, str]:
-        cached = self.get_json(key)
+    def get_or_set_json(
+        self,
+        key: str,
+        ttl_seconds: int,
+        factory: Callable[[], Any],
+        *,
+        allow_degraded_read: bool = False,
+        allow_degraded_write: bool = False,
+    ) -> tuple[Any, str]:
+        try:
+            cached = self.get_json(key)
+        except CacheUnavailableError:
+            if not allow_degraded_read:
+                raise
+            logger.warning("cache read degraded key=%s", key)
+            return factory(), "degraded-read"
         if cached.hit:
             return cached.value, "hit"
         value = factory()
-        self.set_json(key, value, ttl_seconds)
+        try:
+            self.set_json(key, value, ttl_seconds)
+        except CacheEntryTooLargeError:
+            logger.warning("cache write skipped for oversized value key=%s", key)
+            return value, "skip-large"
+        except CacheUnavailableError:
+            if not allow_degraded_write:
+                raise
+            logger.warning("cache write degraded key=%s", key)
+            return value, "degraded-write"
         return value, "miss"
 
     def delete_patterns(self, patterns: list[str]) -> int:
