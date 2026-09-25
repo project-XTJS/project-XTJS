@@ -1144,20 +1144,20 @@ class ResultNormalizerMixin:
                 )
             )
 
-        # 加分项(△)未达标：仅提示、不计入合规失败，但要逐条爆出供人工/模型确认。
+        # 评分项(△/▲)未达标：仅提示、不计入合规失败，但要逐条列出供人工/模型确认。
         bonus: list[dict[str, Any]] = []
         for item in (raw.get("bonus_flagged_items") or []):
             evidence = self._deviation_issue_evidence(item, raw)
             bonus.append(
                 self._issue(
                     status="warning",
-                    title=item.get("requirement") or "加分项(△)未达标",
-                    message="加分项(△)未响应或存在偏离，建议人工确认（不计入合规失败）。",
+                    title=item.get("requirement") or "评分项(△/▲)未达标",
+                    message="评分项(△/▲)未响应或存在偏离，建议人工确认（不计入合规失败）。",
                     evidence=evidence,
                 )
             )
 
-        # 响应正确(无问题)的 ★/△ 项也逐条展示，便于逐项核对(招标★/△条款 ↔ 投标响应)。
+        # 响应正确(无问题)的 ★/△/▲ 项也逐条展示，便于逐项核对。
         responded_ok_statuses = {"positive_deviation", "no_deviation", "listed_response"}
         for item in (raw.get("match_results") or []):
             if not isinstance(item, dict) or not item.get("responded"):
@@ -1243,7 +1243,7 @@ class ResultNormalizerMixin:
         }
 
     def _build_deviation_marker_items(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
-        """把每一个 ★/△ 标记项投影成精简列表，确保前端能逐条展示并人工/模型确认。"""
+        """把每一个 ★/△/▲ 标记项投影成精简列表，确保前端能逐条展示并人工/模型确认。"""
         items: list[dict[str, Any]] = []
         for match in (raw.get("match_results") or []):
             if not isinstance(match, dict):

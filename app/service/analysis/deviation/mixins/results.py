@@ -100,7 +100,7 @@ class ResultsMixin:
         # 对每个标记项做语义符合度打分（BGE，离线），每项都带 semantic_*/needs_manual。
         self._apply_semantic_judgement(matches)
 
-        # 必须项(★)缺失/负偏离 → 失败；加分项(△)未达标 → 提示(不致失败)。
+        # 必须项(★)缺失/负偏离 → 失败；评分项(△/▲)未达标 → 提示。
         missing_items: list[dict[str, Any]] = []   # 仅必须项，驱动合规
         negative_items: list[dict[str, Any]] = []  # 仅必须项
         unclear_items: list[dict[str, Any]] = []   # 仅必须项
@@ -189,10 +189,10 @@ class ResultsMixin:
         )
 
         findings = [
-            f"在招标文件中检测到 {mandatory_total} 条 ★ 强制性要求、{bonus_total} 条 △ 加分项。"
+            f"在招标文件中检测到 {mandatory_total} 条 ★ 强制性要求、{bonus_total} 条 △/▲ 评分项。"
         ]
         findings.append(f"★ 已响应 {responded} 条，缺失 {missing} 条，负偏离 {negative} 条，不明确 {unclear} 条。")
-        findings.append(f"△ 已响应 {bonus_responded} 条，未达标 {bonus_flagged} 条（加分项，不计入合规失败）。")
+        findings.append(f"△/▲ 已响应 {bonus_responded} 条，未达标 {bonus_flagged} 条（评分项，不计入合规失败）。")
         findings.append(f"合规响应数量（无偏离/正偏离/列明未负响应）：{no_dev + positive + listed} 条。")
         declared_negative_count = sum(
             1
@@ -754,35 +754,24 @@ class ResultsMixin:
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
 
-    def _build_missing_deviation_table_result(self, requirements, sections, table_coverage):
-        """商务标未识别到商务/技术偏离表时，按缺少偏离表返回。"""
-        evidence = "商务标文件中未识别到商务偏离表或技术偏离表，无法核验偏离响应。"
-        missing_items = [
-            {
-                "requirement_id": item["requirement_id"],
-                "requirement": item["requirement"],
-                "requirement_page": item.get("page"),
-                "requirement_bbox": item.get("bbox"),
-                "response_page": None,
-                "response_bbox": None,
-                "response_status": "deviation_table_missing",
-                "response_evidence": evidence,
-            }
-            for item in requirements
-        ]
+    def _missing_marked_response_items(self, requirements, response_status, evidence):
+        """缺少投标内容时，★ 计入缺失，△/▲ 只计入评分提示。"""
         matches = [
             {
                 "responded": False,
-                "risk_level": "high",
+                "risk_level": "medium" if item.get("requirement_kind") == "bonus" else "high",
                 "match_score": 0.0,
+                "requirement_id": item["requirement_id"],
                 "requirement": item["requirement"],
+                "marker_type": item.get("marker_type", "star"),
+                "requirement_kind": item.get("requirement_kind", "mandatory"),
                 "requirement_page": item.get("page"),
                 "requirement_bbox": item.get("bbox"),
                 "section_type": item.get("section_type"),
                 "response_page": None,
+                "response_bbox": None,
                 "deviation_type": "missing",
-                "requirement_id": item["requirement_id"],
-                "response_status": "deviation_table_missing",
+                "response_status": response_status,
                 "response_section": "",
                 "explicit_response": False,
                 "response_evidence": evidence,
@@ -791,15 +780,34 @@ class ResultsMixin:
             }
             for item in requirements
         ]
+        mandatory = [item for item in matches if item["requirement_kind"] != "bonus"]
+        bonus = [item for item in matches if item["requirement_kind"] == "bonus"]
+        return matches, [self._summary_item(item, response_status) for item in mandatory], [
+            self._summary_item(item, response_status) for item in bonus
+        ]
+
+    def _build_missing_deviation_table_result(self, requirements, sections, table_coverage):
+        """商务标未识别到商务/技术偏离表时，按标记类型分别统计。"""
+        evidence = "商务标文件中未识别到商务偏离表或技术偏离表，无法核验偏离响应。"
+        matches, missing_items, bonus_items = self._missing_marked_response_items(
+            requirements, "deviation_table_missing", evidence
+        )
+        mandatory_total, bonus_total = len(missing_items), len(bonus_items)
         total = len(requirements)
+        summary = (
+            f"共发现 {mandatory_total} 条带 ★ 的强制性要求"
+            + (f"、{bonus_total} 条 △/▲ 评分项" if bonus_total else "")
+            + "，但商务标文件中未识别到商务偏离表或技术偏离表。"
+        )
         return {
             "mode": "tender_technical_bid_json",
-            "summary": f"共发现 {total} 条带 ★ 的强制性要求，但商务标文件中未识别到商务偏离表或技术偏离表。",
-            "compliance_status": "missing",
-            "deviation_status": "deviation_table_missing",
+            "summary": summary,
+            "compliance_status": "missing" if mandatory_total else "pass",
+            "deviation_status": "deviation_table_missing" if mandatory_total else "pass",
             "requirement_extraction_mode": "star",
             "core_requirements_count": total,
-            "core_star_requirements_count": total,
+            "core_star_requirements_count": mandatory_total,
+            "bonus_requirements_count": bonus_total,
             "deviation_tables": {
                 "business_found": False,
                 "technical_found": False,
@@ -815,68 +823,50 @@ class ResultsMixin:
             "missing_response_items": missing_items,
             "negative_deviation_items": [],
             "unclear_response_items": [],
+            "bonus_flagged_items": bonus_items,
             "stats": {
                 "responded_count": 0,
-                "missing_count": total,
+                "missing_count": mandatory_total,
                 "negative_deviation_count": 0,
                 "positive_deviation_count": 0,
                 "no_deviation_count": 0,
                 "listed_response_count": 0,
                 "unclear_deviation_count": 0,
                 "explicit_response_count": 0,
+                "bonus_total_count": bonus_total,
+                "bonus_responded_count": 0,
+                "bonus_flagged_count": bonus_total,
                 "covered_by_global_statement_count": 0,
                 "covered_by_deviation_table_count": 0,
             },
             "key_findings": [
-                f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
-                "商务标文件中未识别到商务偏离表或技术偏离表，按缺少偏离表处理。",
+                f"在招标文件中检测到 {mandatory_total} 条 ★ 强制性要求、{bonus_total} 条 △/▲ 评分项。",
+                "商务标文件中未识别到商务偏离表或技术偏离表；评分项仅提示。",
             ],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
 
     def _build_missing_bid_content_result(self, requirements, sections, table_coverage):
-        """投标文件 OCR/内容缺失时按 missing 返回。"""
-        missing_items = [
-            {
-                "requirement_id": item["requirement_id"],
-                "requirement": item["requirement"],
-                "requirement_page": item.get("page"),
-                "requirement_bbox": item.get("bbox"),
-                "response_status": "bid_content_missing",
-                "response_evidence": "投标文件 OCR 内容为空，无法核验响应。",
-            }
-            for item in requirements
-        ]
-        matches = [
-            {
-                "responded": False,
-                "risk_level": "high",
-                "match_score": 0.0,
-                "requirement": item["requirement"],
-                "requirement_page": item.get("page"),
-                "requirement_bbox": item.get("bbox"),
-                "section_type": item.get("section_type"),
-                "response_page": None,
-                "deviation_type": "missing",
-                "requirement_id": item["requirement_id"],
-                "response_status": "bid_content_missing",
-                "response_section": "",
-                "explicit_response": False,
-                "response_evidence": "投标文件 OCR 内容为空，无法核验响应。",
-                "response_line_number": None,
-                "response_section_title": "",
-            }
-            for item in requirements
-        ]
+        """投标文件 OCR/内容缺失时，评分项不导致合规失败。"""
+        matches, missing_items, bonus_items = self._missing_marked_response_items(
+            requirements, "bid_content_missing", "投标文件 OCR 内容为空，无法核验响应。"
+        )
+        mandatory_total, bonus_total = len(missing_items), len(bonus_items)
         total = len(requirements)
+        summary = (
+            f"共发现 {mandatory_total} 条带 ★ 的强制性要求"
+            + (f"、{bonus_total} 条 △/▲ 评分项" if bonus_total else "")
+            + "，但投标文件 OCR 内容为空，无法完成偏离比对。"
+        )
         return {
             "mode": "tender_technical_bid_json",
-            "summary": f"共发现 {total} 条带 ★ 的强制性要求，但投标文件 OCR 内容为空，无法完成偏离比对。",
-            "compliance_status": "missing",
-            "deviation_status": "bid_content_missing",
+            "summary": summary,
+            "compliance_status": "missing" if mandatory_total else "pass",
+            "deviation_status": "bid_content_missing" if mandatory_total else "pass",
             "requirement_extraction_mode": "star",
             "core_requirements_count": total,
-            "core_star_requirements_count": total,
+            "core_star_requirements_count": mandatory_total,
+            "bonus_requirements_count": bonus_total,
             "deviation_tables": {
                 "business_found": bool(sections["business"]),
                 "technical_found": bool(sections["technical"]),
@@ -892,21 +882,25 @@ class ResultsMixin:
             "missing_response_items": missing_items,
             "negative_deviation_items": [],
             "unclear_response_items": [],
+            "bonus_flagged_items": bonus_items,
             "stats": {
                 "responded_count": 0,
-                "missing_count": total,
+                "missing_count": mandatory_total,
                 "negative_deviation_count": 0,
                 "positive_deviation_count": 0,
                 "no_deviation_count": 0,
                 "listed_response_count": 0,
                 "unclear_deviation_count": 0,
                 "explicit_response_count": 0,
+                "bonus_total_count": bonus_total,
+                "bonus_responded_count": 0,
+                "bonus_flagged_count": bonus_total,
                 "covered_by_global_statement_count": 0,
                 "covered_by_deviation_table_count": 0,
             },
             "key_findings": [
-                f"在招标文件中检测到 {total} 条带 ★ 的强制性要求。",
-                "投标文件 OCR 内容为空，按响应内容缺失处理。",
+                f"在招标文件中检测到 {mandatory_total} 条 ★ 强制性要求、{bonus_total} 条 △/▲ 评分项。",
+                "投标文件 OCR 内容为空；评分项仅提示。",
             ],
             "extracted_parameters": [x["requirement"] for x in requirements],
         }
@@ -951,10 +945,10 @@ class ResultsMixin:
     ) -> tuple[str, str, str]:
         """根据统计结果生成总体状态和摘要。
 
-        合规判定仅依据 ★ 必须项；△ 加分项未达标只做提示，不导致失败。
+        合规判定仅依据 ★ 必须项；△/▲ 评分项未达标只做提示，不导致失败。
         """
         bonus_note = (
-            f"；另有 {bonus_total} 条 △ 加分项，其中 {bonus_flagged} 条未达标(缺失/负偏离/不明确)。"
+            f"；另有 {bonus_total} 条 △/▲ 评分项，其中 {bonus_flagged} 条未达标(缺失/负偏离/不明确)。"
             if bonus_total
             else ""
         )
@@ -1010,7 +1004,7 @@ class ResultsMixin:
 
         已响应项用 BGE 向量计算「需求 ↔ 响应证据」相似度，≥阈值记为“符合”、
         否则“存疑”；模型不可用、无证据或未响应一律标记为 needs_manual=True，
-        确保每个 ★/△ 项都能由人工或模型确认。
+        确保每个 ★/△/▲ 项都能由人工或模型确认。
         """
         from app.config.settings import settings
 
