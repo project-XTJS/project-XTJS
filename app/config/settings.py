@@ -142,7 +142,6 @@ class Settings(BaseSettings):
     CONSISTENCY_MATCH_MARGIN: float = 0.05
     CONSISTENCY_TEXT_PASS_THRESHOLD: float = 0.93
     CONSISTENCY_DETERMINISTIC_MISSING_MAX_LEXICAL: float = 0.30
-    CONSISTENCY_TEMPLATE_ENGINE_VERSION: str = "fixed-template-exact-v3.2"
 
     # 偏离表 ★/△ 响应的语义符合度阈值（复用 BGE 向量），≥该值记为“符合”，否则“存疑”待人工。
     DEVIATION_SEMANTIC_PASS_THRESHOLD: float = 0.70

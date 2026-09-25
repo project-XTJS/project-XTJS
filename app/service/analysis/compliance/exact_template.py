@@ -11,18 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 import difflib
 import re
+import unicodedata
 from typing import Any
 
 
-LEGACY_VERSION = "fixed-template-exact-v3"
-V31_VERSION = "fixed-template-exact-v3.1"
-VERSION = "fixed-template-exact-v3.2"
+VERSION = "fixed-template-exact-v3.3"
 SLOT_TOKEN_RE = re.compile(r"\uFFF0(?P<index>\d+)\uFFF1")
 MARKUP_RE = re.compile(r"\\underline\s*\{|<u(?:\s[^>]*)?>", re.I)
 LITERAL_BLANK_RE = re.compile(r"[_＿]{2,}|(?:\.{3,}|…{2,}|·{3,})")
 BRACKET_SLOT_RE = re.compile(r"[（(【\[]\s*(?P<label>[^（）()【】\[\]\n]{1,40})\s*[）)】\]]")
 INLINE_FIELD_RE = re.compile(
-    r"[（(]?(?P<label>小写|大写|项目名称|项目编号|投标人名称|参选人名称|供应商名称|"
+    r"[（(]?(?P<label>身份证号\s*码|身份证号码|电话号码|传真号码|邮政编码|"
+    r"小写|大写|项目名称|项目编号|投标人名称|参选人名称|供应商名称|"
     r"单位名称(?:[（(](?:盖公章|加盖公章)[）)])?|供应商全称(?:[（(]加盖公章[）)])?|供应商地址|行业类型|"
     r"姓名|职务|地址|金额|日期|电话|手机|邮编|在册人数|成立日期|"
     r"注册资本|实收资本|经营范围|专业人员分类及人数|联系人|电子邮箱|电子邮件|传真|"
@@ -165,7 +165,7 @@ def plain_text(value: Any) -> str:
     return _layout_normalize(rendered)
 
 
-def _v32_layout_spacing(text: str) -> str:
+def _numbered_layout_spacing(text: str) -> str:
     value = str(text or "")
     list_marker = r"(?:[（(]?\d+(?:[-－]\d+)*[）).．、]|[（(][一二三四五六七八九十百零]+[）)])"
     value = re.sub(rf"(?<=[：:；;。！？!?])\s+(?={list_marker})", "", value)
@@ -173,11 +173,11 @@ def _v32_layout_spacing(text: str) -> str:
     return value
 
 
-def _plain_text_v32(value: Any) -> str:
-    return _v32_layout_spacing(plain_text(value))
+def _comparison_text(value: Any) -> str:
+    return _numbered_layout_spacing(plain_text(value))
 
 
-def _build_pattern(value: Any, *, preserve_numbered_field_prefixes: bool) -> TemplatePattern:
+def build_pattern(value: Any) -> TemplatePattern:
     original = str(value or "")
     pieces: list[str] = []
     slots: list[Slot] = []
@@ -249,7 +249,7 @@ def _build_pattern(value: Any, *, preserve_numbered_field_prefixes: bool) -> Tem
             unit = re.search(r"(?P<unit>(?:人民币)?(?:亿元|万元|元|角|分|%|％))\s*$", between)
             if unit:
                 suffix = unit.group("unit")
-        if preserve_numbered_field_prefixes and next_match is not None:
+        if next_match is not None:
             numbered = re.search(
                 r"\s*(?P<number>[（(][一二三四五六七八九十百零\d]+[）)])\s*$",
                 between,
@@ -262,28 +262,27 @@ def _build_pattern(value: Any, *, preserve_numbered_field_prefixes: bool) -> Tem
         inline_pieces.append(intermediate[inline_cursor:])
         intermediate = "".join(inline_pieces)
 
-    if preserve_numbered_field_prefixes:
-        bare_field = re.compile(
-            r"(?P<label>性别|年龄|身份证号码|职务|姓名|地址|邮编|电话|手机)"
-            r"(?P<blank>[ \t\u3000]+)(?=[，,；;])"
-        )
-        bare_pieces: list[str] = []
-        bare_cursor = 0
-        for match in bare_field.finditer(intermediate):
-            bare_pieces.append(intermediate[bare_cursor:match.end("label")])
-            index = len(slots)
-            bare_pieces.append(f"\uFFF0{index}\uFFF1")
-            slots.append(Slot(
-                index,
-                match.group("label"),
-                "explicit_blank_after_label",
-                match.start("blank"),
-                match.end("blank"),
-            ))
-            bare_cursor = match.end("blank")
-        if bare_pieces:
-            bare_pieces.append(intermediate[bare_cursor:])
-            intermediate = "".join(bare_pieces)
+    bare_field = re.compile(
+        r"(?P<label>性别|年龄|身份证号码|职务|姓名|地址|邮编|电话|手机)"
+        r"(?P<blank>[ \t\u3000]+)(?=[，,；;])"
+    )
+    bare_pieces: list[str] = []
+    bare_cursor = 0
+    for match in bare_field.finditer(intermediate):
+        bare_pieces.append(intermediate[bare_cursor:match.end("label")])
+        index = len(slots)
+        bare_pieces.append(f"\uFFF0{index}\uFFF1")
+        slots.append(Slot(
+            index,
+            match.group("label"),
+            "explicit_blank_after_label",
+            match.start("blank"),
+            match.end("blank"),
+        ))
+        bare_cursor = match.end("blank")
+    if bare_pieces:
+        bare_pieces.append(intermediate[bare_cursor:])
+        intermediate = "".join(bare_pieces)
 
     # Literal blanks and explicit bracket prompts are template evidence too.
     rebuilt: list[str] = []
@@ -303,8 +302,7 @@ def _build_pattern(value: Any, *, preserve_numbered_field_prefixes: bool) -> Tem
         cursor = match.end()
     rebuilt.append(intermediate[cursor:])
     pattern_text = _layout_normalize("".join(rebuilt))
-    if preserve_numbered_field_prefixes:
-        pattern_text = _v32_layout_spacing(pattern_text)
+    pattern_text = _numbered_layout_spacing(pattern_text)
     salutation = re.match(r"^(致\uFFF0\d+\uFFF1[：:])", pattern_text)
     if salutation:
         index = len(slots)
@@ -348,15 +346,6 @@ def _build_pattern(value: Any, *, preserve_numbered_field_prefixes: bool) -> Tem
     return TemplatePattern(original, display, pattern_text, fixed, tuple(slots), tuple(issues))
 
 
-def build_pattern_v31(value: Any) -> TemplatePattern:
-    """Frozen v3.1 template parser used by the rollback path."""
-    return _build_pattern(value, preserve_numbered_field_prefixes=False)
-
-
-def build_pattern(value: Any) -> TemplatePattern:
-    return _build_pattern(value, preserve_numbered_field_prefixes=True)
-
-
 def _align_slots(pattern: TemplatePattern, candidate: str) -> tuple[str, list[str]]:
     """Return pass/unclear/fail and captures for a bounded ordered slot map."""
     text = plain_text(candidate)
@@ -383,98 +372,6 @@ def _align_slots(pattern: TemplatePattern, candidate: str) -> tuple[str, list[st
     if len(placements) > 1:
         return "unclear", []
     return "fail", []
-
-
-def compare_pattern_legacy(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
-    candidate_text = plain_text(candidate)
-    if pattern.issues:
-        return {
-            "status": "unclear",
-            "template_text": pattern.display_text,
-            "bid_text": candidate_text,
-            "captures": [],
-            "issues": list(pattern.issues),
-            "differences": [],
-        }
-    status, captures = _align_slots(pattern, candidate_text)
-    differences = [] if status == "pass" else character_differences(
-        fixed_text(pattern), candidate_text
-    )
-    return {
-        "status": status,
-        "template_text": pattern.display_text,
-        "bid_text": candidate_text,
-        "captures": captures,
-        "issues": [],
-        "differences": differences,
-    }
-
-
-def _slot_fixed_offsets(pattern: TemplatePattern) -> set[int]:
-    """Return insertion offsets created by declared template slots.
-
-    Offsets are measured in the fixed-only text used for the character diff.
-    Candidate insertions at these exact offsets are field values and therefore
-    are not fixed-content changes.
-    """
-    offsets: set[int] = set()
-    offset = 0
-    for index, segment in enumerate(pattern.fixed_segments):
-        offset += len(plain_text(segment))
-        if index < len(pattern.slots):
-            offsets.add(offset)
-            following = plain_text(pattern.fixed_segments[index + 1])
-            punctuation = re.match(r"^[：:，,；;]\s*", following)
-            if punctuation:
-                offsets.add(offset + len(punctuation.group()))
-    return offsets
-
-
-def character_differences_for_pattern(
-    pattern: TemplatePattern,
-    candidate: Any,
-) -> list[dict[str, Any]]:
-    """Diff fixed text while excluding values in declared filling slots."""
-    differences = character_differences(fixed_text(pattern), candidate)
-    slot_offsets = _slot_fixed_offsets(pattern)
-    return [
-        difference
-        for difference in differences
-        if not (
-            difference.get("type") == "insert"
-            and int((difference.get("template_range") or {}).get("start", -1))
-            == int((difference.get("template_range") or {}).get("end", -2))
-            and int((difference.get("template_range") or {}).get("start", -1))
-            in slot_offsets
-        )
-    ]
-
-
-def compare_pattern_v31(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
-    """Frozen v3.1 comparison path used by the rollback switch."""
-    candidate_text = plain_text(candidate)
-    if pattern.issues:
-        return {
-            "status": "unclear",
-            "template_text": pattern.display_text,
-            "bid_text": candidate_text,
-            "captures": [],
-            "issues": list(pattern.issues),
-            "differences": [],
-        }
-    status, captures = _align_slots(pattern, candidate_text)
-    differences = [] if status == "pass" else character_differences_for_pattern(
-        pattern,
-        candidate_text,
-    )
-    return {
-        "status": status,
-        "template_text": pattern.display_text,
-        "bid_text": candidate_text,
-        "captures": captures,
-        "issues": [],
-        "differences": differences,
-    }
 
 
 def _field_label(value: str) -> str:
@@ -712,9 +609,9 @@ def _remap_differences(
     return result
 
 
-def compare_pattern(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
-    """Compare v3.2 fixed content after bounded fill-region projection."""
-    candidate_text = _plain_text_v32(candidate)
+def _compare_projected_pattern(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
+    """Compare fixed content after bounded fill-region projection."""
+    candidate_text = _comparison_text(candidate)
     if pattern.issues:
         return {
             "status": "unclear",
@@ -786,6 +683,96 @@ def compare_pattern(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
         "issues": [],
         "differences": differences,
     }
+
+
+def _presentation_punctuation(value: str) -> str:
+    """Fold only one-codepoint width variants of punctuation, preserving offsets."""
+    converted = []
+    for char in value:
+        folded = unicodedata.normalize("NFKC", char)
+        converted.append(
+            folded if unicodedata.category(char).startswith("P")
+            and len(folded) == 1
+            and unicodedata.category(folded).startswith("P")
+            else char
+        )
+    return "".join(converted)
+
+
+def _punctuation_layout_gap(difference: dict[str, Any], template: str, bid: str) -> bool:
+    """Ignore an OCR-only gap beside punctuation and Chinese text, not word spaces."""
+    if difference.get("type") not in {"insert", "delete"}:
+        return False
+    changed = str(difference.get("bid_text") or difference.get("template_text") or "")
+    if not changed or not changed.isspace():
+        return False
+    source = bid if difference.get("type") == "insert" else template
+    span = difference.get("bid_range") if difference.get("type") == "insert" else difference.get("template_range")
+    start, end = (span or {}).get("start"), (span or {}).get("end")
+    if not isinstance(start, int) or not isinstance(end, int):
+        return False
+    left = source[start - 1] if start > 0 else ""
+    right = source[end] if end < len(source) else ""
+    punctuation = ",;:!?，；：！？"
+    chinese = lambda char: bool(char) and "\u3400" <= char <= "\u9fff"
+    return (bool(left) and left in punctuation and chinese(right)) or (
+        chinese(left) and bool(right) and right in punctuation
+    )
+
+
+def compare_pattern(pattern: TemplatePattern, candidate: Any) -> dict[str, Any]:
+    """Compare v3.3 with presentation-equivalent punctuation invisible to review."""
+    original_candidate = _comparison_text(candidate)
+    canonical_pattern = TemplatePattern(
+        pattern.original_text,
+        pattern.display_text,
+        _presentation_punctuation(pattern.pattern_text),
+        tuple(_presentation_punctuation(part) for part in pattern.fixed_segments),
+        pattern.slots,
+        pattern.issues,
+    )
+    result = _compare_projected_pattern(
+        canonical_pattern,
+        _presentation_punctuation(original_candidate),
+    )
+    # Canonicalization is one-to-one, so all ranges still address the original
+    # OCR text.  The comparison never emits a width-only difference.
+    result["bid_text"] = original_candidate
+    if result.get("status") == "pass" and pattern.slots:
+        expression = "".join(
+            re.escape(segment) + ("(.*?)" if index < len(pattern.slots) else "")
+            for index, segment in enumerate(canonical_pattern.fixed_segments)
+        )
+        match = re.fullmatch(expression, _presentation_punctuation(original_candidate), re.S)
+        if match:
+            result["captures"] = [
+                original_candidate[match.start(index):match.end(index)]
+                for index in range(1, len(pattern.slots) + 1)
+            ]
+    for fill in result.get("fillable_ranges") or []:
+        span = fill.get("candidate_range") or {}
+        start, end = span.get("start"), span.get("end")
+        if isinstance(start, int) and isinstance(end, int):
+            fill["value"] = original_candidate[start:end]
+    if result.get("fillable_ranges"):
+        result["captures"] = [fill["value"] for fill in result["fillable_ranges"]]
+    original_fixed = fixed_text(pattern)
+    for difference in result.get("differences") or []:
+        template_range = difference.get("template_range") or {}
+        left_start, left_end = template_range.get("start"), template_range.get("end")
+        if isinstance(left_start, int) and isinstance(left_end, int):
+            difference["template_text"] = original_fixed[left_start:left_end]
+        bid_range = difference.get("bid_range") or {}
+        start, end = bid_range.get("start"), bid_range.get("end")
+        if isinstance(start, int) and isinstance(end, int):
+            difference["bid_text"] = original_candidate[start:end]
+    result["differences"] = [
+        difference for difference in result.get("differences") or []
+        if not _punctuation_layout_gap(difference, original_fixed, original_candidate)
+    ]
+    if result["status"] == "fail" and not result["differences"]:
+        result["status"] = "pass"
+    return result
 
 
 def fixed_text(pattern: TemplatePattern) -> str:

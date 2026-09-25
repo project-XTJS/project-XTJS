@@ -499,9 +499,13 @@ class ResultNormalizerMixin:
                 parts = []
                 if missing:
                     parts.append(f"缺少模板关键内容：{self._join_text(missing)}")
-                difference_count = len(segment.get("difference_items") or [])
+                difference_count = len({
+                    str(item.get("item_id") or index)
+                    for index, item in enumerate(segment.get("difference_items") or [])
+                    if item.get("status") == "fail"
+                })
                 if difference_count:
-                    parts.append(f"发现 {difference_count} 处固定内容逐字差异")
+                    parts.append(f"{difference_count} 个固定内容项存在差异")
                 issue_status = "fail" if segment_status == "fail" else "missing"
                 issue = self._issue(
                     status=issue_status,

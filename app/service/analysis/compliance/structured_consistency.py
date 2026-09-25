@@ -14,26 +14,20 @@ from app.service.manual_review.working_copy import MANUAL_EXTRACTIONS_KEY
 from ..attachment_synonyms import strip_attachment_title_parenthetical_noise
 from .embedding_service import get_embedding_service
 from .exact_template import (
-    LEGACY_VERSION as LEGACY_EXACT_ENGINE_VERSION,
-    V31_VERSION as V31_EXACT_ENGINE_VERSION,
     VERSION as EXACT_ENGINE_VERSION,
     build_pattern,
-    build_pattern_v31,
     compare_pattern,
-    compare_pattern_v31,
-    compare_pattern_legacy,
+    _presentation_punctuation,
     fixed_text,
     plain_text,
     with_locations,
 )
 from .template_extractor import TemplateExtractor
-from .underline_projection import project_text, markup_spans
+from .underline_projection import project_text
 from .template_pdf_evidence import evidence_for
 
 
 ENGINE_VERSION = EXACT_ENGINE_VERSION
-VALID_STATUSES = {"pass", "fail", "unclear", "not_applicable"}
-DELEGATED_KINDS: set[str] = set()
 VARIABLE_LABELS: dict[str, tuple[str, ...]] = {
     "项目名称": ("项目名称", "项目名"),
     "项目编号": ("项目编号", "招标编号", "采购编号", "比选编号"),
@@ -42,9 +36,6 @@ VARIABLE_LABELS: dict[str, tuple[str, ...]] = {
     "金额小写": ("小写", "投标价格小写", "投标报价小写", "报价小写"),
     "金额大写": ("大写", "投标价格大写", "投标报价大写", "报价大写"),
 }
-SIGNATURE_MARKERS = ("签字", "签名", "法定代表人", "授权代表")
-SEAL_MARKERS = ("盖章", "公章", "印章")
-DATE_MARKERS = ("日期", "年月日", "签署日")
 OBLIGATION_MARKERS = (
     "应当",
     "必须",
@@ -91,33 +82,6 @@ TABLE_HEADER_MARKERS = (
 )
 
 
-# 可填写表格的题注词：含这些词（或以“表”结尾的短题注）的段落属于需投标人填写的表格题注，
-# 仅校验其在投标附件中是否存在，不对填写内容做“是否被改动”的一致性检查。
-FILLABLE_TABLE_TITLE_MARKERS = (
-    "情况表",
-    "组成表",
-    "明细表",
-    "报价表",
-    "汇总表",
-    "一览表",
-    "登记表",
-    "信息表",
-    "人员表",
-    "配置表",
-)
-TABLE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
-    "项目名称": ("项目名称", "项目名"),
-    "投标价格": ("投标价格", "投标报价", "报价"),
-    "服务期限": ("服务期限", "服务期", "履约期限"),
-    "数量": ("数量", "数目"),
-    "单位": ("单位", "计量单位"),
-    "税率": ("税率", "增值税税率"),
-    "单价": ("单价", "含税单价", "不含税单价"),
-    "总价": ("总价", "含税总价", "不含税总价"),
-    "偏离": ("偏离", "偏差"),
-    "说明": ("说明", "响应说明"),
-    "备注": ("备注", "注"),
-}
 PLACEHOLDER_RE = re.compile(
     r"_{2,}"
 )
@@ -142,13 +106,6 @@ TEXT_LAYER_TEXT_RE = re.compile(
 TEXT_LAYER_DANGLING_PREFIX_RE = re.compile(
     r"\$?\s*\\underline\s*\{\s*(?:\\text\s*\{\s*)?"
 )
-# 承诺书等附件开头的“致：××公司：”抬头：比对时必须材料一致性时过滤，
-# 避免招标/投标两侧抬头（含填空的公司名）差异被误判为模板改写。
-SALUTATION_RE = re.compile(
-    r"(?:^|[\n\r。；;])[\s　]*致[:：]?\s*[^：:\n\r]{0,60}[:：]"
-)
-
-
 def strip_text_layer_noise(value: Any) -> str:
     text = str(value or "")
     if not text:
@@ -241,18 +198,29 @@ class StructuredConsistencyEngine:
 
     @property
     def engine_version(self) -> str:
-        configured = str(
-            getattr(settings, "CONSISTENCY_TEMPLATE_ENGINE_VERSION", ENGINE_VERSION)
-            or ENGINE_VERSION
-        ).strip()
-        if configured == LEGACY_EXACT_ENGINE_VERSION:
-            return LEGACY_EXACT_ENGINE_VERSION
-        if configured == V31_EXACT_ENGINE_VERSION:
-            return V31_EXACT_ENGINE_VERSION
         return ENGINE_VERSION
 
     def build_template_skeleton(self, model_json: dict[str, Any]) -> list[dict[str, Any]]:
         templates = TemplateExtractor.extract_consistency_templates(model_json)
+        # Optional policy declarations are checked only when a bidder
+        # actually submits the form. Their notes are never obligations.
+        scoped, _ = TemplateExtractor.filter_business_response_attachments(model_json)
+        present = {normalize_raw_text(item.get("title")) for item in templates}
+        for source in scoped:
+            title = str(source.get("title") or "")
+            if not any(marker in title for marker in ("中小企业声明函", "残疾人福利性单位声明函")):
+                continue
+            if normalize_raw_text(title) in present:
+                continue
+            templates.append({
+                "title": title,
+                "content": list(source.get("content") or []),
+                "locations": list(source.get("title_locations") or source.get("locations") or []),
+                "is_optional": True,
+                "applicability_status": "optional",
+                "conditional_optional_declaration": True,
+            })
+            present.add(normalize_raw_text(title))
         manual_values = {item["item_id"]: item for item in _manual_skeleton_values(model_json)}
         model_attachment_index = self._index_model_attachments(model_json)
         attachments: list[dict[str, Any]] = []
@@ -302,17 +270,16 @@ class StructuredConsistencyEngine:
             or (source or {}).get("identifier_id")
             or "business-bid"
         )
-        document_candidates: list[dict[str, Any]] = []
-        if self.engine_version == ENGINE_VERSION:
-            document_candidates = self._document_candidate_records(
-                test_json,
-                source_identity=source_identity,
-            )
+        document_candidates = self._document_candidate_records(
+            test_json,
+            source_identity=source_identity,
+        )
         model_status = self.embedding.status()
         results: list[dict[str, Any]] = []
 
         for skeleton in skeletons:
-            if TemplateExtractor._review_material_excluded(skeleton):
+            if (TemplateExtractor._review_material_excluded(skeleton)
+                    and not skeleton.get("conditional_optional_declaration")):
                 continue
             if skeleton.get("is_self_defined"):
                 results.append(self._skipped_segment(
@@ -358,13 +325,18 @@ class StructuredConsistencyEngine:
             bid_evidence = evidence_for(test_json, list(matched.get('pages') or []))
             matched = dict(matched, _underline_evidence=bid_evidence,
                            _underline_locations=self._underline_locations(test_json, matched.get('sections') or []),
-                           _table_headers=(
-                               self._logical_table_headers_v31(test_json, set(matched.get('pages') or []))
-                               if self.engine_version != ENGINE_VERSION
-                               else self._logical_table_headers(test_json, set(matched.get('pages') or []))
+                           _table_headers=self._logical_table_headers(
+                               test_json, set(matched.get('pages') or []),
                            ),
                            _source_identity=source_identity,
                            _document_candidates=document_candidates,
+                           _logical_tables=[
+                               table for table in _data_node(test_json).get("logical_tables") or []
+                               if isinstance(table, dict) and any(
+                                   page in set(matched.get('pages') or [])
+                                   for page in table.get("pages") or []
+                               )
+                           ],
                            _layout_exclusions=(
                                deepcopy(document_candidates[0].get("layout_exclusions") or [])
                                if document_candidates else []
@@ -372,7 +344,9 @@ class StructuredConsistencyEngine:
             result = self._evaluate_attachment(skeleton, matched, attachment_match)
             result["model_status"] = self.embedding.status()
             results.append(result)
-        for skeleton, result in zip(skeletons, results):
+        skeleton_by_title = {skeleton["title"]: skeleton for skeleton in skeletons}
+        for result in results:
+            skeleton = skeleton_by_title[result["name"]]
             result['is_optional'] = skeleton['is_optional']
             result['optionality_locations'] = skeleton.get('optionality_locations') or []
             result['applicability_status'] = skeleton.get('applicability_status') or 'required'
@@ -393,6 +367,7 @@ class StructuredConsistencyEngine:
         content_lines = self._truncate_at_next_attachment_heading(
             self._clean_lines(template.get("content") or []),
             title=title,
+            strict_title_only=True,
         )
         attachment_number = self.checker._verification_checker._attachment_number(title)
         attachment_key = self._attachment_key(attachment_number, title)
@@ -423,18 +398,45 @@ class StructuredConsistencyEngine:
         # text.  Projection remains evidence only: it must never erase fixed
         # words merely because they are underlined.
         content_lines = self._truncate_at_next_attachment_heading(
-            self._clean_lines(raw_template.splitlines()), title=title
+            self._clean_lines(raw_template.splitlines()), title=title,
+            strict_title_only=True,
         )
-        layout_exclusions: list[dict[str, Any]] = []
-        if self.engine_version == ENGINE_VERSION:
-            layout_exclusions = self._template_layout_exclusions(model_json)
-            excluded_keys = {
-                normalize_raw_text(entry.get("text") or "")
-                for entry in layout_exclusions
+        layout_exclusions = self._template_layout_exclusions(model_json)
+        excluded_keys = {
+            normalize_raw_text(entry.get("text") or "")
+            for entry in layout_exclusions
+        }
+        content_lines = [
+            line for line in content_lines
+            if normalize_raw_text(line) not in excluded_keys
+        ]
+        content_lines = self._without_reference_note(content_lines, title)
+        content_lines = self._without_signoff_fields(content_lines)
+        if self._is_price_table_title(title):
+            content_lines = self._complete_price_table_instructions(
+                content_lines, model_json, allowed_pages,
+            )
+        table_grid = self._price_table_grid(model_json, title, allowed_pages)
+        if table_grid is None and self._is_price_table_title(title):
+            # A text-only/OCR table has no trustworthy cell boundaries.
+            # Keep only the pre-table fields and report the grid as unclear.
+            table_grid = {
+                "headers": [], "rows": [], "locations": locations,
+                "mode": "unresolved", "scope_ambiguous": True,
             }
+            content_lines = self._price_table_preamble(content_lines)
+        elif table_grid is not None:
+            content_lines, table_grid["scope_ambiguous"] = self._without_table_body(
+                content_lines, table_grid["headers"], table_grid["rows"]
+            )
+            # These are form headings or sign-off fields; signature/date
+            # verification owns their presence and filled values.
             content_lines = [
                 line for line in content_lines
-                if normalize_raw_text(line) not in excluded_keys
+                if not re.match(
+                    r"^\s*(?:注\s*[:：]|投标人法定代表人.*?[:：]|投标人名称\s*[:：]|日期\s*[:：])",
+                    line,
+                )
             ]
         items: list[dict[str, Any]] = []
         items.append(
@@ -452,12 +454,12 @@ class StructuredConsistencyEngine:
         self_defined = self.checker._is_self_defined_format_template(
             title, "\n".join(content_lines)
         )
-        for paragraph_index, paragraph in enumerate(self._paragraphs(content_lines, title)):
-            units = (
-                self._split_structural_text(paragraph)
-                if self.engine_version == ENGINE_VERSION
-                else [(paragraph, 0, len(paragraph))]
-            )
+        if table_grid is not None and table_grid.get("mode") == "fixed_rows":
+            self_defined = False
+        for paragraph_index, paragraph in enumerate(self._paragraphs(
+            content_lines, title, separate_price_fields=table_grid is not None,
+        )):
+            units = self._split_structural_text(paragraph)
             for unit_index, (unit_text, unit_start, unit_end) in enumerate(units):
                 unit_locations = self._locations_for_text(
                     model_json,
@@ -491,9 +493,24 @@ class StructuredConsistencyEngine:
             allowed_pages=header_pages,
             fallback_locations=locations,
         )
-        if structured_headers:
+        if table_grid is not None:
             items = [item for item in items if item.get("kind") != "table_header"]
-            items.extend(structured_headers)
+        if structured_headers:
+            if table_grid is None:
+                items = [item for item in items if item.get("kind") != "table_header"]
+                items.extend(structured_headers)
+        if table_grid is not None:
+            item = self._make_item(
+                attachment_key,
+                "table_grid",
+                "报价表固定列及数据行",
+                "｜".join(table_grid["headers"]) or "报价表结构",
+                True,
+                table_grid["locations"],
+                "logical_table",
+            )
+            item["table_grid"] = table_grid
+            items.append(item)
 
         # Repeated fixed text is retained.  Collapsing it would make full
         # coverage impossible and can hide a deletion in one occurrence.
@@ -506,17 +523,7 @@ class StructuredConsistencyEngine:
             occurrence_by_id[base_id] = occurrence_by_id.get(base_id, 0) + 1
             if occurrence_by_id[base_id] > 1:
                 item["item_id"] = f"{base_id}:occurrence-{occurrence_by_id[base_id]}"
-            pattern_builder = build_pattern if self.engine_version == ENGINE_VERSION else build_pattern_v31
-            item["template_pattern"] = self._public_pattern(pattern_builder(item["reference_text"]))
-            fixed_reference = plain_text(item["reference_text"])
-            if (
-                self.engine_version == LEGACY_EXACT_ENGINE_VERSION
-                and
-                item.get("kind") == "fixed_clause"
-                and len(fixed_reference) >= 30
-                and not fixed_reference.endswith(("。", "；", ";", "！", "!", "？", "?", "：", ":", "）", ")"))
-            ):
-                item["boundary_status"] = "unclear"
+            item["template_pattern"] = self._public_pattern(build_pattern(item["reference_text"]))
             item["source_evidence_unclear"] = self._locations_touch_unclear_evidence(
                 item.get("source_locations") or locations,
                 template_evidence,
@@ -533,6 +540,7 @@ class StructuredConsistencyEngine:
             "template_pages": sorted(allowed_pages),
             "template_scope_status": "ambiguous" if scope_ambiguous else "resolved",
             "is_optional": bool(template.get("is_optional")),
+            "conditional_optional_declaration": bool(template.get("conditional_optional_declaration")),
             "optionality_conflict": bool(template.get('optionality_conflict')),
             "optionality_locations": list(template.get('optionality_locations') or []),
             "applicability_status": str(template.get('applicability_status') or 'required'),
@@ -549,6 +557,7 @@ class StructuredConsistencyEngine:
         lines: list[str],
         *,
         title: str,
+        strict_title_only: bool = False,
     ) -> list[str]:
         """把模板内容截断到下一个附件标题之前。
 
@@ -566,7 +575,10 @@ class StructuredConsistencyEngine:
             compact = normalize_text(strip_attachment_title_parenthetical_noise(line))
             # 当前附件自己的标题行（如“7.中小企业声明函（格式）”）不截断、也不生成子项。
             if compact and any(
-                (norm and (norm in compact or compact in norm))
+                norm and (
+                    (norm == compact or norm in compact and len(compact) <= len(norm) + 4)
+                    if strict_title_only else (norm in compact or compact in norm)
+                )
                 for norm in title_norms
             ):
                 continue
@@ -589,37 +601,364 @@ class StructuredConsistencyEngine:
             return True
         return False
 
-    def _is_fillable_table_title(self, text: str) -> bool:
-        """判断段落是否为“可填写表格”的题注（如“项目管理机构人员情况表”）。"""
-        normalized = normalize_text(text)
-        if not normalized:
-            return False
-        if any(marker in normalized for marker in FILLABLE_TABLE_TITLE_MARKERS):
-            return True
-        # 以“表”结尾的短题注（避免误伤含“表”字的长固定条款）。
-        return len(normalized) <= 30 and normalized.endswith("表")
-
-    def _relax_fillable_table_items(
-        self,
-        items: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """含可填写表格的附件：把表题注(fixed_clause)与表头(table_header)标为仅存在性校验。
-
-        投标人需在这类表格中填写内容，其文本必然与空白模板不同，因此只确认表格在投标附件
-        中存在，不对填写内容做“是否被改动”的一致性检查。其余固定条款保持严格检查不变。
-        """
-        has_table = any(item.get("kind") == "table_header" for item in items)
-        if not has_table:
-            return items
-        for item in items:
-            kind = item.get("kind")
-            if kind == "table_header":
-                item["fillable_existence"] = True
-            elif kind == "fixed_clause" and self._is_fillable_table_title(
-                item.get("reference_text") or ""
+    @staticmethod
+    def _without_reference_note(lines: list[str], title: str) -> list[str]:
+        if not any(name in title for name in ("中小企业声明函", "残疾人福利性单位声明函")):
+            return lines
+        for index, line in enumerate(lines):
+            compact = normalize_raw_text(line)
+            note_heading = bool(re.match(r"^\s*(?:注|说明)\s*[:：]", line))
+            nearby = "".join(normalize_raw_text(value) for value in lines[index + 1:index + 5])
+            declaration_complete = any(
+                marker in "".join(lines[:index])
+                for marker in ("对上述声明内容的真实性负责", "对上述声明的真实性负责")
+            )
+            if note_heading and (declaration_complete or any(marker in nearby for marker in REFERENCE_NOTE_MARKERS)):
+                return lines[:index]
+            if compact.startswith("各行业划型标准") and any(
+                "日期" in value or "盖章" in value for value in lines[:index]
             ):
-                item["fillable_existence"] = True
-        return items
+                return lines[:index]
+        return lines
+
+    @staticmethod
+    def _without_signoff_fields(lines: list[str]) -> list[str]:
+        """Leave pledge text in place; signature, seal and date fields have their own check."""
+        signoff = re.compile(
+            r"(?:供应商|投标人|参选人|[\u3400-\u9fff]{0,8}单位|企业)(?:名称|全称)?\s*[:：]?\s*[（(][^（）()]{0,24}(?:盖章|公章)[）)]\s*[:：]?"
+            r"|(?:供应商|投标人)?法定代表人(?:或授权代表|或授权委托人)?[^。；;\n]{0,30}(?:签字|盖章)[）)]?\s*[:：]"
+            r"|(?:被授权人|授权代表|授权委托人)[^。；;\n]{0,24}(?:签字|盖章)[）)]?\s*[:：]"
+        )
+        result = []
+        date_fields = False
+        for line in lines:
+            match = signoff.search(line)
+            retained = line[:match.start()] if match else line
+            retained = re.sub(r"^\s*年\s*月\s*日\s*", "", retained)
+            if re.match(r"^\s*日\s*期\s*[:：]", retained):
+                date_fields = True
+                continue
+            if date_fields and normalize_raw_text(retained) in {"年", "月", "日"}:
+                continue
+            date_fields = False
+            if retained.strip() and retained.strip() not in {"参选人", "供应商", "投标人"}:
+                result.append(retained)
+        return result
+
+    @classmethod
+    def _price_table_grid(
+        cls, payload: dict[str, Any], title: str, pages: set[int],
+    ) -> dict[str, Any] | None:
+        if not cls._is_price_table_title(title):
+            return None
+        tables = [
+            table for table in _data_node(payload).get("logical_tables") or []
+            if isinstance(table, dict)
+            and any(page in pages for page in table.get("pages") or [])
+        ]
+        primary = None
+        for table in tables:
+            headers = [plain_text(value) for value in table.get("headers") or []]
+            hits = sum(any(marker in header for marker in TABLE_HEADER_MARKERS) for header in headers)
+            if len(headers) >= 3 and hits >= 2 and any(
+                marker in "".join(headers) for marker in ("报价", "单价", "总价")
+            ):
+                primary = table
+                break
+        if primary is None:
+            return None
+        headers = [plain_text(value) for value in primary.get("headers") or []]
+        first_pages = [int(page) for page in primary.get("pages") or [] if str(page).isdigit()]
+        last_page = max(first_pages) if first_pages else 0
+        selected = [primary]
+        for table in tables[tables.index(primary) + 1:]:
+            table_pages = [int(page) for page in table.get("pages") or [] if str(page).isdigit()]
+            candidate_headers = [plain_text(value) for value in table.get("headers") or []]
+            if not table_pages or min(table_pages) != last_page + 1 or len(candidate_headers) != len(headers):
+                break
+            if sum(any(marker in value for marker in TABLE_HEADER_MARKERS) for value in candidate_headers) >= 2:
+                break
+            selected.append(table)
+            last_page = max(table_pages)
+        rows = []
+        locations = []
+        for table in selected:
+            table_pages = [int(page) for page in table.get("pages") or [] if str(page).isdigit()]
+            page = min(table_pages) if table_pages else None
+            if page is not None:
+                locations.append({"page": page, "type": "table_cell", "coordinate_system": "pdf_point"})
+            for row_index, cells in enumerate(cls._logical_table_rows(table)):
+                if table is primary and row_index == 0 and len(cells) == len(headers) and all(
+                    normalize_raw_text(left) == normalize_raw_text(right)
+                    for left, right in zip(cells, headers)
+                ):
+                    continue
+                rows.append({"cells": cells, "page": page, "row_index": row_index})
+        mode = (
+            "fixed_rows" if "格式不可更改" in title
+            else "flexible" if any(marker in title for marker in ("格式可根据实际情况修改", "格式可修改", "格式可调整"))
+            else "header_only"
+        )
+        return {"headers": headers, "rows": rows, "locations": locations, "mode": mode}
+
+    @staticmethod
+    def _is_price_table_title(title: str) -> bool:
+        return "报价表" in title or "报价一览表" in title
+
+    @staticmethod
+    def _complete_price_table_instructions(
+        lines: list[str], payload: dict[str, Any], pages: set[int],
+    ) -> list[str]:
+        """Recover a visibly wrapped instruction only from the next OCR block."""
+        sections = [
+            section for section in _data_node(payload).get("layout_sections") or []
+            if isinstance(section, dict) and section.get("page") in pages
+        ]
+        completed = []
+        for line in lines:
+            value = line.rstrip()
+            if not value.endswith(("须", "应")):
+                completed.append(line)
+                continue
+            matches = [
+                index for index, section in enumerate(sections)
+                if normalize_raw_text(section.get("text")) == normalize_raw_text(value)
+            ]
+            if len(matches) != 1 or matches[0] + 1 >= len(sections):
+                completed.append(line)
+                continue
+            index = matches[0]
+            following = sections[index + 1]
+            continuation = str(following.get("text") or "").strip()
+            if (
+                following.get("page") == sections[index].get("page")
+                and continuation.startswith(("与", "并", "且"))
+                and not any(normalize_raw_text(continuation) == normalize_raw_text(part) for part in lines)
+            ):
+                completed.append(value + continuation)
+                numbering = re.match(r"^\s*(\d+)[.、．]", value)
+                next_number = int(numbering.group(1)) + 1 if numbering else None
+                if next_number is not None:
+                    for section in sections[index + 2:index + 8]:
+                        if section.get("page") != following.get("page"):
+                            break
+                        instruction = str(section.get("text") or "").strip()
+                        match = re.match(r"^\s*(\d+)[.、．]", instruction)
+                        if match is None or int(match.group(1)) != next_number:
+                            break
+                        if not any(normalize_raw_text(instruction) == normalize_raw_text(part) for part in lines):
+                            completed.append(instruction)
+                        next_number += 1
+            else:
+                completed.append(line)
+        return completed
+
+    @staticmethod
+    def _price_table_preamble(lines: list[str]) -> list[str]:
+        """Retain only clearly identifiable form fields before an unparsed grid."""
+        result = []
+        for line in lines:
+            compact = normalize_raw_text(line)
+            if not compact:
+                continue
+            if any(marker in compact for marker in ("序号", "产品名称", "服务板块", "服务项目", "单价", "总价", "投标报价")):
+                break
+            if not re.match(r"^\s*(?:项目名称|项目编号|招标编号|采购编号)\s*[:：]", line):
+                break
+            result.append(line)
+        return result
+
+    @staticmethod
+    def _without_table_body(
+        lines: list[str], headers: list[str], rows: list[dict[str, Any]],
+    ) -> tuple[list[str], bool]:
+        start = next((
+            index for index, line in enumerate(lines)
+            if normalize_raw_text(headers[0]) in normalize_raw_text(line)
+            and sum(
+                normalize_raw_text(header) in normalize_raw_text(" ".join(lines[index:index + len(headers) + 1]))
+                for header in headers if normalize_raw_text(header)
+            ) >= 2
+        ), None)
+        if start is None:
+            return lines, True
+        end = next((
+            index for index in range(start + 1, len(lines))
+            if re.match(r"^\s*(?:注|说明)\s*[:：]", lines[index])
+        ), None)
+        if end is None and rows:
+            last_cells = rows[-1]["cells"]
+            last_text = next((normalize_raw_text(cell) for cell in last_cells if normalize_raw_text(cell)), "")
+            end = next((
+                index + 1 for index in range(len(lines) - 1, start, -1)
+                if last_text and last_text in normalize_raw_text(lines[index])
+            ), None)
+        if end is None:
+            return lines[:start], True
+        return lines[:start] + lines[end:], False
+
+    @staticmethod
+    def _table_row_key(cells: list[str]) -> tuple[str, ...]:
+        fixed = []
+        for cell in cells:
+            value = plain_text(cell)
+            if not value or re.fullmatch(r"[¥￥$]?\s*[\d,]+(?:\.\d+)?\s*(?:元)?", value):
+                continue
+            fixed.append(_presentation_punctuation(value))
+        return tuple(fixed)
+
+    @staticmethod
+    def _table_element(
+        item: dict[str, Any], suffix: str, label: str, reference: str,
+        status: str, bid: str, differences: list[dict[str, Any]],
+        bid_locations: list[dict[str, Any]], reason: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "item_id": f"{item['item_id']}:{suffix}",
+            "kind": "table_header" if suffix == "header" else "table_fixed_rows",
+            "label": label,
+            "reference_text": reference,
+            "required": bool(item.get("required")),
+            "enabled": bool(item.get("enabled")),
+            "status": status,
+            "match_method": "logical_table_cells",
+            "difference_category": (
+                "alignment_unclear" if status == "unclear"
+                else "fixed_content_changed" if status == "fail"
+                else None
+            ),
+            "template_locations": deepcopy(item.get("source_locations") or []),
+            "bid_locations": deepcopy(bid_locations),
+            "matched_text": bid,
+            "differences": differences,
+            "unclear_reasons": ([{
+                "code": "table_structure_unclear",
+                "message": reason or "无法可靠还原报价表行列关系。",
+            }] if status == "unclear" else []),
+            "source_range": {},
+            "source_spans": [],
+            "fillable_mapping": [],
+        }
+
+    def _evaluate_table_grid(
+        self, item: dict[str, Any], section: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        grid = item["table_grid"]
+        headers = grid["headers"]
+        header_reference = "｜".join(headers)
+        expected_rows = [self._table_row_key(row["cells"]) for row in grid["rows"]]
+        expected_rows = [row for row in expected_rows if row]
+        row_reference = "\n".join("｜".join(row) for row in expected_rows)
+        mode = grid["mode"]
+
+        def unclear(reason: str) -> list[dict[str, Any]]:
+            result = [self._table_element(
+                item, "header", "报价表固定表头", header_reference,
+                "unclear", "", [], [], reason,
+            )]
+            if mode == "fixed_rows":
+                result.append(self._table_element(
+                    item, "rows", "固定服务项目及顺序", row_reference,
+                    "unclear", "", [], [], reason,
+                ))
+            return result
+
+        if grid.get("scope_ambiguous"):
+            return unclear("招标报价表边界无法可靠确定。")
+        candidates = []
+        for table in section.get("_logical_tables") or []:
+            candidate_headers = [plain_text(value) for value in table.get("headers") or []]
+            if len(candidate_headers) < 2:
+                continue
+            overlap = sum(
+                normalize_raw_text(header) in {normalize_raw_text(value) for value in candidate_headers}
+                for header in headers
+            )
+            if overlap >= 2:
+                candidates.append((overlap, table, candidate_headers))
+        if not candidates:
+            return unclear("投标报价表未找到可确认的表头及单元格。")
+        candidates.sort(key=lambda value: value[0], reverse=True)
+        if len(candidates) > 1 and candidates[0][0] == candidates[1][0]:
+            return unclear("投标附件中有多个同等匹配的报价表。")
+        _, table, candidate_headers = candidates[0]
+        bid_pages = [int(page) for page in table.get("pages") or [] if str(page).isdigit()]
+        bid_locations = [{
+            "page": page,
+            "type": "table_cell",
+            "coordinate_system": "pdf_point",
+            "table_id": table.get("id"),
+        } for page in bid_pages]
+        actual_header = "｜".join(candidate_headers)
+        header_equal = (
+            len(headers) == len(candidate_headers)
+            and all(
+                _presentation_punctuation(plain_text(left)) == _presentation_punctuation(plain_text(right))
+                for left, right in zip(headers, candidate_headers)
+            )
+        )
+        if mode == "flexible":
+            header_equal = True
+        header_differences = [] if header_equal else [{
+            "type": "replace", "template_text": header_reference,
+            "bid_text": actual_header,
+            "template_locations": deepcopy(item.get("source_locations") or []),
+            "bid_locations": bid_locations,
+        }]
+        results = [self._table_element(
+            item, "header", "报价表固定表头" if mode != "flexible" else "报价表表头存在性",
+            header_reference, "pass" if header_equal else "fail", actual_header,
+            header_differences, bid_locations,
+        )]
+        if mode != "fixed_rows":
+            return results
+        actual_rows = self._logical_table_rows(table)
+        if actual_rows and len(actual_rows[0]) == len(candidate_headers) and all(
+            normalize_raw_text(left) == normalize_raw_text(right)
+            for left, right in zip(actual_rows[0], candidate_headers)
+        ):
+            actual_rows = actual_rows[1:]
+        expected = expected_rows
+        actual = [self._table_row_key(row) for row in actual_rows]
+        actual = [row for row in actual if row]
+        # Some OCR engines fuse a later one-column summary into the price
+        # grid across a page gap.  A complete grid ending at its 合计 row is
+        # still verifiable; the detached summary is outside that grid.
+        page_gap = any(right - left > 1 for left, right in zip(sorted(bid_pages), sorted(bid_pages)[1:]))
+        if (
+            page_gap and len(actual) > len(expected)
+            and actual[:len(expected)] == expected
+            and expected and len(expected[-1]) == 1 and "合计" in expected[-1][0]
+            and all(len(row) == 1 for row in actual[len(expected):])
+        ):
+            actual = actual[:len(expected)]
+        if not expected or not actual:
+            results.append(self._table_element(
+                item, "rows", "固定服务项目及顺序", row_reference,
+                "unclear", "", [], bid_locations, "报价表数据行无法可靠读取。",
+            ))
+            return results
+        differences = []
+        for tag, left_start, left_end, right_start, right_end in difflib.SequenceMatcher(
+            None, expected, actual, autojunk=False,
+        ).get_opcodes():
+            if tag == "equal":
+                continue
+            differences.append({
+                "type": tag,
+                "template_text": "\n".join("｜".join(row) for row in expected[left_start:left_end]),
+                "bid_text": "\n".join("｜".join(row) for row in actual[right_start:right_end]),
+                "template_row_range": {"start": left_start, "end": left_end},
+                "bid_row_range": {"start": right_start, "end": right_end},
+                "template_locations": deepcopy(item.get("source_locations") or []),
+                "bid_locations": bid_locations,
+            })
+        results.append(self._table_element(
+            item, "rows", "固定服务项目及顺序", row_reference,
+            "fail" if differences else "pass",
+            "\n".join("｜".join(row) for row in actual), differences, bid_locations,
+        ))
+        return results
 
     def _index_model_attachments(self, model_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
         """在“响应文件格式”区域建立 编号/标题 -> 区段 的索引。"""
@@ -777,44 +1116,6 @@ class StructuredConsistencyEngine:
             )
         ]
 
-    def _variable_items(
-        self,
-        text: str,
-        attachment_key: str,
-        locations: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        normalized = normalize_raw_text(text)
-        items: list[dict[str, Any]] = []
-        for canonical, aliases in VARIABLE_LABELS.items():
-            alias = next((value for value in aliases if normalize_text(value) in normalized), None)
-            if not alias:
-                continue
-            explicit_label = bool(
-                re.search(
-                    rf"{re.escape(alias)}\s*(?:[:：]|_{{2,}})",
-                    text,
-                )
-            )
-            compact = re.sub(r"\s+", "", text)
-            short_label = len(compact) <= 30 and compact.startswith(alias)
-            # “根据贵方为（项目名称）项目（项目编号：____）……”中的项目名称
-            # 是正文内的可填占位，不是必须原样保留的字段标签；正文骨架会另行校验。
-            # 只有明确的“标签：值”或独立短字段才生成变量字段项。
-            if not explicit_label and not short_label:
-                continue
-            items.append(
-                self._make_item(
-                    attachment_key,
-                    "variable_field",
-                    canonical,
-                    f"{alias}：______",
-                    True,
-                    locations,
-                    "auto",
-                )
-            )
-        return items
-
     def _table_header_items(
         self,
         text: str,
@@ -859,11 +1160,7 @@ class StructuredConsistencyEngine:
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         seen: set[str] = set()
-        entries = (
-            self._logical_table_headers_v31(payload, allowed_pages)
-            if self.engine_version != ENGINE_VERSION
-            else self._logical_table_headers(payload, allowed_pages)
-        )
+        entries = self._logical_table_headers(payload, allowed_pages)
         for entry in entries:
             if entry.get("kind") != "header":
                 continue
@@ -938,31 +1235,6 @@ class StructuredConsistencyEngine:
                     "table_structure_status": (
                         "resolved" if cls._looks_like_label_value_row(values) else "data"
                     ),
-                })
-        return result
-
-    @staticmethod
-    def _logical_table_headers_v31(payload: dict[str, Any], pages: set[int]) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for table in _data_node(payload).get("logical_tables") or []:
-            if not isinstance(table, dict):
-                continue
-            table_pages = {
-                int(page) for page in table.get("pages") or []
-                if str(page).isdigit() and int(page) > 0
-            }
-            if pages and not (pages & table_pages):
-                continue
-            headers = [plain_text(value) for value in table.get("headers") or []]
-            headers = [value for value in headers if value]
-            if headers:
-                result.append({
-                    "headers": headers,
-                    "text": "｜".join(headers),
-                    "locations": [
-                        {"page": page, "type": "table_cell", "coordinate_system": "pdf_point"}
-                        for page in sorted(table_pages)
-                    ],
                 })
         return result
 
@@ -1052,167 +1324,109 @@ class StructuredConsistencyEngine:
             require_scope=True,
         )
         bid_text = plain_text(section.get('text') or '')
-        legacy_mode = self.engine_version == LEGACY_EXACT_ENGINE_VERSION
-        v31_mode = self.engine_version == V31_EXACT_ENGINE_VERSION
-        candidate_texts = self._candidate_texts(section) if legacy_mode else []
-        candidate_records = (
-            []
-            if legacy_mode
-            else self._candidate_records(
-                section,
+        candidate_records = self._candidate_records(
+            section,
+            source_identity=str(section.get("_source_identity") or "business-bid"),
+        )
+        for record in candidate_records:
+            record.setdefault("search_scope", "attachment")
+        candidate_records.extend(
+            self._table_candidate_records(
+                section.get("_table_headers") or [],
+                start_order=len(candidate_records) + 1,
                 source_identity=str(section.get("_source_identity") or "business-bid"),
             )
         )
-        if legacy_mode:
-            candidate_texts.extend(
-                entry["text"] for entry in section.get('_table_headers') or []
-            )
-            candidate_texts.append(str(section.get('title') or ''))
-        else:
-            for record in candidate_records:
-                record.setdefault("search_scope", "attachment")
-            candidate_records.extend(
-                self._table_candidate_records(
-                    section.get("_table_headers") or [],
-                    start_order=len(candidate_records) + 1,
-                    source_identity=str(section.get("_source_identity") or "business-bid"),
-                )
-            )
-            if not bid_text:
-                bid_text = plain_text("\n".join(
-                    record.get("text") or ""
-                    for record in candidate_records
-                    if int((record.get("source_range") or {}).get("block_count") or 1) == 1
-                ))
+        if not bid_text:
+            bid_text = plain_text("\n".join(
+                record.get("text") or ""
+                for record in candidate_records
+                if int((record.get("source_range") or {}).get("block_count") or 1) == 1
+            ))
         locations = self.checker._serialize_section_locations(section)
         element_results: list[dict[str, Any]] = []
-        minimum_order = 0
-        alignments = (
-            self._align_items_v32(skeleton.get("items") or [], candidate_records)
-            if not legacy_mode and not v31_mode
-            else {}
-        )
+        alignments = self._align_items(skeleton.get("items") or [], candidate_records)
         for item in skeleton["items"]:
-            if legacy_mode:
-                item_candidates = (
-                    [self._fixed_attachment_title(str(section.get('title') or ''))]
-                    if item.get("kind") == "title"
-                    else candidate_texts
-                )
-                evaluated = self._evaluate_item_v3(
-                    item,
-                    bid_text=bid_text,
-                    candidates=item_candidates,
-                    bid_locations=locations,
-                    attachment_match=attachment_match,
-                    evidence=section.get('_underline_evidence') or {},
-                )
-            elif v31_mode:
-                item_candidates = (
-                    [self._title_candidate_record(section)]
-                    if item.get("kind") == "title"
-                    else candidate_records
-                )
-                evaluated = self._evaluate_item_v31(
-                    item,
-                    candidates=item_candidates,
-                    attachment_match=attachment_match,
-                    minimum_order=minimum_order,
-                )
-                source_range = evaluated.get("source_range") or {}
-                if (
-                    item.get("kind") != "title"
-                    and evaluated.get("status") in {"pass", "fail"}
-                    and isinstance(source_range.get("end_order"), int)
-                ):
-                    minimum_order = max(minimum_order, int(source_range["end_order"]) + 1)
+            if item.get("kind") == "table_grid":
+                element_results.extend(self._evaluate_table_grid(item, section))
+                continue
+            if item.get("kind") == "title":
+                title_record = self._title_candidate_record(section)
+                assignment = {
+                    "record": title_record,
+                    "compared": compare_pattern(
+                        build_pattern(item.get("reference_text") or ""),
+                        title_record.get("text") or "",
+                    ),
+                    "score": 1.0,
+                    "ambiguous": False,
+                }
             else:
-                if item.get("kind") == "title":
-                    title_record = self._title_candidate_record(section)
-                    assignment = {
-                        "record": title_record,
-                        "compared": compare_pattern(
-                            build_pattern(item.get("reference_text") or ""),
-                            title_record.get("text") or "",
-                        ),
-                        "score": 1.0,
-                        "ambiguous": False,
-                    }
-                else:
-                    assignment = alignments.get(str(item.get("item_id") or ""))
-                evaluated = self._evaluate_item_v32(
-                    item,
-                    assignment=assignment,
-                    local_candidates=candidate_records,
-                    document_candidates=section.get("_document_candidates") or [],
-                    attachment_pages=set(section.get("pages") or []),
-                    attachment_match=attachment_match,
-                )
-            element_results.append(evaluated)
+                assignment = alignments.get(str(item.get("item_id") or ""))
+            element_results.append(self._evaluate_item(
+                item,
+                assignment=assignment,
+                local_candidates=candidate_records,
+                document_candidates=section.get("_document_candidates") or [],
+                attachment_pages=set(section.get("pages") or []),
+                attachment_match=attachment_match,
+            ))
 
-        has_template_table = any(
-            item.get("kind") == "table_header" and item.get("enabled")
-            for item in skeleton.get("items") or []
+        if self._supports_deterministic_attachment_decision(attachment_match):
+            element_results.extend(self._reverse_fixed_insertions(
+                candidate_records,
+                element_results,
+                include_table=not any(
+                    item.get("kind") == "table_grid" for item in skeleton.get("items") or []
+                ),
+            ))
+
+        source_coverage = self._source_coverage(
+            candidate_records, element_results, delegated_signoff=True,
         )
-        if (
-            not legacy_mode
-            and (not v31_mode or not has_template_table)
-            and self._supports_deterministic_attachment_decision(attachment_match)
-        ):
-            element_results.extend(
-                self._reverse_fixed_insertions(
-                    candidate_records,
-                    element_results,
-                    include_table=not v31_mode,
-                )
-            )
-
-        source_coverage = {}
-        if not legacy_mode and not v31_mode:
-            source_coverage = self._source_coverage_v32(candidate_records, element_results)
-            existing_required_nonpass = any(
-                item.get("required")
-                and item.get("enabled")
-                and item.get("status") in {"fail", "unclear"}
-                for item in element_results
-            )
-            if source_coverage.get("unresolved") and not existing_required_nonpass:
-                element_results.append({
-                    "item_id": "source-coverage:unresolved",
-                    "kind": "coverage",
-                    "label": "附件正文覆盖",
-                    "reference_text": "",
-                    "required": True,
-                    "enabled": True,
-                    "status": "unclear",
-                    "match_method": "source_coverage_unresolved",
-                    "lexical_score": 0.0,
-                    "difference_category": "alignment_unclear",
-                    "template_locations": [],
-                    "bid_locations": [
-                        location
+        existing_required_nonpass = any(
+            item.get("required")
+            and item.get("enabled")
+            and item.get("status") in {"fail", "unclear"}
+            for item in element_results
+        )
+        if source_coverage.get("unresolved") and not existing_required_nonpass:
+            element_results.append({
+                "item_id": "source-coverage:unresolved",
+                "kind": "coverage",
+                "label": "附件正文覆盖",
+                "reference_text": "",
+                "required": True,
+                "enabled": True,
+                "status": "unclear",
+                "match_method": "source_coverage_unresolved",
+                "lexical_score": 0.0,
+                "difference_category": "alignment_unclear",
+                "template_locations": [],
+                "bid_locations": [
+                    location
+                    for entry in source_coverage["unresolved"][:20]
+                    for location in entry.get("locations") or []
+                ],
+                "differences": [],
+                "unclear_reasons": [{
+                    "code": "correspondence_unresolved",
+                    "message": "附件内仍有正文来源范围未归入固定内容、填写区或排版内容。",
+                    "basis": "正文覆盖记录存在未分类来源区间",
+                    "affected_ranges": [
+                        entry.get("source_range") or {}
                         for entry in source_coverage["unresolved"][:20]
-                        for location in entry.get("locations") or []
                     ],
-                    "differences": [],
-                    "unclear_reasons": [{
-                        "code": "correspondence_unresolved",
-                        "message": "附件内仍有正文来源范围未归入固定内容、填写区或排版内容。",
-                        "basis": "正文覆盖记录存在未分类来源区间",
-                        "affected_ranges": [
-                            entry.get("source_range") or {}
-                            for entry in source_coverage["unresolved"][:20]
-                        ],
-                    }],
-                    "source_range": {},
-                    "source_spans": [],
-                    "fillable_mapping": [],
-                })
+                }],
+                "source_range": {},
+                "source_spans": [],
+                "fillable_mapping": [],
+            })
 
         required = [
             item
             for item in element_results
-            if item.get("required") and item.get("enabled") and item.get("kind") not in DELEGATED_KINDS
+            if item.get("required") and item.get("enabled")
         ]
         if any(item["status"] == "fail" for item in required):
             status = "fail"
@@ -1334,7 +1548,7 @@ class StructuredConsistencyEngine:
             ),
         }
 
-    def _align_items_v32(
+    def _align_items(
         self,
         items: list[dict[str, Any]],
         candidates: list[dict[str, Any]],
@@ -1342,9 +1556,9 @@ class StructuredConsistencyEngine:
         """Globally align attachment items to non-overlapping OCR ranges."""
         body = [
             item for item in items
-            if item.get("enabled") and item.get("kind") != "title"
+            if item.get("enabled") and item.get("kind") not in {"title", "table_grid"}
         ]
-        options_by_item = [self._item_options_v32(item, candidates) for item in body]
+        options_by_item = [self._item_options(item, candidates) for item in body]
         # end_order -> (score, selected options).  A skipped item remains None;
         # unlike v3.1 this does not force later items behind an early guess.
         states: dict[int, tuple[float, list[dict[str, Any] | None]]] = {
@@ -1434,7 +1648,7 @@ class StructuredConsistencyEngine:
             }
         return result
 
-    def _item_options_v32(
+    def _item_options(
         self,
         item: dict[str, Any],
         candidates: list[dict[str, Any]],
@@ -1463,7 +1677,7 @@ class StructuredConsistencyEngine:
                 or ""
             )
             score = lexical_similarity(fixed_text(pattern), comparison_text)
-            anchored = self._has_fixed_anchor_v32(fixed_text(pattern), comparison_text)
+            anchored = self._has_fixed_anchor(fixed_text(pattern), comparison_text)
             if compared.get("status") != "pass" and not anchored and score < 0.65:
                 continue
             status_weight = {
@@ -1497,7 +1711,7 @@ class StructuredConsistencyEngine:
         return options[:24]
 
     @staticmethod
-    def _has_fixed_anchor_v32(reference: str, candidate: str) -> bool:
+    def _has_fixed_anchor(reference: str, candidate: str) -> bool:
         left = plain_text(reference)
         right = plain_text(candidate)
         if not left or not right:
@@ -1517,7 +1731,7 @@ class StructuredConsistencyEngine:
         return any(normalize_text(value) in normalized_right for value in chunks[:12])
 
     @staticmethod
-    def _fixed_anchor_terms_v32(reference: str) -> list[str]:
+    def _fixed_anchor_terms(reference: str) -> list[str]:
         value = plain_text(reference)
         labels = re.findall(
             r"(?:[A-Za-z][A-Za-z0-9 ]{1,24}|[\u3400-\u9fff]{2,20})\s*[:：]",
@@ -1527,7 +1741,7 @@ class StructuredConsistencyEngine:
         terms = [normalize_text(item) for item in [*labels, *chunks]]
         return list(dict.fromkeys(item for item in terms if len(item) >= 4))[:12]
 
-    def _evaluate_item_v32(
+    def _evaluate_item(
         self,
         item: dict[str, Any],
         *,
@@ -1582,7 +1796,7 @@ class StructuredConsistencyEngine:
                     message="现有表格单元格可读，但无法确认实际表头及列关系。",
                     basis="解析器只提供数据行或标签/填写值行，未提供可靠实际表头",
                 )
-            global_match = self._outside_attachment_match_v32(
+            global_match = self._outside_attachment_match(
                 item,
                 document_candidates,
                 attachment_pages,
@@ -1601,8 +1815,8 @@ class StructuredConsistencyEngine:
                         "matched_pages": sorted(self._record_pages(global_match["record"])),
                     },
                 )
-            nearest = self._nearest_candidate_v32(item, local_candidates)
-            issue = self._explicit_text_issue_v32((nearest or {}).get("record"))
+            nearest = self._nearest_candidate(item, local_candidates)
+            issue = self._explicit_text_issue((nearest or {}).get("record"))
             if issue is not None:
                 code, message, basis = issue
                 return self._mark_unclear(
@@ -1630,7 +1844,7 @@ class StructuredConsistencyEngine:
             lexical_score=round(float(assignment.get("score") or 0.0), 4),
             matched_text=str(record.get("text") or ""),
             text_map=deepcopy(compared.get("text_map") or []),
-            fillable_mapping=self._fillable_mapping_v32(compared),
+            fillable_mapping=self._fillable_mapping(compared),
         )
         if assignment.get("ambiguous"):
             return self._mark_unclear(
@@ -1668,7 +1882,7 @@ class StructuredConsistencyEngine:
         if compared.get("status") == "pass":
             result.update(
                 status="pass",
-                match_method="ordered_exact_fixed_text_v32",
+                match_method="ordered_exact_fixed_text",
                 difference_category=None,
                 fixed_content_coverage={
                     "status": "compared",
@@ -1679,7 +1893,7 @@ class StructuredConsistencyEngine:
             )
             return result
 
-        issue = self._explicit_text_issue_v32(record)
+        issue = self._explicit_text_issue(record)
         if issue is not None:
             code, message, basis = issue
             return self._mark_unclear(
@@ -1704,6 +1918,17 @@ class StructuredConsistencyEngine:
                 lexical_score=assignment.get("score"),
                 basis="字符差异为空或无法映射回已有来源",
             )
+        if self.engine_version == ENGINE_VERSION and self._known_ocr_word_ambiguity(
+            item.get("reference_text") or "", result.get("matched_text") or "", differences,
+        ):
+            return self._mark_unclear(
+                result,
+                code="ocr_character_unclear",
+                message="扫描件中的固定条款单字与 OCR 识别冲突，需按 PDF 原页核对。",
+                record=record,
+                lexical_score=assignment.get("score"),
+                basis="“否决投标”被 OCR 识别为“合决投标”",
+            )
         categories = {difference.get("type") for difference in differences}
         category = (
             "fixed_content_moved" if "move" in categories
@@ -1713,7 +1938,7 @@ class StructuredConsistencyEngine:
         )
         result.update(
             status="fail",
-            match_method="ordered_fixed_text_diff_v32",
+            match_method="ordered_fixed_text_diff",
             difference_category=category,
             differences=differences,
             fixed_content_coverage={
@@ -1725,7 +1950,20 @@ class StructuredConsistencyEngine:
         )
         return result
 
-    def _outside_attachment_match_v32(
+    @staticmethod
+    def _known_ocr_word_ambiguity(
+        reference: str, matched: str, differences: list[dict[str, Any]],
+    ) -> bool:
+        return bool(
+            len(differences) == 1
+            and differences[0].get("type") == "replace"
+            and differences[0].get("template_text") == "否"
+            and differences[0].get("bid_text") == "合"
+            and "否决投标" in plain_text(reference)
+            and "合决投标" in plain_text(matched)
+        )
+
+    def _outside_attachment_match(
         self,
         item: dict[str, Any],
         candidates: list[dict[str, Any]],
@@ -1735,7 +1973,7 @@ class StructuredConsistencyEngine:
             record for record in candidates
             if not attachment_pages.intersection(self._record_pages(record))
         ]
-        anchors = self._fixed_anchor_terms_v32(item.get("reference_text") or "")
+        anchors = self._fixed_anchor_terms(item.get("reference_text") or "")
         if anchors:
             outside = [
                 record for record in outside
@@ -1744,10 +1982,10 @@ class StructuredConsistencyEngine:
                     for anchor in anchors
                 )
             ]
-        options = self._item_options_v32(item, outside)
+        options = self._item_options(item, outside)
         return options[0] if options else None
 
-    def _nearest_candidate_v32(
+    def _nearest_candidate(
         self,
         item: dict[str, Any],
         candidates: list[dict[str, Any]],
@@ -1772,7 +2010,7 @@ class StructuredConsistencyEngine:
         }
 
     @staticmethod
-    def _explicit_text_issue_v32(
+    def _explicit_text_issue(
         record: dict[str, Any] | None,
     ) -> tuple[str, str, str] | None:
         if not record:
@@ -1810,7 +2048,7 @@ class StructuredConsistencyEngine:
         return None
 
     @staticmethod
-    def _fillable_mapping_v32(compared: dict[str, Any]) -> list[dict[str, Any]]:
+    def _fillable_mapping(compared: dict[str, Any]) -> list[dict[str, Any]]:
         ranges = compared.get("fillable_ranges") or []
         if ranges:
             return [deepcopy(value) for value in ranges]
@@ -1818,463 +2056,6 @@ class StructuredConsistencyEngine:
             {"index": index, "label": f"填写区{index + 1}", "bid_text": value}
             for index, value in enumerate(compared.get("captures") or [])
         ]
-
-    def _evaluate_item_v31(
-        self,
-        item: dict[str, Any],
-        *,
-        candidates: list[dict[str, Any]],
-        attachment_match: dict[str, Any],
-        minimum_order: int,
-    ) -> dict[str, Any]:
-        result = {
-            "item_id": item["item_id"],
-            "kind": item["kind"],
-            "label": item["label"],
-            "reference_text": item["reference_text"],
-            "required": bool(item["required"]),
-            "enabled": bool(item["enabled"]),
-            "status": "not_applicable" if not item["enabled"] else "unclear",
-            "match_method": "none",
-            "lexical_score": 0.0,
-            "embedding_score": None,
-            "difference_category": None,
-            "template_locations": deepcopy(item.get("source_locations") or []),
-            "bid_locations": [],
-            "fillable_existence": bool(item.get("fillable_existence")),
-            "source": item.get("source"),
-            "template_pattern": deepcopy(item.get("template_pattern") or {}),
-            "differences": [],
-            "unclear_reasons": [],
-            "source_range": {},
-            "source_spans": [],
-            "fillable_mapping": [],
-        }
-        if item.get("source_scope_status") == "ambiguous":
-            return self._mark_unclear(
-                result,
-                code="template_scope_ambiguous",
-                message="招标模板中的附件页范围无法唯一确定。",
-            )
-        if not item["enabled"]:
-            return result
-
-        records = [record for record in candidates if isinstance(record, dict)]
-        if item.get("kind") != "title":
-            ordered = [
-                record
-                for record in records
-                if int((record.get("source_range") or {}).get("start_order") or 0)
-                >= minimum_order
-            ]
-            if ordered:
-                records = ordered
-        if item.get("kind") == "table_header":
-            records = self._project_table_candidate_records(records)
-
-        pattern = build_pattern_v31(item["reference_text"])
-        exact_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        pattern_unclear: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for record in records:
-            compared = compare_pattern_v31(pattern, record.get("text") or "")
-            if compared["status"] == "pass":
-                exact_matches.append((record, compared))
-            elif compared["status"] == "unclear":
-                pattern_unclear.append((record, compared))
-
-        exact_matches = self._minimal_exact_matches(exact_matches)
-        if exact_matches:
-            first_start = int(
-                (exact_matches[0][0].get("source_range") or {}).get("start_order") or 0
-            )
-            first_matches = [
-                entry
-                for entry in exact_matches
-                if int((entry[0].get("source_range") or {}).get("start_order") or 0)
-                == first_start
-            ]
-            if len(first_matches) > 1:
-                return self._mark_unclear(
-                    result,
-                    code="alignment_ambiguous",
-                    message="同一位置存在多个无法消歧的固定内容候选。",
-                    record=first_matches[0][0],
-                )
-            record, compared = first_matches[0]
-            self._attach_candidate(result, record)
-            result.update(
-                status="pass",
-                match_method="ordered_exact_fixed_text",
-                lexical_score=1.0,
-                matched_text=record.get("text") or "",
-                fillable_values=compared.get("captures") or [],
-                fillable_mapping=self._fillable_mapping(
-                    item.get("template_pattern") or {},
-                    compared.get("captures") or [],
-                ),
-                difference_category=None,
-            )
-            return result
-
-        if pattern_unclear:
-            record = self._ordered_record([entry[0] for entry in pattern_unclear])
-            return self._mark_unclear(
-                result,
-                code="fillable_boundary_unclear",
-                message="填写区域在现有文字中有多个可能边界。",
-                record=record,
-            )
-
-        ranked = sorted(
-            (
-                (record, lexical_similarity(item["reference_text"], str(record.get("text") or "")))
-                for record in records
-            ),
-            key=lambda entry: (-entry[1], self._record_order_key(entry[0])),
-        )
-        if not ranked or ranked[0][1] < 0.82:
-            return self._mark_unclear(
-                result,
-                code="source_text_missing",
-                message="已有 OCR 中未找到足够完整的对应固定内容。",
-                record=ranked[0][0] if ranked else None,
-                lexical_score=ranked[0][1] if ranked else 0.0,
-            )
-
-        best_score = ranked[0][1]
-        near = [entry for entry in ranked if best_score - entry[1] < settings.CONSISTENCY_MATCH_MARGIN]
-        best_record = self._ordered_record([entry[0] for entry in near])
-        best_text = str((best_record or {}).get("text") or "")
-        result["lexical_score"] = round(best_score, 4)
-        if best_record:
-            self._attach_candidate(result, best_record)
-            result["matched_text"] = best_text
-        positions = {
-            (
-                (entry[0].get("source_range") or {}).get("start_order"),
-                (entry[0].get("source_range") or {}).get("end_order"),
-            )
-            for entry in near
-        }
-        if len(positions) > 1 and not self._positions_resolved_by_order(near, minimum_order):
-            return self._mark_unclear(
-                result,
-                code="alignment_ambiguous",
-                message="已有 OCR 中存在多个同等可能的对应位置。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        if self._looks_ocr_uncertain(item["reference_text"], best_text):
-            return self._mark_unclear(
-                result,
-                code="source_text_conflict",
-                message="已有 OCR 文字包含异常字符，无法确认逐字差异。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        if not self._supports_deterministic_attachment_decision(attachment_match):
-            return self._mark_unclear(
-                result,
-                code="attachment_alignment_unclear",
-                message="对应附件尚未可靠定位。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-
-        compared = compare_pattern_v31(pattern, best_text)
-        if compared.get("status") == "unclear":
-            return self._mark_unclear(
-                result,
-                code="fillable_boundary_unclear",
-                message="填写区域边界无法由现有模板证据唯一确定。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        raw_differences = compared.get("differences") or []
-        if self._looks_like_displaced_fill(item["reference_text"], raw_differences):
-            return self._mark_unclear(
-                result,
-                code="fillable_boundary_unclear",
-                message="签字填写内容与固定标签的 OCR 阅读顺序发生交叉。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        if self._looks_like_unmarked_fill(pattern, raw_differences):
-            return self._mark_unclear(
-                result,
-                code="fillable_boundary_unclear",
-                message="已有模板文字显示为项目名称填写位置，但填写线边界不完整。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        if self._looks_like_fragmented_ocr(item["reference_text"], best_text, raw_differences):
-            return self._mark_unclear(
-                result,
-                code="source_text_conflict",
-                message="已有 OCR 在该固定段落中出现多处碎片化缺字或异常前缀。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        differences = with_locations(
-            raw_differences,
-            template_locations=result["template_locations"],
-            bid_locations=result.get("bid_locations") or [],
-        )
-        if not differences:
-            return self._mark_unclear(
-                result,
-                code="fixed_difference_unresolved",
-                message="候选文字未完全一致，但无法从已有文字中可靠分离固定内容差异。",
-                record=best_record,
-                lexical_score=best_score,
-            )
-        categories = {difference.get("type") for difference in differences}
-        category = (
-            "fixed_content_moved" if "move" in categories
-            else "fixed_content_changed" if "replace" in categories
-            else "fixed_content_inserted" if "insert" in categories
-            else "fixed_content_deleted"
-        )
-        result.update(
-            status="fail",
-            match_method="ordered_fixed_text_diff",
-            difference_category=category,
-            differences=differences,
-            fillable_mapping=self._fillable_mapping(
-                item.get("template_pattern") or {},
-                compared.get("captures") or [],
-            ),
-        )
-        return result
-
-    @staticmethod
-    def _looks_like_displaced_fill(
-        reference: str,
-        differences: list[dict[str, Any]],
-    ) -> bool:
-        if not differences or not any(marker in str(reference or "")[:40] for marker in SIGNATURE_MARKERS):
-            return False
-        for difference in differences:
-            value = str(difference.get("bid_text") or "").strip()
-            location = difference.get("template_range") or {}
-            if (
-                difference.get("type") != "insert"
-                or int(location.get("start", -1)) != 0
-                or len(value) > 20
-                or any(marker in value for marker in OBLIGATION_MARKERS)
-            ):
-                return False
-        return True
-
-    @staticmethod
-    def _looks_like_unmarked_fill(
-        pattern: Any,
-        differences: list[dict[str, Any]],
-    ) -> bool:
-        if not differences or any(difference.get("type") != "insert" for difference in differences):
-            return False
-        fixed = fixed_text(pattern)
-        markers = ("参与项目", "参加项目", "为项目")
-        for difference in differences:
-            value = str(difference.get("bid_text") or "").strip()
-            offset = int((difference.get("template_range") or {}).get("start", -1))
-            context = fixed[max(0, offset - 12):offset + 12]
-            if (
-                not value
-                or len(value) > 50
-                or any(marker in value for marker in OBLIGATION_MARKERS)
-                or not any(marker in context for marker in markers)
-            ):
-                return False
-        return True
-
-    @staticmethod
-    def _looks_like_fragmented_ocr(
-        reference: str,
-        candidate: str,
-        differences: list[dict[str, Any]],
-    ) -> bool:
-        if not differences:
-            return False
-        ref = plain_text(reference)
-        bid = plain_text(candidate)
-        if (
-            re.match(r"^\s*\d+[.．、)]", ref)
-            and re.match(r"^\s*\d+[A-Za-z]", bid)
-        ):
-            return True
-        if len(ref) < 80 or len(differences) < 3:
-            return False
-        small_losses = 0
-        for difference in differences:
-            if difference.get("type") not in {"delete", "replace"}:
-                continue
-            left = str(difference.get("template_text") or "")
-            right = str(difference.get("bid_text") or "")
-            if len(left) <= 4 and len(right) <= 4:
-                small_losses += 1
-        return small_losses >= 3
-
-    def _evaluate_item_v3(
-        self,
-        item: dict[str, Any],
-        *,
-        bid_text: str,
-        candidates: list[str],
-        bid_locations: list[dict[str, Any]],
-        attachment_match: dict[str, Any],
-        evidence: dict[str, Any],
-    ) -> dict[str, Any]:
-        result = {
-            "item_id": item["item_id"],
-            "kind": item["kind"],
-            "label": item["label"],
-            "reference_text": item["reference_text"],
-            "required": bool(item["required"]),
-            "enabled": bool(item["enabled"]),
-            "status": "not_applicable" if not item["enabled"] else "unclear",
-            "match_method": "none",
-            "lexical_score": 0.0,
-            "embedding_score": None,
-            "difference_category": None,
-            "template_locations": deepcopy(item.get("source_locations") or []),
-            "bid_locations": [],
-            "fillable_existence": bool(item.get("fillable_existence")),
-            "source": item.get("source"),
-            "template_pattern": deepcopy(item.get("template_pattern") or {}),
-            "differences": [],
-            "boundary_status": item.get("boundary_status"),
-        }
-        if item.get("source_scope_status") == "ambiguous":
-            result.update(
-                status="unclear",
-                match_method="template_scope_ambiguous",
-                difference_category="alignment_unclear",
-            )
-            return result
-        if not item["enabled"]:
-            return result
-
-        reference = item["reference_text"]
-        comparison_reference = reference
-        comparison_candidates = list(candidates)
-        if item["kind"] == "table_header":
-            table_candidates = (
-                [candidate for candidate in candidates if "｜" in candidate]
-                if item.get("source") == "logical_table"
-                else candidates
-            )
-            comparison_candidates = self._table_header_candidates(table_candidates)
-        pattern = build_pattern_v31(comparison_reference)
-
-        exact_matches = []
-        unclear_matches = []
-        for candidate in comparison_candidates:
-            compared = compare_pattern_legacy(pattern, candidate)
-            if compared["status"] == "pass":
-                exact_matches.append((candidate, compared))
-            elif compared["status"] == "unclear":
-                unclear_matches.append((candidate, compared))
-        if len(exact_matches) == 1:
-            best_text, compared = exact_matches[0]
-            bid_locs = self._locations_for_candidate(best_text, bid_locations)
-            result.update(
-                status="pass",
-                match_method="exact_fixed_text",
-                lexical_score=1.0,
-                matched_text=best_text,
-                bid_locations=bid_locs,
-                fillable_values=compared.get("captures") or [],
-                difference_category=None,
-            )
-            return result
-        if len(exact_matches) > 1:
-            result.update(
-                status="unclear",
-                match_method="ambiguous_exact_alignment",
-                matched_text=exact_matches[0][0],
-                difference_category="fillable_range_unclear",
-            )
-            return result
-
-        if item.get("boundary_status") == "unclear":
-            result.update(
-                status="unclear",
-                match_method="template_boundary_unclear",
-                difference_category="alignment_unclear",
-            )
-            return result
-
-        best_text, best_lexical, second_lexical = self._best_lexical(
-            comparison_reference,
-            comparison_candidates,
-        )
-        result["lexical_score"] = round(best_lexical, 4)
-        result["matched_text"] = best_text
-        if best_text:
-            result["bid_locations"] = self._locations_for_candidate(best_text, bid_locations)
-        if unclear_matches or (best_text and best_lexical > 0 and abs(best_lexical - second_lexical) < settings.CONSISTENCY_MATCH_MARGIN):
-            result.update(
-                status="unclear",
-                match_method="ambiguous_alignment",
-                difference_category="alignment_unclear",
-            )
-            return result
-        if best_lexical < 0.82:
-            result.update(
-                status="unclear",
-                match_method="ocr_or_alignment_unclear",
-                difference_category="alignment_unclear",
-            )
-            return result
-        if self._looks_ocr_uncertain(reference, best_text):
-            result.update(
-                status="unclear",
-                match_method="local_ocr_required",
-                difference_category="alignment_unclear",
-            )
-            return result
-        if not best_text or not self._supports_deterministic_attachment_decision(attachment_match):
-            result.update(
-                status="unclear",
-                match_method="candidate_unresolved",
-                difference_category="alignment_unclear",
-            )
-            return result
-
-        compared = compare_pattern_legacy(pattern, best_text)
-        bid_locs = result.get("bid_locations") or []
-        if not bid_locs or item.get("source_evidence_unclear") or self._locations_touch_unclear_evidence(
-            bid_locs or bid_locations,
-            evidence,
-        ):
-            result.update(
-                status="unclear",
-                match_method="local_ocr_required",
-                difference_category="alignment_unclear",
-            )
-            return result
-        differences = with_locations(
-            compared.get("differences") or [],
-            template_locations=result["template_locations"],
-            bid_locations=bid_locs,
-        )
-        categories = {item.get("type") for item in differences}
-        if "move" in categories:
-            category = "fixed_content_moved"
-        elif "replace" in categories:
-            category = "fixed_content_changed"
-        elif "insert" in categories:
-            category = "fixed_content_inserted"
-        else:
-            category = "fixed_content_deleted"
-        result.update(
-            status="fail",
-            match_method="exact_fixed_text",
-            difference_category=category,
-            differences=differences,
-        )
-        return result
 
     @staticmethod
     def _locations_touch_unclear_evidence(
@@ -2294,96 +2075,6 @@ class StructuredConsistencyEngine:
             if isinstance(entry, dict) and str(entry.get("status") or "ready") != "ready":
                 return True
         return False
-
-    def _semantic_or_absent(
-        self,
-        result: dict[str, Any],
-        reference: str,
-        candidates: list[str],
-        best_lexical: float,
-        second_lexical: float,
-        attachment_match: dict[str, Any],
-        *,
-        structural: bool,
-    ) -> dict[str, Any]:
-        # 可填写表格的题注/表头：未在主体命中即视为“存在性无法严格确认”，判跳过而非不通过。
-        if result.get("fillable_existence"):
-            result.update(status="skipped", difference_category=None)
-            return result
-        scores = self.embedding.similarities(reference, candidates)
-        if scores is not None:
-            result_model = self.embedding.status()
-            if result_model["status"] == "loaded" and scores:
-                order = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)
-                best_index = order[0]
-                best_score = scores[best_index]
-                second_score = scores[order[1]] if len(order) > 1 else 0.0
-                result["embedding_score"] = round(best_score, 4)
-                if not result.get("matched_text"):
-                    result["matched_text"] = candidates[best_index]
-                margin = best_score - second_score
-                if (
-                    best_score >= settings.CONSISTENCY_PARAGRAPH_MATCH_THRESHOLD
-                    and margin >= settings.CONSISTENCY_MATCH_MARGIN
-                ):
-                    result.update(
-                        status="unclear",
-                        match_method="embedding",
-                        difference_category="alignment_unclear" if structural else "possible_rewrite",
-                    )
-                    return result
-                if best_score >= settings.CONSISTENCY_PARAGRAPH_UNMATCHED_THRESHOLD:
-                    result.update(
-                        status="unclear",
-                        match_method="embedding",
-                        difference_category="alignment_unclear",
-                    )
-                    return result
-
-        if not result["required"]:
-            result.update(status="skipped", difference_category=None)
-            return result
-        deterministic = (
-            self._supports_deterministic_attachment_decision(attachment_match)
-            and len(normalize_text(reference)) >= 12
-            and len(normalize_text("".join(candidates))) >= 24
-            and best_lexical < settings.CONSISTENCY_DETERMINISTIC_MISSING_MAX_LEXICAL
-        )
-        if deterministic:
-            result.update(
-                status="missing",
-                match_method="exhaustive_lexical",
-                difference_category="fixed_clause_missing",
-            )
-        else:
-            result.update(
-                status="unclear",
-                match_method="lexical_fallback",
-                difference_category="alignment_unclear",
-            )
-        return result
-
-    def _finish_structural_absence(
-        self,
-        result: dict[str, Any],
-        attachment_match: dict[str, Any],
-        best_lexical: float,
-    ) -> dict[str, Any]:
-        if not result["required"]:
-            result["status"] = "skipped"
-        elif self._supports_deterministic_attachment_decision(attachment_match) and best_lexical < 0.35:
-            result.update(
-                status="missing",
-                match_method="exhaustive_lexical",
-                difference_category="fixed_clause_missing",
-            )
-        else:
-            result.update(
-                status="unclear",
-                match_method="lexical_fallback",
-                difference_category="alignment_unclear",
-            )
-        return result
 
     def _match_attachment(self, skeleton: dict[str, Any], sections: list[dict[str, Any]]) -> dict[str, Any]:
         return self.checker._verification_checker._resolve_attachment(skeleton, sections)
@@ -2682,12 +2373,23 @@ class StructuredConsistencyEngine:
         return result
 
     @staticmethod
-    def _paragraphs(lines: list[str], title: str) -> list[str]:
+    def _paragraphs(
+        lines: list[str], title: str, *, separate_price_fields: bool = False,
+    ) -> list[str]:
         title_key = normalize_text(title)
         paragraphs: list[str] = []
         buffer: list[str] = []
         for line in lines:
             if normalize_text(line) == title_key:
+                continue
+            if separate_price_fields and re.match(
+                r"^\s*(?:项目名称|招标编号|采购编号|货币单位)\s*[:：]",
+                line,
+            ):
+                if buffer:
+                    paragraphs.append(" ".join(buffer))
+                    buffer = []
+                paragraphs.append(line)
                 continue
             if re.fullmatch(r"\s*(?:\(?\d+(?:[-－]\d+)*\)?[.．、)）]?)\s*", line):
                 buffer.append(line)
@@ -2715,15 +2417,6 @@ class StructuredConsistencyEngine:
         if buffer:
             paragraphs.append(" ".join(buffer))
         return paragraphs
-
-    @staticmethod
-    def _looks_like_field_row(text: str) -> bool:
-        compact = re.sub(r"\s+", "", text)
-        return (
-            len(compact) <= 100
-            and ("：" in text or ":" in text or "__" in text)
-            and not any(marker in compact for marker in OBLIGATION_MARKERS)
-        )
 
     @staticmethod
     def _clause_label(text: str) -> str:
@@ -3171,36 +2864,6 @@ class StructuredConsistencyEngine:
                 projected.append(value)
         return projected
 
-    @classmethod
-    def _minimal_exact_matches(
-        cls,
-        matches: list[tuple[dict[str, Any], dict[str, Any]]],
-    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-        unique: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        seen: set[tuple[Any, ...]] = set()
-        for record, compared in matches:
-            key = (
-                tuple(record.get("source_ids") or []),
-                str(record.get("text") or ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append((record, compared))
-        minimal: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        for candidate in unique:
-            record = candidate[0]
-            source_ids = set(record.get("source_ids") or [])
-            start = (record.get("source_range") or {}).get("start_order")
-            if any(
-                set(other[0].get("source_ids") or []) < source_ids
-                and (other[0].get("source_range") or {}).get("start_order") == start
-                for other in unique
-            ):
-                continue
-            minimal.append(candidate)
-        return sorted(minimal, key=lambda entry: cls._record_order_key(entry[0]))
-
     @staticmethod
     def _record_order_key(record: dict[str, Any]) -> tuple[int, int, int]:
         source_range = record.get("source_range") or {}
@@ -3209,24 +2872,6 @@ class StructuredConsistencyEngine:
             int(source_range.get("block_count") or 1),
             len(str(record.get("text") or "")),
         )
-
-    @classmethod
-    def _ordered_record(cls, records: list[dict[str, Any]]) -> dict[str, Any] | None:
-        values = [record for record in records if isinstance(record, dict)]
-        return min(values, key=cls._record_order_key) if values else None
-
-    @classmethod
-    def _positions_resolved_by_order(
-        cls,
-        ranked: list[tuple[dict[str, Any], float]],
-        minimum_order: int,
-    ) -> bool:
-        starts = sorted({
-            int((record.get("source_range") or {}).get("start_order") or 0)
-            for record, _ in ranked
-            if int((record.get("source_range") or {}).get("start_order") or 0) >= minimum_order
-        })
-        return bool(starts) and starts[0] >= minimum_order
 
     @staticmethod
     def _attach_candidate(result: dict[str, Any], record: dict[str, Any]) -> None:
@@ -3291,23 +2936,6 @@ class StructuredConsistencyEngine:
             unclear_reasons=[reason],
         )
         return result
-
-    @staticmethod
-    def _fillable_mapping(
-        pattern: dict[str, Any],
-        captures: list[str],
-    ) -> list[dict[str, Any]]:
-        slots = pattern.get("slots") if isinstance(pattern, dict) else []
-        return [
-            {
-                "index": slot.get("index", index),
-                "label": slot.get("label") or f"填写区{index + 1}",
-                "source": slot.get("source"),
-                "template_range": deepcopy(slot.get("range") or {}),
-                "bid_text": captures[index] if index < len(captures) else "",
-            }
-            for index, slot in enumerate(slots or [])
-        ]
 
     @staticmethod
     def _collect_unclear_reasons(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3444,9 +3072,10 @@ class StructuredConsistencyEngine:
         return additions
 
     @staticmethod
-    def _source_coverage_v32(
+    def _source_coverage(
         candidates: list[dict[str, Any]],
         evaluated: list[dict[str, Any]],
+        *, delegated_signoff: bool = False,
     ) -> dict[str, Any]:
         consumed = {
             str(span.get("source_id") or "")
@@ -3517,6 +3146,12 @@ class StructuredConsistencyEngine:
                 for marker in ("signature", "seal", "image", "stamp")
             ):
                 classification = "fillable_or_non_text_evidence"
+            elif delegated_signoff and re.match(
+                r"^\s*(?:日\s*期\s*[:：]|(?:投标人|供应商|参选人)(?:名称|全称)?\s*[:：]|"
+                r"(?:投标人|供应商|参选人)?法定代表人[^。；;]{0,35}(?:签字|盖章)\s*[:：])",
+                text,
+            ):
+                classification = "fillable_or_non_text_evidence"
             elif (
                 len(normalize_text(text)) <= 40
                 and not any(marker in text for marker in OBLIGATION_MARKERS)
@@ -3547,49 +3182,6 @@ class StructuredConsistencyEngine:
         }
 
     @staticmethod
-    def _candidate_texts(section: dict[str, Any]) -> list[str]:
-        values: list[str] = []
-        for item in section.get("sections") or []:
-            if not isinstance(item, dict):
-                continue
-            text = strip_text_layer_noise(item.get("text") or "")
-            text = re.sub(r"\s+", " ", text).strip()
-            if text and not PAGE_NO_RE.match(text):
-                values.extend(part.strip() for part in text.splitlines() if part.strip())
-        if not values:
-            values.extend(
-                part.strip()
-                for part in strip_text_layer_noise(section.get("text") or "").splitlines()
-                if part.strip()
-            )
-        # OCR 会在换页处把一个固定句拆成两个版面块，甚至把后半句误标成 heading。
-        # 补充相邻两块窗口即可恢复句子，同时仍严格限制在已匹配附件内部。
-        adjacent = [
-            f"{values[index]} {values[index + 1]}"
-            for index in range(len(values) - 1)
-        ]
-        return values + adjacent
-
-    @staticmethod
-    def _looks_ocr_uncertain(reference: str, candidate: str) -> bool:
-        """Conservatively defer differences containing typical OCR artifacts."""
-        value = str(candidate or "")
-        if not value:
-            return True
-        unusual = sum(
-            1 for char in value
-            if not (
-                char.isspace() or char.isalnum() or "\u3400" <= char <= "\u9fff"
-                or char in "，。；：、！？,.!?;:（）()【】[]《》“”‘’/%％+-—－_｜|"
-            )
-        )
-        reference_cjk = sum("\u3400" <= char <= "\u9fff" for char in str(reference or ""))
-        candidate_latin = sum("A" <= char <= "z" for char in value)
-        return unusual / max(1, len(value)) >= 0.02 or (
-            reference_cjk >= 8 and candidate_latin / max(1, len(value)) >= 0.08
-        )
-
-    @staticmethod
     def _table_header_candidates(candidates: list[str]) -> list[str]:
         """Project candidate table lines to exact canonical header order.
 
@@ -3613,29 +3205,6 @@ class StructuredConsistencyEngine:
             if positions:
                 result.append("｜".join(marker for _, marker in sorted(positions)))
         return list(dict.fromkeys(result))
-
-    @staticmethod
-    def _best_lexical(reference: str, candidates: list[str]) -> tuple[str, float, float]:
-        ranked = sorted(
-            ((candidate, lexical_similarity(reference, candidate)) for candidate in candidates),
-            key=lambda item: item[1],
-            reverse=True,
-        )
-        if not ranked:
-            return "", 0.0, 0.0
-        return ranked[0][0], ranked[0][1], ranked[1][1] if len(ranked) > 1 else 0.0
-
-    @staticmethod
-    def _locations_for_candidate(
-        candidate: str,
-        locations: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        key = normalize_text(candidate)
-        return [
-            deepcopy(location)
-            for location in locations
-            if key and key in normalize_text(location.get("text"))
-        ][:8]
 
     @staticmethod
     def _locations_for_text(

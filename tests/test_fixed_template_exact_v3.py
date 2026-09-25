@@ -1,20 +1,13 @@
 import unittest
-from unittest.mock import patch
 
 from app.service.analysis.compliance.exact_template import (
-    LEGACY_VERSION,
-    V31_VERSION,
     VERSION,
     build_pattern,
-    build_pattern_v31,
     character_differences,
     compare_pattern,
-    compare_pattern_v31,
-    compare_pattern_legacy,
 )
 from app.service.analysis.compliance.structured_consistency import StructuredConsistencyEngine
 from app.service.analysis.compliance.consistency import ConsistencyChecker
-from app.config.settings import settings
 from app.service.analysis.compliance.template_pdf_evidence import native_text_conflicted
 
 
@@ -23,9 +16,8 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
         self.assertEqual(compare_pattern(build_pattern(template), bid)["status"], status)
 
     def test_version(self):
-        self.assertEqual(VERSION, "fixed-template-exact-v3.2")
-        self.assertEqual(V31_VERSION, "fixed-template-exact-v3.1")
-        self.assertEqual(LEGACY_VERSION, "fixed-template-exact-v3")
+        self.assertEqual(VERSION, "fixed-template-exact-v3.3")
+        self.assertEqual(ConsistencyChecker()._structured_engine.engine_version, VERSION)
 
     def test_only_declared_values_may_change(self):
         self.assert_status(
@@ -37,15 +29,29 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
     def test_obligation_synonym_is_not_equal(self):
         self.assert_status("供应商必须遵守本条款。", "供应商应当遵守本条款。", "fail")
 
-    def test_digit_decimal_case_width_and_punctuation_are_fixed(self):
+    def test_digit_decimal_case_and_width_remain_fixed(self):
         for template, bid in (
             ("费率为1.5%。", "费率为15%。"),
             ("型号ABC。", "型号abc。"),
-            ("金额：100元。", "金额:100元。"),
             ("宽度10cm。", "宽度１０cm。"),
         ):
             with self.subTest(template=template, bid=bid):
                 self.assert_status(template, bid, "fail")
+
+    def test_presentation_punctuation_is_invisible(self):
+        pattern = build_pattern("(2) 金额：100元；我方必须履约。")
+        bid = "（2）金额:100元;我方必须履约。"
+        result = compare_pattern(pattern, bid)
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["differences"], [])
+        self.assertEqual(result["bid_text"], bid)
+        self.assert_status("我方必须履约。", "我方应当履约。", "fail")
+        self.assert_status("费用,均已包含。", "费用, 均已包含。", "pass")
+
+    def test_extended_contact_value_slots(self):
+        template = "身份证号码： ；电话号码： ；传真号码： ；邮政编码： ；"
+        bid = "身份证号码：110108197107306020；电话号码：15102110464；传真号码：02112345678；邮政编码：202505；"
+        self.assertEqual(compare_pattern(build_pattern(template), bid)["status"], "pass")
 
     def test_extra_fixed_condition_fails(self):
         self.assert_status("我方接受全部条款。", "我方接受全部条款，但仅限本年度。", "fail")
@@ -114,17 +120,7 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             [("必须", "应当")],
         )
 
-    def test_legacy_comparator_remains_available(self):
-        result = compare_pattern_legacy(build_pattern("姓名：______"), "姓名：张三")
-        self.assertEqual(result["status"], "pass")
-
-    def test_v31_parser_and_comparator_are_frozen_for_rollback(self):
-        pattern = build_pattern_v31("7. 在册人数： （三）其他情况：")
-        self.assertNotIn("（三）", pattern.pattern_text)
-        result = compare_pattern_v31(pattern, "7.在册人数：55人（三）其他情况：无")
-        self.assertEqual(result["status"], "pass")
-
-    def test_v32_preserves_numbered_next_field_and_reports_fixed_punctuation(self):
+    def test_numbered_next_field_and_fixed_punctuation(self):
         pattern = build_pattern("1. 单位名称： （二）地址：")
         self.assertIn("（二）地址：", pattern.pattern_text)
         result = compare_pattern(pattern, "1、单位名称：甲公司（二）地址：北京")
@@ -135,7 +131,7 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
         )
         self.assertEqual(result["captures"], ["甲公司", "北京"])
 
-    def test_v32_maps_compact_identity_form_fields_without_swallowing_labels(self):
+    def test_compact_identity_form_fields_without_swallowing_labels(self):
         template = "兹证明（姓名），性别 ，年龄 ，身份证号码 ，现任我单位（职务）。"
         bid = "兹证明张三，性别男，年龄35，身份证号码310000，现任我单位经理。"
         result = compare_pattern(build_pattern(template), bid)
@@ -150,11 +146,11 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             "提供 SLA 和 AI PC 服务。",
         ):
             with self.subTest(text=text):
-                self.assertIsNone(engine._explicit_text_issue_v32({"text": text}))
+                self.assertIsNone(engine._explicit_text_issue({"text": text}))
 
     def test_explicit_corrupt_text_evidence_remains_unclear(self):
         engine = StructuredConsistencyEngine.__new__(StructuredConsistencyEngine)
-        issue = engine._explicit_text_issue_v32({"text": "固定正文\ufffd后续"})
+        issue = engine._explicit_text_issue({"text": "固定正文\ufffd后续"})
         self.assertEqual(issue[0], "source_text_unavailable")
 
     def test_synthetic_table_columns_are_not_document_headers(self):
@@ -186,7 +182,7 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             }]},
             source_identity="project-260",
         )
-        result = engine._evaluate_item_v32(
+        result = engine._evaluate_item(
             item,
             assignment=None,
             local_candidates=[],
@@ -231,8 +227,7 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             }
             for order in (1, 2)
         ]
-        with patch.object(settings, "CONSISTENCY_TEMPLATE_ENGINE_VERSION", VERSION):
-            assignment = engine._align_items_v32([item], candidates)[item["item_id"]]
+        assignment = engine._align_items([item], candidates)[item["item_id"]]
         self.assertFalse(assignment["ambiguous"])
 
     def test_different_source_repeated_text_remains_locally_ambiguous(self):
@@ -249,8 +244,7 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             }
             for order in (1, 2)
         ]
-        with patch.object(settings, "CONSISTENCY_TEMPLATE_ENGINE_VERSION", VERSION):
-            assignment = engine._align_items_v32([item], candidates)[item["item_id"]]
+        assignment = engine._align_items([item], candidates)[item["item_id"]]
         self.assertTrue(assignment["ambiguous"])
 
     def test_246_field_group_full_flow_maps_each_original_line(self):
@@ -286,10 +280,9 @@ class FixedTemplateExactV3Tests(unittest.TestCase):
             "_underline_evidence": {}, "_underline_locations": [], "_table_headers": [],
             "_source_identity": "project-246", "_document_candidates": [],
         }
-        with patch.object(settings, "CONSISTENCY_TEMPLATE_ENGINE_VERSION", VERSION):
-            result = engine._evaluate_attachment(
-                skeleton, section, {"confidence": "high", "method": "title_exact"}
-            )
+        result = engine._evaluate_attachment(
+            skeleton, section, {"confidence": "high", "method": "title_exact"}
+        )
         self.assertEqual(result["status"], "fail")
         self.assertEqual(
             [item["status"] for item in result["element_results"]],

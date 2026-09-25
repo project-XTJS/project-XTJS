@@ -267,31 +267,6 @@ class ConsistencyOptionalAndReferenceTests(unittest.TestCase):
 
         self.assertEqual(score, 1.0)
 
-    def test_inline_project_name_placeholder_is_not_a_required_label(self) -> None:
-        engine = ConsistencyChecker()._structured_engine
-        items = engine._variable_items(
-            "根据贵方为（项目名称）项目（项目编号：______）的比选邀请书",
-            "attachment-1",
-            [],
-        )
-
-        self.assertNotIn("项目名称", [item["label"] for item in items])
-        self.assertIn("项目编号", [item["label"] for item in items])
-
-    def test_consistency_candidates_include_adjacent_ocr_blocks(self) -> None:
-        candidates = StructuredConsistencyEngine._candidate_texts(
-            {
-                "sections": [
-                    {"type": "text", "text": "同时须经采购", "page": 75},
-                    {"type": "text", "text": "第 75 页 共 102 页", "page": 75},
-                    {"type": "heading", "text": "人备案同意后方可更换。", "page": 76},
-                ]
-            }
-        )
-
-        self.assertIn("同时须经采购 人备案同意后方可更换。", candidates)
-
-
 class VerificationAttachmentScopeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.verifier = VerificationChecker(None)
