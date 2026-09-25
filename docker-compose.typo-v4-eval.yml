@@ -1,0 +1,44 @@
+# Standalone, opt-in offline evaluation. Never add this file to production `up`.
+services:
+  typo-v4-eval:
+    profiles: ["v4-eval"]
+    image: xtjs-typo:cec3-v3-20260924
+    init: true
+    entrypoint: ["python", "-m", "typo_runtime.manager"]
+    environment:
+      PYTHONPATH: /runtime
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      TYPO_PIPELINE_VERSION: duplicate-typo-macbert-cec3-v4
+      TYPO_MODEL_PATH: /models/current
+      TYPO_CEC3_MODEL_PATH: /models/cec3
+      TYPO_VERIFIER_MODEL_PATH: /models/verifier
+      TYPO_CACHE_PATH: /cache/checks.sqlite
+      TYPO_IDLE_SECONDS: "300"
+      TYPO_V4_EVAL_TRACE: ${TYPO_V4_EVAL_TRACE:-false}
+      TYPO_VERIFIER_SUPPORTED_THRESHOLD: ${TYPO_VERIFIER_SUPPORTED_THRESHOLD:-0.99}
+      TYPO_VERIFIER_UNSUPPORTED_THRESHOLD: ${TYPO_VERIFIER_UNSUPPORTED_THRESHOLD:-0.999}
+      TYPO_DEVICE: cuda
+      TYPO_REQUEST_SECONDS: "120"
+      TYPO_STARTUP_SECONDS: "600"
+    volumes:
+      - ./app/service/typo_runtime:/runtime/typo_runtime:ro
+      - ./models/typo/macbert4csc-public-v1:/models/current:ro
+      - ./models/typo/ChineseErrorCorrector3-4B:/models/cec3:ro
+      - /data/xtjs-models/typo-training/v4/verifier-public-v1:/models/verifier:ro
+      - typo_v4_eval_cache:/cache
+    ports:
+      - "127.0.0.1:${TYPO_V4_EVAL_PORT:-18090}:8090"
+    shm_size: 1gb
+    mem_limit: 24g
+    cpus: 4
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
+volumes:
+  typo_v4_eval_cache:

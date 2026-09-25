@@ -1,0 +1,4 @@
+FROM project-xtjs:cec3-v3-20260924 AS pinyin-source
+FROM xtjs-typo:cec3-v3-20260924
+COPY --from=pinyin-source /usr/local/lib/python3.12/site-packages/pypinyin /usr/local/lib/python3.12/site-packages/pypinyin
+COPY --from=pinyin-source /usr/local/lib/python3.12/site-packages/pypinyin-0.55.0.dist-info /usr/local/lib/python3.12/site-packages/pypinyin-0.55.0.dist-info

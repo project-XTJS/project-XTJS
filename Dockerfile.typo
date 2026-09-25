@@ -1,0 +1,4 @@
+FROM project-xtjs:cec3-v3-20260924 AS jieba-source
+FROM xtjs-vllm:v0.22.1
+COPY --from=jieba-source /usr/local/lib/python3.12/site-packages/jieba /usr/local/lib/python3.12/site-packages/jieba
+COPY --from=jieba-source /usr/local/lib/python3.12/site-packages/jieba-0.42.1.dist-info /usr/local/lib/python3.12/site-packages/jieba-0.42.1.dist-info

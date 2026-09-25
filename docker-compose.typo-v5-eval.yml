@@ -1,0 +1,104 @@
+# Isolated v5 experiment; never included in the production compose invocation.
+services:
+  typo-v5-train:
+    profiles: ["v5-train"]
+    build:
+      context: .
+      dockerfile: Dockerfile.typo-v5
+    image: xtjs-typo:v5-offline-experiment
+    working_dir: /workspace
+    entrypoint: ["python", "tools/train_typo_detector_v5.py"]
+    environment:
+      PYTHONPATH: /workspace
+      CUDA_VISIBLE_DEVICES: ""
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      OMP_NUM_THREADS: "2"
+    volumes:
+      - ./:/workspace:ro
+      - ./models/typo/macbert4csc-public-v1:/models/current:ro
+      - /data/xtjs-models/typo-training/public-v1/data:/data/public:ro
+      - /data/xtjs-models/typo-training/v5:/output
+    cpus: 2
+    mem_limit: 8g
+    network_mode: "none"
+    restart: "no"
+  typo-v5-eval:
+    profiles: ["v5-eval"]
+    image: xtjs-typo:v5-offline-experiment
+    init: true
+    entrypoint: ["python", "-m", "typo_runtime.manager"]
+    environment:
+      PYTHONPATH: /runtime
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      TYPO_PIPELINE_VERSION: duplicate-typo-original-detector-v5
+      TYPO_MODEL_PATH: /models/current
+      TYPO_CEC3_MODEL_PATH: /models/cec3
+      TYPO_DETECTOR_MODEL_PATH: /models/detector
+      TYPO_V5_FONT_PATH: /models/v5-assets/NotoSansSC-wght.ttf
+      TYPO_CACHE_PATH: /cache/checks.sqlite
+      TYPO_IDLE_SECONDS: "300"
+      TYPO_DETECTOR_THRESHOLD: ${TYPO_DETECTOR_THRESHOLD:-0.99}
+      TYPO_GLYPH_THRESHOLD: ${TYPO_GLYPH_THRESHOLD:-0.75}
+      TYPO_V5_EVAL_TRACE: ${TYPO_V5_EVAL_TRACE:-false}
+      TYPO_DEVICE: cuda
+      TYPO_REQUEST_SECONDS: "120"
+      TYPO_STARTUP_SECONDS: "600"
+    volumes:
+      - ./app/service/typo_runtime:/runtime/typo_runtime:ro
+      - ./models/typo/macbert4csc-public-v1:/models/current:ro
+      - ./models/typo/ChineseErrorCorrector3-4B:/models/cec3:ro
+      - /data/xtjs-models/typo-training/v5/detector-public-v1:/models/detector:ro
+      - /data/xtjs-models/typo-training/v5/assets:/models/v5-assets:ro
+      - typo_v5_eval_cache:/cache
+    ports:
+      - "127.0.0.1:${TYPO_V5_EVAL_PORT:-18091}:8090"
+    shm_size: 1gb
+    mem_limit: 24g
+    cpus: 4
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
+  typo-v3-baseline:
+    profiles: ["v5-baseline"]
+    image: xtjs-typo:cec3-v3-20260924
+    init: true
+    entrypoint: ["python", "-m", "typo_runtime.manager"]
+    environment:
+      PYTHONPATH: /runtime
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      TYPO_MODEL_PATH: /models/current
+      TYPO_CEC3_MODEL_PATH: /models/cec3
+      TYPO_CACHE_PATH: /cache/checks.sqlite
+      TYPO_IDLE_SECONDS: "300"
+      TYPO_DEVICE: cuda
+      TYPO_REQUEST_SECONDS: "120"
+      TYPO_STARTUP_SECONDS: "600"
+    volumes:
+      - ./app/service/typo_runtime:/runtime/typo_runtime:ro
+      - ./models/typo/macbert4csc-public-v1:/models/current:ro
+      - ./models/typo/ChineseErrorCorrector3-4B:/models/cec3:ro
+      - typo_v3_baseline_cache:/cache
+    ports:
+      - "127.0.0.1:${TYPO_V3_BASELINE_PORT:-18092}:8090"
+    shm_size: 1gb
+    mem_limit: 24g
+    cpus: 4
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: "no"
+volumes:
+  typo_v5_eval_cache:
+  typo_v3_baseline_cache:

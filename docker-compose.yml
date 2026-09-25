@@ -4,7 +4,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.release
-    image: project-xtjs:review-hardening-v2-20260924
+    image: project-xtjs:tender-fulltext-v1-20260925
     container_name: project-xtjs
     ports:
       - "8080:8080"
@@ -65,7 +65,6 @@ services:
       - PADDLE_PDX_CACHE_HOME=${PADDLE_PDX_CACHE_HOME:-/app/.ocr_runtime/paddlex-cache}
       - OCR_RUNTIME_TEMP_DIR=${OCR_RUNTIME_TEMP_DIR:-/app/.ocr_runtime/runtime-tmp}
       - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
-      - CONSISTENCY_TEMPLATE_ENGINE_VERSION=${CONSISTENCY_TEMPLATE_ENGINE_VERSION:-fixed-template-exact-v3.2}
       - XTJS_IO_CONCURRENCY=${XTJS_IO_CONCURRENCY:-8}
       - XTJS_IO_QUEUE_TIMEOUT_SECONDS=${XTJS_IO_QUEUE_TIMEOUT_SECONDS:-10}
       - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
@@ -106,7 +105,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.release
-    image: project-xtjs:review-hardening-v2-20260924
+    image: project-xtjs:tender-fulltext-v1-20260925
     container_name: project-xtjs-business-review-worker
     env_file:
       - .env
@@ -116,7 +115,6 @@ services:
       - OCR_STORAGE_ROOT=${OCR_STORAGE_ROOT:-/app/.ocr_runtime}
       - CONSISTENCY_EMBEDDING_MODEL_PATH=${CONSISTENCY_EMBEDDING_MODEL_PATH:-/app/models/bge-small-zh-v1.5}
       - CONSISTENCY_EMBEDDING_DEVICE=${BUSINESS_REVIEW_EMBEDDING_DEVICE:-cpu}
-      - CONSISTENCY_TEMPLATE_ENGINE_VERSION=${CONSISTENCY_TEMPLATE_ENGINE_VERSION:-fixed-template-exact-v3.2}
       - XTJS_CACHE_ENABLED=${XTJS_CACHE_ENABLED:-true}
       - XTJS_CACHE_REQUIRED=${XTJS_CACHE_REQUIRED:-true}
       - BUSINESS_REVIEW_QUEUE=${BUSINESS_REVIEW_QUEUE:-business_review}
