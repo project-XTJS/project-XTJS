@@ -85,6 +85,20 @@ class TypoEvaluationTests(unittest.TestCase):
         self.assertEqual(metrics["candidate_metrics"]["modification_precision"], 1.0)
         self.assertEqual(metrics["candidate_metrics"]["recall"], 1.0)
 
+    def test_v3_hidden_candidates_are_not_reported_as_measured_candidate_recall(self):
+        records = [{
+            "project_id": "project-v3", "split": "test", "text": "安全培圳",
+            "expected": [{"start": 3, "end": 4, "replacement": "训"}],
+            "result": {
+                "issues": [], "candidate_metrics_available": False,
+                "candidates": None, "candidate_count": 1,
+                "eligible_count": 0, "hidden_count": 1,
+            },
+        }]
+        metrics = MODULE.evaluate_records(records)
+        self.assertIsNone(metrics["candidate_metrics"])
+        self.assertEqual((metrics["candidate_count"], metrics["hidden_count"]), (1, 1))
+
     def test_custom_rules_can_be_evaluated_without_replacing_runtime_rules(self):
         candidate = {
             "start": 3,

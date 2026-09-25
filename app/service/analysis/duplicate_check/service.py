@@ -51,11 +51,17 @@ from app.service.analysis.typo_client import DuplicateTypoService, common_word_e
 from app.service.typo_runtime.contract import (
     TypoUnavailable,
     VERSION as TYPO_VERSION,
-    word_rule_version,
 )
 
+TYPO_DIAGNOSTIC_COUNTS = (
+    "eligible_count", "confirmed_count", "hidden_count", "incomplete_count",
+    "budget_skipped_count", "verifier_rejected_count", "cec3_unsupported_count",
+    "word_invalid_count", "position_invalid_count", "detector_rejected_count",
+    "source_valid_rejected_count", "similarity_rejected_count",
+)
 
 _LOGGER = logging.getLogger(__name__)
+
 
 def _bbox_overlap(a: list[float], b: list[float]) -> bool:
     """两个 [x1, y1, x2, y2] 包围盒是否相交（同一坐标系）。"""
@@ -180,6 +186,13 @@ class DuplicateCheckService:
                 )
                 for left, right in combinations(documents, 2)
             ]
+            typo_totals = {
+                key: sum(int((item.get("typo_check") or {}).get(key) or 0) for item in compared_pair_items)
+                for key in TYPO_DIAGNOSTIC_COUNTS
+            }
+            pair_rule_version = next((item.get("typo_check", {}).get("rule_version") for item in compared_pair_items if item.get("typo_check", {}).get("rule_version")), TYPO_VERSION)
+            pair_verifier_model = next((item.get("typo_check", {}).get("verifier_model") for item in compared_pair_items if item.get("typo_check", {}).get("verifier_model")), None)
+            pair_detector_model = next((item.get("typo_check", {}).get("detector_model") for item in compared_pair_items if item.get("typo_check", {}).get("detector_model")), None)
             total_pair_count = len(compared_pair_items)
             pair_items = [
                 item
@@ -208,6 +221,7 @@ class DuplicateCheckService:
                 "suspicious_pair_count": len(suspicious),
                 "high_risk_pair_count": len(high),
                 "medium_risk_pair_count": len(medium),
+                "typo_check": {**typo_totals, "rule_version": pair_rule_version, "verifier_model": pair_verifier_model, "detector_model": pair_detector_model},
                 "documents": [
                     {
                         "identifier_id": item["identifier_id"],
@@ -250,6 +264,14 @@ class DuplicateCheckService:
                 "suspicious_pair_count": suspicious_pair_count,
                 "high_risk_pair_count": high_risk_pair_count,
                 "medium_risk_pair_count": medium_risk_pair_count,
+                "typo_check": {
+                    key: sum(int((group.get("typo_check") or {}).get(key) or 0) for group in groups.values())
+                    for key in TYPO_DIAGNOSTIC_COUNTS
+                } | {
+                    "rule_version": next((group.get("typo_check", {}).get("rule_version") for group in groups.values() if group.get("typo_check", {}).get("rule_version")), TYPO_VERSION),
+                    "verifier_model": next((group.get("typo_check", {}).get("verifier_model") for group in groups.values() if group.get("typo_check", {}).get("verifier_model")), None),
+                    "detector_model": next((group.get("typo_check", {}).get("detector_model") for group in groups.values() if group.get("typo_check", {}).get("detector_model")), None),
+                },
             },
         }
 
@@ -1286,6 +1308,10 @@ class DuplicateCheckService:
         kept_count = 0
         conclusive_kept_count = 0
         review_only_count = 0
+        typo_totals = {key: 0 for key in TYPO_DIAGNOSTIC_COUNTS}
+        pair_rule_version = TYPO_VERSION
+        pair_verifier_model = None
+        pair_detector_model = None
         for evidence_key in text_evidence_keys:
             kept_items: list[dict[str, Any]] = []
             for evidence_index, evidence in enumerate(issue.get(evidence_key) or []):
@@ -1306,18 +1332,20 @@ class DuplicateCheckService:
                     evidence_key=evidence_key,
                     source_issue=issue,
                 )
+                pair_rule_version = (decision.get("typo_check") or {}).get("rule_version") or pair_rule_version
+                pair_verifier_model = (decision.get("typo_check") or {}).get("verifier_model") or pair_verifier_model
+                pair_detector_model = (decision.get("typo_check") or {}).get("detector_model") or pair_detector_model
+                for key in typo_totals:
+                    typo_totals[key] += int((decision.get("typo_check") or {}).get(key) or 0)
                 next_evidence["duplicate_text_length"] = decision["text_length"]
                 next_evidence["duplicate_report_reason"] = decision["reason"]
                 next_evidence["review_only"] = bool(decision.get("review_only"))
                 default_typo_status = "completed" if settings.TYPO_CHECK_ENABLED else "disabled"
-                next_evidence["typo_check"] = dict(decision.get(
-                    "typo_check",
-                    {
+                next_evidence["typo_check"] = dict(decision.get("typo_check") or {
                         "status": default_typo_status,
                         "rule_version": TYPO_VERSION,
-                        "word_rule_version": word_rule_version(),
-                    },
-                ))
+                        "word_rule_version": None,
+                    })
                 next_evidence["typo_check"].setdefault(
                     "confirmed_count", len(decision.get("typo_issues") or [])
                 )
@@ -1326,8 +1354,10 @@ class DuplicateCheckService:
                 )
                 next_evidence["typo_check"].setdefault("rule_version", TYPO_VERSION)
                 next_evidence["typo_check"].setdefault(
-                    "word_rule_version", word_rule_version()
+                    "word_rule_version", None
                 )
+                for key in typo_totals:
+                    next_evidence["typo_check"].setdefault(key, 0)
                 if decision.get("typo_issues"):
                     next_evidence["short_duplicate_typo_issues"] = decision["typo_issues"]
                 if decision.get("review_candidates"):
@@ -1365,12 +1395,15 @@ class DuplicateCheckService:
                         target.append(typo)
         issue["short_duplicate_typo_issues"] = aggregated_typo_issues
         issue["typo_review_candidates"] = aggregated_review_candidates
-        incomplete = any(e.get("typo_check", {}).get("status") == "incomplete" for k in text_evidence_keys for e in issue.get(k, []))
+        incomplete = typo_totals["incomplete_count"] > 0
         typo_status = "incomplete" if incomplete else ("completed" if settings.TYPO_CHECK_ENABLED else "disabled")
         issue["typo_check"] = {
             "status": typo_status,
-            "rule_version": TYPO_VERSION,
-            "word_rule_version": word_rule_version(),
+            "rule_version": pair_rule_version,
+            "word_rule_version": None,
+            "verifier_model": pair_verifier_model,
+            "detector_model": pair_detector_model,
+            **typo_totals,
             "confirmed_count": len(aggregated_typo_issues),
             "review_candidate_count": len(aggregated_review_candidates),
             "message": (
@@ -1421,18 +1454,33 @@ class DuplicateCheckService:
         typo_check: dict[str, Any] | None = None
         if settings.TYPO_CHECK_ENABLED:
             try:
-                typo_issues, review_candidates = self._short_duplicate_typo_results(
+                typo_issues, review_candidates, metrics = self._short_duplicate_typo_results(
                     evidence,
                     left_text=left_text,
                     right_text=right_text,
                     evidence_key=evidence_key,
                     source_issue=source_issue or {},
                 )
+                typo_check = {
+                    "status": "completed",
+                    "rule_version": metrics.get("rule_version") or TYPO_VERSION,
+                    "word_rule_version": None,
+                    "verifier_model": metrics.get("verifier_model"),
+                    "detector_model": metrics.get("detector_model"),
+                    "confirmed_count": len(typo_issues),
+                    "review_candidate_count": 0,
+                    "eligible_count": int(metrics.get("eligible_count") or 0),
+                    "hidden_count": int(metrics.get("hidden_count") or 0),
+                    "incomplete_count": 0,
+                    **{key: int(metrics.get(key) or 0) for key in TYPO_DIAGNOSTIC_COUNTS if key not in ("eligible_count", "confirmed_count", "hidden_count", "incomplete_count")},
+                }
             except TypoUnavailable as exc:
                 typo_check = {
                     "status": "incomplete",
                     "message": str(exc),
                     "rule_version": TYPO_VERSION,
+                    "word_rule_version": None,
+                    "incomplete_count": 1,
                 }
 
         if text_length >= 30:
@@ -1461,24 +1509,23 @@ class DuplicateCheckService:
                 "reason": "short_duplicate_contains_typo",
                 "text_length": text_length,
                 "typo_issues": typo_issues,
+                "typo_check": typo_check,
             }
-        if typo_check:
+        if typo_check and typo_check.get("status") == "incomplete":
             return {
-                "report": True,
-                "review_only": True,
+                "report": False,
                 "reason": "typo_check_incomplete",
                 "text_length": text_length,
                 "typo_check": typo_check,
             }
         if review_candidates:
             return {
-                "report": True,
-                "review_only": True,
-                "reason": "short_duplicate_typo_review",
+                "report": False,
+                "reason": "short_duplicate_without_confirmed_typo",
                 "text_length": text_length,
-                "review_candidates": review_candidates,
+                "typo_check": typo_check,
             }
-        return {"report": False, "reason": "short_duplicate_without_typo", "text_length": text_length}
+        return {"report": False, "reason": "short_duplicate_without_typo", "text_length": text_length, "typo_check": typo_check}
 
     def _duplicate_evidence_pair_text(
         self,
@@ -1536,7 +1583,7 @@ class DuplicateCheckService:
         right_text: str,
         evidence_key: str,
         source_issue: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
         left = self._check_short_duplicate_side_typos("left", left_text, evidence, evidence_key, source_issue)
         right = self._check_short_duplicate_side_typos("right", right_text, evidence, evidence_key, source_issue)
         shared = common_word_edits(
@@ -1545,9 +1592,17 @@ class DuplicateCheckService:
             list(left.get("issues") or []) + list(left.get("review_candidates") or []),
             list(right.get("issues") or []) + list(right.get("review_candidates") or []),
         )
+        metrics = {
+            key: int((left.get("metrics") or {}).get(key) or 0)
+            + int((right.get("metrics") or {}).get(key) or 0)
+            for key in ("candidate_count", "eligible_count", "hidden_count", "budget_skipped_count", "verifier_rejected_count", "cec3_unsupported_count", "word_invalid_count", "position_invalid_count")
+        }
+        metrics["rule_version"] = (left.get("metrics") or {}).get("rule_version") or (right.get("metrics") or {}).get("rule_version")
+        metrics["verifier_model"] = (left.get("metrics") or {}).get("verifier_model") or (right.get("metrics") or {}).get("verifier_model")
         return (
             [item for item in shared if item.get("verification_status") == "confirmed"],
             [item for item in shared if item.get("verification_status") != "confirmed"],
+            metrics,
         )
 
     def _check_short_duplicate_side_typos(
@@ -1559,7 +1614,7 @@ class DuplicateCheckService:
         source_issue: dict[str, Any],
     ) -> dict[str, list[dict[str, Any]]]:
         if not str(text or "").strip():
-            return {"issues": [], "review_candidates": []}
+            return {"issues": [], "review_candidates": [], "metrics": {}}
         page = evidence.get(f"{side}_page")
         if page is None:
             pages = evidence.get(f"{side}_pages") or []
@@ -1596,7 +1651,7 @@ class DuplicateCheckService:
         return {
             key: [dict(item) for item in result.get(key) or [] if isinstance(item, dict)]
             for key in ("issues", "review_candidates")
-        }
+        } | {"metrics": dict(result.get("metrics") or {})}
 
     @staticmethod
     def _duplicate_evidence_segments(
@@ -1671,7 +1726,7 @@ class DuplicateCheckService:
         right_text: str,
     ) -> list[dict[str, Any]]:
         """Compatibility helper returning only confirmed v2 word edits."""
-        confirmed, _ = self._short_duplicate_typo_results(
+        confirmed, _, _ = self._short_duplicate_typo_results(
             evidence,
             left_text=left_text,
             right_text=right_text,

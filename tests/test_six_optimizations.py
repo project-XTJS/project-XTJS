@@ -7,7 +7,7 @@ from app.service.analysis.verification_evidence import aggregate_status,componen
 from app.service.analysis.manual_review.business_bid_format import _verification_value_status
 from app.service.analysis.compliance.underline_projection import project_text
 from app.service.analysis.compliance.template_pdf_evidence import build_pdf_underline_evidence
-from app.service.typo_runtime.contract import classify_candidates,validate_candidates,validate_edits,TypoUnavailable
+from app.service.typo_runtime.contract import classify_candidates,classify_dual_candidates,validate_candidates,validate_edits,TypoUnavailable
 from app.service.typo_runtime.manager import ModelManager
 from app.service.analysis.typo_client import DuplicateTypoService,common_edits,common_word_edits
 from app.service.analysis.duplicate_merge.merger import DuplicateResultMerger
@@ -145,6 +145,12 @@ class UnderlineTests(unittest.TestCase):
   self.assertEqual(project_text('测试公司保证',evidence=e,pages=[1],require_scope=True)['status'],'unclear')
 
 class TypoTests(unittest.TestCase):
+ def _v5_manager(self,d,**kwargs):
+  with patch('app.service.typo_runtime.manager.ShapeSoundGate') as gate:
+   gate.return_value.evidence.return_value={'similarity_type':'pinyin','glyph_similarity':0.5}
+   return ModelManager([],worker_url='',model_id='fixture',cec3_model_id='cec3',detector_model_id='detector',
+                       font_path='/unused-font',font_sha256='font',pinyin_version='0.55.0',
+                       cache_path=Path(d)/'c.db',**kwargs)
  def _candidate(self,text,original,replacement,probability=.99,ratio=100):
   start=text.index(original);return {'candidates':[{'start':start,'end':start+1,'original':original,'replacement':replacement,'candidate_probability':probability,'source_probability':probability/ratio,'probability_ratio':ratio}]}
  def test_word_rules_confirm_only_approved_high_confidence_edits(self):
@@ -214,17 +220,19 @@ class TypoTests(unittest.TestCase):
   self.assertEqual(len(common_edits(left,right,a,b)),2)
  def test_idle_cache_and_busy_lifecycle(self):
   with tempfile.TemporaryDirectory() as d:
-   now=[0];m=ModelManager([],worker_url='',model_id='fixture',cache_path=Path(d)/'c.db',clock=lambda:now[0])
+   now=[0];m=self._v5_manager(d,clock=lambda:now[0])
    worker=Mock();worker.poll.return_value=None;worker.pid=999999;m.worker=worker;m.state='ready'
-   with patch.object(m,'_start') as start,patch.object(m,'_request',return_value={'corrected_text':'正常文字'}),patch('os.killpg') as kill:
+   with patch.object(m,'_start'),patch.object(m,'_request',return_value={'scores':[0.1]*4}),patch('os.killpg') as kill:
     m.check('正常文字');self.assertEqual(m.last_used,0)
     now[0]=1799;self.assertFalse(m.reap_idle());self.assertTrue(m.check('正常文字')['cache_hit']);self.assertEqual(m.last_used,0)
     now[0]=1800;m.pending=1;self.assertFalse(m.reap_idle());m.pending=0;self.assertTrue(m.reap_idle());self.assertEqual(kill.call_count,2);self.assertEqual(m.status()['state'],'unloaded')
  def test_manager_returns_separate_buckets_and_runtime_metrics(self):
   with tempfile.TemporaryDirectory() as d:
-   m=ModelManager([],worker_url='',model_id='fixture',cache_path=Path(d)/'c.db')
+   m=self._v5_manager(d)
    payload={'corrected_text':'安全培训','candidates':[{'start':3,'end':4,'original':'圳','replacement':'训','candidate_probability':.99,'source_probability':.001,'probability_ratio':990}]}
-   with patch.object(m,'_start'),patch.object(m,'_request',return_value=payload):
+   def reference(path,*args,**kwargs):
+    return {'scores':[0.1,0.1,0.1,0.99]} if path=='/detect' else payload if path=='/correct' else {'corrected_text':'安全培训'}
+   with patch.object(m,'_start'),patch.object(m,'_request',side_effect=reference):
     result=m.check('安全培圳')
    self.assertEqual(result['confirmed_count'],1);self.assertEqual(result['review_candidate_count'],0)
    metrics=m.status()['metrics'];self.assertEqual(metrics['checks'],1);self.assertEqual(metrics['completed'],1);self.assertEqual(metrics['confirmed_results'],1)
@@ -242,9 +250,9 @@ class TypoTests(unittest.TestCase):
   from app.service.analysis.duplicate_check.service import DuplicateCheckService
   from app.config.settings import settings
   service=DuplicateCheckService();candidate={'shared_id':'review-1','verification_status':'review'}
-  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([],[candidate])):
+  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([],[candidate],{'hidden_count':1})):
    decision=service._short_duplicate_report_decision({'left_text':'菜试搭配','right_text':'菜试搭配'},evidence_key='duplicate_blocks')
-  self.assertTrue(decision['report']);self.assertTrue(decision['review_only']);self.assertEqual(decision['review_candidates'],[candidate])
+  self.assertFalse(decision['report']);self.assertNotIn('review_candidates',decision)
  def test_typo_failure_does_not_suppress_long_duplicate_rule(self):
   from app.service.analysis.duplicate_check.service import DuplicateCheckService
   from app.config.settings import settings
@@ -260,13 +268,55 @@ class TypoTests(unittest.TestCase):
   from app.config.settings import settings
   service=DuplicateCheckService();confirmed={'shared_id':'confirmed','verification_status':'confirmed'}
   base={'risk_level':'none','duplicate_blocks':[{'left_text':'安全培圳','right_text':'安全培圳'}]}
-  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([confirmed],[])):
+  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([confirmed],[],{})):
    issue=service._filter_short_duplicate_evidence(copy.deepcopy(base))
   self.assertEqual(issue['risk_level'],'low');self.assertTrue(issue['suspicious']);self.assertFalse(issue['review_only'])
   candidate={'shared_id':'review','verification_status':'review'}
-  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([],[candidate])):
+  with patch.object(settings,'TYPO_CHECK_ENABLED',True),patch.object(service,'_short_duplicate_typo_results',return_value=([],[candidate],{'hidden_count':1})):
    issue=service._filter_short_duplicate_evidence(copy.deepcopy(base))
-  self.assertEqual(issue['risk_level'],'none');self.assertFalse(issue['suspicious']);self.assertTrue(issue['review_only']);self.assertEqual(issue['status'],'unclear')
+  self.assertEqual(issue['risk_level'],'none');self.assertFalse(issue['suspicious']);self.assertFalse(issue.get('review_only',False))
+
+ def test_cec3_agreement_rejects_invalid_words_semantic_choices_and_extra_edits(self):
+  for text,original,replacement,target in [
+   ('链路畅通','路','络','链络畅通'),
+   ('权利明确','利','力','权力明确'),
+   ('数据链路畅通','路','络','数据链络畅通'),
+  ]:
+   candidates=validate_candidates(text,self._candidate(text,original,replacement))
+   accepted,counts=classify_dual_candidates(text,candidates,target,target)
+   self.assertEqual(accepted,[],text);self.assertEqual(counts['hidden_count'],1)
+  text='安全培圳。'
+  candidates=validate_candidates(text,self._candidate(text,'圳','训'))
+  accepted,counts=classify_dual_candidates(text,candidates,'安全培训。','安全培训。')
+  self.assertEqual([(x['original_word'],x['replacement_word']) for x in accepted],[('培圳','培训')])
+  self.assertEqual(counts['hidden_count'],0)
+  for corrected,roundtrip in [('安全培训！','安全培训！'),('安全培训。解释','安全培训。解释'),('安全培训。','安全培圳。'),('安全培训。','安全培训！')]:
+   accepted,_=classify_dual_candidates(text,candidates,corrected,roundtrip)
+   self.assertEqual(accepted,[])
+ def test_cec3_rejects_prompt_echo_as_incomplete(self):
+  with tempfile.TemporaryDirectory() as d:
+   m=self._v5_manager(d)
+   payload={'candidates':[{'start':3,'end':4,'original':'圳','replacement':'训','candidate_probability':.99,'source_probability':.001,'probability_ratio':990}]}
+   def response(path,*args,**kwargs):
+    return {'scores':[0.1,0.1,0.1,0.99]} if path=='/detect' else payload if path=='/correct' else {'corrected_text':'纠正后的文本：安全培训'}
+   with patch.object(m,'_start'),patch.object(m,'_request',side_effect=response):
+    with self.assertRaises(TypoUnavailable):m.check('安全培圳')
+   self.assertEqual(m.status()['metrics']['incomplete'],1)
+ def test_repeated_word_and_non_bmp_codepoint_offsets_remain_distinct(self):
+  left='😀安全培圳，安全培圳。';right='说明：😀安全培圳，安全培圳。'
+  def collect(text,side):
+   output=[]
+   for index in (text.index('圳'),text.rindex('圳')):
+    candidate={'candidates':[{'start':index,'end':index+1,'original':'圳','replacement':'训','candidate_probability':.99,'source_probability':.001,'probability_ratio':990}]}
+    accepted,_=classify_dual_candidates(text,validate_candidates(text,candidate),text[:index]+'训'+text[index+1:],text[:index]+'训'+text[index+1:])
+    self.assertEqual(len(accepted),1)
+    accepted[0].update(side=side,source_evidence_id='e',page=2,source_location_reliable=True)
+    output.extend(accepted)
+   return output
+  shared=common_word_edits(left,right,collect(left,'left'),collect(right,'right'))
+  self.assertEqual(len(shared),2)
+  self.assertEqual(len({item['shared_id'] for item in shared}),2)
+  self.assertEqual(sorted(item['occurrences'][0]['start'] for item in shared),[left.index('圳'),left.rindex('圳')])
 
 
 class AccessRequestTests(unittest.TestCase):

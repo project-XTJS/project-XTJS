@@ -237,8 +237,17 @@ class DuplicateResultMerger(
                         or next((value.get("rule_version") for value in source_typo_checks if value.get("rule_version")), None),
                         "word_rule_version": next((item.get("word_rule_version") for item in typo_issues + typo_review_candidates if item.get("word_rule_version")), None)
                         or next((value.get("word_rule_version") for value in source_typo_checks if value.get("word_rule_version")), None),
+                        "verifier_model": next((value.get("verifier_model") for value in source_typo_checks if value.get("verifier_model")), None),
+                        "detector_model": next((value.get("detector_model") for value in source_typo_checks if value.get("detector_model")), None),
                         "confirmed_count": len(typo_issues),
                         "review_candidate_count": len(typo_review_candidates),
+                        "eligible_count": sum(int(value.get("eligible_count") or 0) for value in source_typo_checks),
+                        "hidden_count": sum(int(value.get("hidden_count") or 0) for value in source_typo_checks),
+                        "incomplete_count": sum(int(value.get("incomplete_count") or 0) for value in source_typo_checks),
+                        **{
+                            key: sum(int(value.get(key) or 0) for value in source_typo_checks)
+                            for key in ("budget_skipped_count", "verifier_rejected_count", "cec3_unsupported_count", "word_invalid_count", "position_invalid_count", "detector_rejected_count", "source_valid_rejected_count", "similarity_rejected_count")
+                        },
                     },
                     "occurrence_count": len(cluster.get("occurrences") or []),
                     "source_issue_count": len(cluster.get("items") or []),
@@ -276,6 +285,7 @@ class DuplicateResultMerger(
                 "suspicious_cluster_count": len(suspicious_clusters),
                 "high_risk_cluster_count": len(high_clusters),
                 "medium_risk_cluster_count": len(medium_clusters),
+                "typo_check": dict(group.get("typo_check") or {}),
             },
             "documents": list(group.get("documents") or []),
             "skipped_documents": list(group.get("skipped_documents") or []),

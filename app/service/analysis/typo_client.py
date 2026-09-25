@@ -16,6 +16,12 @@ class DuplicateTypoService:
     def check_text_snippets_for_typos(self, snippets):
         confirmed: list[dict[str, Any]] = []
         review: list[dict[str, Any]] = []
+        counts = {key: 0 for key in (
+            "candidate_count", "eligible_count", "hidden_count", "budget_skipped_count",
+            "verifier_rejected_count", "cec3_unsupported_count", "word_invalid_count",
+            "position_invalid_count", "detector_rejected_count", "source_valid_rejected_count",
+            "similarity_rejected_count",
+        )}
         for snippet in snippets:
             text = str(snippet.get("text") or "")
             seen: set[tuple[str, int, int, str]] = set()
@@ -34,6 +40,16 @@ class DuplicateTypoService:
                     raise TypoUnavailable("错别字检查未完成：模型暂不可用，请重试") from exc
                 if payload.get("status") != "completed":
                     raise TypoUnavailable("错别字检查未完成")
+                counts["rule_version"] = payload.get("rule_version")
+                counts["verifier_model"] = payload.get("verifier_model")
+                counts["detector_model"] = payload.get("detector_model")
+                for key in (
+                    "candidate_count", "eligible_count", "hidden_count", "budget_skipped_count",
+                    "verifier_rejected_count", "cec3_unsupported_count", "word_invalid_count",
+                    "position_invalid_count", "detector_rejected_count", "source_valid_rejected_count",
+                    "similarity_rejected_count",
+                ):
+                    counts[key] += int(payload.get(key) or 0)
                 for bucket_name in ("issues", "review_candidates"):
                     for raw_issue in payload.get(bucket_name) or []:
                         item = self._project_issue(
@@ -45,9 +61,11 @@ class DuplicateTypoService:
                         )
                         output_bucket = bucket_name
                         if bucket_name == "issues" and not item.get("source_location_reliable"):
-                            output_bucket = "review_candidates"
-                            item["verification_status"] = "review"
-                            item["review_reason"] = "ambiguous_source_location"
+                            counts["hidden_count"] += 1
+                            continue
+                        if bucket_name == "review_candidates":
+                            counts["hidden_count"] += 1
+                            continue
                         key = (
                             output_bucket,
                             item["word_start"],
@@ -58,7 +76,7 @@ class DuplicateTypoService:
                             continue
                         seen.add(key)
                         (confirmed if output_bucket == "issues" else review).append(item)
-        return {"issues": confirmed, "review_candidates": review}
+        return {"issues": confirmed, "review_candidates": review, "metrics": counts}
 
     @staticmethod
     def _snippet_chunks(text, snippet):
@@ -130,6 +148,14 @@ class DuplicateTypoService:
                 "source_segment_end": source_segment.get("end") if source_segment else None,
                 "source_location_reliable": source_location_reliable,
                 "model": payload.get("model"),
+                "reference_model": payload.get("reference_model"),
+                "verifier_model": payload.get("verifier_model"),
+                "detector_model": payload.get("detector_model"),
+                "font_sha256": payload.get("font_sha256"),
+                "pinyin_version": payload.get("pinyin_version"),
+                "pillow_version": payload.get("pillow_version"),
+                "prompt_version": payload.get("prompt_version"),
+                "jieba_version": payload.get("jieba_version"),
                 "rule_version": payload.get("rule_version") or VERSION,
                 "word_rule_version": payload.get("word_rule_version"),
             }
@@ -182,6 +208,9 @@ def _occurrence(item: dict[str, Any]) -> dict[str, Any]:
             "candidate_probability",
             "source_probability",
             "probability_ratio",
+            "detector_score",
+            "similarity_type",
+            "glyph_similarity",
             "start",
             "end",
             "word_start",
@@ -255,9 +284,22 @@ def common_word_edits(left_text, right_text, left_issues, right_issues):
                     "candidate_probability": min(float(left.get("candidate_probability") or 0), float(right.get("candidate_probability") or 0)),
                     "source_probability": max(float(left.get("source_probability") or 0), float(right.get("source_probability") or 0)),
                     "probability_ratio": min(float(left.get("probability_ratio") or 0), float(right.get("probability_ratio") or 0)),
+                    "detector_score": min(float(left.get("detector_score") or 0), float(right.get("detector_score") or 0)) if left.get("detector_score") is not None and right.get("detector_score") is not None else None,
+                    "similarity_type": left.get("similarity_type") if left.get("similarity_type") == right.get("similarity_type") else "mixed",
+                    "glyph_similarity": min(float(left["glyph_similarity"]), float(right["glyph_similarity"])) if left.get("glyph_similarity") is not None and right.get("glyph_similarity") is not None else None,
                     "rule_id": left.get("rule_id") if left.get("rule_id") == right.get("rule_id") else None,
                     "rule_version": left.get("rule_version") or right.get("rule_version") or VERSION,
                     "word_rule_version": left.get("word_rule_version") or right.get("word_rule_version"),
+                    "verification_method": left.get("verification_method") if left.get("verification_method") == right.get("verification_method") else None,
+                    "model": left.get("model") if left.get("model") == right.get("model") else None,
+                    "verifier_model": left.get("verifier_model") if left.get("verifier_model") == right.get("verifier_model") else None,
+                    "detector_model": left.get("detector_model") if left.get("detector_model") == right.get("detector_model") else None,
+                    "font_sha256": left.get("font_sha256") if left.get("font_sha256") == right.get("font_sha256") else None,
+                    "pinyin_version": left.get("pinyin_version") if left.get("pinyin_version") == right.get("pinyin_version") else None,
+                    "pillow_version": left.get("pillow_version") if left.get("pillow_version") == right.get("pillow_version") else None,
+                    "reference_model": left.get("reference_model") if left.get("reference_model") == right.get("reference_model") else None,
+                    "prompt_version": left.get("prompt_version") if left.get("prompt_version") == right.get("prompt_version") else None,
+                    "jieba_version": left.get("jieba_version") if left.get("jieba_version") == right.get("jieba_version") else None,
                     "occurrences": occurrences,
                     "locations": list(left.get("locations") or []) + list(right.get("locations") or []),
                 }

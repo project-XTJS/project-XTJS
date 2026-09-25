@@ -2,6 +2,7 @@
 
 import atexit
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -16,14 +17,21 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .contract import (
-    DEFAULT_AUTO_MIN_PROBABILITY,
-    DEFAULT_AUTO_MIN_PROBABILITY_RATIO,
-    VERSION,
     TypoUnavailable,
-    classify_candidates,
     validate_candidates,
-    word_rule_version,
 )
+from .v5 import VERSION as V5_VERSION, ShapeSoundGate, classify_v5, select_candidates
+
+PROMPT_VERSION = "cec3-spelling-only-v1"
+V5_FONT_SHA256 = "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da"
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class ModelManager:
@@ -33,11 +41,18 @@ class ModelManager:
         *,
         worker_url,
         model_id,
+        cec3_model_id,
+        detector_model_id,
+        pipeline_version=V5_VERSION,
+        eval_trace=False,
+        detector_threshold=0.99,
+        glyph_threshold=0.75,
+        font_path,
+        font_sha256,
+        pinyin_version,
+        pillow_version=None,
+        jieba_version="0.42.1",
         cache_path,
-        min_probability=0.60,
-        min_probability_ratio=10.0,
-        auto_min_probability=DEFAULT_AUTO_MIN_PROBABILITY,
-        auto_min_probability_ratio=DEFAULT_AUTO_MIN_PROBABILITY_RATIO,
         idle_seconds=1800,
         startup_seconds=300,
         request_seconds=30,
@@ -47,10 +62,19 @@ class ModelManager:
         self.command = command
         self.worker_url = worker_url
         self.model_id = model_id
-        self.min_probability = float(min_probability)
-        self.min_probability_ratio = float(min_probability_ratio)
-        self.auto_min_probability = float(auto_min_probability)
-        self.auto_min_probability_ratio = float(auto_min_probability_ratio)
+        self.cec3_model_id = cec3_model_id
+        if pipeline_version != V5_VERSION:
+            raise ValueError("unsupported_typo_pipeline")
+        self.pipeline_version = pipeline_version
+        self.detector_model_id = detector_model_id
+        self.detector_threshold = float(detector_threshold)
+        self.glyph_threshold = float(glyph_threshold)
+        self.font_sha256 = font_sha256
+        self.pinyin_version = pinyin_version
+        self.pillow_version = pillow_version
+        self.shape_sound_gate = ShapeSoundGate(font_path, glyph_threshold=self.glyph_threshold)
+        self.eval_trace = bool(eval_trace)
+        self.jieba_version = jieba_version
         self.idle_seconds = idle_seconds
         self.startup_seconds = startup_seconds
         self.request_seconds = request_seconds
@@ -71,6 +95,15 @@ class ModelManager:
             "inference_checks": 0,
             "confirmed_results": 0,
             "review_candidates": 0,
+            "eligible_candidates": 0,
+            "hidden_candidates": 0,
+            "budget_skipped_candidates": 0,
+            "cec3_unsupported_candidates": 0,
+            "word_invalid_candidates": 0,
+            "position_invalid_candidates": 0,
+            "detector_rejected_candidates": 0,
+            "source_valid_rejected_candidates": 0,
+            "similarity_rejected_candidates": 0,
             "inference_seconds": 0.0,
         }
         self.cache_path = str(cache_path)
@@ -89,12 +122,19 @@ class ModelManager:
             return {
                 "state": self.state,
                 "model": self.model_id,
-                "min_probability": self.min_probability,
-                "min_probability_ratio": self.min_probability_ratio,
-                "auto_min_probability": self.auto_min_probability,
-                "auto_min_probability_ratio": self.auto_min_probability_ratio,
-                "rule_version": VERSION,
-                "word_rule_version": word_rule_version(),
+                "reference_model": self.cec3_model_id,
+                "prompt_version": PROMPT_VERSION,
+                "jieba_version": self.jieba_version,
+                "min_probability": 0.10,
+                "min_probability_ratio": 0.30,
+                "rule_version": self.pipeline_version,
+                "detector_model": self.detector_model_id,
+                "detector_threshold": self.detector_threshold,
+                "glyph_threshold": self.glyph_threshold,
+                "font_sha256": self.font_sha256,
+                "pinyin_version": self.pinyin_version,
+                "pillow_version": self.pillow_version,
+                "word_rule_version": None,
                 "pending": self.pending,
                 "idle_seconds": self.idle_seconds,
                 "error": self.error,
@@ -107,6 +147,18 @@ class ModelManager:
             self.metrics["cache_hits"] += int(cache_hit)
             self.metrics["confirmed_results"] += int(result.get("confirmed_count") or 0)
             self.metrics["review_candidates"] += int(result.get("review_candidate_count") or 0)
+            self.metrics["eligible_candidates"] += int(result.get("eligible_count") or 0)
+            self.metrics["hidden_candidates"] += int(result.get("hidden_count") or 0)
+            for metric, result_key in (
+                ("budget_skipped_candidates", "budget_skipped_count"),
+                ("cec3_unsupported_candidates", "cec3_unsupported_count"),
+                ("word_invalid_candidates", "word_invalid_count"),
+                ("position_invalid_candidates", "position_invalid_count"),
+                ("detector_rejected_candidates", "detector_rejected_count"),
+                ("source_valid_rejected_candidates", "source_valid_rejected_count"),
+                ("similarity_rejected_candidates", "similarity_rejected_count"),
+            ):
+                self.metrics[metric] += int(result.get(result_key) or 0)
 
     def _request(self, path, payload=None, timeout=3):
         request = urllib.request.Request(
@@ -185,11 +237,13 @@ class ModelManager:
         with self.lock:
             self.metrics["checks"] += 1
         key_material = (
-            f"{self.model_id}\0{VERSION}\0{self.min_probability:.6f}"
-            f"\0{self.min_probability_ratio:.6f}"
-            f"\0{self.auto_min_probability:.6f}"
-            f"\0{self.auto_min_probability_ratio:.6f}"
-            f"\0{word_rule_version()}\0{text}"
+            f"{self.model_id}\0{self.pipeline_version}\0min_probability=0.10"
+            f"\0min_probability_ratio=0.30\0top_k=2"
+            f"\0{self.cec3_model_id}\0{PROMPT_VERSION}"
+            f"\0{self.jieba_version}"
+            f"\0{self.detector_model_id}\0{self.detector_threshold:.6f}"
+            f"\0{self.glyph_threshold:.6f}\0{self.font_sha256}\0{self.pinyin_version}\0{self.pillow_version}"
+            f"\0trace={int(self.eval_trace)}\0{text}"
         )
         key = hashlib.sha256(key_material.encode()).hexdigest()
         with sqlite3.connect(self.cache_path) as db:
@@ -217,61 +271,95 @@ class ModelManager:
                     self._record_completed(result, cache_hit=True)
                     return dict(result, cache_hit=True)
                 self._start()
-                for attempt in range(2):
-                    try:
-                        if not inference_started:
-                            inference_started = True
-                            inference_started_at = self.clock()
-                            with self.lock:
-                                self.metrics["inference_checks"] += 1
+                try:
+                    if not inference_started:
+                        inference_started = True
+                        inference_started_at = self.clock()
+                        with self.lock:
+                            self.metrics["inference_checks"] += 1
+                    detected = self._request("/detect", {"text": text}, timeout=self.request_seconds)
+                    detector_scores = detected.get("scores")
+                    if not isinstance(detector_scores, list) or len(detector_scores) != len(text) or any(
+                        score is not None and (not isinstance(score, (int, float)) or not 0 <= score <= 1)
+                        for score in detector_scores
+                    ):
+                        raise TypoUnavailable("原文检测器输出无效")
+                    detector_positive = any(
+                        score is not None and score >= self.detector_threshold for score in detector_scores
+                    )
+                    candidates = []
+                    if detector_positive or self.eval_trace:
                         response = self._request(
                             "/correct",
-                            {
-                                "text": text,
-                                "min_probability": self.min_probability,
-                                "min_probability_ratio": self.min_probability_ratio,
-                            },
+                            {"text": text, "min_probability": 0.10,
+                             "min_probability_ratio": 0.30, "top_k": 2},
                             timeout=self.request_seconds,
                         )
-                        if "candidates" not in response:
-                            if response.get("corrected_text") != text:
-                                raise TypoUnavailable("纠错输出缺少字符候选")
-                            response = {**response, "candidates": []}
-                        candidates = validate_candidates(text, response)
-                        issues, review_candidates = classify_candidates(
-                            text,
-                            candidates,
-                            auto_min_probability=self.auto_min_probability,
-                            auto_min_probability_ratio=self.auto_min_probability_ratio,
-                        )
-                        result = {
-                            "status": "completed",
-                            "issues": issues,
-                            "review_candidates": review_candidates,
-                            "candidate_count": len(candidates),
-                            "confirmed_count": len(issues),
-                            "review_candidate_count": len(review_candidates),
-                            "model": self.model_id,
-                            "min_probability": self.min_probability,
-                            "min_probability_ratio": self.min_probability_ratio,
-                            "auto_min_probability": self.auto_min_probability,
-                            "auto_min_probability_ratio": self.auto_min_probability_ratio,
-                            "rule_version": VERSION,
-                            "word_rule_version": word_rule_version(),
-                        }
-                        with sqlite3.connect(self.cache_path) as db:
-                            db.execute(
-                                "INSERT OR REPLACE INTO checks VALUES (?,?)",
-                                (key, json.dumps(result, ensure_ascii=False)),
-                            )
-                        self._record_completed(result, cache_hit=False)
-                        return dict(result, cache_hit=False)
-                    except (urllib.error.URLError, TimeoutError) as exc:
-                        self._stop()
-                        if attempt:
-                            raise TypoUnavailable("纠错模型暂不可用") from exc
-                        self._start()
-                raise TypoUnavailable("纠错未完成")
+                        candidates = validate_candidates(text, response, allow_subunit_ratio=True)
+                    eligible, detector_rejected, budget_skipped, source_valid_rejected = select_candidates(
+                        candidates, detector_scores, threshold=self.detector_threshold,
+                        source_text=text, limit=len(candidates) if self.eval_trace else 8,
+                    )
+                    corrected = roundtrip = text
+                    if eligible:
+                        first_pass = self._request("/cec3", {"text": text}, timeout=self.request_seconds)
+                        corrected = first_pass.get("corrected_text")
+                        if not isinstance(corrected, str) or not corrected or any(
+                            marker in corrected for marker in ("输入文本：", "纠正后的文本：", "```", "<|im_start|>")
+                        ):
+                            raise TypoUnavailable("CEC3 纠错输出无效")
+                        if corrected != text:
+                            second_pass = self._request("/cec3", {"text": corrected}, timeout=self.request_seconds)
+                            roundtrip = second_pass.get("corrected_text")
+                            if not isinstance(roundtrip, str) or not roundtrip or any(
+                                marker in roundtrip for marker in ("输入文本：", "纠正后的文本：", "```", "<|im_start|>")
+                            ):
+                                raise TypoUnavailable("CEC3 回程输出无效")
+                    trace_reasons = {} if self.eval_trace else None
+                    issues, counts = classify_v5(
+                        text, eligible, corrected, roundtrip,
+                        gate=self.shape_sound_gate, reasons=trace_reasons,
+                    )
+                    counts["source_valid_rejected_count"] += source_valid_rejected
+                    result = {
+                        "status": "completed", "issues": issues, "review_candidates": [],
+                        **counts, "candidate_count": len(candidates), "eligible_count": len(eligible),
+                        "hidden_count": len(candidates) - len(issues),
+                        "detector_rejected_count": detector_rejected,
+                        "budget_skipped_count": budget_skipped,
+                        "confirmed_count": len(issues), "review_candidate_count": 0,
+                        "model": self.model_id, "reference_model": self.cec3_model_id,
+                        "detector_model": self.detector_model_id,
+                        "detector_threshold": self.detector_threshold,
+                        "glyph_threshold": self.glyph_threshold,
+                        "font_sha256": self.font_sha256, "pinyin_version": self.pinyin_version,
+                        "pillow_version": self.pillow_version,
+                        "verification_method": "original_detector_macbert_cec3",
+                        "prompt_version": PROMPT_VERSION, "jieba_version": self.jieba_version,
+                        "min_probability": 0.10, "min_probability_ratio": 0.30,
+                        "rule_version": self.pipeline_version, "word_rule_version": None,
+                    }
+                    if self.eval_trace:
+                        result["eval_trace"] = True
+                        result["trace_score_floor"] = self.detector_threshold
+                        result["raw_candidates"] = [
+                            {**item, "detector_score": detector_scores[item["start"]]}
+                            for item in candidates
+                        ]
+                        result["budget_candidates"] = eligible
+                        result["calibration_candidates"] = issues
+                        result["detector_scores"] = detector_scores
+                        result["calibration_reasons"] = [
+                            {"start": start, "replacement": replacement, "reason": reason}
+                            for (start, replacement), reason in trace_reasons.items()
+                        ]
+                    with sqlite3.connect(self.cache_path) as db:
+                        db.execute("INSERT OR REPLACE INTO checks VALUES (?,?)", (key, json.dumps(result, ensure_ascii=False)))
+                    self._record_completed(result, cache_hit=False)
+                    return dict(result, cache_hit=False)
+                except (urllib.error.URLError, TimeoutError) as exc:
+                    self._stop()
+                    raise TypoUnavailable("纠错模型暂不可用") from exc
         except Exception as exc:
             with self.lock:
                 self.error = str(exc)
@@ -291,9 +379,18 @@ class ModelManager:
 
 
 def main():
-    path = Path(os.environ.get("TYPO_MODEL_PATH", "/models/current"))
+    pipeline_version = os.environ.get("TYPO_PIPELINE_VERSION", V5_VERSION)
+    if pipeline_version != V5_VERSION:
+        raise RuntimeError("仅支持 v5 错别字管线")
+    path = Path(os.environ["TYPO_MODEL_PATH"])
     manifest = json.loads((path / "model-manifest.json").read_text())
-    model_id = manifest["model"] + "@" + manifest["revision"]
+    model_id = manifest["model"] + "@" + manifest["revision"] + "#" + manifest["model_sha256"]
+    cec3_path = Path(os.environ["TYPO_CEC3_MODEL_PATH"])
+    cec3_manifest = json.loads((cec3_path / "model-manifest.json").read_text())
+    cec3_model_id = (
+        cec3_manifest["model"] + "@" + cec3_manifest["revision"]
+        + "#" + cec3_manifest["model_sha256"]
+    )
     worker_url = "http://127.0.0.1:8001"
     command = [
         sys.executable,
@@ -301,6 +398,10 @@ def main():
         "typo_runtime.worker",
         "--model",
         str(path),
+        "--cec3-model",
+        str(cec3_path),
+        "--detector-model",
+        os.environ["TYPO_DETECTOR_MODEL_PATH"],
         "--host",
         "127.0.0.1",
         "--port",
@@ -308,21 +409,38 @@ def main():
         "--device",
         os.environ.get("TYPO_DEVICE", "auto"),
     ]
+    detector_path = Path(os.environ["TYPO_DETECTOR_MODEL_PATH"])
+    detector_manifest = json.loads((detector_path / "model-manifest.json").read_text())
+    if _file_sha256(detector_path / "model.safetensors") != detector_manifest["model_sha256"]:
+        raise RuntimeError("原文检测器权重校验失败")
+    tokenizer_hash = _file_sha256(detector_path / "tokenizer.json")
+    detector_model_id = (
+        detector_manifest["model"] + "@" + detector_manifest["revision"]
+        + "#" + detector_manifest["model_sha256"] + "+" + tokenizer_hash
+    )
+    font_path = Path(os.environ["TYPO_V5_FONT_PATH"])
+    font_sha256 = _file_sha256(font_path)
+    if font_sha256 != V5_FONT_SHA256:
+        raise RuntimeError("v5 字体文件与固定版本不一致")
+    if not (font_path.parent / "OFL-LICENSE.txt").is_file():
+        raise RuntimeError("v5 字体许可证缺失")
+    pinyin_version = importlib.metadata.version("pypinyin")
+    pillow_version = importlib.metadata.version("Pillow")
     manager = ModelManager(
         command,
         worker_url=worker_url,
         model_id=model_id,
+        cec3_model_id=cec3_model_id,
+        detector_model_id=detector_model_id,
+        detector_threshold=float(os.environ.get("TYPO_DETECTOR_THRESHOLD", "0.99")),
+        glyph_threshold=float(os.environ.get("TYPO_GLYPH_THRESHOLD", "0.75")),
+        font_path=font_path,
+        font_sha256=font_sha256,
+        pinyin_version=pinyin_version,
+        pillow_version=pillow_version,
+        pipeline_version=pipeline_version,
+        eval_trace=os.environ.get("TYPO_V5_EVAL_TRACE", "false").lower() == "true",
         cache_path=os.environ.get("TYPO_CACHE_PATH", "/cache/checks.sqlite"),
-        min_probability=float(os.environ.get("TYPO_MIN_PROBABILITY", "0.60")),
-        min_probability_ratio=float(
-            os.environ.get("TYPO_MIN_PROBABILITY_RATIO", "10.0")
-        ),
-        auto_min_probability=float(
-            os.environ.get("TYPO_AUTO_MIN_PROBABILITY", "0.90")
-        ),
-        auto_min_probability_ratio=float(
-            os.environ.get("TYPO_AUTO_MIN_PROBABILITY_RATIO", "20.0")
-        ),
         idle_seconds=int(os.environ.get("TYPO_IDLE_SECONDS", "1800")),
         startup_seconds=int(os.environ.get("TYPO_STARTUP_SECONDS", "300")),
         request_seconds=int(os.environ.get("TYPO_REQUEST_SECONDS", "30")),

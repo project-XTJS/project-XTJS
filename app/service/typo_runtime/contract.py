@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any
 
 
-VERSION = "duplicate-typo-macbert-v2"
+VERSION = "duplicate-typo-macbert-cec3-v3"
+LEGACY_VERSION = "duplicate-typo-macbert-v2"
 DEFAULT_AUTO_MIN_PROBABILITY = 0.90
 DEFAULT_AUTO_MIN_PROBABILITY_RATIO = 20.0
 _LEXICON_PATH = Path(__file__).with_name("word_rules.json")
@@ -41,8 +42,9 @@ def word_rules(path: str | Path | None = None) -> dict[str, Any]:
     return _read_word_rules(str(Path(path or _LEXICON_PATH).resolve()))
 
 
-def word_rule_version(rules: dict[str, Any] | None = None) -> str:
-    return str((rules or word_rules())["version"])
+def word_rule_version(rules: dict[str, Any] | None = None) -> str | None:
+    # v3 never consults the historical hand-maintained word rules.
+    return str(rules["version"]) if rules is not None else None
 
 
 def protected_spans(text: str) -> list[tuple[int, int]]:
@@ -138,7 +140,7 @@ def _approved_word_edit(
     return matches[0]
 
 
-def validate_candidates(text: str, payload: Any) -> list[dict[str, Any]]:
+def validate_candidates(text: str, payload: Any, *, allow_subunit_ratio: bool = False) -> list[dict[str, Any]]:
     """Validate character offsets and probabilities returned by the model worker."""
     if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
         raise TypoUnavailable("纠错输出缺少字符候选")
@@ -171,7 +173,7 @@ def validate_candidates(text: str, payload: Any) -> list[dict[str, Any]]:
             probability_ratio = float(raw.get("probability_ratio"))
         except (TypeError, ValueError) as exc:
             raise TypoUnavailable("纠错字符候选概率无效") from exc
-        if not 0.0 <= probability <= 1.0 or not 0.0 <= source_probability <= 1.0 or probability_ratio < 1.0:
+        if not 0.0 <= probability <= 1.0 or not 0.0 <= source_probability <= 1.0 or probability_ratio < (0.0 if allow_subunit_ratio else 1.0):
             raise TypoUnavailable("纠错字符候选概率无效")
         key = (start, end, replacement)
         if key in seen:
@@ -230,7 +232,7 @@ def classify_candidates(
             "display_text": text[context_start:context_end],
             "context_start": context_start,
             "context_end": context_end,
-            "rule_version": VERSION,
+            "rule_version": LEGACY_VERSION,
             "word_rule_version": word_rule_version(active_rules),
         }
         if word_edit:
@@ -265,6 +267,110 @@ def classify_candidates(
         item.update({"verification_status": "confirmed", "review_reason": None})
         confirmed.append(item)
     return confirmed, review
+
+
+def classify_dual_candidates(
+    text: str,
+    candidates: list[dict[str, Any]],
+    corrected: str | None,
+    roundtrip: str | None,
+    *,
+    auto_min_probability: float = DEFAULT_AUTO_MIN_PROBABILITY,
+    auto_min_probability_ratio: float = DEFAULT_AUTO_MIN_PROBABILITY_RATIO,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Accept only exact MacBERT/CEC3 agreement on valid word substitutions."""
+    eligible = [
+        item for item in candidates
+        if not item.get("protected_span")
+        and float(item["candidate_probability"]) >= auto_min_probability
+        and float(item["probability_ratio"]) >= auto_min_probability_ratio
+    ]
+    counts = {
+        "candidate_count": len(candidates),
+        "eligible_count": len(eligible),
+        "hidden_count": len(candidates),
+    }
+    if not eligible:
+        return [], counts
+    if not isinstance(corrected, str) or not corrected or not isinstance(roundtrip, str):
+        raise TypoUnavailable("CEC3 纠错输出无效")
+    if corrected != roundtrip or len(corrected) != len(text) or corrected == text:
+        return [], counts
+
+    actual = {
+        (index, index + 1, before, after)
+        for index, (before, after) in enumerate(zip(text, corrected))
+        if before != after
+    }
+    nominated = {
+        (int(item["start"]), int(item["end"]), item["original"], item["replacement"])
+        for item in eligible
+    }
+    if actual != nominated or any(
+        not _CHINESE_CHARACTER.fullmatch(before)
+        or not _CHINESE_CHARACTER.fullmatch(after)
+        for _, _, before, after in actual
+    ):
+        return [], counts
+
+    try:
+        import jieba
+    except ImportError as exc:
+        raise TypoUnavailable("Jieba 通用词典不可用") from exc
+    jieba.initialize()
+    tokens = list(jieba.tokenize(corrected, mode="default"))
+    source_tokens = list(jieba.tokenize(text, mode="default"))
+    confirmed: list[dict[str, Any]] = []
+    for candidate in eligible:
+        start = candidate["start"]
+        matches = [
+            (token, word_start, word_end)
+            for token, word_start, word_end in tokens
+            if word_start <= start < word_end
+        ]
+        if len(matches) != 1:
+            return [], counts
+        target_word, word_start, word_end = matches[0]
+        original_word = text[word_start:word_end]
+        source_matches = [
+            (source_start, source_end)
+            for _, source_start, source_end in source_tokens
+            if source_start <= start < source_end
+        ]
+        if (
+            not 2 <= word_end - word_start <= 8
+            or not re.fullmatch(r"[\u4e00-\u9fff]{2,8}", target_word)
+            or not jieba.dt.FREQ.get(target_word, 0)
+            or jieba.dt.FREQ.get(original_word, 0)
+            or source_matches != [(word_start, word_end)]
+            or sum(a != b for a, b in zip(original_word, target_word)) != 1
+            or original_word[start - word_start] != candidate["original"]
+            or target_word[start - word_start] != candidate["replacement"]
+        ):
+            return [], counts
+        context_start = max(0, start - 12)
+        context_end = min(len(text), start + 13)
+        confirmed.append({
+            **candidate,
+            "matched_text": original_word,
+            "raw_matched_text": candidate["original"],
+            "suggestion": target_word,
+            "highlight_text": candidate["original"],
+            "error_type": "substitution",
+            "display_text": text[context_start:context_end],
+            "context_start": context_start,
+            "context_end": context_end,
+            "word_start": word_start,
+            "word_end": word_end,
+            "original_word": original_word,
+            "replacement_word": target_word,
+            "verification_status": "confirmed",
+            "verification_method": "macbert_cec3_roundtrip",
+            "rule_version": VERSION,
+            "word_rule_version": None,
+        })
+    counts["hidden_count"] = len(candidates) - len(confirmed)
+    return confirmed, counts
 
 
 def validate_edits(text: str, payload: Any) -> list[dict[str, Any]]:
@@ -329,7 +435,7 @@ def validate_edits(text: str, payload: Any) -> list[dict[str, Any]]:
                     "display_text": context,
                     "highlight_text": source,
                     "context": text,
-                    "rule_version": VERSION,
+                    "rule_version": LEGACY_VERSION,
                 }
             )
     return sorted(found, key=lambda item: item["start"])
