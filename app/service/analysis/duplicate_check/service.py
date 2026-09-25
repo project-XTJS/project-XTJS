@@ -3,6 +3,7 @@
 文档查重服务门面（组合所有子模块，对外提供统一接口）
 """
 import json
+import logging
 import re
 from itertools import combinations
 from typing import Any
@@ -31,6 +32,7 @@ from .text_utils import (
 from .block_extractor import extract_document_content as _extract_document_content_blocks
 from .business_scope import extract_business_duplicate_segments
 from .template_excluder import exclude_template_content, _build_template_placeholder_patterns
+from .tender_content_excluder import TenderContentIndex, tender_text_units
 from .image_extractor import extract_document_images as _extract_document_images
 from .comparators.exact import compare_blocks, compare_sections, compare_tables, compare_images
 from .comparators.similarity import (
@@ -52,6 +54,8 @@ from app.service.typo_runtime.contract import (
     word_rule_version,
 )
 
+
+_LOGGER = logging.getLogger(__name__)
 
 def _bbox_overlap(a: list[float], b: list[float]) -> bool:
     """两个 [x1, y1, x2, y2] 包围盒是否相交（同一坐标系）。"""
@@ -134,6 +138,11 @@ class DuplicateCheckService:
             template_context = self._get_tender_template_context(
                 record, role=role, cache=template_cache,
             )
+            if template_context is None or not template_context.get("content_index"):
+                _LOGGER.info(
+                    "Tender full-text exclusion unavailable for bid %s: missing associated tender OCR content",
+                    identifier_id,
+                )
             technical_payload = None
             if role == DOCUMENT_TYPE_BUSINESS_BID:
                 relation_key = str(record.get("relation_id") or "").strip()
@@ -254,24 +263,21 @@ class DuplicateCheckService:
         duplicate_scope: str | None = None,
         technical_payload: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any] | None, str | None]:
-        """对单条文档记录提取内容，排除模板，返回可用于比较的结构化对象。"""
+        """提取查重范围，并在比较前剔除关联招标文件的相同内容。"""
         payload = self._coerce_payload(record.get("content"))
+        content_index = (template_context or {}).get("content_index")
+        source_aware = isinstance(content_index, TenderContentIndex) and bool(content_index)
         if role == DOCUMENT_TYPE_BUSINESS_BID:
-            # 商务标先按招标模板清洗可比内容，再进入统一查重。
+            # 商务标仍限于报价和偏离表；全文来源匹配在范围提取后统一执行。
             scoped_segments = extract_business_duplicate_segments(
                 payload,
                 itemized_checker=self._itemized_checker,
                 deviation_checker=self._deviation_checker,
-                star_requirement_context=(
-                    template_context.get("star_requirement_context") if template_context else None
-                ),
-                deviation_template_context=(
-                    template_context.get("deviation_template_context") if template_context else None
-                ),
-                itemized_template_context=(
-                    template_context.get("itemized_template_context") if template_context else None
-                ),
+                star_requirement_context=(template_context or {}).get("star_requirement_context") if not source_aware else None,
+                deviation_template_context=(template_context or {}).get("deviation_template_context") if not source_aware else None,
+                itemized_template_context=(template_context or {}).get("itemized_template_context") if not source_aware else None,
                 technical_payload=technical_payload,
+                source_aware=source_aware,
             )
             scoped_segments = self._filter_business_duplicate_segments(
                 scoped_segments,
@@ -290,24 +296,30 @@ class DuplicateCheckService:
                     payload, ordered_blocks, table_entries,
                 )
 
+        had_text_content = bool(ordered_blocks or table_entries)
+        if source_aware:
+            ordered_blocks, table_entries = content_index.strip_blocks_and_tables(ordered_blocks, table_entries)
+        else:
+            ordered_blocks, table_entries = exclude_template_content(
+                ordered_blocks, table_entries, template_context=template_context,
+            )
+
+        tender_image_hashes = set((template_context or {}).get("image_hashes") or [])
         if not ordered_blocks:
             # 即使没有区块，仍尝试仅用表格构建文档，供表格重复检测
-            prepared = self._build_prepared_document(record, [], table_entries, role=role)
+            prepared = self._build_prepared_document(
+                record, [], table_entries, role=role, tender_image_hashes=tender_image_hashes,
+            )
             if prepared is not None:
                 return prepared, None
-            return None, empty_reason
+            return None, TEMPLATE_EXCLUDED_SKIP_REASON if source_aware and had_text_content else empty_reason
 
-        ordered_blocks, table_entries = exclude_template_content(
-            ordered_blocks, table_entries, template_context=template_context,
+        prepared = self._build_prepared_document(
+            record, ordered_blocks, table_entries, role=role,
+            tender_image_hashes=tender_image_hashes,
         )
-        if not ordered_blocks:
-            prepared = self._build_prepared_document(record, [], table_entries, role=role)
-            if prepared is not None:
-                return prepared, None
-            return None, TEMPLATE_EXCLUDED_SKIP_REASON
-
-        prepared = self._build_prepared_document(record, ordered_blocks, table_entries, role=role)
-        return prepared, None if prepared is not None else empty_reason
+        reason = TEMPLATE_EXCLUDED_SKIP_REASON if source_aware and had_text_content else empty_reason
+        return prepared, None if prepared is not None else reason
 
     def _exclude_deviation_regions(
         self,
@@ -404,12 +416,16 @@ class DuplicateCheckService:
         table_entries: list[dict[str, Any]],
         *,
         role: str,
+        tender_image_hashes: set[str] | None = None,
     ) -> dict[str, Any] | None:
         """构建可供比较的内部文档结构，包含区块、区段、表格、图片等映射。"""
         sections = self._build_sections(ordered_blocks)
         full_text = "\n".join(block["text"] for block in ordered_blocks if block.get("text"))
         exact_key = compact_raw_text(full_text)
-        image_entries = self._get_document_images(record, role=role)
+        image_entries = [
+            item for item in self._get_document_images(record, role=role)
+            if str(item.get("exact_hash") or "") not in (tender_image_hashes or set())
+        ]
         exact_block_units, exact_block_map, exact_block_occurrence_map = self._build_sentence_unit_index(
             ordered_blocks
         )
@@ -718,6 +734,16 @@ class DuplicateCheckService:
             return cache[cache_key]
 
         tender_payload = self._coerce_payload(record.get("tender_content"))
+        content_index = TenderContentIndex(tender_text_units(tender_payload))
+        tender_image_record = {
+            "file_url": record.get("tender_file_url"),
+            "file_name": record.get("tender_file_name"),
+        }
+        image_hashes = {
+            str(item.get("exact_hash") or "")
+            for item in self._get_document_images(tender_image_record, role=DOCUMENT_TYPE_TECHNICAL_BID)
+            if item.get("exact_hash")
+        } if role == DOCUMENT_TYPE_TECHNICAL_BID else set()
         ordered_blocks, table_entries, _ = _extract_document_content_blocks(tender_payload, role=role)
         # 这三类模板上下文分别服务于星标要求、偏离表、分项报价表清洗。
         star_requirement_context = self._build_star_requirement_context(tender_payload)
@@ -731,6 +757,8 @@ class DuplicateCheckService:
             and not (deviation_template_context.get("requirement_items") or [])
             and not (deviation_template_context.get("line_items") or [])
             and not (itemized_template_context.get("line_items") or [])
+            and not content_index
+            and not image_hashes
         ):
             cache[cache_key] = None
             return None
@@ -748,6 +776,8 @@ class DuplicateCheckService:
                 if str(table.get("exact_hash") or "")
             },
             "placeholder_patterns": _build_template_placeholder_patterns(ordered_blocks),
+            "content_index": content_index,
+            "image_hashes": image_hashes,
             "star_requirement_context": star_requirement_context,
             "deviation_template_context": deviation_template_context,
             "itemized_template_context": itemized_template_context,

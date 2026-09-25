@@ -92,6 +92,7 @@ from app.service.analysis.duplicate_merge import (
     RAW_RESULT_KEY_BY_DOC_TYPE,
     build_duplicate_merge_results,
 )
+from app.service.analysis.duplicate_merge.review_projection import project_duplicate_payload
 from app.service.analysis.manual_review.business_bid_format import (
     BUSINESS_FORMAT_RESULT_KEY,
     _apply_manual_business_review_inputs,
@@ -2170,7 +2171,6 @@ def _load_or_build_project_merged_results(
     )
 
     merged_payloads: dict[str, Any] = {}
-    changed = False
     for merged_key in target_keys:
         existing = results.get(merged_key)
         if not _merged_result_needs_rebuild(existing):
@@ -2194,24 +2194,7 @@ def _load_or_build_project_merged_results(
 
         results[merged_key] = built_payload
         merged_payloads[merged_key] = built_payload
-        db_service.upsert_project_result_item(
-            project_identifier_id=identifier_id,
-            result_key=merged_key,
-            result_value=built_payload,
-        )
-        changed = True
-
-    refreshed_result_record = result_record
-    if changed:
-        refreshed_result_record = db_service.get_project_result(identifier_id)
-        results = dict((refreshed_result_record or {}).get("result") or {})
-        merged_payloads = {
-            key: value
-            for key, value in ((key, results.get(key)) for key in target_keys)
-            if isinstance(value, dict)
-        }
-
-    return refreshed_result_record or result_record or {}, merged_payloads
+    return result_record or {}, merged_payloads
 
 
 # 构建项目展示用结果（含合并查重的替换）
@@ -2247,8 +2230,13 @@ def _build_project_display_results(
             continue
         merged_payload = merged_results.get(merged_key)
         if isinstance(merged_payload, dict) and merged_payload:
-            display_results[raw_key] = merged_payload
-            display_results[merged_key] = merged_payload
+            projected = project_duplicate_payload(merged_payload)
+            display_results[raw_key] = projected
+            display_results[merged_key] = projected
+
+    for raw_key in merged_key_aliases:
+        if isinstance(display_results.get(raw_key), dict) and "issues" in display_results[raw_key]:
+            display_results[raw_key] = project_duplicate_payload(display_results[raw_key])
 
     if "duplicate_check" in display_results:
         display_results["duplicate_check"] = {
@@ -4427,7 +4415,7 @@ def get_project_review_summary(
         summary = db_service.get_project_review_summary(identifier_id)
         cache_key = cache_service.key(
             "project", identifier_id, "review", summary.get("project", {}).get("input_revision", 0),
-            summary.get("result_version") or "none", "summary-v3",
+            summary.get("result_version") or "none", "summary-v4-duplicate-projection",
         )
         return _cache_get_or_set_payload(
             cache_service=cache_service,
@@ -4455,7 +4443,7 @@ def get_project_review_component(
         version_head = db_service.assert_project_review_version(identifier_id, result_version)
         cache_key = cache_service.key(
             "project", identifier_id, "review", version_head["input_revision"],
-            result_version, "component", result_key,
+            result_version, "component-duplicate-projection-v1", result_key,
         )
         return _cache_get_or_set_payload(
             cache_service=cache_service,
@@ -4495,7 +4483,7 @@ def list_project_review_issues(
         version_head = db_service.assert_project_review_version(identifier_id, result_version)
         cache_key = cache_service.key(
             "project", identifier_id, "review", version_head["input_revision"],
-            result_version, "issues-v3", cache_service.digest(filters),
+            result_version, "issues-v4-duplicate-projection", cache_service.digest(filters),
         )
         return _cache_get_or_set_payload(
             cache_service=cache_service,
@@ -4564,7 +4552,7 @@ def get_project_review_issue_detail(
         version_head = db_service.assert_project_review_version(identifier_id, result_version)
         cache_key = cache_service.key(
             "project", identifier_id, "review", version_head["input_revision"],
-            result_version, "detail", issue_id,
+            result_version, "detail-duplicate-projection-v1", issue_id,
         )
         return _cache_get_or_set_payload(
             cache_service=cache_service,
@@ -4600,7 +4588,7 @@ def get_project_review_issue_evidence(
         version_head = db_service.assert_project_review_version(identifier_id, result_version)
         cache_key = cache_service.key(
             "project", identifier_id, "review", version_head["input_revision"],
-            result_version, "evidence", issue_id, limit, offset,
+            result_version, "evidence-duplicate-projection-v1", issue_id, limit, offset,
         )
         return _cache_get_or_set_payload(
             cache_service=cache_service,
@@ -4690,6 +4678,8 @@ def get_project_results(
 
         # A delayed old cache fill must never become the current input's result.
         cache_key = f"{cache_key}:input:{project.get('input_revision', 0)}"
+        if view == "display" or include_raw_results:
+            cache_key += ":duplicate-projection-v1"
 
         def _load_results():
             result_record = db_service.get_project_result(identifier_id)
@@ -4828,7 +4818,7 @@ def get_project_merged_results(
             "result_record_meta": _build_result_record_meta(refreshed_record or result_record),
                 "results_stale": bool((result_record or {}).get("results_stale")),
                 "input_revision": project.get("input_revision", 0),
-            "results": merged_results,
+            "results": {key: project_duplicate_payload(value) for key, value in merged_results.items()},
             "available_result_keys": merged_result_keys,
         }
         if include_result_record:

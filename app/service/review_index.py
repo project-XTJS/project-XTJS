@@ -9,6 +9,7 @@ from typing import Any, Iterable
 
 from app.service import document_blob_store
 from app.service.analysis.duplicate_merge.constants import MERGED_RESULT_KEY_BY_DOC_TYPE
+from app.service.analysis.duplicate_merge.review_projection import project_duplicate_payload
 from app.service.analysis.duplicate_merge.storage import (
     canonical_json_bytes,
     compact_project_duplicate_results,
@@ -115,6 +116,10 @@ def display_result_components(result: dict[str, Any]) -> dict[str, Any]:
         merged = result.get(merged_key)
         if raw_key not in latest and isinstance(merged, dict) and merged:
             visible[raw_key] = merged
+    for raw_key in aliases:
+        component = visible.get(raw_key)
+        if is_compact_duplicate_payload(component):
+            visible[raw_key] = project_duplicate_payload(component)
     excluded = {"duplicate_check", *MERGED_RESULT_KEY_BY_DOC_TYPE.values()}
     return {
         key: value
@@ -361,7 +366,9 @@ def _duplicate_issue_parts(
             "cluster_id", "title", "family", "mode", "risk_level", "score_display",
             "score_value", "similarity", "files", "file_count", "metrics",
             "doc_ranges_by_file", "occurrence_count", "source_issue_count", "status",
-            "review_only", "typo_check",
+            "review_only", "typo_check", "participants", "participant_documents", "source_evidence_count",
+            "review_projection_version",
+            "source_review_issue_ids", "pair_scores",
         )
         if key in issue
     }

@@ -7,6 +7,7 @@ PostgreSQL 数据访问服务模块。
 
 import logging
 import re
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -35,6 +36,7 @@ from app.service.analysis.location_utils import (
 )
 from app.service.minio_service import MinioService
 from app.service import document_blob_store
+from app.service.analysis.duplicate_merge.review_projection import project_duplicate_payload
 from app.service.project_result_summary import build_project_result_summary, is_result_key_visible
 from app.service.review_index import (
     REMOVED_BUSINESS_SCOPE_ISSUE_TITLE,
@@ -65,6 +67,18 @@ UUID_TEXT_PATTERN = re.compile(rf"(?i)\b{UUID_TEXT}\b")
 UUID_SUFFIX_PATTERN = re.compile(rf"(?i)\(({UUID_TEXT})\)\s*$")
 MISSING_UUID_SENTINEL = "00000000-0000-0000-0000-000000000000"
 LEGACY_NOT_APPLICABLE_STATUSES = {"not_applicable", "skipped", "optional"}
+DUPLICATE_REVIEW_KEYS = frozenset({"business_bid_duplicate_check", "technical_bid_duplicate_check"})
+_duplicate_projection_cache: OrderedDict[tuple[str, str, str], list[dict[str, Any]] | None] = OrderedDict()
+_duplicate_projection_cache_lock = Lock()
+
+
+def _remember_duplicate_projection(key: tuple[str, str, str], value: list[dict[str, Any]] | None):
+    with _duplicate_projection_cache_lock:
+        _duplicate_projection_cache[key] = value
+        _duplicate_projection_cache.move_to_end(key)
+        while len(_duplicate_projection_cache) > 4:
+            _duplicate_projection_cache.popitem(last=False)
+    return value
 
 
 def _canonical_review_issue_status(value: Any) -> str:
@@ -3513,6 +3527,99 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         if head.get("result_input_revision") is not None and int(head.get("result_input_revision") or 0) != int(head.get("input_revision") or 0):
             raise ConsistencyConflict("材料已变更，旧结果已过期")
 
+    def _projected_duplicate_review_rows(
+        self, project_identifier_id: str, result_version: str, result_key: str,
+    ) -> list[dict[str, Any]] | None:
+        """Build historical duplicate cards from immutable index blobs; never persist them."""
+        if result_key not in DUPLICATE_REVIEW_KEYS:
+            return None
+        cache_key = (str(project_identifier_id), str(result_version), result_key)
+        with _duplicate_projection_cache_lock:
+            if cache_key in _duplicate_projection_cache:
+                _duplicate_projection_cache.move_to_end(cache_key)
+                return _duplicate_projection_cache[cache_key]
+        with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """SELECT issue_id,detail_object_key,evidence_object_key
+                   FROM xtjs_review_issues
+                   WHERE project_identifier_id=%s AND result_version=%s AND result_key=%s
+                   ORDER BY issue_order,issue_id""",
+                (project_identifier_id, result_version, result_key),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+        if not rows or all(str(row["issue_id"]).startswith("dupgroup-") for row in rows):
+            return _remember_duplicate_projection(cache_key, None)
+        source_keys: dict[str, str] = {}
+        issues: list[dict[str, Any]] = []
+        for row in rows:
+            detail = document_blob_store.read_blob(row["detail_object_key"])
+            evidence = document_blob_store.read_blob(row["evidence_object_key"])
+            if not isinstance(detail, dict) or not isinstance(evidence, dict):
+                raise ValueError("review duplicate evidence is invalid")
+            issue = {**detail, "occurrences": list(evidence.get("occurrences") or [])}
+            issue["source_review_issue_ids"] = list(dict.fromkeys(
+                [*issue.get("source_review_issue_ids", []), str(row["issue_id"])]))
+            issues.append(issue)
+            source_keys.update(evidence.get("source_item_object_keys") or {})
+        if not any(
+            any(
+                (occurrence.get("evidence") or {}).get(key)
+                for key in ("left_analysis_text", "right_analysis_text", "left_text", "right_text",
+                            "left_preview", "right_preview", "left_rows", "right_rows",
+                            "sample_rows", "text", "preview", "hash", "phash")
+            ) or any((doc or {}).get("preview") for doc in (occurrence.get("docs") or {}).values())
+            for issue in issues for occurrence in issue.get("occurrences") or []
+            if isinstance(occurrence, dict)
+        ):
+            return _remember_duplicate_projection(cache_key, None)
+        sources = {}
+        for identifier, object_key in source_keys.items():
+            value = document_blob_store.read_blob(object_key)
+            if not isinstance(value, dict):
+                raise ValueError(f"review source item is invalid: {identifier}")
+            sources[str(identifier)] = value
+        projected = project_duplicate_payload({
+            "document_type": result_key,
+            "source_items": sources,
+            "issues": issues,
+        })
+        if len(projected["issues"]) == len(issues) and all(
+            int(issue.get("source_evidence_count") or 0) <= 1
+            for issue in projected["issues"]
+        ):
+            return _remember_duplicate_projection(cache_key, None)
+        result = []
+        for order, issue in enumerate(projected["issues"]):
+            identifiers = list(dict.fromkeys(
+                [*issue.get("source_issue_ids", []),
+                 *[identifier for occurrence in issue.get("occurrences") or []
+                   for identifier in occurrence.get("source_item_ids") or []]]))
+            detail = {key: value for key, value in issue.items() if key != "occurrences"}
+            evidence = {
+                "issue_id": issue["cluster_id"],
+                "occurrences": issue.get("occurrences") or [],
+                "source_item_object_keys": {key: source_keys[key] for key in identifiers if key in source_keys},
+            }
+            status = str(issue.get("status") or "unclear")
+            result.append({
+                "result_key": result_key, "issue_id": issue["cluster_id"],
+                "issue_order": order, "risk_level": issue.get("risk_level") or "none",
+                "status": status, "check_code": "duplicate_check",
+                "title": issue.get("title") or "疑似重复内容",
+                "description": f"共 {issue.get('occurrence_count', 0)} 条重复证据",
+                "file_names": issue.get("files") or [],
+                "list_payload": {key: value for key, value in detail.items()
+                                 if key in {"cluster_id", "title", "family", "mode", "risk_level",
+                                            "score_display", "score_value", "similarity", "files", "file_count",
+                                            "metrics", "doc_ranges_by_file", "occurrence_count",
+                                            "source_evidence_count", "participants", "participant_documents",
+                                            "source_review_issue_ids",
+                                            "pair_scores", "status", "review_only", "review_projection_version"}},
+                "evidence_count": len(evidence["occurrences"]),
+                "_projection_detail": detail, "_projection_evidence": evidence,
+            })
+        return _remember_duplicate_projection(cache_key, result)
+
     @access_check(project_identifier_id='project')
     def get_project_review_summary(self, project_identifier_id: str) -> dict[str, Any]:
         """Read the first-screen summary without hydrating the full result object."""
@@ -3563,6 +3670,43 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 )
                 removed_rows = [dict(row) for row in cursor.fetchall()]
             summary = _subtract_removed_review_issue_counts(summary, removed_rows)
+            categories = []
+            for category in summary.get("categories") or []:
+                category = dict(category)
+                projected = self._projected_duplicate_review_rows(
+                    str(head["identifier_id"]), str(head["result_version"]),
+                    str(category.get("result_key") or ""),
+                )
+                if projected is not None:
+                    risks = {key: 0 for key in ("high", "medium", "low", "none")}
+                    statuses = {key: 0 for key in ("pass", "fail", "unclear", "not_applicable")}
+                    for row in projected:
+                        risks[str(row.get("risk_level") or "none")] += 1
+                        canonical = _canonical_review_issue_status(row.get("status"))
+                        if canonical in statuses:
+                            statuses[canonical] += 1
+                    category.update({
+                        "issue_count": len(projected), "risk_counts": risks,
+                        "status_counts": statuses, "review_item_count": sum(statuses.values()),
+                        "inconsistent_count": statuses["fail"], "unclear_count": statuses["unclear"],
+                        "not_applicable_count": statuses["not_applicable"],
+                        "has_risk": any(risks[key] for key in ("high", "medium", "low")),
+                    })
+                categories.append(category)
+            summary["categories"] = categories
+            summary["issue_count"] = sum(int(item.get("issue_count") or 0) for item in categories)
+            summary["risk_counts"] = {
+                key: sum(int((item.get("risk_counts") or {}).get(key) or 0) for item in categories)
+                for key in ("high", "medium", "low", "none")
+            }
+            summary["status_counts"] = {
+                key: sum(int((item.get("status_counts") or {}).get(key) or 0) for item in categories)
+                for key in ("pass", "fail", "unclear", "not_applicable")
+            }
+            summary["review_item_count"] = sum(summary["status_counts"].values())
+            summary["inconsistent_count"] = summary["status_counts"]["fail"]
+            summary["unclear_count"] = summary["status_counts"]["unclear"]
+            summary["not_applicable_count"] = summary["status_counts"]["not_applicable"]
         else:
             basic = head.get("result_summary") or {}
             summary = {
@@ -3638,6 +3782,13 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         payload = document_blob_store.read_blob(row["object_key"])
         if not isinstance(payload, dict):
             raise ValueError("review component is invalid")
+        projected = self._projected_duplicate_review_rows(
+            str(head["identifier_id"]), str(head["result_version"]), result_key,
+        )
+        if projected is not None:
+            payload = {**payload, "issue_count": len(projected), "review_projection_version": 1}
+            if isinstance(payload.get("summary"), dict):
+                payload["summary"] = {**payload["summary"], "cluster_count": len(projected)}
         return {
             "result_version": head.get("result_version"),
             "result_key": result_key,
@@ -3658,9 +3809,86 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         limit: int = 20,
         offset: int = 0,
         ids_only: bool = False,
+        _projection_enabled: bool = True,
+        _all_rows: bool = False,
     ) -> dict[str, Any]:
         normalized_limit = max(1, min(int(limit), 100))
         normalized_offset = max(0, int(offset))
+        if _projection_enabled and result_key is None:
+            with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                head = self._get_project_review_head(cursor, project_identifier_id)
+                if not head:
+                    raise ValueError("project not found")
+                self._assert_review_version(head, result_version)
+            projected_by_key = {
+                key: self._projected_duplicate_review_rows(
+                    str(head["identifier_id"]), str(head["result_version"]), key,
+                ) for key in DUPLICATE_REVIEW_KEYS
+            }
+            if any(value is not None for value in projected_by_key.values()):
+                raw = self.list_project_review_issues(
+                    project_identifier_id, result_version=result_version,
+                    _projection_enabled=False, _all_rows=True,
+                )
+                replacement_keys = {key for key, value in projected_by_key.items() if value is not None}
+                combined = [row for row in raw["items"] if row.get("result_key") not in replacement_keys]
+                combined.extend(row for value in projected_by_key.values() for row in value or [])
+                combined.sort(key=lambda row: (str(row.get("result_key") or ""),
+                                               int(row.get("issue_order") or 0), str(row.get("issue_id") or "")))
+                wanted_status = _canonical_review_issue_status(status)
+                filtered = []
+                for row in combined:
+                    if risk_level and str(row.get("risk_level")) != str(risk_level):
+                        continue
+                    if check_code and str(row.get("check_code")) != str(check_code):
+                        continue
+                    if file_name and file_name not in (row.get("file_names") or []):
+                        continue
+                    actual = _canonical_review_issue_status((row.get("list_payload") or {}).get("status") or row.get("status"))
+                    if wanted_status and not (wanted_status == "not_pass" and actual != "pass") and actual != wanted_status:
+                        continue
+                    filtered.append(row)
+                selected = filtered if ids_only else filtered[normalized_offset:normalized_offset + normalized_limit]
+                return {"result_version": head.get("result_version"), "total": len(filtered),
+                        "limit": len(filtered) if ids_only else normalized_limit,
+                        "offset": 0 if ids_only else normalized_offset,
+                        "items": [{"issue_id": row["issue_id"]} if ids_only else
+                                  _canonical_review_issue_row({key: value for key, value in row.items()
+                                                               if not key.startswith("_projection_")})
+                                  for row in selected]}
+        if _projection_enabled and result_key in DUPLICATE_REVIEW_KEYS:
+            with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                head = self._get_project_review_head(cursor, project_identifier_id)
+                if not head:
+                    raise ValueError("project not found")
+                self._assert_review_version(head, result_version)
+            projected = self._projected_duplicate_review_rows(
+                str(head["identifier_id"]), str(head["result_version"]), result_key,
+            )
+            if projected is not None:
+                filtered = []
+                wanted_status = _canonical_review_issue_status(status)
+                for row in projected:
+                    if risk_level and str(row.get("risk_level")) != str(risk_level):
+                        continue
+                    if check_code and str(row.get("check_code")) != str(check_code):
+                        continue
+                    if file_name and file_name not in (row.get("file_names") or []):
+                        continue
+                    actual = _canonical_review_issue_status(row.get("status"))
+                    if wanted_status and not (wanted_status == "not_pass" and actual != "pass") and actual != wanted_status:
+                        continue
+                    filtered.append(row)
+                selected = filtered if ids_only else filtered[normalized_offset:normalized_offset + normalized_limit]
+                return {
+                    "result_version": head.get("result_version"), "total": len(filtered),
+                    "limit": len(filtered) if ids_only else normalized_limit,
+                    "offset": 0 if ids_only else normalized_offset,
+                    "items": [{"issue_id": row["issue_id"]} if ids_only else
+                              _canonical_review_issue_row({key: value for key, value in row.items()
+                                                           if not key.startswith("_projection_")})
+                              for row in selected],
+                }
         with self._get_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cursor:
             head = self._get_project_review_head(cursor, project_identifier_id)
             if not head:
@@ -3732,8 +3960,8 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
             cursor.execute(f"SELECT COUNT(*) AS total FROM xtjs_review_issues WHERE {where}", tuple(values))
             total = int(cursor.fetchone()["total"])
             selected = "issue_id" if ids_only else "issue_id,result_key,issue_order,risk_level,status,check_code,title,description,file_names,list_payload,evidence_count"
-            paging = "" if ids_only else " LIMIT %s OFFSET %s"
-            params = tuple(values if ids_only else values + [normalized_limit, normalized_offset])
+            paging = "" if ids_only or _all_rows else " LIMIT %s OFFSET %s"
+            params = tuple(values if ids_only or _all_rows else values + [normalized_limit, normalized_offset])
             cursor.execute(
                 f"SELECT {selected} FROM xtjs_review_issues WHERE {where} ORDER BY result_key,issue_order,issue_id{paging}",
                 params,
@@ -3742,8 +3970,8 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         return {
             "result_version": head.get("result_version"),
             "total": total,
-            "limit": total if ids_only else normalized_limit,
-            "offset": 0 if ids_only else normalized_offset,
+            "limit": total if ids_only or _all_rows else normalized_limit,
+            "offset": 0 if ids_only or _all_rows else normalized_offset,
             "items": items,
         }
 
@@ -3771,6 +3999,31 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 (head["identifier_id"], head.get("result_version"), issue_id),
             )
             row = cursor.fetchone()
+        if not row and str(issue_id).startswith("dupgroup-"):
+            for duplicate_key in DUPLICATE_REVIEW_KEYS:
+                projected = self._projected_duplicate_review_rows(
+                    str(head["identifier_id"]), str(head["result_version"]), duplicate_key,
+                )
+                match = next((item for item in projected or [] if item["issue_id"] == issue_id), None)
+                if match is None:
+                    continue
+                payload = match["_projection_evidence"] if evidence else match["_projection_detail"]
+                if evidence:
+                    normalized_limit = max(1, min(int(limit), 100))
+                    normalized_offset = max(0, int(offset))
+                    all_occurrences = payload["occurrences"]
+                    occurrences = all_occurrences[normalized_offset:normalized_offset + normalized_limit]
+                    referenced_ids = {str(identifier) for occurrence in occurrences
+                                      for identifier in occurrence.get("source_item_ids") or []}
+                    source_items = {}
+                    for identifier, object_key in payload["source_item_object_keys"].items():
+                        if identifier in referenced_ids:
+                            source_items[identifier] = document_blob_store.read_blob(object_key)
+                    payload = {"issue_id": issue_id, "occurrences": occurrences,
+                               "source_items": source_items, "total": len(all_occurrences),
+                               "limit": normalized_limit, "offset": normalized_offset}
+                return {"result_version": head.get("result_version"), "result_key": duplicate_key,
+                        "issue_id": issue_id, "evidence_count": match["evidence_count"], "data": payload}
         if not row:
             raise KeyError(issue_id)
         object_key = row["evidence_object_key"] if evidence else row["detail_object_key"]
@@ -3785,6 +4038,12 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 for occurrence in occurrences
                 if isinstance(occurrence, dict) and occurrence.get("source_item_id")
             }
+            referenced_ids.update(
+                str(identifier)
+                for occurrence in occurrences if isinstance(occurrence, dict)
+                for identifier in occurrence.get("source_item_ids") or []
+                if identifier
+            )
             source_items: dict[str, Any] = {}
             for identifier, source_key in (payload.get("source_item_object_keys") or {}).items():
                 if referenced_ids and str(identifier) not in referenced_ids:
@@ -3832,10 +4091,41 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 (head["identifier_id"], head.get("result_version")),
             )
             rows = [dict(row) for row in cursor.fetchall()]
+        for duplicate_key in DUPLICATE_REVIEW_KEYS:
+            projected = self._projected_duplicate_review_rows(
+                str(head["identifier_id"]), str(head["result_version"]), duplicate_key,
+            )
+            if projected is not None:
+                rows = [row for row in rows if row.get("result_key") != duplicate_key] + projected
+        rows.sort(key=lambda row: (str(row.get("result_key") or ""), int(row.get("issue_order") or 0), str(row.get("issue_id") or "")))
         statuses = review_statuses or {}
         items: list[dict[str, Any]] = []
         object_cache: dict[str, Any] = {}
         source_items: dict[str, dict[str, Any]] = {}
+
+        def hide_unverified_typos(value: Any) -> Any:
+            if isinstance(value, list):
+                return [hide_unverified_typos(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            clean = {}
+            for key, nested in value.items():
+                if key == "typo_review_candidates":
+                    continue
+                if key == "short_duplicate_typo_issues":
+                    clean[key] = [
+                        hide_unverified_typos(item)
+                        for item in nested or []
+                        if isinstance(item, dict)
+                        and item.get("verification_status") == "confirmed"
+                        and len(str(item.get("original_word") or "")) >= 2
+                        and item.get("occurrences")
+                    ]
+                elif key == "review_candidate_count":
+                    clean[key] = 0
+                else:
+                    clean[key] = hide_unverified_typos(nested)
+            return clean
 
         def read_once(object_key: Any) -> Any:
             normalized_key = str(object_key or "").strip()
@@ -3848,8 +4138,14 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
         for row in rows:
             row = _canonical_review_issue_row(row)
             payload = dict(row.get("list_payload") or {})
-            detail = read_once(row.get("detail_object_key"))
-            evidence = read_once(row.get("evidence_object_key"))
+            if (
+                "duplicate" in str(row.get("result_key") or "")
+                and payload.get("review_only")
+                and str(payload.get("risk_level") or row.get("risk_level") or "none") == "none"
+            ):
+                continue
+            detail = row.get("_projection_detail") or read_once(row.get("detail_object_key"))
+            evidence = row.get("_projection_evidence") or read_once(row.get("evidence_object_key"))
             if isinstance(evidence, dict) and evidence.get("source_item_object_keys"):
                 evidence = dict(evidence)
                 source_object_keys = evidence.pop("source_item_object_keys", {})
@@ -3881,8 +4177,8 @@ class PostgreSQLService(ResourceAccessMixin, UploadRecoveryMixin):
                 item["frontend_reviewed_at"] = status.get("reviewedAt") or status.get("reviewed_at")
                 if status.get("note"):
                     item["frontend_review_note"] = status["note"]
-            items.append(item)
-        return {"result": items, "source_items": source_items}
+            items.append(hide_unverified_typos(item) if "duplicate" in str(row.get("result_key") or "") else item)
+        return {"result": items, "source_items": hide_unverified_typos(source_items)}
 
     def list_project_results(
         self,

@@ -104,6 +104,7 @@ def extract_business_duplicate_segments(
     deviation_template_context: dict[str, Any] | None = None,
     itemized_template_context: dict[str, Any] | None = None,
     technical_payload: dict[str, Any] | None = None,
+    source_aware: bool = False,
 ) -> list[dict[str, Any]]:
     """从商务标中提取分项报价和偏离表相关段落作为查重范围。
 
@@ -112,17 +113,18 @@ def extract_business_duplicate_segments(
     """
     segments: list[dict[str, Any]] = []
 
-    # 分项报价先按招标模板剔除表头/固定行，再保留剩余可比内容。
+    # 全文索引可用时保留原始行，随后只减去相同片段。
     itemized_document = itemized_checker._prepare_document(payload)
     for section in itemized_document.get("item_sections") or []:
         segment = _segment_from_itemized_section(
             section,
             itemized_template_context=itemized_template_context,
+            source_aware=source_aware,
         )
         if segment is not None:
             segments.append(segment)
 
-    # 偏离表先按招标模板剔除要求列/模板行，再保留响应内容。
+    # 偏离表同样先收集要求与响应，再按来源片段清洗。
     deviation_payload = deviation_checker._coerce_payload(payload)
     deviation_sections = deviation_checker._extract_bid_deviation_sections(deviation_payload)
     segments.extend(
@@ -131,6 +133,7 @@ def extract_business_duplicate_segments(
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
             deviation_template_context=deviation_template_context,
+            source_aware=source_aware,
         )
     )
 
@@ -146,6 +149,7 @@ def extract_business_duplicate_segments(
                 deviation_checker=deviation_checker,
                 star_requirement_context=star_requirement_context,
                 deviation_template_context=deviation_template_context,
+                source_aware=source_aware,
             )
         )
 
@@ -160,6 +164,7 @@ def _deviation_segments(
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
     deviation_template_context: dict[str, Any] | None,
+    source_aware: bool = False,
 ) -> list[dict[str, Any]]:
     """从一份文档的偏离解析结果中构建偏离表查重段落（偏离行 + 未覆盖章节）。"""
     row_segments = _segments_from_deviation_rows(
@@ -167,6 +172,7 @@ def _deviation_segments(
         deviation_checker=deviation_checker,
         star_requirement_context=star_requirement_context,
         deviation_template_context=deviation_template_context,
+        source_aware=source_aware,
     )
     segments: list[dict[str, Any]] = list(row_segments)
 
@@ -187,6 +193,7 @@ def _deviation_segments(
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
             deviation_template_context=deviation_template_context,
+            source_aware=source_aware,
         )
         if segment is not None:
             segments.append(segment)
@@ -199,6 +206,7 @@ def _segments_from_deviation_rows(
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
     deviation_template_context: dict[str, Any] | None,
+    source_aware: bool = False,
 ) -> list[dict[str, Any]]:
     """从已解析的偏离行中构建查重段落。"""
     section_pages = {
@@ -221,23 +229,25 @@ def _segments_from_deviation_rows(
         requirement = normalize_plain_text(row.get("requirement_text") or "")
         response = normalize_plain_text(row.get("response_text") or "")
         deviation = normalize_plain_text(row.get("deviation_text") or "")
-        if _is_requirement_echo_duplicate_row(requirement, response, deviation):
+        if not source_aware and _is_requirement_echo_duplicate_row(requirement, response, deviation):
             continue
-        star_matched = _matches_star_requirement(
+        star_matched = not source_aware and _matches_star_requirement(
             requirement,
             deviation_checker=deviation_checker,
             star_requirement_context=star_requirement_context,
         )
-        # ★/▲ 强制响应项：各家本就按招标要求逐条响应（“满足/无偏离”），整行天然雷同，
-        # 不是串标线索。需求明确“除★强制响应部分外”，故整行剔除，不计入查重比对。
+        # 无招标全文索引时沿用旧规则；正常路径按来源片段清洗并保留自填响应。
         if star_matched:
             continue
-        template_matched = _matches_tender_template_requirement(
+        template_matched = not source_aware and _matches_tender_template_requirement(
             requirement,
             deviation_checker=deviation_checker,
             deviation_template_context=deviation_template_context,
         )
-        if not _is_deviation_duplicate_row(requirement, response, deviation):
+        if source_aware:
+            if not (response or deviation):
+                continue
+        elif not _is_deviation_duplicate_row(requirement, response, deviation):
             continue
         joined = " | ".join(
             part
@@ -415,9 +425,10 @@ def _segment_from_itemized_section(
     section: dict[str, Any],
     *,
     itemized_template_context: dict[str, Any] | None,
+    source_aware: bool = False,
 ) -> dict[str, Any] | None:
     """将分项报价区段标准化为查重段落。"""
-    lines = _normalize_scope_lines(section.get("lines") or [])
+    lines = _normalize_scope_lines(section.get("lines") or [], preserve_common_lines=source_aware)
     # 逐行剔除与招标分项报价模板重合的固定内容。
     lines = [
         line
@@ -443,6 +454,7 @@ def _segment_from_itemized_section(
         "pages": pages or [1],
         "kind": "table",
         "source": "itemized_pricing",
+        "preserve_common_lines": source_aware,
         "bbox": normalize_bbox(section.get("bbox") or section.get("box")),
         "lines": lines,
     }
@@ -454,6 +466,7 @@ def _segment_from_deviation_section(
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
     deviation_template_context: dict[str, Any] | None,
+    source_aware: bool = False,
 ) -> dict[str, Any] | None:
     """将偏离表区段标准化为查重段落。"""
     raw_lines = section.get("lines")
@@ -463,22 +476,24 @@ def _segment_from_deviation_section(
         _trim_deviation_section_lines(raw_lines),
         preserve_common_lines=True,
     )
-    lines = [line for line in lines if _is_deviation_response_line(line)]
+    if not source_aware:
+        lines = [line for line in lines if _is_deviation_response_line(line)]
     cleaned_lines: list[str] = []
     for line in lines:
-        # 先剔★要求，再剔招标偏离表模板，最后只保留真正可比的响应文本。
-        line = _strip_star_requirement_content(
-            line,
-            deviation_checker=deviation_checker,
-            star_requirement_context=star_requirement_context,
-        )
-        line = _strip_tender_template_line_content(
-            line,
-            deviation_checker=deviation_checker,
-            deviation_template_context=deviation_template_context,
-        )
-        if _is_common_duplicate_scope_line(line):
-            continue
+        # 旧版整行排除只用于缺少全文索引的回退路径。
+        if not source_aware:
+            line = _strip_star_requirement_content(
+                line,
+                deviation_checker=deviation_checker,
+                star_requirement_context=star_requirement_context,
+            )
+            line = _strip_tender_template_line_content(
+                line,
+                deviation_checker=deviation_checker,
+                deviation_template_context=deviation_template_context,
+            )
+            if _is_common_duplicate_scope_line(line):
+                continue
         if not compact_raw_text(line):
             continue
         cleaned_lines.append(line)
@@ -541,7 +556,7 @@ def _strip_star_requirement_content(
     deviation_checker: DeviationChecker,
     star_requirement_context: dict[str, Any] | None,
 ) -> str:
-    """偏离表原始行：命中招标 ★/▲ 强制要求时整行剔除（不计入查重），否则原样保留。"""
+    """无全文索引时沿用的旧版星标整行排除规则。"""
     text = normalize_plain_text(line)
     if not text:
         return ""
@@ -552,7 +567,7 @@ def _strip_star_requirement_content(
     ):
         return text
 
-    # ★/▲ 强制响应行：整行剔除（各家照招标要求逐条响应，响应侧本就雷同，不是串标线索）。
+    # 仅在来源索引不可用时调用；正常路径按相同片段清洗。
     return ""
 
 
